@@ -267,6 +267,21 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         )
         return {**current_state_dict, **state_dict}
 
+    def _require_saved_world_size(self, local_path: str) -> None:
+        """Raise unless the checkpoint was saved by this world size, by which its shard files are named."""
+        fsdp_config_path = os.path.join(local_path, "fsdp_config.json")
+        # a remote path, or a checkpoint saved without its config: the load goes on and names the file it misses
+        if not os.path.exists(fsdp_config_path):
+            return
+
+        with open(fsdp_config_path) as f:
+            saved_world_size = json.load(f)["world_size"]
+        if saved_world_size != self.world_size:
+            raise ValueError(
+                f"the checkpoint {local_path} was saved by {saved_world_size} trainer processes and this run has "
+                f"{self.world_size}: its shard files are named by that world size, so a resume needs the same number"
+            )
+
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
         Load an FSDP checkpoint for this rank.
@@ -282,6 +297,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         """
         if local_path is None:
             return
+        self._require_saved_world_size(local_path)
         self.register_existing_checkpoints(local_path)
 
         # check if the checkpoint_load_contents is valid
