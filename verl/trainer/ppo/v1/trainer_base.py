@@ -16,6 +16,8 @@ import json
 import logging
 import math
 import os
+import re
+import shutil
 import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -1034,6 +1036,16 @@ class PPOTrainer(ABC):
         )
         return len(inflight_uids)
 
+    @staticmethod
+    def _remove_pruned_step_folders(default_local_dir: str, current_step: int) -> None:
+        """Remove the global_step folders whose actor checkpoint was pruned: data.pt and the transfer_queue snapshot
+        keep them alive."""
+        for entry in os.listdir(default_local_dir):
+            match = re.fullmatch(r"global_step_(\d+)", entry)
+            folder = os.path.join(default_local_dir, entry)
+            if match and int(match.group(1)) < current_step and not os.path.isdir(os.path.join(folder, "actor")):
+                shutil.rmtree(folder, ignore_errors=True)
+
     def _save_checkpoint(self):
         """Save actor, critic, and dataloader checkpoints to local (and optionally remote) storage."""
         from verl.utils.fs import local_mkdir_safe
@@ -1081,6 +1093,10 @@ class PPOTrainer(ABC):
             self.critic_wg.save_checkpoint(
                 critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
             )
+
+        # the step folders whose actor was just pruned go before this step's transfer-queue snapshot is written: their
+        # own snapshots would otherwise sit next to it at the peak of the save
+        self._remove_pruned_step_folders(self.config.trainer.default_local_dir, self.global_steps)
 
         # save dataloader state
         local_mkdir_safe(local_global_step_folder)
