@@ -266,6 +266,8 @@ class FSDPEngine(BaseEngine):
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
     def _build_module(self):
+        from accelerate import init_empty_weights
+
         from verl.utils.model import get_hf_auto_model_class
         from verl.utils.torch_dtypes import PrecisionType
 
@@ -287,12 +289,22 @@ class FSDPEngine(BaseEngine):
             if self.model_config.model_type == "language_model":
                 auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
 
-                module = auto_class.from_pretrained(
-                    pretrained_model_name_or_path=self.model_config.local_path,
-                    torch_dtype=torch_dtype,
-                    config=self.model_config.hf_config,
-                    trust_remote_code=self.model_config.trust_remote_code,
-                )
+                if init_context is init_empty_weights:
+                    # this rank's weights and buffers come from the source rank's broadcast after sharding;
+                    # from_pretrained would read and convert the whole checkpoint here too (transformers 5 loads it
+                    # on every rank)
+                    module = auto_class.from_config(
+                        self.model_config.hf_config,
+                        torch_dtype=torch_dtype,
+                        trust_remote_code=self.model_config.trust_remote_code,
+                    )
+                else:
+                    module = auto_class.from_pretrained(
+                        pretrained_model_name_or_path=self.model_config.local_path,
+                        torch_dtype=torch_dtype,
+                        config=self.model_config.hf_config,
+                        trust_remote_code=self.model_config.trust_remote_code,
+                    )
 
                 # Strip sub-modules listed in _verl_strip_modules (e.g.
                 # talker / code2wav for Qwen3-Omni Thinker-only training).
