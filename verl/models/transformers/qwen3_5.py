@@ -122,7 +122,10 @@ def _prepend_cp_conv_prefix(mixed_qkv: torch.Tensor, cp_context) -> tuple[torch.
     if valid_prefix_len < prefix_len:
         prefix = prefix.clone()
         prefix[..., : prefix_len - valid_prefix_len] = 0
-    return torch.cat((prefix, mixed_qkv), dim=-1), prefix_len
+    # assembled token-major: the projection wrote mixed_qkv that way and the FLA convolution reads it that way, so the
+    # halo costs one small copy instead of two full ones
+    packed = torch.cat((prefix.transpose(1, 2), mixed_qkv.transpose(1, 2)), dim=1)
+    return packed.transpose(1, 2), prefix_len
 
 
 def _as_channel_last_conv1d_input(x: torch.Tensor) -> torch.Tensor:
@@ -143,16 +146,38 @@ def _prepare_cp_conv_seq_idx(
     return torch.cat((prefix_idx, seq_idx), dim=1)
 
 
-def _packed_causal_conv1d_fallback(
+def _packed_causal_conv1d(
     self,
     mixed_qkv: torch.Tensor,
     cu_seqlens: torch.LongTensor,
     cu_seqlens_cpu: Optional[torch.LongTensor] = None,
 ):
-    outputs = []
-    for (segment,) in _split_packed_args(cu_seqlens, (mixed_qkv,), cu_seqlens_cpu=cu_seqlens_cpu, dim=2):
-        outputs.append(F.silu(self.conv1d(segment)[:, :, : segment.shape[-1]]))
-    return torch.cat(outputs, dim=-1)
+    """The short convolution over a packed batch with FLA's Triton kernel: one launch, not an nn.Conv1d per sequence."""
+    from fla.modules.conv import causal_conv1d
+
+    # activation=None and SiLU on the bf16 output: fusing SiLU into the fp32 accumulator would move the rounding
+    # point of every mixer away from the nn.Conv1d path (the model amplifies rounding-level changes in its early layers)
+    output, _ = causal_conv1d(
+        x=mixed_qkv.transpose(1, 2).contiguous(),
+        weight=self.conv1d.weight.squeeze(1),
+        bias=self.conv1d.bias,
+        activation=None,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+    )
+    return F.silu(output).transpose(1, 2)
+
+
+def drop_conv_autotune_length_key():
+    """Keeps FLA from re-tuning its convolution kernels per packed length: the tiling depends on D and W only."""
+    from fla.modules.conv.triton import kernels
+
+    for kernel in (kernels.causal_conv1d_fwd_kernel, kernels.causal_conv1d_bwd_kernel):
+        tuner = kernel
+        while not hasattr(tuner, "keys") and hasattr(tuner, "fn"):
+            tuner = tuner.fn
+        if hasattr(tuner, "keys"):
+            tuner.keys = [key for key in tuner.keys if key != "NB"]
 
 
 def _packed_chunk_gated_delta_rule(
@@ -292,11 +317,11 @@ def qwen3_5_gated_delta_net_forward(
                 if model_cu_seqlens_cpu is not None:
                     model_cu_seqlens_cpu = model_cu_seqlens_cpu + conv_prefix_len
                     model_cu_seqlens_cpu[0] = 0
-                mixed_qkv = _packed_causal_conv1d_fallback(self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu)[
+                mixed_qkv = _packed_causal_conv1d(self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu)[
                     ..., conv_prefix_len:
                 ]
             else:
-                mixed_qkv = _packed_causal_conv1d_fallback(self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu)
+                mixed_qkv = _packed_causal_conv1d(self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu)
         else:
             mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
 
