@@ -520,15 +520,21 @@ class ReplayBufferAsync(ReplayBuffer):
     def _validate_mode_config(self) -> None:
         pass
 
+    def is_stale(self, global_steps: int, prompt_global_steps: int) -> bool:
+        """Whether a group dispatched at ``prompt_global_steps`` is dropped when it finishes at ``global_steps``."""
+        return (
+            self.max_off_policy_threshold is not None
+            and self.max_off_policy_strategy == "drop"
+            and global_steps - prompt_global_steps + 1 > self.max_off_policy_threshold
+        )
+
     def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
-        if partition_id == "val" or self.max_off_policy_threshold is None or self.max_off_policy_strategy != "drop":
+        if partition_id == "val":
             return set()
         prompt_global_steps = self.prompt_global_steps[partition_id]
         terminal_keys = self.finished_keys[partition_id]
         return {
-            uid
-            for uid in terminal_keys
-            if global_steps - prompt_global_steps.get(uid, global_steps) + 1 > self.max_off_policy_threshold
+            uid for uid in terminal_keys if self.is_stale(global_steps, prompt_global_steps.get(uid, global_steps))
         }
 
     def _terminal_eviction_reasons(
