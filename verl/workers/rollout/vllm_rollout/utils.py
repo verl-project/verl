@@ -58,6 +58,10 @@ VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
 
+# "1" when the actor carries the MTP layers the rollout's MTP drafter takes at every weight sync (mtp.enable), set by
+# the server for the engine processes it starts; otherwise the drafter keeps the weights of its own checkpoint
+VLLM_MTP_DRAFTER_WEIGHT_SYNC_ENV = "VERL_VLLM_MTP_DRAFTER_WEIGHT_SYNC"
+
 
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
     worker_local_rank = int(worker_local_rank)
@@ -231,9 +235,18 @@ class vLLMColocateWorkerExtension:
         return spec.draft_model_config if spec is not None and spec.draft_model_config is not None else None
 
     def _use_mtp_drafter_weight_sync(self):
-        """Return whether the vLLM MTP drafter should receive actor weights."""
+        """Return whether the vLLM MTP drafter should receive actor weights.
+
+        Only an actor that carries MTP layers (mtp.enable) has weights for it. A drafter of the rollout alone
+        (mtp.enable_rollout without mtp.enable) is frozen at the weights of its own checkpoint.
+        """
         spec = self.model_runner.vllm_config.speculative_config
-        return spec is not None and spec.method == "mtp" and self._get_drafter_model() is not None
+        return (
+            os.environ.get(VLLM_MTP_DRAFTER_WEIGHT_SYNC_ENV) == "1"
+            and spec is not None
+            and spec.method == "mtp"
+            and self._get_drafter_model() is not None
+        )
 
     def _iter_all_models(self):
         """Yield models that need weight updates.

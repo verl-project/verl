@@ -169,7 +169,7 @@ def check_nvfp4_per_token_rollout(
     if any(size > 1 for size in context_parallel.values()):
         raise ValueError(f"Per-token NVFP4 rollout does not support context parallelism, got {context_parallel}")
     mtp = rollout_config.mtp
-    if mtp is not None and mtp.enable and mtp.enable_rollout:
+    if mtp is not None and mtp.enable_rollout:
         raise ValueError("Per-token NVFP4 rollout does not support speculative decoding/MTP")
     checkpoint_backend = getattr(rollout_config.checkpoint_engine, "backend", None)
     if checkpoint_backend != "naive":

@@ -34,7 +34,9 @@ class MtpConfig(BaseConfig):
     enable: Enable loading and saving of MTP parameters, but do not use them
 
     enable_train: Whether to enable using MTP parameters during training
-    enable_rollout: Whether to enable using MTP parameters during rollout
+    enable_rollout: Whether to enable using MTP parameters during rollout. With enable, the vLLM rollout's drafter
+        takes the actor's MTP parameters at every weight sync; without it, the drafter is frozen at those of its own
+        checkpoint (rollout.engine_kwargs.vllm.speculative_config.model, or the model's own MTP layers)
 
     Training parameters:
         detach_encoder: Whether to detach encoder parameters during MTP training
