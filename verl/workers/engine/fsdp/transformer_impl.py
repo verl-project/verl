@@ -782,9 +782,13 @@ class FSDPEngine(BaseEngine):
                 print(f"WARN: grad_norm is not finite: {grad_norm}")
                 self.optimizer.zero_grad()
             else:
-                self.optimizer.step()
+                self._optimizer_update()
 
         return grad_norm.item()
+
+    def _optimizer_update(self):
+        """Apply the optimizer's update to the clipped, finite gradients. A subclass may replace how it runs."""
+        self.optimizer.step()
 
     def lr_scheduler_step(self):
         """
