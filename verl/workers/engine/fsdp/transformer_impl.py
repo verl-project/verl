@@ -570,6 +570,7 @@ class FSDPEngine(BaseEngine):
         log_gpu_memory_usage("Before FSDP", logger=None)
         module = self._build_fsdp_module(module)
         log_gpu_memory_usage("After FSDP", logger=None)
+        self._warm_up_replicate_group(module)
 
         if not self.engine_config.forward_only:
             # Initialize optimizer with model parameters and config settings
@@ -583,6 +584,33 @@ class FSDPEngine(BaseEngine):
         self.module = module
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
+
+    def _warm_up_replicate_group(self, module):
+        """All-reduce on an HSDP training engine's replicate group while the device memory is still free."""
+        # NCCL sets up a group's communicator and buffers at its first collective, outside PyTorch's allocator, which
+        # may hold the whole device by then: the first update's gradient all-reduce across the replicas, which only
+        # FSDP2 training on a 2D mesh does
+        config = self.engine_config
+        if config.forward_only or config.strategy != "fsdp2" or self.device_mesh.ndim != 2:
+            return
+
+        largest = 0
+        for unit in module.modules():
+            if isinstance(unit, FSDPModule):
+                nested = {
+                    id(p)
+                    for sub in unit.modules()
+                    if sub is not unit and isinstance(sub, FSDPModule)
+                    for p in sub.parameters()
+                }
+                largest = max(largest, sum(p.to_local().numel() for p in unit.parameters() if id(p) not in nested))
+
+        # one element sets up the connections of small messages, the largest unit's gradient shard (fp32, the default
+        # reduce dtype) those of large ones: the update's all-reduces then allocate nothing
+        group = self.device_mesh.get_group("ddp")
+        for numel in (1, largest):
+            torch.distributed.all_reduce(torch.zeros(numel, dtype=torch.float32, device=get_device_id()), group=group)
+        log_gpu_memory_usage("After the HSDP replicate group's warm-up", logger=None)
 
     def train_mode(self, **kwargs):
         """

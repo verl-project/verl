@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -125,6 +127,18 @@ def test_gradient_sync_context_hsdp_all_reduces_on_the_last_micro_batch_only(mon
 
     expected = [("all_reduce", False), "backward", ("all_reduce", True), "backward"] if enabled else ["backward"] * 2
     assert module.events == expected
+
+
+@pytest.mark.parametrize("forward_only,strategy,ndim", [(True, "fsdp2", 2), (False, "fsdp", 2), (False, "fsdp2", 1)])
+def test_replicate_group_warm_up_skips_all_but_fsdp2_training_on_a_2d_mesh(monkeypatch, forward_only, strategy, ndim):
+    engine = _make_engine(None)
+    engine.engine_config.forward_only = forward_only
+    engine.engine_config.strategy = strategy
+    engine.device_mesh = SimpleNamespace(ndim=ndim, get_group=lambda name: None)
+    monkeypatch.setattr(transformer_impl, "get_device_id", lambda: "cpu")
+    monkeypatch.setattr(dist, "all_reduce", lambda *args, **kwargs: pytest.fail("all-reduced on the replicate group"))
+
+    engine._warm_up_replicate_group(torch.nn.Linear(2, 2))
 
 
 @pytest.mark.parametrize("version,module_cls", [(1, _FSDP1Module), (2, _FSDP2Module)])
@@ -274,3 +288,51 @@ def test_distributed_accumulation_matches_per_micro_batch_sync(tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+def _replicate_warm_up_worker(rank, world_size, rendezvous_file, out_dir):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        mesh = init_device_mesh("cpu", (2, world_size // 2), mesh_dim_names=("ddp", "fsdp"))
+        model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.GELU(), torch.nn.Linear(8, 2))
+        for layer in (model[0], model[2]):
+            fully_shard(layer, mesh=mesh)
+        fully_shard(model, mesh=mesh)
+        engine = _make_engine(model)
+        engine.engine_config.forward_only = False
+        engine.engine_config.strategy = "fsdp2"
+        engine.device_mesh = mesh
+        calls = []
+        all_reduce = dist.all_reduce
+
+        def recording_all_reduce(tensor, group=None, **kwargs):
+            calls.append([tensor.numel(), dist.get_process_group_ranks(group)])
+            return all_reduce(tensor, group=group, **kwargs)
+
+        dist.all_reduce = recording_all_reduce
+        transformer_impl.get_device_id = lambda: "cpu"
+        transformer_impl.log_gpu_memory_usage = lambda *args, **kwargs: None  # it queries CUDA even without a GPU
+        engine._warm_up_replicate_group(model)
+        (Path(out_dir) / f"{rank}.json").write_text(json.dumps(calls))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_replicate_group_warm_up_all_reduces_one_element_and_the_largest_unit_shard(tmp_path):
+    world_size = 4
+    mp.spawn(
+        _replicate_warm_up_worker,
+        args=(world_size, str(tmp_path / "rdzv"), str(tmp_path)),
+        nprocs=world_size,
+        join=True,
+    )
+
+    for rank in range(world_size):
+        replicas = [rank % 2, rank % 2 + 2]
+        # the largest unit is the first Linear: its 8 x 4 weight and 8 biases, half of each on every fsdp rank
+        assert json.loads((tmp_path / f"{rank}.json").read_text()) == [[1, replicas], [20, replicas]]
