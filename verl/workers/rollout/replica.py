@@ -50,6 +50,14 @@ def prefix_cache_salt(config: RolloutConfig, global_steps: Optional[int]) -> Opt
     return f"{config.prefix_cache_namespace}:{global_steps}"
 
 
+# A generation's speculative-decoding counts, the rollout-common names its TokenOutput's extra_fields carries them under
+SPEC_DECODE_EXTRA_KEYS = (
+    "spec_num_draft_tokens",
+    "spec_num_accepted_tokens",
+    "spec_num_verify_steps",
+)
+
+
 class TokenOutput(BaseModel):
     token_ids: list[int]
     """response token ids"""

@@ -34,16 +34,10 @@ from verl.tools.function_tool import FunctionTool, normalize_function_tool_retur
 from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, ToolResponse
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
-from verl.workers.rollout.replica import TokenOutput
+from verl.workers.rollout.replica import SPEC_DECODE_EXTRA_KEYS, TokenOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-SPEC_DECODE_EXTRA_KEYS = (
-    "spec_num_draft_tokens",
-    "spec_num_accepted_tokens",
-    "spec_num_verify_steps",
-)
 
 
 class AgentState(Enum):
