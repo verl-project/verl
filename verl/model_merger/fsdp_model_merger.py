@@ -186,11 +186,14 @@ class FSDPModelMerger(BaseModelMerger):
 
         for key in set(model_state_dict_lst[0].keys()):
             state_dict[key] = []
+            # bf16, except the fp32 modules (the rollout's replicas load them in fp32)
+            is_fp32 = any(pattern in key for pattern in self.config.fp32_modules)
             for model_state_shard in model_state_dict_lst:
                 # add tensor shard in order of rank to state_dict[key]
                 tensor = model_state_shard.pop(key)
                 if isinstance(tensor, DTensor):
-                    state_dict[key].append(tensor._local_tensor.bfloat16())
+                    local = tensor._local_tensor
+                    state_dict[key].append(local.float() if is_fp32 else local.bfloat16())
 
                     placements = tuple(tensor.placements)
                     # replicated placement at dp dimension can be discarded
@@ -202,7 +205,7 @@ class FSDPModelMerger(BaseModelMerger):
                     else:
                         assert param_placements[key] == placements
                 else:
-                    state_dict[key].append(tensor.bfloat16())
+                    state_dict[key].append(tensor.float() if is_fp32 else tensor.bfloat16())
 
         del model_state_dict_lst
 
