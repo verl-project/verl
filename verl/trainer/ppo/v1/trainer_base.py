@@ -1011,6 +1011,17 @@ class PPOTrainer(ABC):
         if not data:
             return 0
         items = data.get(partition_id, {})
+        # trajectories whose prompt key is gone were consumed by a step before the checkpoint (the queue is saved
+        # before that step's kv_clear): nothing samples or clears them after a restore, they only accumulate
+        prompt_uids = {key for key, tag in items.items() if tag.get("is_prompt", False)}
+        orphan_keys = [
+            key
+            for key, tag in items.items()
+            if not tag.get("is_prompt", False) and key.split("_", 1)[0] not in prompt_uids
+        ]
+        if orphan_keys:
+            tq.kv_clear(keys=orphan_keys, partition_id=partition_id)
+            logger.info(f"Dropped {len(orphan_keys)} consumed trajectories restored with the transfer queue")
         inflight_uids = [
             key
             for key, tag in items.items()
