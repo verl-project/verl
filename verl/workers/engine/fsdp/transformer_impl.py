@@ -323,11 +323,8 @@ class FSDPEngine(BaseEngine):
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
-                _apply_liger_kernel_to_instance(
-                    model=module,
-                    fused_linear_cross_entropy=False,
-                    swiglu=True,
-                )
+                liger_kwargs = {"fused_linear_cross_entropy": False, "swiglu": True, **self.model_config.liger_kwargs}
+                _apply_liger_kernel_to_instance(model=module, **liger_kwargs)
 
             fused_kernel_options = self.model_config.fused_kernel_options
             fused_kernels_backend = (
