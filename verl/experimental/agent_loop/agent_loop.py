@@ -64,6 +64,7 @@ from verl.utils.tokenizer import (
 )
 from verl.utils.tokenizer.continuous_token_check import verify_continuous_token_builder
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import (
     HFModelConfig,
     RolloutConfig,
@@ -1032,6 +1033,11 @@ class AgentLoopWorker:
         # We must use dict(multi_modal_inputs) to convert BatchFeature values to a new dict
         # because np.array() only keeps the keys for BatchFeature.
         multi_modal_inputs = dict(multi_modal_inputs.convert_to_tensors("pt"))
+        if self.config.data.get("pixel_dtype") is not None:  # see data.pixel_dtype
+            dtype = PrecisionType.to_dtype(self.config.data.pixel_dtype)
+            for key in ("pixel_values", "pixel_values_videos"):
+                if key in multi_modal_inputs and torch.is_floating_point(multi_modal_inputs[key]):
+                    multi_modal_inputs[key] = multi_modal_inputs[key].to(dtype)
         image_grid_thw = multi_modal_inputs.get("image_grid_thw")
         if image_grid_thw is not None:
             images_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])

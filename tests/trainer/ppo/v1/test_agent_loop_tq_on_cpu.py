@@ -145,6 +145,48 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
     assert "rollout_topk_log_probs" not in fields.keys()
 
 
+def test_pixel_dtype_switch():
+    """data.pixel_dtype: None keeps the processor's fp32 pixel tensors, bf16 casts them; grids and seqlens stay as
+    they are."""
+    from types import SimpleNamespace
+
+    from omegaconf import OmegaConf
+    from transformers import BatchFeature
+
+    from verl.experimental.agent_loop.agent_loop import AgentLoopWorker
+
+    pixels = torch.randn(2048, 1536)
+    grid = torch.tensor([[1, 32, 32], [1, 32, 32]])
+
+    def processor(text, images=None, videos=None, audio=None, return_tensors="pt", **kwargs):
+        return BatchFeature(
+            {"pixel_values": pixels.clone(), "image_grid_thw": grid.clone(), "input_ids": torch.tensor([[1]])}
+        )
+
+    processor.image_token_id, processor.video_token_id = 151655, None
+    output = SimpleNamespace(multi_modal_data={"images": [object(), object()]}, mm_processor_kwargs=None)
+
+    def compute(pixel_dtype):
+        # a real worker instance with the attributes __init__ sets, so a wrong attribute in the method fails here
+        worker = AgentLoopWorker.__new__(AgentLoopWorker)
+        worker.config = OmegaConf.create({"data": {"pixel_dtype": pixel_dtype}})
+        worker.processor, worker.tokenizer, worker.mm_processor_kwargs = (
+            processor,
+            SimpleNamespace(decode=lambda ids, **kw: "x"),
+            {},
+        )
+        return worker._compute_multi_modal_inputs(output, torch.tensor([[1, 151655, 151655, 2]]))
+
+    out = compute(None)  # the default: the processor's dtype
+    assert out["pixel_values"].dtype == torch.float32 and torch.equal(out["pixel_values"], pixels)
+    out = compute("bf16")
+    assert out["pixel_values"].dtype == torch.bfloat16 and torch.equal(
+        out["pixel_values"].float(), pixels.to(torch.bfloat16).float()
+    )
+    assert out["image_grid_thw"].dtype == torch.int64 and torch.equal(out["image_grid_thw"], grid)
+    assert torch.equal(out["images_seqlens"], torch.tensor([1024, 1024])) and "input_ids" not in out
+
+
 def test_a_restored_group_runs_only_its_unfinished_sessions(monkeypatch):
     """A row with __unfinished_session_ids__ (a group restored from a checkpoint) runs exactly those sessions; a row
     without runs rollout.n of them; each group then reports finished."""

@@ -530,6 +530,7 @@ data:
   seed: null
   dataloader_num_workers: 8
   image_patch_size: 14
+  pixel_dtype: null
   validation_shuffle: false
   filter_overlong_prompts: false
   filter_overlong_prompts_workers: 1
