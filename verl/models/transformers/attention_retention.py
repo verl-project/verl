@@ -69,7 +69,9 @@ def retain_attention_in_checkpoints(model: torch.nn.Module):
     for layer in model.modules():
         if not getattr(layer, "gradient_checkpointing", False):
             continue
-        if getattr(layer, "layer_type", "full_attention") != "full_attention":  # linear attention: nothing to retain
+        # a decoder layer's type is its block_type from transformers 5.16, its layer_type before
+        block_type = getattr(layer, "block_type", getattr(layer, "layer_type", "full_attention"))
+        if block_type != "full_attention":  # linear attention: nothing to retain
             continue
         original = layer._gradient_checkpointing_func
         # the checkpoint calls context_fn afresh for every forward: a cache lives for one forward and its backward
