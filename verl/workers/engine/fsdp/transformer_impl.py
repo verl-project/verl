@@ -656,17 +656,37 @@ class FSDPEngine(BaseEngine):
         reduces FSDP gradient collectives from one reduce-scatter per
         micro-batch to a single round, at the cost of temporarily retaining
         unsharded gradients until the final backward.
+
+        With ``hsdp_all_reduce_on_last_micro_batch`` and without that deferral,
+        HSDP (FSDP2 on a 2D mesh) still reduce-scatters every micro-batch's
+        gradients within its shard group but all-reduces them across the
+        replicas on the final micro-batch only.
         """
         defer_sync = getattr(
             self.engine_config,
             "use_no_sync_for_gradient_accumulation",
             True,
         )
-        if is_last_micro_batch or not defer_sync:
+        if is_last_micro_batch:
             yield
             return
 
         version = fsdp_version(self.module)
+        if not defer_sync:
+            if (
+                getattr(self.engine_config, "hsdp_all_reduce_on_last_micro_batch", False)
+                and version == 2
+                and self.device_mesh.ndim == 2
+            ):
+                self.module.set_requires_all_reduce(False)
+                try:
+                    yield
+                finally:
+                    self.module.set_requires_all_reduce(True)
+            else:
+                yield
+            return
+
         if version == 1:
             with self.module.no_sync():
                 yield
