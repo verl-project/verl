@@ -1286,3 +1286,19 @@ def test_wait_for_sampleable_replaces_groups_sample_would_have_evicted(tq_init, 
         assert _uids_of(batch.keys) == {refiller.produced_uids[0]}
     finally:
         _clear_partition(partition_id)
+
+
+def test_is_stale_only_under_the_drop_strategy():
+    def buffer(strategy: str) -> ReplayBufferAsync:
+        return ReplayBufferAsync(
+            trainer_mode="separate_async",
+            trainer_config={},
+            max_off_policy_threshold=5,
+            max_off_policy_strategy=strategy,
+            sampler_kwargs={},
+        )
+
+    # trained at step 10: dispatched at 6 spans 5 versions, at 5 spans 6
+    assert not buffer("drop").is_stale(global_steps=10, prompt_global_steps=6)
+    assert buffer("drop").is_stale(global_steps=10, prompt_global_steps=5)
+    assert not buffer("wait").is_stale(global_steps=10, prompt_global_steps=1)
