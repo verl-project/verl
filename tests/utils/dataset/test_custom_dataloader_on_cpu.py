@@ -20,6 +20,8 @@ import importlib.util
 import logging
 import math
 import os
+import re
+import shutil
 import sys
 import uuid
 from collections import Counter, defaultdict
@@ -384,6 +386,7 @@ def trainer_class(replay_types):
         "step",
         "_load_checkpoint",
         "_save_checkpoint",
+        "_remove_pruned_step_folders",
     }
     methods = [node for node in trainer.body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert len(methods) == len(names)
@@ -401,6 +404,8 @@ def trainer_class(replay_types):
         "uuid": uuid,
         "math": math,
         "os": os,
+        "re": re,
+        "shutil": shutil,
         "torch": torch,
         "find_latest_ckpt_path": Mock(return_value=None),
         "Role": SimpleNamespace(Critic="critic"),
