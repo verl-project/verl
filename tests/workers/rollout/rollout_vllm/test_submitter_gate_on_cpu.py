@@ -558,6 +558,58 @@ def test_cancelled_request_releases_barrier_and_aborts_in_engine():
     asyncio.run(main())
 
 
+def test_a_request_the_paused_engine_rejects_returns_as_aborted(monkeypatch):
+    # a request admitted before the gate closed reaches the engine only after the barrier gave up on it and the engine
+    # paused, which vLLM >= 0.33 answers with RetryableRequestError (vLLM >= 0.32 has the class)
+    pytest.importorskip("vllm", minversion="0.32.0")
+    from vllm.exceptions import RetryableRequestError
+
+    monkeypatch.setattr(vllm_async_server, "_GATE_BARRIER_TIMEOUT_S", 0.05)
+
+    async def main():
+        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [])
+        on_its_way, arrived = asyncio.Event(), asyncio.Event()
+        engine_aborts = []
+
+        class _RejectedCollector:
+            request_id = "admitted-internal"  # vLLM's internal request id
+
+            def get_nowait(self):
+                return None
+
+            async def get(self):
+                raise RetryableRequestError("Generation is paused. Please retry after it resumes.")
+
+            def close(self):
+                server.engine.closed += 1
+
+        async def add_request(request_id, prompt, params, **kwargs):
+            on_its_way.set()
+            await arrived.wait()
+            return _RejectedCollector()
+
+        async def abort(request_id, internal=False):
+            engine_aborts.append((request_id, internal))
+
+        server.engine.add_request = add_request
+        request = asyncio.create_task(server.generate([1, 2, 3], {}, "admitted"))
+        await on_its_way.wait()
+
+        await server.abort_all_requests()
+        server.engine.abort = abort
+        arrived.set()
+        output = await asyncio.wait_for(request, timeout=5)
+
+        assert output.stop_reason == "aborted"
+        assert output.token_ids == []
+        assert output.extra_fields == {"global_steps": 7}
+        assert engine_aborts == [("admitted-internal", True)], "the rejected request is dropped from the engine"
+        assert server.engine.closed == 1
+        assert server._admitting == 0, "a rejected request no longer counts as an admission"
+
+    asyncio.run(main())
+
+
 def _salted(server):
     server.config = RolloutConfig(
         name="vllm",

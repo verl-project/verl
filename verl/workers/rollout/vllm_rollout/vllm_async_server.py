@@ -78,6 +78,12 @@ from verl.workers.rollout.vllm_rollout.utils import (
     get_vllm_max_lora_rank,
 )
 
+try:
+    # vLLM >= 0.33 rejects a request that reaches the engine while it is paused with this error, until the resume
+    from vllm.exceptions import RetryableRequestError as _PausedEngineRejection
+except ImportError:  # vLLM < 0.32 has no such error to catch
+    _PausedEngineRejection = ()
+
 _VLLM_VERSION = version.parse(vllm.__version__)
 
 # vLLM args that verl sets from its own config, and the config that controls each one.
@@ -730,14 +736,26 @@ class vLLMHttpServer:
             "vllm_generate",
             state_lane_id=ray.get_runtime_context().get_actor_name(),
         ):
-            final_res = await self._generate_admitted(
-                prompt=prompt,
-                sampling_params=sampling_params,
-                request_id=request_id,
-                lora_request=lora_request,
-                priority=priority,
-                data_parallel_rank=self._dp_rank_for_session(session_id),
-            )
+            try:
+                final_res = await self._generate_admitted(
+                    prompt=prompt,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                    priority=priority,
+                    data_parallel_rank=self._dp_rank_for_session(session_id),
+                )
+            except _PausedEngineRejection:
+                # admitted before the gate closed, the request reached the engine only after the barrier gave up on it
+                # and the pause began: returned as aborted, the partial-rollout client resubmits it after the resume
+                logger.warning("Request %s reached the paused engine, returned as aborted", request_id)
+                return TokenOutput(
+                    token_ids=[],
+                    log_probs=None,
+                    routed_experts=None,
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
@@ -1216,7 +1234,8 @@ class vLLMHttpServer:
             request_ids = list(self.engine.output_processor.request_states.keys())
 
             # pause_generation in abort mode will:
-            # 1. Set engine to paused state (new requests are accepted but not scheduled)
+            # 1. Set engine to paused state (vLLM < 0.33 accepts new requests but does not
+            #    schedule them; vLLM >= 0.33 rejects them, see generate())
             # 2. Abort all in-flight requests
             # 3. Wait for requests to drain
             # 4. Clear prefix and mm caches if clear_cache=True.
