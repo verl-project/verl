@@ -467,8 +467,11 @@ class FSDPEngine(BaseEngine):
             # - critic: offload_policy
             # - ref: CPUOffloadPolicy(pin_memory=True)
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+            # mixed_precision.fp32_residual: the layers take the fp32 residual stream as it is, not cast to param_dtype
             mp_policy = MixedPrecisionPolicy(
-                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                cast_forward_inputs=not (mixed_precision_config or {}).get("fp32_residual", False),
             )
             offload_policy = None
             if self.engine_config.offload_policy or self.engine_config.forward_only:
