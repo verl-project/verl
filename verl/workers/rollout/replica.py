@@ -222,10 +222,12 @@ class RolloutReplica(ABC):
             resource_pool_spec = {
                 resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
             }
+            custom = self.config.get("custom") or {}  # custom.node_label: the Ray node resource the replicas require
             resource_pool_manager = ResourcePoolManager(
                 resource_pool_spec=resource_pool_spec,
                 mapping=None,
                 max_colocate_count=2,
+                accelerator_type=custom.get("node_label"),  # see trainer.node_label
             )
             resource_pool_manager.create_resource_pool()
             resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
