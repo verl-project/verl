@@ -443,6 +443,7 @@ actor_rollout_ref:
     exclude_modules: null
     lora_adapter_path: null
     use_liger: false
+    liger_kwargs: {}
     use_fused_kernels: false
     fused_kernel_options:
       impl_backend: torch
@@ -687,6 +688,7 @@ critic:
     exclude_modules: null
     lora_adapter_path: null
     use_liger: false
+    liger_kwargs: {}
     use_fused_kernels: false
     fused_kernel_options:
       impl_backend: torch
