@@ -15,6 +15,9 @@ param_offload: false
 # Note that this differs from the offload_policy in FSDP
 optimizer_offload: false
 
+# Load optimizer states only during updates. Requires FSDP2 and manual optimizer_offload.
+optimizer_offload_step: false
+
 # Only for FSDP2: offload param/grad/optimizer during train
 offload_policy: false
 
