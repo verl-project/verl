@@ -118,6 +118,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
             config = self.config.actor_rollout_ref.rollout
             n = prompt.pop("__rollout_n__", config.n if not trajectory["validate"] else config.val_kwargs.n)
+            # a group restored from a checkpoint runs only the sessions it had not stored
+            unfinished_session_ids = prompt.pop("__unfinished_session_ids__", range(n))
             do_sample = prompt.pop("__do_sample__", True)
 
             run_sampling_params = dict(sampling_params)
@@ -125,7 +127,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 apply_greedy_sampling_params(run_sampling_params)
 
             tasks = []
-            for i in range(n):
+            for i in unfinished_session_ids:
                 task = asyncio.create_task(
                     self._run_agent_loop(
                         run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
