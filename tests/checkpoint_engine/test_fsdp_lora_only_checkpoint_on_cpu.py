@@ -244,6 +244,10 @@ class _FakeFSDPModel:
         self.config = self._fsdp_wrapped_module.config
         self.can_generate = self._fsdp_wrapped_module.can_generate
 
+    def parameters(self):
+        module = self._fsdp_wrapped_module
+        return iter((module.base_weight, module.lora_A_weight, module.lora_B_weight))
+
     def state_dict(self):
         return self._fsdp_wrapped_module.state_dict()
 
