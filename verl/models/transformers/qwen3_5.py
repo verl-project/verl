@@ -496,6 +496,53 @@ def fast_pos_embed_interpolate(self, grid_thw):
     return patch_pos_embeds
 
 
+class _GatherVisionFeatures(torch.autograd.Function):
+    """All-gather of the SP ranks' image features (ragged sizes); the backward sums the ranks' gradients in fp32."""
+
+    @staticmethod
+    def forward(ctx, local: torch.Tensor, sizes: tuple[int, ...], group: dist.ProcessGroup):
+        ctx.group, ctx.rank, ctx.sizes, ctx.dtype = group, dist.get_rank(group), sizes, local.dtype
+        padded = F.pad(local, (0, 0, 0, max(sizes) - local.shape[0]))
+        gathered = [torch.empty_like(padded) for _ in sizes]
+        dist.all_gather(gathered, padded.contiguous(), group=group)
+        return torch.cat([part[:size] for part, size in zip(gathered, sizes, strict=True)], dim=0)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        # every rank's text model contributes a gradient to every image; FSDP averages the parameter gradients later
+        gradient = grad_output.to(dtype=torch.float32, memory_format=torch.contiguous_format, copy=True)
+        dist.all_reduce(gradient, group=ctx.group)
+        start = sum(ctx.sizes[: ctx.rank])
+        return gradient.narrow(0, start, ctx.sizes[ctx.rank]).to(dtype=ctx.dtype, copy=True), None, None
+
+
+def patch_vision_model_for_ulysses_sharding(model_class: type):
+    """Each Ulysses SP rank encodes a share of whole images and the features are all-gathered."""
+    original_forward = model_class.forward
+
+    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs):
+        group = get_ulysses_sequence_parallel_group()
+        world = dist.get_world_size(group) if group is not None else 1
+        offsets = [0]
+        for temporal, height, width in grid_thw.tolist():
+            offsets.append(offsets[-1] + temporal * height * width)
+        # whole images only: their attention and position interpolation stay independent; fewer images than ranks,
+        # extra arguments (precomputed metadata) or an unexpected token count take the stock path
+        if world == 1 or grid_thw.shape[0] < world or kwargs or hidden_states.shape[0] != offsets[-1]:
+            return original_forward(self, hidden_states, grid_thw=grid_thw, **kwargs)
+
+        boundaries = [grid_thw.shape[0] * rank // world for rank in range(world + 1)]
+        sizes = tuple(offsets[end] - offsets[start] for start, end in zip(boundaries[:-1], boundaries[1:], strict=True))
+        first, last = boundaries[dist.get_rank(group)], boundaries[dist.get_rank(group) + 1]
+        output = original_forward(self, hidden_states[offsets[first] : offsets[last]], grid_thw=grid_thw[first:last])
+        output.last_hidden_state = _GatherVisionFeatures.apply(output.last_hidden_state, sizes, group)
+        pooled_sizes = tuple(size // self.spatial_merge_unit for size in sizes)
+        output.pooler_output = _GatherVisionFeatures.apply(output.pooler_output, pooled_sizes, group)
+        return output
+
+    model_class.forward = forward
+
+
 def _get_input_embeds(
     model: "Qwen3_5CausalLMOutputWithPast",
     input_ids: torch.LongTensor,
