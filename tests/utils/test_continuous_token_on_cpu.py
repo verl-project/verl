@@ -14,6 +14,7 @@
 
 import logging
 
+import numpy as np
 import pytest
 
 from verl.utils.tokenizer.continuous_token import (
@@ -2607,3 +2608,80 @@ def test_vl_builder_preserves_explicit_sampling_rate_over_processor_default():
     )
 
     assert builder.mm_processor_kwargs["sampling_rate"] == 24000
+
+
+def _topk_heads(count, k, start):
+    """Distinct assistant heads: row i holds ids start+i.. and log-probs -(start+i)."""
+    ids = (np.arange(count)[:, None] + start + np.arange(k)[None, :]).astype(np.int32)
+    return ids, -ids.astype(np.float32)
+
+
+def test_align_response_topk_follows_the_metadata_edits_over_a_multi_turn_episode():
+    k = 4
+    builder = create_continuous_token_builder(_TemplateTokenizer(), model_family="default")
+    turn1, turn2 = _topk_heads(3, k, start=100), _topk_heads(2, k, start=200)
+    # the provider's coverage of the first turn's heads; none of the second's, which stay unknown
+    turn1_complete = np.array([True, False, True])
+    merges = [
+        (MergeResult(token_ids=[], appended_token_count=3, kind="assistant"), turn1, turn1_complete),
+        (MergeResult(token_ids=[], appended_token_count=2, kind="context", inserted_token_ids=[9]), None, None),
+        # the next assistant merge first drops one stale prefix token (the last context token)
+        (
+            MergeResult(token_ids=[], appended_token_count=2, kind="assistant", removed_prefix_token_count=1),
+            turn2,
+            None,
+        ),
+        # an aborted request: no tokens, no heads
+        (MergeResult(token_ids=[], appended_token_count=0, kind="assistant"), None, None),
+        (MergeResult(token_ids=[], appended_token_count=1, kind="context"), None, None),
+    ]
+    mask, logprobs = [], []
+    ids, log_probs = np.zeros((0, k), dtype=np.int32), np.zeros((0, k), dtype=np.float32)
+    complete = np.zeros(0, dtype=np.bool_)
+    for merge, heads, heads_complete in merges:
+        assistant_logprobs = heads[1][:, 0].tolist() if heads is not None else None
+        if merge.kind == "assistant" and heads is None:
+            assistant_logprobs = []
+        mask, logprobs = builder.align_response_metadata(merge, mask, logprobs, assistant_logprobs=assistant_logprobs)
+        ids, log_probs, complete = builder.align_response_topk(
+            merge,
+            ids,
+            log_probs,
+            complete,
+            assistant_topk_ids=None if heads is None else heads[0],
+            assistant_topk_log_probs=None if heads is None else heads[1],
+            assistant_support_complete=heads_complete,
+        )
+        assert len(ids) == len(log_probs) == len(complete) == len(mask)
+
+    assert mask == [1, 1, 1, 0, 0, 1, 1, 0]
+    trained = np.asarray(mask, dtype=bool)
+    np.testing.assert_array_equal(ids[trained], np.concatenate([turn1[0], turn2[0]]))
+    np.testing.assert_array_equal(log_probs[trained], np.concatenate([turn1[1], turn2[1]]))
+    np.testing.assert_array_equal(ids[~trained], np.broadcast_to(np.arange(k), (int((~trained).sum()), k)))
+    np.testing.assert_allclose(log_probs[~trained], -np.log(k))
+    assert ids.dtype == np.int32 and log_probs.dtype == np.float32 and complete.dtype == np.bool_
+    # a placeholder head is complete by construction
+    assert complete.tolist() == [True, False, True, True, True, False, False, True]
+
+
+def test_align_response_topk_rejects_missing_or_misshapen_assistant_heads():
+    k = 4
+    empty = (np.zeros((0, k), dtype=np.int32), np.zeros((0, k), dtype=np.float32), np.zeros(0, dtype=np.bool_))
+    merge = MergeResult(token_ids=[], appended_token_count=2, kind="assistant")
+
+    with pytest.raises(ValueError, match="required"):
+        ContinuousTokenBuilder.align_response_topk(merge, *empty)
+    ids, log_probs = _topk_heads(3, k, start=0)
+    with pytest.raises(ValueError, match="shape"):
+        ContinuousTokenBuilder.align_response_topk(
+            merge, *empty, assistant_topk_ids=ids, assistant_topk_log_probs=log_probs
+        )
+    with pytest.raises(ValueError, match="one bool per appended assistant token"):
+        ContinuousTokenBuilder.align_response_topk(
+            merge,
+            *empty,
+            assistant_topk_ids=ids[:2],
+            assistant_topk_log_probs=log_probs[:2],
+            assistant_support_complete=np.array([1, 0]),
+        )

@@ -165,8 +165,8 @@ class AgentLoopOutput(BaseModel):
         if response_topk_ids is not None and response_topk_log_probs is not None:
             from verl.trainer.ppo.score_centering import pad_rollout_topk
 
-            if self.num_turns > 2:
-                raise ValueError("rollout.topk_log_probs supports the single-turn agent loop only.")
+            # one head per response token, multi-turn included: context tokens carry placeholder heads
+            # (ContinuousTokenBuilder.align_response_topk)
             if len(response_topk_ids) != output["responses"].size(0):
                 raise ValueError(
                     f"sampler top-k heads cover {len(response_topk_ids)} tokens, "

@@ -20,6 +20,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import numpy as np
+
 from .chat_template import apply_chat_template
 from .tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
@@ -417,6 +419,88 @@ class ContinuousTokenBuilder:
             raise ValueError(f"Unknown Continuous Token merge kind: {merge_result.kind!r}")
 
         return aligned_mask, aligned_logprobs
+
+    @staticmethod
+    def align_response_topk(
+        merge_result: MergeResult,
+        response_topk_ids: np.ndarray,
+        response_topk_log_probs: np.ndarray,
+        response_support_complete: np.ndarray,
+        *,
+        assistant_topk_ids: np.ndarray | None = None,
+        assistant_topk_log_probs: np.ndarray | None = None,
+        assistant_support_complete: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Apply the edits of ``align_response_metadata`` to the sampler top-k heads of the response tokens.
+
+        Every response token carries one head (its sampler's top-k ids and log-probs, shape (k,)) and whether that
+        head is verified to cover the sampling support: model-generated assistant tokens get their sampler's heads
+        and coverage, while tokens the model did not sample (inserted boundary tokens and context tokens) get a
+        uniform placeholder head, complete by construction, which the loss masks out with the response mask.
+
+        Args:
+            merge_result: The merge whose edits to apply.
+            response_topk_ids: Heads of the response tokens so far, shape (n, k), dtype int32.
+            response_topk_log_probs: Log-probs matching ``response_topk_ids``, shape (n, k), dtype float32.
+            response_support_complete: Coverage of the heads so far, shape (n,), dtype bool.
+            assistant_topk_ids: Heads of the appended assistant tokens, shape (appended_token_count, k); required for
+                an assistant merge that appends tokens.
+            assistant_topk_log_probs: Log-probs matching ``assistant_topk_ids``.
+            assistant_support_complete: Coverage of the appended assistant tokens' heads, shape
+                (appended_token_count,), dtype bool; None when the provider gives no evidence, which leaves them
+                unknown (False).
+
+        Returns:
+            Tuple containing the aligned ``(topk_ids, topk_log_probs, support_complete)``.
+        """
+        k = response_topk_ids.shape[1]
+        ids, log_probs, complete = response_topk_ids, response_topk_log_probs, response_support_complete
+
+        # the same edits, in the same order, as align_response_metadata
+        if merge_result.removed_prefix_token_count:
+            ids = ids[: -merge_result.removed_prefix_token_count]
+            log_probs = log_probs[: -merge_result.removed_prefix_token_count]
+            complete = complete[: -merge_result.removed_prefix_token_count]
+        placeholder_count = len(merge_result.inserted_token_ids)
+        if merge_result.kind == "assistant":
+            appended_token_count = merge_result.appended_token_count
+            if assistant_topk_ids is None or assistant_topk_log_probs is None:
+                if appended_token_count:
+                    raise ValueError("assistant top-k heads are required for an assistant Continuous Token merge")
+                # an aborted request returns no tokens and no heads
+                assistant_topk_ids = np.zeros((0, k), dtype=np.int32)
+                assistant_topk_log_probs = np.zeros((0, k), dtype=np.float32)
+            assistant_topk_ids = np.asarray(assistant_topk_ids)
+            assistant_topk_log_probs = np.asarray(assistant_topk_log_probs)
+            if assistant_topk_ids.shape != (appended_token_count, k) or (
+                assistant_topk_log_probs.shape != assistant_topk_ids.shape
+            ):
+                raise ValueError(
+                    f"assistant top-k heads must have shape ({appended_token_count}, {k}), "
+                    f"got {assistant_topk_ids.shape} and {assistant_topk_log_probs.shape}"
+                )
+            if assistant_support_complete is None:
+                assistant_support_complete = np.zeros(appended_token_count, dtype=np.bool_)
+            assistant_support_complete = np.asarray(assistant_support_complete)
+            if assistant_support_complete.dtype != np.bool_ or assistant_support_complete.shape != (
+                appended_token_count,
+            ):
+                raise ValueError("assistant support coverage must have one bool per appended assistant token")
+        elif merge_result.kind == "context":
+            placeholder_count += merge_result.appended_token_count
+        else:
+            raise ValueError(f"Unknown Continuous Token merge kind: {merge_result.kind!r}")
+
+        # uniform placeholder heads: distinct ids and finite log-probs keep the loss finite before masking
+        placeholder_ids = np.broadcast_to(np.arange(k, dtype=np.int32), (placeholder_count, k))
+        placeholder_log_probs = np.full((placeholder_count, k), -np.log(k), dtype=np.float32)
+        ids_parts, log_prob_parts = [ids, placeholder_ids], [log_probs, placeholder_log_probs]
+        complete_parts = [complete, np.ones(placeholder_count, dtype=np.bool_)]
+        if merge_result.kind == "assistant":
+            ids_parts.append(assistant_topk_ids.astype(np.int32, copy=False))
+            log_prob_parts.append(assistant_topk_log_probs.astype(np.float32, copy=False))
+            complete_parts.append(assistant_support_complete)
+        return np.concatenate(ids_parts), np.concatenate(log_prob_parts), np.concatenate(complete_parts)
 
     # === Multimodal hooks (VL subclasses override these) ===
 
