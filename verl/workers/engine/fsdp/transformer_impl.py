@@ -788,7 +788,16 @@ class FSDPEngine(BaseEngine):
 
     def _optimizer_update(self):
         """Apply the optimizer's update to the clipped, finite gradients. A subclass may replace how it runs."""
-        self.optimizer.step()
+        if self.engine_config.optimizer_offload_step:
+            # the optimizer states live on the CPU (EngineTrainModeCtx does not preload them): in for the update,
+            # out again
+            try:
+                self.to(device=get_device_name(), model=False, optimizer=True, grad=False)
+                self.optimizer.step()
+            finally:
+                self.to(device="cpu", model=False, optimizer=True, grad=False)
+        else:
+            self.optimizer.step()
 
     def lr_scheduler_step(self):
         """
@@ -1069,6 +1078,17 @@ class EngineEvalModeCtx(BaseEngineCtx):
 class EngineTrainModeCtx(BaseEngineCtx):
     def __init__(self, engine: FSDPEngine, **kwargs):
         super().__init__(engine=engine, mode="train", **kwargs)
+        # optimizer_offload_step: the optimizer states stay on the CPU and come to the device for optimizer.step() only
+        # (FSDPEngine.optimizer_step), so the automatic placement leaves them out
+        self.offload_step = engine.engine_config.optimizer_offload_step and not self.disable_auto_offload
+        if self.offload_step and (type(engine.optimizer) is not torch.optim.AdamW or engine.scaler is not None):
+            raise ValueError("optimizer_offload_step supports ordinary AdamW without a gradient scaler")
+
+    def _context_switch(self, device):
+        if not (self.offload_step and device != "cpu"):
+            return super()._context_switch(device)
+        if self.engine.is_param_offload_enabled:  # the model and its gradients only
+            self.engine.to(device=device, model=True, optimizer=False, grad=True)
 
     def __enter__(self):
         assert isinstance(self.engine, FSDPEngine)

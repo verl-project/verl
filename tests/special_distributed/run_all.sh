@@ -26,3 +26,5 @@ torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_cp
 torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_pinned_model_transfer.py
 # Uneven-shard CPU offload regression with queued work on the conversion stream.
 PYTHONPATH="$PWD:$PYTHONPATH" torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_model_cpu_offload.py
+# Per-update optimizer offload: sharded Adam parity, residency, skipped updates, and state reload.
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_optimizer_offload_step.py
