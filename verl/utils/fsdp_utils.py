@@ -561,6 +561,17 @@ def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
     return modules
 
 
+def _autocast_disabled(forward):
+    """``forward`` with autocast turned off while it runs."""
+
+    @functools.wraps(forward)
+    def wrapped(*args, **kwargs):
+        with torch.autocast(device_type=get_device_name(), enabled=False):
+            return forward(*args, **kwargs)
+
+    return wrapped
+
+
 def apply_fsdp2(model, fsdp_kwargs, config):
     """model: AutoModelForCausalLM"""
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
@@ -579,11 +590,36 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
 
+    # mixed_precision.fp32_modules: submodules (by name) that gather their parameters and compute in fp32, each one unit
+    # of its own over the wrapped layers inside it; a rollout engine must compute them in fp32 as well
+    mixed_precision = config.get("mixed_precision") or {}
+    fp32_roots = [model.get_submodule(name) for name in mixed_precision.get("fp32_modules", [])]
+    fp32_members = {id(member) for root in fp32_roots for member in root.modules()}
+    fp32_kwargs = {
+        **fsdp_kwargs,
+        "mp_policy": MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32),
+    }
+    for root in fp32_roots:
+        # flash-attention kernels have no fp32 path
+        if hasattr(getattr(root, "config", None), "_attn_implementation"):
+            root.config._attn_implementation = "sdpa"
+    if fp32_roots:
+        # their matmuls and convolutions in IEEE fp32 (cudnn's default TF32 rounds inputs to 10 mantissa bits) or on
+        # TF32 tensor cores (fp32_modules_tf32); process-wide flags, but every other matmul runs in bf16 under autocast
+        tf32 = mixed_precision.get("fp32_modules_tf32", False)
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+        torch.backends.cudnn.allow_tf32 = tf32
+
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
         #     print(f"wrap module {module.__class__.__name__}")
         with maybe_patch_fsdp_module(module):
-            fully_shard(module, **fsdp_kwargs)
+            fully_shard(module, **(fp32_kwargs if id(module) in fp32_members else fsdp_kwargs))
+    for root in fp32_roots:
+        with maybe_patch_fsdp_module(root):
+            fully_shard(root, **fp32_kwargs)
+        # the engine runs the forward under autocast in param_dtype, which would lower these modules' matmuls back to it
+        root.forward = _autocast_disabled(root.forward)
 
     # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
     #     print(f"wrap module {model.__class__.__name__}")
