@@ -219,6 +219,9 @@ class HFModelConfig(BaseConfig):
             self.override_config["model_config"] if "model_config" in self.override_config else self.override_config
         )
         override_config_kwargs.update(override_config)
+        # attn_implementation went to from_pretrained above (one name, or one per sub-model: {"text_config": ...}); it is
+        # not a config attribute
+        override_config_kwargs.pop("attn_implementation", None)
         update_model_config(self.hf_config, override_config_kwargs=override_config_kwargs)
 
         self.share_embeddings_and_output_weights = getattr(self.hf_config, "tie_word_embeddings", False)
