@@ -138,6 +138,9 @@ class PPOTrainer(ABC):
         config: DictConfig from yaml config file.
     """
 
+    # the statuses of a checkpointed prompt group whose generation a resume starts again
+    INFLIGHT_PROMPT_STATUSES = ("pending", "running")
+
     def __init__(self, config: DictConfig):
         self.config = config
         self.checkpoint_callback = build_checkpoint_callback(config)
@@ -1037,11 +1040,15 @@ class PPOTrainer(ABC):
         inflight_uids = [
             key
             for key, tag in items.items()
-            if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
+            if tag.get("is_prompt", False) and tag.get("status") in self.INFLIGHT_PROMPT_STATUSES
         ]
         if not inflight_uids:
             return 0
 
+        return self._reissue_prompt_groups(inflight_uids, items, partition_id)
+
+    def _reissue_prompt_groups(self, inflight_uids: list[str], items: dict[str, dict], partition_id: str) -> int:
+        """Dispatch a restored partition's in-flight prompt groups again, given the partition's tags by key."""
         batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
         inflight_uid_set = set(inflight_uids)
         old_trajectory_keys = [
