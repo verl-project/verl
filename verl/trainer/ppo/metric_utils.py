@@ -592,6 +592,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "prompt_length/max": torch.max(prompt_length).detach().item(),
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+        # prompt + response: the context the engines and the trainer hold per trajectory
+        "ctx_total_length/mean": torch.mean(prompt_length + response_length).detach().item(),
+        "ctx_total_length/max": torch.max(prompt_length + response_length).detach().item(),
     }
 
     # multi-turn conversation
