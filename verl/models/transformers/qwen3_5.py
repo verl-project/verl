@@ -27,6 +27,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5CausalLMOutputWithPast,
     Qwen3_5ForConditionalGeneration,
 )
+from transformers.utils import is_causal_conv1d_available
 
 from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_group,
@@ -230,7 +231,11 @@ def qwen3_5_gated_delta_net_forward(
 
     module = import_module(self.__class__.__module__)
     hidden_states = module.apply_mask_to_padding_states(hidden_states, attention_mask)
-    causal_conv1d_fn = self.causal_conv1d_fn if hasattr(self, "causal_conv1d_fn") else module.causal_conv1d_fn
+    # transformers >= 5.16 never sets causal_conv1d_fn to None: without the causal-conv1d package its torch fallback
+    # cannot keep packed sequences apart (5.16 drops seq_idx, 5.22 raises on it), so packed rows take FLA's kernel below
+    causal_conv1d_fn = None
+    if is_causal_conv1d_available():
+        causal_conv1d_fn = self.causal_conv1d_fn if hasattr(self, "causal_conv1d_fn") else module.causal_conv1d_fn
     causal_conv1d_update = (
         self.causal_conv1d_update if hasattr(self, "causal_conv1d_update") else module.causal_conv1d_update
     )
