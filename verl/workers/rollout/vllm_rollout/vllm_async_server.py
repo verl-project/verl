@@ -35,7 +35,7 @@ from vllm.entrypoints.openai.api_server import build_app, init_app_state
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
-from vllm.outputs import STREAM_FINISHED, RequestOutput
+from vllm.outputs import STREAM_FINISHED, CompletionOutput, RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -188,7 +188,6 @@ class vLLMHttpServer:
         self.nnodes = nnodes
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
-        self._warned_missing_spec_decode_stats = False
 
         # vLLM's pause stops requests being scheduled but still accepts them, and a request
         # admitted after the pause is invisible to the drain's liveness check.
@@ -412,6 +411,8 @@ class vLLMHttpServer:
                 self.config.mtp.num_speculative_tokens,
                 args.get("speculative_config"),
             )
+            # each finished request's acceptance counts, read from its output's spec_decode_metrics
+            args["per_request_spec_decode_metrics"] = "summary"
 
         if self.config.data_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
@@ -840,20 +841,8 @@ class vLLMHttpServer:
         if response_kv_transfer_params is not None:
             extra_fields["kv_transfer_params"] = response_kv_transfer_params
 
-        # Re-key backend spec-decoding stats to the rollout-common names.
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            spec_decode_stats = getattr(final_res.metrics, "request_spec_decode_stats", None)
-            if spec_decode_stats is None:
-                if not self._warned_missing_spec_decode_stats:
-                    logger.warning(
-                        "vLLM MTP rollout metrics do not include request_spec_decode_stats; "
-                        "speculative decoding acceptance metrics will be skipped."
-                    )
-                    self._warned_missing_spec_decode_stats = True
-            else:
-                extra_fields["spec_num_draft_tokens"] = spec_decode_stats.num_draft_tokens
-                extra_fields["spec_num_accepted_tokens"] = spec_decode_stats.num_accepted_tokens
-                extra_fields["spec_num_verify_steps"] = spec_decode_stats.num_verify_steps
+            extra_fields.update(self.spec_decode_fields(final_res.outputs[0]))
         output = TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
@@ -863,6 +852,19 @@ class vLLMHttpServer:
             extra_fields=extra_fields,
         )
         return self._postprocess_output(output, final_res, sampling_params)
+
+    @staticmethod
+    def spec_decode_fields(output: CompletionOutput) -> dict:
+        """A finished request's speculative-decoding counts under the rollout-common names."""
+        # vLLM hands the counts over when its scheduler finishes a request; an aborted request's final output has none
+        if output.spec_decode_metrics is None:
+            return {"spec_num_draft_tokens": 0, "spec_num_accepted_tokens": 0, "spec_num_verify_steps": 0}
+        metrics = output.spec_decode_metrics.to_dict()
+        return {
+            "spec_num_draft_tokens": metrics["num_draft_tokens"],
+            "spec_num_accepted_tokens": metrics["num_accepted_draft_tokens"],
+            "spec_num_verify_steps": metrics["num_spec_steps"],
+        }
 
     def _select_decode_peer(self) -> ActorHandle:
         """Round-robin across decode peers."""
