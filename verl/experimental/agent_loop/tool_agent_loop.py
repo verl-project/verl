@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -84,6 +85,12 @@ class AgentData:
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
+        # Sampler top-k head of every response token (score centering): ids and log-probs of shape
+        # (len(response_mask), k) and whether each head is verified to cover the sampling support, shape
+        # (len(response_mask),); None when the rollout does not request heads
+        self.response_topk_ids: Optional[np.ndarray] = None
+        self.response_topk_log_probs: Optional[np.ndarray] = None
+        self.response_support_complete: Optional[np.ndarray] = None
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
         self.user_turns = 0
@@ -154,6 +161,11 @@ class ToolAgentLoop(AgentLoopBase):
             request_id=request_id,
             tools_kwargs=tools_kwargs,
         )
+        topk = sampling_params.get("topk_log_probs", 0)  # absent on validation and greedy rollouts
+        if topk:
+            agent_data.response_topk_ids = np.zeros((0, topk), dtype=np.int32)
+            agent_data.response_topk_log_probs = np.zeros((0, topk), dtype=np.float32)
+            agent_data.response_support_complete = np.zeros(0, dtype=np.bool_)
 
         # Per-sample tool selection: filter global tools by extra_info.tool_selection
         extra_info = kwargs.get("extra_info", {}) or {}
@@ -212,6 +224,17 @@ class ToolAgentLoop(AgentLoopBase):
             extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
+        if agent_data.response_topk_ids is not None:
+            if len(agent_data.response_topk_ids) != len(agent_data.response_mask):
+                raise RuntimeError(
+                    f"{len(agent_data.response_topk_ids)} sampler top-k heads for "
+                    f"{len(agent_data.response_mask)} response tokens"
+                )
+            output.extra_fields["response_topk_ids"] = agent_data.response_topk_ids[: self.response_length]
+            output.extra_fields["response_topk_log_probs"] = agent_data.response_topk_log_probs[: self.response_length]
+            output.extra_fields["response_support_complete"] = agent_data.response_support_complete[
+                : self.response_length
+            ]
         return output
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
@@ -260,6 +283,12 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
 
+        # Sampler top-k heads belong to this turn's tokens: they accumulate per response token, not as a first-turn
+        # extra field
+        assistant_topk_ids = output.extra_fields.pop("response_topk_ids", None)
+        assistant_topk_log_probs = output.extra_fields.pop("response_topk_log_probs", None)
+        assistant_support_complete = output.extra_fields.pop("response_support_complete", None)
+
         if not agent_data.extra_fields:
             agent_data.extra_fields.update(output.extra_fields)
         else:
@@ -284,6 +313,20 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.response_mask = response_mask
         if response_logprobs is not None:
             agent_data.response_logprobs = response_logprobs
+        if agent_data.response_topk_ids is not None:
+            (
+                agent_data.response_topk_ids,
+                agent_data.response_topk_log_probs,
+                agent_data.response_support_complete,
+            ) = self.continuous_token_builder.align_response_topk(
+                merge_result,
+                agent_data.response_topk_ids,
+                agent_data.response_topk_log_probs,
+                agent_data.response_support_complete,
+                assistant_topk_ids=assistant_topk_ids,
+                assistant_topk_log_probs=assistant_topk_log_probs,
+                assistant_support_complete=assistant_support_complete,
+            )
 
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
@@ -399,6 +442,17 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.response_mask = response_mask
         if agent_data.response_logprobs:
             agent_data.response_logprobs = response_logprobs or []
+        if agent_data.response_topk_ids is not None:
+            (
+                agent_data.response_topk_ids,
+                agent_data.response_topk_log_probs,
+                agent_data.response_support_complete,
+            ) = self.continuous_token_builder.align_response_topk(
+                merge_result,
+                agent_data.response_topk_ids,
+                agent_data.response_topk_log_probs,
+                agent_data.response_support_complete,
+            )
 
         # Keep original image objects for rollout and final multimodal postprocessing.
         if new_images_this_turn:

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from contextlib import nullcontext
 from typing import Any, Optional
@@ -250,18 +251,28 @@ def test_agent_loop_output_rejects_incomplete_provider_evidence_records():
         output.as_dict()
 
 
-def test_agent_loop_output_as_dict_rejects_multi_turn_rollout_topk():
+def test_agent_loop_output_as_dict_lays_out_multi_turn_rollout_topk():
+    # a tool turn between two assistant turns: its tokens carry the uniform placeholder head, complete by construction
+    placeholder_ids, placeholder_log_probs = [0, 1], [-math.log(2)] * 2
     output = AgentLoopOutput(
         prompt_ids=[1],
-        response_ids=[2, 3],
-        response_mask=[1, 1],
+        response_ids=[2, 3, 4, 5],
+        response_mask=[1, 0, 0, 1],
         num_turns=4,
         metrics=AgentLoopMetrics(),
-        extra_fields={"response_topk_ids": [[2, 9], [3, 8]], "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]]},
+        extra_fields={
+            "response_topk_ids": [[2, 9], placeholder_ids, placeholder_ids, [5, 8]],
+            "response_topk_log_probs": [[-0.1, -2.0], placeholder_log_probs, placeholder_log_probs, [-0.2, -1.5]],
+            "response_support_complete": [False, True, True, False],
+        },
     )
 
-    with pytest.raises(ValueError, match="single-turn"):
-        output.as_dict()
+    fields = output.as_dict()
+
+    # row P-1+r holds response token r's head, the last row the dummy head
+    assert fields["rollout_topk_ids"].tolist() == [[2, 9], [0, 1], [0, 1], [5, 8], [0, 1]]
+    assert fields["rollout_topk_log_probs"][3].tolist() == pytest.approx([-0.2, -1.5])
+    assert fields["rollout_support_complete"].tolist() == [False, True, True, False, True]
 
 
 def test_agent_loop_output_as_dict_rejects_misaligned_rollout_topk():

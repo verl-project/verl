@@ -252,7 +252,8 @@ multi_turn:
 calculate_log_probs: True
 
 # Sampler top-k log-probs per generated token, needed by algorithm.rollout_correction.score_centering.
-# 0 disables; the paper uses 128 (32 also matches). vLLM only for now, single-turn agent loop only.
+# 0 disables; the paper uses 128 (32 also matches). vLLM only for now; multi-turn loops give their context tokens
+# placeholder heads (ContinuousTokenBuilder.align_response_topk).
 topk_log_probs: 0
 
 # [Experimental] agent loop based rollout configs

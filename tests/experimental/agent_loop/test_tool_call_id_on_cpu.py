@@ -157,6 +157,9 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
             prompt_ids=[1, 2, 3],
             response_mask=[],
             response_logprobs=[],
+            response_topk_ids=None,
+            response_topk_log_probs=None,
+            response_support_complete=None,
             image_data=None,
             user_turns=0,
         )
