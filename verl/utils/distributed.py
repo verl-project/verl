@@ -34,7 +34,8 @@ def set_numa_affinity():
 
     initialized = False
     try:
-        libnuma = ctypes.CDLL("libnuma.so")
+        # the runtime library's name: libnuma.so is the link of the development package, which a training machine lacks
+        libnuma = ctypes.CDLL("libnuma.so.1")
         if libnuma.numa_available() < 0:
             return
 
