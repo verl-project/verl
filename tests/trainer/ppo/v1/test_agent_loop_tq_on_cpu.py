@@ -143,3 +143,61 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
     assert "rollout_topk_ids" not in fields.keys()
     assert "rollout_topk_log_probs" not in fields.keys()
+
+
+def test_a_restored_group_runs_only_its_unfinished_sessions(monkeypatch):
+    """A row with __unfinished_session_ids__ (a group restored from a checkpoint) runs exactly those sessions; a row
+    without runs rollout.n of them; each group then reports finished."""
+    from omegaconf import OmegaConf
+    from tensordict import TensorDict
+
+    from verl.trainer.ppo.v1 import agent_loop_tq
+    from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ
+    from verl.utils import tensordict_utils as tu
+
+    statuses, sessions = [], []
+
+    async def async_kv_put(*, key, partition_id, tag):
+        statuses.append((key, tag["status"]))
+
+    async def run_agent_loop(sampling_params, *, trajectory, trace, session_id, **prompt):
+        sessions.append((prompt["uid"], prompt["global_steps"], session_id))
+
+    monkeypatch.setattr(agent_loop_tq.tq, "async_kv_put", async_kv_put)
+    worker_class = AgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = worker_class.__new__(worker_class)
+    worker.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "n": 4,
+                    "val_kwargs": {"n": 1},
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "calculate_log_probs": False,
+                    "topk_log_probs": 0,
+                    "agent": {"default_agent_loop": "tool_agent"},
+                }
+            }
+        }
+    )
+    worker.background_tasks = set()
+    worker._run_agent_loop = run_agent_loop
+    restored = TensorDict({"index": torch.tensor([0, 1])}, batch_size=2)
+    tu.assign_non_tensor_stack(restored, "uid", ["a", "b"])
+    tu.assign_non_tensor_stack(restored, "__unfinished_session_ids__", [[1, 3], [0]])
+    tu.assign_non_tensor_data(restored, "global_steps", 5)
+    fresh = TensorDict({"index": torch.tensor([2])}, batch_size=1)
+    tu.assign_non_tensor_stack(fresh, "uid", ["c"])
+    tu.assign_non_tensor_data(fresh, "global_steps", 7)
+
+    async def run():
+        for batch in (restored, fresh):
+            await worker.generate_sequences(batch)
+        await asyncio.gather(*worker.background_tasks)
+
+    asyncio.run(run())
+
+    assert sorted(sessions) == [("a", 5, 1), ("a", 5, 3), ("b", 5, 0)] + [("c", 7, i) for i in range(4)]
+    assert sorted(statuses) == sorted([(uid, "running") for uid in "abc"] + [(uid, "finished") for uid in "abc"])
