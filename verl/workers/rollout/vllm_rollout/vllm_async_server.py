@@ -346,6 +346,7 @@ class vLLMHttpServer:
             compilation_config["cudagraph_mode"] = "PIECEWISE"
         if self.config.cudagraph_capture_sizes:
             compilation_config["cudagraph_capture_sizes"] = self.config.cudagraph_capture_sizes
+        self._postprocess_compilation_config(compilation_config)
 
         compilation_config = json.dumps(compilation_config)
         args = {
@@ -1507,6 +1508,9 @@ class vLLMHttpServer:
                     f"but got {weight_transfer_backend!r}"
                 )
             engine_kwargs["weight_transfer_config"] = {"backend": VERL_DELTA_WEIGHT_TRANSFER_BACKEND}
+
+    def _postprocess_compilation_config(self, compilation_config: dict) -> None:
+        """Mutate the compilation config in-place before it is serialized into the CLI args."""
 
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""
