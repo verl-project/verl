@@ -32,7 +32,12 @@ from verl.utils import normalize_token_ids
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tracking import RLInsightLogger
-from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
+from verl.workers.rollout.replica import (
+    SPEC_DECODE_EXTRA_KEYS,
+    RolloutReplica,
+    TokenOutput,
+    get_rollout_replica_class,
+)
 from verl.workers.rollout.router import GlobalRequestLoadBalancer  # noqa: F401
 from verl.workers.rollout.utils import update_prometheus_config
 
@@ -286,6 +291,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # must carry it forward explicitly or the consumer sees 0. Take the first
         # (initial-prompt) prefill's hit count, matching single-prefill semantics.
         num_cached_tokens = None
+        # the speculative-decoding counts of every attempt, summed: a resumed request is one generation
+        spec_counts = {}
 
         while True:
             # 1. generate tokens
@@ -313,6 +320,9 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                     final_output.routed_experts = np.concatenate(
                         [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]]
                     )
+            for key in SPEC_DECODE_EXTRA_KEYS:
+                if key in output.extra_fields:
+                    spec_counts[key] = spec_counts.get(key, 0) + int(output.extra_fields[key])
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
             # sampler top-k heads for score centering, one row per newly generated token
@@ -366,6 +376,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps
         final_output.extra_fields["num_cached_tokens"] = num_cached_tokens
+        final_output.extra_fields.update(spec_counts)
         return final_output
 
 
