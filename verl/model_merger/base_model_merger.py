@@ -68,6 +68,13 @@ def parse_args():
         help="Whether to use CPU initialization for the model. This is useful for large models that cannot "
         "fit into GPU memory during initialization.",
     )
+    base_op_parser.add_argument(
+        "--fp32_modules",
+        nargs="*",
+        default=[],
+        help="Weights whose names contain one of these substrings are saved in fp32 instead of bf16 (the weights a "
+        "rollout engine computes in fp32).",
+    )
 
     merge_parser = subparsers.add_parser("merge", parents=[base_op_parser], help="Merge model checkpoints and save.")
     merge_parser.add_argument(
@@ -112,6 +119,8 @@ class ModelMergerConfig:
         hf_upload (bool): Whether to upload to HuggingFace (computed automatically). Not for initialization.
         use_cpu_initialization (bool): Whether to use CPU initialization for large models. Defaults to False.
         base_model_path (Optional[str]): Path to the HuggingFace model the training started from. Defaults to None.
+        fp32_modules (list[str]): Weights whose names contain one of these substrings are saved in fp32, everything
+            else in bf16: the weights a rollout engine computes in fp32. Defaults to [].
     """
 
     operation: str  # 'merge' or 'test'
@@ -128,6 +137,7 @@ class ModelMergerConfig:
     hf_upload: bool = field(init=False)
     use_cpu_initialization: bool = False
     base_model_path: Optional[str] = None
+    fp32_modules: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         self.hf_upload = self.operation == "merge" and bool(self.hf_upload_path)
@@ -163,6 +173,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
         "hf_model_config_path": _default_hf_model_config_path(args.backend, args.local_dir),
         "use_cpu_initialization": args.use_cpu_initialization,
         "base_model_path": args.base_model_path,
+        "fp32_modules": args.fp32_modules,
     }
 
     if args.operation == "merge":
