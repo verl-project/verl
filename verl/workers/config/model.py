@@ -115,6 +115,7 @@ class HFModelConfig(BaseConfig):
     override_config: dict = field(default_factory=dict)
 
     enable_gradient_checkpointing: bool = True
+    gradient_checkpointing_retain_attention: bool = False
     enable_activation_offload: bool = False
 
     use_remove_padding: bool = True

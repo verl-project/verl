@@ -434,6 +434,7 @@ actor_rollout_ref:
     external_lib: null
     override_config: {}
     enable_gradient_checkpointing: true
+    gradient_checkpointing_retain_attention: false
     enable_activation_offload: false
     use_remove_padding: true
     lora_rank: 0
@@ -677,6 +678,7 @@ critic:
     external_lib: null
     override_config: {}
     enable_gradient_checkpointing: true
+    gradient_checkpointing_retain_attention: false
     enable_activation_offload: false
     use_remove_padding: true
     lora_rank: 0

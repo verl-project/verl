@@ -33,6 +33,11 @@ override_config: {}
 # whether to enable gradient checkpointing. Only valid when we use hf model definition
 enable_gradient_checkpointing: True
 
+# keep each checkpointed attention layer's FlashAttention-4 or -3 outputs between its forward and backward (no
+# attention recompute; the outputs of one checkpoint stay on the device). Only valid with
+# enable_gradient_checkpointing and flash_attention_4 or flash_attention_3
+gradient_checkpointing_retain_attention: False
+
 # whether to enable activation offload. Only valid when we use hf model definition
 enable_activation_offload: False
 
