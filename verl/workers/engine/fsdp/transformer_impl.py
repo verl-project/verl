@@ -857,9 +857,13 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.module)
 
+        configured_lrs = list(self.lr_scheduler.base_lrs) if self.lr_scheduler is not None else None
         self.checkpoint_manager.load_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
         )
+        if configured_lrs is not None:
+            # the configured learning rates win over the checkpoint's; the restored schedule keeps its position
+            verl_F.apply_configured_lrs(self.optimizer, self.lr_scheduler, configured_lrs)
 
         torch.distributed.barrier()
         if self._is_offload_param:

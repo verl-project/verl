@@ -937,6 +937,16 @@ def get_wsd_schedule_with_warmup(
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
+def apply_configured_lrs(optimizer: Optimizer, lr_scheduler: LambdaLR, configured_lrs: list[float]) -> None:
+    """Set a restored schedule's base learning rates to the configured ones, keeping its position."""
+    lr_scheduler.base_lrs = list(configured_lrs)
+    for group, base_lr, lr_lambda in zip(
+        optimizer.param_groups, lr_scheduler.base_lrs, lr_scheduler.lr_lambdas, strict=True
+    ):
+        group["initial_lr"] = base_lr
+        group["lr"] = base_lr * lr_lambda(lr_scheduler.last_epoch)  # what LambdaLR sets at the restored position
+
+
 @contextmanager
 def check_device_is_available():
     """
