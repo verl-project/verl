@@ -239,7 +239,7 @@ class ToolAgentLoop(AgentLoopBase):
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
-        schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
+        schemas = self._prompt_tool_schemas(agent_data)
         # Continuous Token is the only tokenization path; multimodal prompts require a
         # VL builder + processor, so validate before building any tokens.
         self._assert_mm_supported(bool(agent_data.image_data or agent_data.video_data or agent_data.audio_data))
@@ -427,7 +427,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.messages.extend(add_messages)
 
-        schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
+        schemas = self._prompt_tool_schemas(agent_data)
         merge_result, response_mask, response_logprobs = await self.ct_merge_context_msg(
             previous_messages,
             agent_data.messages,
@@ -465,6 +465,10 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.user_turns += 1
         return AgentState.GENERATING
+
+    def _prompt_tool_schemas(self, agent_data: AgentData) -> list[dict[str, Any]]:
+        """The tool schemas a session's prompts render: those of the tools its row selects."""
+        return getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
 
     def _build_assistant_message(self, content: str, agent_data: AgentData) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": content or ""}
