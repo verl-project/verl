@@ -265,6 +265,9 @@ class FSDPEngineConfig(EngineConfig):
         use_no_sync_for_gradient_accumulation (bool): Whether to defer FSDP gradient synchronization until the
             final micro-batch. Disabling this reduces peak memory by synchronizing and resharding gradients after
             every micro-batch. default True
+        hsdp_all_reduce_on_last_micro_batch (bool): With HSDP (FSDP2 on a 2D mesh) and without
+            ``use_no_sync_for_gradient_accumulation``: all-reduce the gradients across the replicas on the final
+            micro-batch only; every micro-batch still reduce-scatters within its shard group. default False
         pad_to_length (bool): Round every packed micro-batch up to a multiple of
             ``pad_to_length_bucket`` tokens, so the packed shape only takes a handful of distinct
             values instead of a new one per micro-batch, which avoids repeated kernel
@@ -298,6 +301,7 @@ class FSDPEngineConfig(EngineConfig):
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     use_no_sync_for_gradient_accumulation: bool = True
+    hsdp_all_reduce_on_last_micro_batch: bool = False
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024

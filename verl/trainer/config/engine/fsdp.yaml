@@ -66,6 +66,10 @@ entropy_checkpointing: false
 # from retaining unsharded gradients outweighs the communication savings.
 use_no_sync_for_gradient_accumulation: false
 
+# With HSDP (fsdp_size below the number of GPUs) and without the deferral above: all-reduce the gradients across the
+# replicas on the final micro-batch only, while every micro-batch still reduce-scatters within its shard group.
+hsdp_all_reduce_on_last_micro_batch: false
+
 # Round every packed micro-batch up to a multiple of `pad_to_length_bucket` tokens, so the packed
 # shape only takes a few distinct values instead of a new one per micro-batch (avoids kernel
 # recompilation / re-autotuning). Requires use_remove_padding=True. Pad tokens are stripped before

@@ -49,6 +49,11 @@ class _FSDP2Module:
         self.events.append(enabled)
 
 
+class _HSDPModule(_FSDP2Module):
+    def set_requires_all_reduce(self, enabled):
+        self.events.append(("all_reduce", enabled))
+
+
 def _make_engine(module, *, use_no_sync_for_gradient_accumulation=True):
     engine = object.__new__(FSDPEngine)
     engine.module = module
@@ -104,6 +109,22 @@ def test_gradient_sync_context_keeps_sync_when_disabled(monkeypatch, version, mo
         module.events.append("backward")
 
     assert module.events == ["backward"]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_gradient_sync_context_hsdp_all_reduces_on_the_last_micro_batch_only(monkeypatch, enabled):
+    module = _HSDPModule()
+    engine = _make_engine(module, use_no_sync_for_gradient_accumulation=False)
+    engine.engine_config.hsdp_all_reduce_on_last_micro_batch = enabled
+    engine.device_mesh = SimpleNamespace(ndim=2)
+    monkeypatch.setattr(transformer_impl, "fsdp_version", lambda _: 2)
+
+    for is_last_micro_batch in (False, True):
+        with engine._gradient_sync_context(is_last_micro_batch=is_last_micro_batch):
+            module.events.append("backward")
+
+    expected = [("all_reduce", False), "backward", ("all_reduce", True), "backward"] if enabled else ["backward"] * 2
+    assert module.events == expected
 
 
 @pytest.mark.parametrize("version,module_cls", [(1, _FSDP1Module), (2, _FSDP2Module)])
