@@ -634,6 +634,7 @@ def apply_monkey_patch(
             drop_conv_autotune_length_key,
             fast_pos_embed_interpolate,
             forward_with_normal_backend,
+            patch_vision_model_for_ulysses_sharding,
             qwen3_5_base_forward,
             qwen3_5_decoder_layer_forward,
             qwen3_5_gated_delta_net_forward,
@@ -655,6 +656,8 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
+            patch_vision_model_for_ulysses_sharding(Qwen3_5VisionModel)
+            patch_vision_model_for_ulysses_sharding(Qwen3_5MoeVisionModel)
 
         # Step 3: the training-step kernels
         drop_conv_autotune_length_key()
