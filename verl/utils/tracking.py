@@ -84,7 +84,8 @@ class Tracking:
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
             entity = os.environ.get("WANDB_ENTITY", None)
             wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
-            self.logger["wandb"] = wandb
+            # commit each step at once: a step-addressed wandb.log is uploaded only when a later step arrives
+            self.logger["wandb"] = SimpleNamespace(log=partial(wandb.log, commit=True), finish=wandb.finish)
 
         if "trackio" in default_backend:
             import trackio
