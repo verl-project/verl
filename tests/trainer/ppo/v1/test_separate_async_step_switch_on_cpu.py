@@ -633,3 +633,14 @@ def test_setup_standalone_memory_from_hydra_override(monkeypatch, model_engine, 
     assert created_configs[0][0].actor_rollout_ref.rollout.gpu_memory_utilization == expected
     assert trainer.config.actor_rollout_ref.rollout.gpu_memory_utilization == 0.45
     assert OmegaConf.to_container(trainer.config, resolve=False) == original
+
+
+def test_setup_takes_the_standalone_server_manager_from_its_hook(monkeypatch):
+    trainer, created_configs, _ = _memory_budget_setup(monkeypatch, False, None)
+    standalone_server_manager = SimpleNamespace(get_replicas=lambda: ["standalone"])
+    trainer._create_standalone_server_manager = lambda: standalone_server_manager
+
+    trainer._setup()
+
+    assert trainer.standalone_server_manager is standalone_server_manager
+    assert created_configs == []

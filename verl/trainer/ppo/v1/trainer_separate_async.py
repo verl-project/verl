@@ -156,17 +156,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
         # initialize standalone rollout
         # TODO: make initialization parallel with super().init()
-        hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
-        # Standalone replicas have dedicated GPUs; keep their memory budget
-        # separate from the hybrid replicas that share GPUs with training.
-        standalone_config = deepcopy(self.config)
-        standalone_rollout_config = standalone_config.actor_rollout_ref.rollout
-        standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
-        if standalone_memory is not None:
-            standalone_rollout_config.gpu_memory_utilization = standalone_memory
-        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
-            config=standalone_config, start_rank=hybrid_num_replicas
-        )
+        self.standalone_server_manager: LLMServerManager = self._create_standalone_server_manager()
         rollout_config = self.config.actor_rollout_ref.rollout
         if rollout_config.prometheus.enable:
             server_addresses = (
@@ -197,6 +187,23 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 "(trainer.v1.separate_async.hybrid_rollout.enable_switch=False): "
                 f"rollout served by {len(self.standalone_server_manager.get_replicas())} standalone replicas only"
             )
+
+    def _create_standalone_server_manager(self) -> LLMServerManager:
+        """Start the standalone replicas, their ranks after the hybrid replicas'."""
+        return LLMServerManager.create(
+            config=self._standalone_config(), start_rank=len(self.llm_server_manager.rollout_replicas)
+        )
+
+    def _standalone_config(self) -> DictConfig:
+        """The trainer's config with the standalone replicas' memory budget."""
+        # Standalone replicas have dedicated GPUs; keep their memory budget
+        # separate from the hybrid replicas that share GPUs with training.
+        standalone_config = deepcopy(self.config)
+        standalone_rollout_config = standalone_config.actor_rollout_ref.rollout
+        standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
+        if standalone_memory is not None:
+            standalone_rollout_config.gpu_memory_utilization = standalone_memory
+        return standalone_config
 
     def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Version-aware old_log_probs computation for Decoupled PPO.
