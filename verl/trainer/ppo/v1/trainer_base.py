@@ -563,11 +563,12 @@ class PPOTrainer(ABC):
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
 
             dapo_filtered_reward_counts = metrics.pop(DAPO_FILTERED_REWARD_COUNTS_KEY, None)
-            self.logger.log(data=metrics, step=self.global_steps)
+            # before the metrics: the wandb backend commits the step, later logs to it are dropped
             if dapo_filtered_reward_counts:
                 self.dapo_filtered_reward_logger.log(
                     self.config.trainer.logger, dapo_filtered_reward_counts, self.global_steps
                 )
+            self.logger.log(data=metrics, step=self.global_steps)
             progress_bar.update(1)
             self.global_steps += 1
             SkipManager.set_step(self.global_steps)

@@ -109,3 +109,26 @@ def test_validation_generations_logger_logs_trackio_traces():
     assert trace_kwargs["metadata"]["score"] == 0.5
     mock_trackio.log.assert_called_once()
     assert mock_trackio.log.call_args.kwargs["step"] == 7
+
+
+def test_wandb_backend_commits_each_step(monkeypatch):
+    """A step-addressed wandb.log is only uploaded when committed; the backend must pass commit=True."""
+    import sys
+    import types
+
+    calls = []
+    stub = types.SimpleNamespace(
+        init=lambda **kwargs: calls.append(("init", kwargs)),
+        log=lambda **kwargs: calls.append(("log", kwargs)),
+        finish=lambda **kwargs: calls.append(("finish", kwargs)),
+    )
+    monkeypatch.setitem(sys.modules, "wandb", stub)
+    from verl.utils.tracking import Tracking
+
+    tracking = Tracking(project_name="p", experiment_name="e", default_backend=["wandb"], config=None)
+    tracking.log(data={"a": 1.0}, step=3)
+    tracking.finish(exit_code=0)
+
+    assert [c[0] for c in calls] == ["init", "log", "finish"]
+    assert calls[1][1] == {"data": {"a": 1.0}, "step": 3, "commit": True}
+    assert calls[2][1] == {"exit_code": 0}
