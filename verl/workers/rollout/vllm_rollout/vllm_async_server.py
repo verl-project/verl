@@ -71,6 +71,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
+    VLLM_MTP_DRAFTER_WEIGHT_SYNC_ENV,
     SuppressSignalInThread,
     build_cli_args_from_config,
     build_mtp_speculative_config,
@@ -405,14 +406,7 @@ class vLLMHttpServer:
                     served_model_name = served_model_name.split("/")[-1]
                 args["served_model_name"] = served_model_name
 
-        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            args["speculative_config"] = build_mtp_speculative_config(
-                self.config.mtp.method,
-                self.config.mtp.num_speculative_tokens,
-                args.get("speculative_config"),
-            )
-            # each finished request's acceptance counts, read from its output's spec_decode_metrics
-            args["per_request_spec_decode_metrics"] = "summary"
+        self._apply_mtp_rollout_config(args)
 
         if self.config.data_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
@@ -841,7 +835,7 @@ class vLLMHttpServer:
         if response_kv_transfer_params is not None:
             extra_fields["kv_transfer_params"] = response_kv_transfer_params
 
-        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
+        if self.config.mtp is not None and self.config.mtp.enable_rollout:
             extra_fields.update(self.spec_decode_fields(final_res.outputs[0]))
         output = TokenOutput(
             token_ids=token_ids,
@@ -1533,6 +1527,26 @@ class vLLMHttpServer:
     def _postprocess_compilation_config(self, compilation_config: dict) -> None:
         """Mutate the compilation config in-place before it is serialized into the CLI args."""
 
+    def _apply_mtp_rollout_config(self, args: dict) -> None:
+        """Draft with MTP when the rollout asks for it (mtp.enable_rollout).
+
+        The drafter takes the actor's MTP weights at every weight sync when the actor carries MTP layers (mtp.enable).
+        Otherwise it drafts frozen, with the weights of its own checkpoint: speculative_config.model, or the model's
+        own MTP layers.
+        """
+        mtp_config = self.config.mtp
+        if mtp_config is None or not mtp_config.enable_rollout:
+            return
+        args["speculative_config"] = build_mtp_speculative_config(
+            mtp_config.method,
+            mtp_config.num_speculative_tokens,
+            args.get("speculative_config"),
+        )
+        # each finished request's acceptance counts, read from its output's spec_decode_metrics
+        args["per_request_spec_decode_metrics"] = "summary"
+        # read by the engine's worker processes, which inherit this process's environment
+        os.environ[VLLM_MTP_DRAFTER_WEIGHT_SYNC_ENV] = "1" if mtp_config.enable else "0"
+
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""
         # Override default generation config from hugging face model config,
@@ -1580,16 +1594,13 @@ class vLLMHttpServer:
         """Deepest sleep level whose discarded state a subsequent weight sync can restore.
 
         MTP drafter-only weights are initialized by vLLM and are not guaranteed
-        to be restored by actor weight sync after level 2 sleep discards them.
+        to be restored by actor weight sync after level 2 sleep discards them;
+        a frozen drafter's (mtp.enable_rollout without mtp.enable) get no sync at all.
         lora only update adapter weights, so set sleep level to 1.
         vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
-        mtp_rollout_enabled = (
-            mtp_config is not None
-            and getattr(mtp_config, "enable", False)
-            and getattr(mtp_config, "enable_rollout", False)
-        )
+        mtp_rollout_enabled = mtp_config is not None and getattr(mtp_config, "enable_rollout", False)
         if mtp_rollout_enabled or self.lora_as_adapter:
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):

@@ -2123,7 +2123,7 @@ class PPOTrainer(ABC):
         # Only fetch speculative decoding stats when rollout writes them.
         spec_drafts = spec_accepts = spec_verifies = None
         mtp_config = getattr(self.config.actor_rollout_ref.model, "mtp", None)
-        if mtp_config is not None and mtp_config.enable and mtp_config.enable_rollout:
+        if mtp_config is not None and mtp_config.enable_rollout:
             spec_data = tq.kv_batch_get(
                 keys=batch.keys,
                 partition_id=batch.partition_id,

@@ -49,11 +49,15 @@ class _FakeMtpEngine:
         return num_draft_tokens, num_accepted_tokens, num_verify_steps
 
 
-def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeypatch):
+# an actor that carries the MTP layers its drafter takes at every sync, and a frozen drafter of the rollout alone
+@pytest.mark.parametrize("enable", [True, False])
+def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeypatch, enable):
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
 
     server = object.__new__(vllm_async_server.vLLMHttpServer)
-    server.config = SimpleNamespace(mtp=SimpleNamespace(enable=True, enable_rollout=True))
+    server.config = SimpleNamespace(
+        mtp=SimpleNamespace(enable=enable, enable_rollout=True), external_kv_cache_invalidation="reset"
+    )
     server.model_config = SimpleNamespace(lora_rank=0, lora={})
     server.engine = _FakeMtpEngine()
 

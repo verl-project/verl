@@ -271,36 +271,69 @@ def test_vllm_update_weights_loads_params_and_buffers():
     )
 
 
+class _SpecConfig:
+    method = "mtp"
+    draft_model_config = object()
+
+
+class _Drafter:
+    def __init__(self, m):
+        self.model = m
+
+
+def _mtp_worker(main_model, drafter_model, owner_attr):
+    """A worker whose model runner drafts with MTP, the drafter held by the V1 or the V2 owner."""
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(main_model, speculative_config=_SpecConfig())
+    setattr(worker.model_runner, owner_attr, _Drafter(drafter_model))
+    return worker
+
+
+_MTP_WEIGHTS = [
+    ("model.layers.0.linear.weight", torch.ones(4, 4, dtype=torch.float32)),
+    ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32) + 5),
+]
+
+
 @pytest.mark.parametrize("owner_attr", ["drafter", "speculator"])
-def test_vllm_update_weights_syncs_buffers_to_mtp_drafter(owner_attr):
-    """MTP buffers must stay in sync with either the V1 or V2 draft-model owner."""
+def test_vllm_update_weights_syncs_buffers_to_mtp_drafter(monkeypatch, owner_attr):
+    """MTP buffers must stay in sync with either the V1 or V2 draft-model owner of an actor that carries MTP."""
+    monkeypatch.setenv(_vllm_rollout_utils.VLLM_MTP_DRAFTER_WEIGHT_SYNC_ENV, "1")
     main_model = _ToyModel()
     drafter_model = _ToyModel()
     main_model.load_weights = lambda weights: None
     drafter_model.load_weights = lambda weights: None
+    worker = _mtp_worker(main_model, drafter_model, owner_attr)
 
-    class _SpecConfig:
-        method = "mtp"
-        draft_model_config = object()
-
-    class _Drafter:
-        def __init__(self, m):
-            self.model = m
-
-    worker = object.__new__(vLLMColocateWorkerExtension)
-    worker.model_runner = _FakeModelRunner(main_model, speculative_config=_SpecConfig())
-    setattr(worker.model_runner, owner_attr, _Drafter(drafter_model))
-
-    weights = [
-        ("model.layers.0.linear.weight", torch.ones(4, 4, dtype=torch.float32)),
-        ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32) + 5),
-    ]
-
-    worker._update_weights(weights, peft_config=None, base_sync_done=False)
+    worker._update_weights(_MTP_WEIGHTS, peft_config=None, base_sync_done=False)
 
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+@pytest.mark.parametrize("sync_flag", ["0", None])
+@pytest.mark.parametrize("owner_attr", ["drafter", "speculator"])
+def test_vllm_update_weights_leaves_a_frozen_mtp_drafter_alone(monkeypatch, owner_attr, sync_flag):
+    """A drafter of the rollout alone (mtp.enable_rollout without mtp.enable) keeps its own checkpoint's weights."""
+    if sync_flag is None:
+        monkeypatch.delenv(_vllm_rollout_utils.VLLM_MTP_DRAFTER_WEIGHT_SYNC_ENV, raising=False)
+    else:
+        monkeypatch.setenv(_vllm_rollout_utils.VLLM_MTP_DRAFTER_WEIGHT_SYNC_ENV, sync_flag)
+    main_model = _ToyModel()
+    drafter_model = _ToyModel()
+    main_model.load_weights = lambda weights: None
+    drafter_loads = []
+    drafter_model.load_weights = drafter_loads.append
+    worker = _mtp_worker(main_model, drafter_model, owner_attr)
+
+    worker._update_weights(_MTP_WEIGHTS, peft_config=None, base_sync_done=False)
+
+    expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
+    torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
+    torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, torch.zeros(4))
+    assert drafter_loads == []
+    assert list(worker._iter_all_models()) == [main_model]
 
 
 @pytest.mark.parametrize("helper_available,fail_receive", [(True, False), (True, True), (False, False)])
