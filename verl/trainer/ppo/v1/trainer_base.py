@@ -22,6 +22,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import partial
 from pprint import pprint
 from typing import Any, Optional
@@ -86,7 +87,7 @@ from verl.utils.dataset.dataloader import (
     validate_custom_batch,
 )
 from verl.utils.dataset.rl_dataset import collate_fn
-from verl.utils.debug import marked_timer
+from verl.utils.debug import marked_timer as _marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
@@ -109,6 +110,16 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def marked_timer(name, timing_raw, **kwargs):
+    """marked_timer that logs the phase it enters: the log then tells which phase the trainer is in."""
+    logger.info("phase %s", name)
+    with _marked_timer(name, timing_raw, **kwargs):
+        yield
+
+
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
