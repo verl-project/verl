@@ -175,6 +175,7 @@ class PPOTrainer(ABC):
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
         else:
             sampler_cls = ReplayBuffer if self.trainer_mode == "sync" else ReplayBufferAsync
+        sampler_cls = self._replay_buffer_class(sampler_cls)
 
         replay_buffer_kwargs = dict(
             trainer_mode=self.trainer_mode,
@@ -213,7 +214,15 @@ class PPOTrainer(ABC):
                     else (self.config.data.get("gen_batch_size", None) or train_batch_size),
                     max_inflight_gen_batches=max_inflight_gen_batches,
                 )
-        return sampler_cls(**replay_buffer_kwargs)
+        return sampler_cls(**self._replay_buffer_kwargs(replay_buffer_kwargs))
+
+    def _replay_buffer_class(self, sampler_cls: type[ReplayBuffer]) -> type[ReplayBuffer]:
+        """The class of the replay buffer to build: the one the config selects, unless a trainer builds its own."""
+        return sampler_cls
+
+    def _replay_buffer_kwargs(self, replay_buffer_kwargs: dict[str, Any]) -> dict[str, Any]:
+        """The keyword arguments the replay buffer is built with: a trainer with a class of its own adds to them."""
+        return replay_buffer_kwargs
 
     def _resolve_filter_groups_metric(self) -> str | None:
         """Resolve DAPO's group metric and verify that rollout computes it before sampling."""

@@ -42,8 +42,24 @@ class _CustomSampler:
         self.kwargs = kwargs
 
 
-def _trainer_with_filter_groups(filter_groups: dict, trainer_mode: str = "sync") -> _StubTrainer:
-    trainer = _StubTrainer.__new__(_StubTrainer)
+class _CappedSampler(ReplayBufferAsync):
+    def __init__(self, *, session_cap: int, **kwargs):
+        super().__init__(**kwargs)
+        self.session_cap = session_cap
+
+
+class _CappedSamplerTrainer(_StubTrainer):
+    def _replay_buffer_class(self, sampler_cls):
+        return _CappedSampler
+
+    def _replay_buffer_kwargs(self, replay_buffer_kwargs):
+        return dict(replay_buffer_kwargs, session_cap=16)
+
+
+def _trainer_with_filter_groups(
+    filter_groups: dict, trainer_mode: str = "sync", trainer_class: type[_StubTrainer] = _StubTrainer
+) -> _StubTrainer:
+    trainer = trainer_class.__new__(trainer_class)
     trainer.trainer_mode = trainer_mode
     trainer.config = OmegaConf.create(
         {
@@ -176,6 +192,18 @@ def test_configured_poll_interval_matches_a_custom_subclass_that_sets_it():
     assert built_in.poll_interval == subclass.poll_interval == 0.1
     state = {k: v for k, v in vars(built_in).items() if k != "refill_fn"}
     assert state == {k: v for k, v in vars(subclass).items() if k != "refill_fn"}
+
+
+def test_a_subclass_names_the_sampler_class_and_adds_to_the_builtin_arguments():
+    trainer = _trainer_with_filter_groups(
+        {"enable": True, "metric": "acc"}, trainer_mode="separate_async", trainer_class=_CappedSamplerTrainer
+    )
+
+    sampler = trainer._build_replay_buffer()
+
+    assert type(sampler) is _CappedSampler
+    assert (sampler.session_cap, sampler.filter_groups_metric) == (16, "acc")
+    assert sampler.train_batch_size is None
 
 
 def test_builtin_filter_groups_uses_default_inflight_limit():
