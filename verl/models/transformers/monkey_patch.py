@@ -631,6 +631,7 @@ def apply_monkey_patch(
         )
 
         from verl.models.transformers.qwen3_5 import (
+            drop_conv_autotune_length_key,
             fast_pos_embed_interpolate,
             forward_with_normal_backend,
             qwen3_5_base_forward,
@@ -654,6 +655,9 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
+
+        # Step 3: the training-step kernels
+        drop_conv_autotune_length_key()
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
