@@ -379,6 +379,7 @@ def trainer_class(replay_types):
         "_add_batch_to_generate",
         "_add_async_warmup_batches",
         "_reissue_inflight_prompts",
+        "_reissue_prompt_groups",
         "prepare_step",
         "close_dataloaders",
         "fit",
@@ -391,10 +392,17 @@ def trainer_class(replay_types):
     }
     methods = [node for node in trainer.body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert len(methods) == len(names)
+    # the class attribute _reissue_inflight_prompts reads
+    attributes = [
+        node
+        for node in trainer.body
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "INFLIGHT_PROMPT_STATUSES"
+    ]
+    assert len(attributes) == 1
     tree = ast.Module(
         body=[
             ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
-            ast.ClassDef(name="Trainer", bases=[], keywords=[], body=methods, decorator_list=[]),
+            ast.ClassDef(name="Trainer", bases=[], keywords=[], body=attributes + methods, decorator_list=[]),
         ],
         type_ignores=[],
     )

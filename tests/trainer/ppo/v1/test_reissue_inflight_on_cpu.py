@@ -79,13 +79,15 @@ class FakeAgentLoopManager:
 
 
 def _make_trainer_stub(trainer_mode: str = "separate_async", global_steps: int = 8):
-    """Bind the real ``_reissue_inflight_prompts`` to a stub exposing only what it uses
-    (``agent_loop_manager``, ``trainer_mode``, and ``global_steps``)."""
+    """Bind the real ``_reissue_inflight_prompts`` and its ``_reissue_prompt_groups`` to a stub exposing only what
+    they use (``agent_loop_manager``, ``trainer_mode``, ``global_steps`` and the in-flight statuses)."""
     stub = type("Stub", (), {})()
     stub.trainer_mode = trainer_mode
     stub.global_steps = global_steps
     stub.agent_loop_manager = FakeAgentLoopManager()
+    stub.INFLIGHT_PROMPT_STATUSES = PPOTrainer.INFLIGHT_PROMPT_STATUSES
     stub._reissue_inflight_prompts = PPOTrainer._reissue_inflight_prompts.__get__(stub)
+    stub._reissue_prompt_groups = PPOTrainer._reissue_prompt_groups.__get__(stub)
     return stub
 
 

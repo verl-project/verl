@@ -1,3 +1,4 @@
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -15,7 +16,13 @@ def restore(monkeypatch):
         tq = MagicMock(kv_list=MagicMock(return_value={"train": items}))
         monkeypatch.setattr(trainer_base, "tq", tq)
         monkeypatch.setattr(trainer_base.tu, "assign_non_tensor_data", MagicMock())
-        trainer = SimpleNamespace(trainer_mode="separate_async", global_steps=7, agent_loop_manager=MagicMock())
+        trainer = SimpleNamespace(
+            trainer_mode="separate_async",
+            global_steps=7,
+            agent_loop_manager=MagicMock(),
+            INFLIGHT_PROMPT_STATUSES=PPOTrainer.INFLIGHT_PROMPT_STATUSES,
+        )
+        trainer._reissue_prompt_groups = partial(PPOTrainer._reissue_prompt_groups, trainer)
         reissued = PPOTrainer._reissue_inflight_prompts(trainer)
         return reissued, {key for call in tq.kv_clear.call_args_list for key in call.kwargs["keys"]}
 
@@ -36,3 +43,20 @@ def test_consumed_rows_are_dropped_and_the_finished_groups_kept(restore):
 def test_without_inflight_prompts(restore):
     items = {"fin": {"is_prompt": True, "status": "finished", "global_steps": 6}, "fin_0_0": {}, "old_0_0": {}}
     assert restore(items) == (0, {"old_0_0"})
+
+
+def test_the_groups_of_the_trainer_s_statuses_go_to_its_hook_whose_count_is_returned(monkeypatch):
+    items = {
+        "que": {"is_prompt": True, "status": "queued", "global_steps": 5},
+        "run": {"is_prompt": True, "status": "running", "global_steps": 6},
+        "fin": {"is_prompt": True, "status": "finished", "global_steps": 6},
+    }
+    monkeypatch.setattr(trainer_base, "tq", MagicMock(kv_list=MagicMock(return_value={"train": items})))
+    trainer = SimpleNamespace(
+        trainer_mode="separate_async",
+        INFLIGHT_PROMPT_STATUSES=("queued", "running"),
+        _reissue_prompt_groups=MagicMock(return_value=5),
+    )
+
+    assert PPOTrainer._reissue_inflight_prompts(trainer) == 5
+    trainer._reissue_prompt_groups.assert_called_once_with(["que", "run"], items, "train")
