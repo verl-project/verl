@@ -35,6 +35,7 @@ round-trip that backs checkpoint consistency (matching ``_save_checkpoint``/
 import uuid
 
 import pytest
+import ray
 import torch
 import transfer_queue as tq
 from omegaconf import OmegaConf
@@ -47,9 +48,13 @@ from verl.utils import tensordict_utils as tu
 
 @pytest.fixture(scope="module")
 def tq_init():
+    # A cluster of this module's own, with the CPUs TransferQueue's actors take (the controller and the two storage
+    # units, one each): on a machine with fewer cores, a cluster sized by the machine leaves tq.init() waiting forever.
+    ray.init(num_cpus=3)
     tq.init()
     yield
     tq.close()
+    ray.shutdown()
 
 
 @pytest.fixture
