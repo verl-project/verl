@@ -243,3 +243,67 @@ def test_a_restored_group_runs_only_its_unfinished_sessions(monkeypatch):
 
     assert sorted(sessions) == [("a", 5, 1), ("a", 5, 3), ("b", 5, 0)] + [("c", 7, i) for i in range(4)]
     assert sorted(statuses) == sorted([(uid, "running") for uid in "abc"] + [(uid, "finished") for uid in "abc"])
+
+
+def test_cancel_background_tasks_returns_after_the_running_sessions_cleaned_up(monkeypatch):
+    """Cancelling a worker's background tasks cancels every session of its running groups and returns their number, only
+    after the sessions' cleanup; the cancelled groups publish no terminal status."""
+    from omegaconf import OmegaConf
+    from tensordict import TensorDict
+
+    from verl.trainer.ppo.v1 import agent_loop_tq
+    from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ
+    from verl.utils import tensordict_utils as tu
+
+    statuses, running, cleaned = [], [], []
+
+    async def async_kv_put(*, key, partition_id, tag):
+        statuses.append((key, tag["status"]))
+
+    async def run_agent_loop(sampling_params, *, trajectory, trace, session_id, **prompt):
+        running.append((prompt["uid"], session_id))
+        try:
+            await asyncio.Event().wait()  # a session that only a cancellation ends
+        finally:
+            await asyncio.sleep(0.01)  # a cleanup that takes a while, as closing an environment does
+            cleaned.append((prompt["uid"], session_id))
+
+    monkeypatch.setattr(agent_loop_tq.tq, "async_kv_put", async_kv_put)
+    worker_class = AgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = worker_class.__new__(worker_class)
+    worker.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "n": 2,
+                    "val_kwargs": {"n": 1},
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "calculate_log_probs": False,
+                    "topk_log_probs": 0,
+                    "agent": {"default_agent_loop": "tool_agent"},
+                }
+            }
+        }
+    )
+    worker.background_tasks = set()
+    worker._run_agent_loop = run_agent_loop
+    batch = TensorDict({"index": torch.tensor([0, 1])}, batch_size=2)
+    tu.assign_non_tensor_stack(batch, "uid", ["a", "b"])
+    tu.assign_non_tensor_data(batch, "global_steps", 5)
+
+    async def run():
+        await worker.generate_sequences(batch)
+        while len(running) < 4:
+            await asyncio.sleep(0)
+        cancelled_groups = await worker.cancel_background_tasks()
+        return cancelled_groups, sorted(cleaned)
+
+    cancelled_groups, cleaned_at_return = asyncio.run(run())
+
+    sessions = [(uid, session_id) for uid in "ab" for session_id in range(2)]
+    assert cancelled_groups == 2
+    assert sorted(running) == sessions
+    assert cleaned_at_return == sessions
+    assert sorted(statuses) == [("a", "running"), ("b", "running")]

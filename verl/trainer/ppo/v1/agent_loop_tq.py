@@ -154,6 +154,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 await _settle_session_tasks(tasks)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
+    async def cancel_background_tasks(self) -> int:
+        """Cancel the prompt groups still running, wait until their sessions are over and return how many groups."""
+        tasks = list(self.background_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
+
     async def _agent_loop_postprocess(
         self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
     ) -> None:
@@ -262,3 +270,8 @@ class AgentLoopManagerTQ(AgentLoopManager):
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
             ]
         )
+
+    def cancel_background_tasks(self) -> int:
+        """Cancel every worker's running prompt groups and return how many: no session calls a rollout server once
+        this returns."""
+        return sum(ray.get([worker.cancel_background_tasks.remote() for worker in self.agent_loop_workers]))
