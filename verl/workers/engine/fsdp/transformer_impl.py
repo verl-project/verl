@@ -348,6 +348,10 @@ class FSDPEngine(BaseEngine):
 
             if self.model_config.enable_gradient_checkpointing:
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                if self.model_config.gradient_checkpointing_retain_attention:
+                    from verl.models.transformers.attention_retention import retain_attention_in_checkpoints
+
+                    retain_attention_in_checkpoints(module)
         return module
 
     def _build_lora_module(self, module):
