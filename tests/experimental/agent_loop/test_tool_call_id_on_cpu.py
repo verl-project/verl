@@ -128,7 +128,7 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
             processor=None,
             tool_parser_name="qwen3_coder",
             response_length=128,
-            tool_schemas=[],
+            _prompt_tool_schemas=lambda agent_data: [],
             _assert_mm_supported=lambda has_multi_modal: None,
             ct_merge_context_msg=ct_merge_context_msg,
             _call_tool=call_tool,
@@ -176,6 +176,37 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
         assert agent_data.prompt_ids == [1, 2, 3, 41, 42]
         assert agent_data.response_mask == [0, 0]
         assert agent_data.tool_rewards == [1.0]
+
+    def test_prompt_tool_schemas_are_those_of_the_tools_the_session_s_row_selects(self) -> None:
+        loop = SimpleNamespace(tool_schemas=[{"name": "every_tool"}])
+        routed_session = SimpleNamespace(_active_tool_schemas=[{"name": "selected_tool"}])
+
+        assert ToolAgentLoop._prompt_tool_schemas(loop, routed_session) == [{"name": "selected_tool"}]
+        assert ToolAgentLoop._prompt_tool_schemas(loop, SimpleNamespace()) == [{"name": "every_tool"}]
+
+    async def test_pending_state_renders_the_prompt_tool_schemas(self) -> None:
+        rendered_tools: list[Any] = []
+
+        async def ct_build_initial_tokens(messages: list[dict[str, Any]], tools: Any = None, **kwargs: Any):
+            del messages, kwargs
+            rendered_tools.append(tools)
+            return [1, 2, 3]
+
+        loop = SimpleNamespace(
+            _prompt_tool_schemas=lambda agent_data: [{"name": "a_subclass_s_choice"}],
+            _assert_mm_supported=lambda has_multi_modal: None,
+            ct_build_initial_tokens=ct_build_initial_tokens,
+            build_sglang_video_payload=lambda videos, mm_inputs: None,
+        )
+        agent_data = SimpleNamespace(
+            messages=[{"role": "user", "content": "weather?"}], image_data=None, video_data=None, audio_data=None
+        )
+
+        state = await ToolAgentLoop._handle_pending_state(loop, agent_data, {})
+
+        assert state == AgentState.GENERATING
+        assert rendered_tools == [[{"name": "a_subclass_s_choice"}]]
+        assert agent_data.prompt_ids == [1, 2, 3]
 
 
 if __name__ == "__main__":
