@@ -510,6 +510,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
+        if self._is_actor and not self._is_rollout:
+            # a standalone actor trains with expandable segments from its first allocation (fragmentation of the update
+            # otherwise reserves extra memory); the colocated worker toggles them around its rollout's wake-ups
+            set_expandable_segments(True)
 
         if self._is_actor:
             omega_profiler_config = config.actor.get("profiler", {})
