@@ -27,6 +27,7 @@ from safetensors.torch import save_file
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp._common_utils import clean_tensor_name
+from torch.distributed.tensor import DTensor
 from transformers import PreTrainedTokenizer, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
@@ -298,9 +299,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         optim_cfg = (
             ShardedOptimStateDictConfig(offload_to_cpu=is_device_available()) if self.should_load_optimizer else None
         )
+        shard_rank = self._shard_file_rank()
         with get_fsdp_state_ctx(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
             if self.should_load_model:
-                remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
+                remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{shard_rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
                 if self.is_lora_only_state_dict(model_state_dict):
@@ -320,7 +322,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
 
             if self.should_load_optimizer:
-                remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
+                remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{shard_rank}.pt")
                 local_optim_path = copy_to_local(remote_optim_path)
                 optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
                 optimizer_state_dict = self._backfill_optimizer_state(optimizer_state_dict)
@@ -358,6 +360,16 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
         # wait for everyone to load checkpoints
         torch.distributed.barrier()
+
+    def _shard_file_rank(self) -> int:
+        """The rank whose model and optimizer files hold this rank's shards."""
+        # under HSDP (FSDP2 on a 2D mesh, the replicas on dim 0) the replicas hold the same shards: the files are those
+        # of the replica-0 rank at this rank's shard position
+        param = next(self.model.parameters())
+        if not isinstance(param, DTensor) or param.device_mesh.ndim != 2:
+            return self.rank
+        mesh = param.device_mesh
+        return int(mesh.mesh[0, mesh.get_local_rank(1)])
 
     def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):
         """
@@ -397,7 +409,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 "optimizer must be provided when checkpoint_contents.save includes ['optimizer']"
             )
 
-        # every rank will save its own model and optim shard
+        # every rank saves its own extra state; its model and optimizer shards only when it holds the shard file (under
+        # HSDP the replicas hold identical shards, which replica 0 writes once)
+        writes_shards = self._shard_file_rank() == self.rank
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=is_device_available())
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=is_device_available())
         with warnings.catch_warnings():
@@ -407,7 +421,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
                 extra_path = os.path.join(local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt")
 
-                if self.should_save_model:
+                if self.should_save_model and writes_shards:
                     model_state_dict = self.model.state_dict()
                     if self.should_save_lora_only and self._has_lora():
                         n_total = len(model_state_dict)
@@ -437,7 +451,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     torch.save(model_state_dict, model_path)
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
 
-                if self.should_save_optimizer:
+                if self.should_save_optimizer and writes_shards:
                     optimizer_state_dict = self.optimizer.state_dict()
                     torch.save(optimizer_state_dict, optim_path)
                     log_with_rank(f"Saved optim to {os.path.abspath(optim_path)}", rank=self.rank, logger=logger)
