@@ -148,6 +148,23 @@ class BaseCheckpointManager:
     ):
         raise NotImplementedError
 
+    def register_existing_checkpoints(self, local_path: str) -> None:
+        """On resume: track the checkpoints an earlier process saved, so the next save applies max_ckpt_to_keep to
+        them too."""
+        step_dir, name = os.path.split(os.path.normpath(local_path))  # <root>/global_step_<k>/<name>
+        root, step_name = os.path.split(step_dir)
+        if not step_name.startswith("global_step_"):
+            return
+        loaded_step = int(step_name.rsplit("_", 1)[1])
+        steps = [
+            int(d.rsplit("_", 1)[1])
+            for d in os.listdir(root)
+            if d.startswith("global_step_") and os.path.isdir(os.path.join(root, d, name))
+        ]
+        self.previous_saved_paths = [
+            os.path.join(root, f"global_step_{s}", name) for s in sorted(steps) if s <= loaded_step
+        ]
+
     @staticmethod
     def checkpath(local_path: str, hdfs_path: str):
         assert local_path is not None or hdfs_path is not None, "local_path and hdfs_path cannot be both None"

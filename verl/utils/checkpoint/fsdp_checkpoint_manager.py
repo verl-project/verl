@@ -281,6 +281,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         """
         if local_path is None:
             return
+        self.register_existing_checkpoints(local_path)
 
         # check if the checkpoint_load_contents is valid
         if self.should_load_model:
