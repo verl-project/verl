@@ -497,6 +497,83 @@ class ActivationHandler:
         module.forward = wrapped_method.__get__(module, type(module))
 
 
+class OffloadedTensor:
+    """A saved tensor's pinned host copy, the event of its copy out and, once fetched, its copy back on the device."""
+
+    def __init__(self, host: torch.Tensor, device: torch.device, copied_out: torch.cuda.Event):
+        self.host = host
+        self.device = device
+        self.copied_out = copied_out
+        self.gpu = None
+        self.copied_in = None
+
+
+class CheckpointInputOffload:
+    """The inputs each checkpointed layer keeps for its recompute, held in pinned host memory until its backward."""
+
+    # with gradient checkpointing these inputs are all that outlives a layer's forward; the copies run on their own
+    # streams, and the backward fetches each one while the layer after it still computes
+    MIN_BYTES = 1 << 20  # smaller tensors stay on the device: their copies would cost more than they free
+
+    def __init__(self):
+        self.copy_out = get_torch_device().Stream()
+        self.copy_in = get_torch_device().Stream()
+        self.pending = []  # offloaded, not yet unpacked, in the order the forward saved them
+
+    def install(self, model) -> None:
+        """Wrap the checkpoint function of every layer that checkpoints."""
+        for layer in model.modules():
+            if getattr(layer, "gradient_checkpointing", False) and hasattr(layer, "_gradient_checkpointing_func"):
+                checkpoint = layer._gradient_checkpointing_func
+                layer._gradient_checkpointing_func = functools.partial(self.checkpoint, checkpoint)
+
+    def checkpoint(self, checkpoint, function, *args, **kwargs):
+        # the checkpoint saves its inputs under these hooks, then pushes its own for what the layer saves inside
+        with torch.autograd.graph.saved_tensors_hooks(self.pack, self.unpack):
+            return checkpoint(function, *args, **kwargs)
+
+    def pack(self, tensor: torch.Tensor):
+        if not tensor.is_cuda or not tensor.is_contiguous() or tensor.numel() * tensor.element_size() < self.MIN_BYTES:
+            return tensor
+        host = torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True)
+        self.copy_out.wait_stream(get_torch_device().current_stream())
+        with get_torch_device().stream(self.copy_out):
+            host.copy_(tensor, non_blocking=True)
+            copied_out = get_torch_device().Event()
+            copied_out.record()
+        tensor.record_stream(self.copy_out)  # its memory is reused only after the copy out
+        offloaded = OffloadedTensor(host, tensor.device, copied_out)
+        self.pending.append(offloaded)
+        return offloaded
+
+    def unpack(self, saved):
+        if isinstance(saved, torch.Tensor):
+            return saved
+        self.fetch(saved)
+        index = next(i for i in range(len(self.pending) - 1, -1, -1) if self.pending[i] is saved)
+        del self.pending[index]
+        # the backward recomputes the layers in reverse: the one saved before this is needed next
+        if index > 0:
+            self.fetch(self.pending[index - 1])
+
+        current = get_torch_device().current_stream()
+        current.wait_event(saved.copied_in)
+        gpu, saved.gpu = saved.gpu, None
+        gpu.record_stream(current)
+        return gpu
+
+    def fetch(self, saved: OffloadedTensor) -> None:
+        """Start the copy back to the device on the copy-in stream, once."""
+        if saved.gpu is not None:
+            return
+        with get_torch_device().stream(self.copy_in):
+            self.copy_in.wait_event(saved.copied_out)
+            saved.gpu = torch.empty(saved.host.shape, dtype=saved.host.dtype, device=saved.device)
+            saved.gpu.copy_(saved.host, non_blocking=True)
+            saved.copied_in = get_torch_device().Event()
+            saved.copied_in.record()
+
+
 def enable_activation_offloading(model, strategy, enable_ckpt=False):
     """
     Enable activation offloading for the model. It groups activations by TransformerLayer and offloads activation
@@ -519,6 +596,11 @@ def enable_activation_offloading(model, strategy, enable_ckpt=False):
     """
 
     assert strategy == "fsdp" or strategy == "fsdp2", "activation offloading only supports fsdp strategy"
+    if strategy == "fsdp2" and enable_ckpt:
+        # the per-layer groups below read each FSDP unit's parameters as plain tensors in its pre-forward, which a unit
+        # nesting others (an fp32 vision tower around its blocks) holds as sharded DTensors without storage there
+        CheckpointInputOffload().install(model)
+        return
     layers = []
 
     def get_layers(module):
