@@ -924,7 +924,12 @@ class PPOTrainer(ABC):
             resource_pool_spec["teacher_pool"] = teacher_pool
             self.mapping[Role.TeacherModel] = "teacher_pool"
 
-        self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        # trainer.node_label: the Ray node resource the training pools require
+        self.resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+            accelerator_type=config.trainer.get("node_label"),
+        )
 
     def _load_checkpoint(self):
         self.global_steps = 0
