@@ -76,6 +76,10 @@ dataloader_num_workers: 8
 # image patch size
 image_patch_size: 14
 
+# Dtype the pixel tensors are stored in (the processor emits fp32; a vision tower that casts its input to bf16 anyway
+# loses nothing and every trajectory halves its bytes). null keeps the processor's dtype.
+pixel_dtype: null
+
 # Whether to shuffle the validation set.
 validation_shuffle: False
 
