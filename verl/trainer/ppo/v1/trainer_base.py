@@ -1653,7 +1653,7 @@ class PPOTrainer(ABC):
 
     def _submit_batch_to_rollout(self, batch: TensorDict) -> int:
         """Register prompts in TransferQueue and dispatch them for generation."""
-        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))]
+        tags = self._prompt_tags(batch)
         if self.trainer_mode != "sync":
             tq.kv_batch_put(
                 keys=list(batch["uid"]),
@@ -1668,6 +1668,10 @@ class PPOTrainer(ABC):
 
         self.agent_loop_manager.generate_sequences(batch)
         return len(batch)
+
+    def _prompt_tags(self, batch: TensorDict) -> list[dict]:
+        """The tags a batch's prompts are registered with in TransferQueue, one per prompt."""
+        return [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))]
 
     def _add_prompts_to_generate(self, num_prompts: int) -> int:
         """Submit requested prompts, or the remaining custom-source tail in async mode."""

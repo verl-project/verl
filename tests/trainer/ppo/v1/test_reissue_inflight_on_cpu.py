@@ -143,6 +143,7 @@ def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
     stub.trainer_mode = "separate_async"
     stub.global_steps = 4
     stub.agent_loop_manager = FakeAgentLoopManager()
+    stub._prompt_tags = PPOTrainer._prompt_tags.__get__(stub)
     stub._submit_batch_to_rollout = PPOTrainer._submit_batch_to_rollout.__get__(stub)
     batch = tu.get_tensordict(
         {

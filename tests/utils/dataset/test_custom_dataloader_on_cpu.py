@@ -374,6 +374,7 @@ def trainer_class(replay_types):
         "_fetch_one_gen_batch",
         "_next_train_batch",
         "_submit_batch_to_rollout",
+        "_prompt_tags",
         "_add_prompts_to_generate",
         "_add_batch_to_generate",
         "_add_async_warmup_batches",
