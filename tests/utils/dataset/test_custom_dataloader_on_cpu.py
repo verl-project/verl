@@ -372,6 +372,7 @@ def trainer_class(replay_types):
         "_init_dataloader",
         "_init_builtin_dataloaders",
         "_fetch_one_gen_batch",
+        "_next_dataloader_batch",
         "_next_train_batch",
         "_submit_batch_to_rollout",
         "_prompt_tags",

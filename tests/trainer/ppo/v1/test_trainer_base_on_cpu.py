@@ -281,6 +281,28 @@ def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured()
     )
 
 
+def test_the_dataloader_starts_over_once_its_batches_run_out():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create({"data": {}})  # no custom dataloader, which would own its repetition
+    trainer.train_dataloader = [{"raw_prompt": ["a"]}, {"raw_prompt": ["b"]}]
+    trainer.train_dataloader_it = None
+
+    prompts = [trainer._next_dataloader_batch()["raw_prompt"] for _ in range(3)]
+
+    assert prompts == [["a"], ["b"], ["a"]]
+
+
+def test_fetch_one_gen_batch_gives_each_prompt_of_the_next_dataloader_batch_a_uid():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create({"data": {}})
+    trainer._next_dataloader_batch = lambda: {"raw_prompt": ["a", "b"]}
+
+    batch = trainer._fetch_one_gen_batch()
+
+    assert list(batch["raw_prompt"]) == ["a", "b"]
+    assert len(set(batch["uid"])) == 2
+
+
 @pytest.mark.parametrize("score_centering", [True, False])
 def test_update_actor_passes_score_centering_flag(score_centering):
     trainer = _StubTrainer.__new__(_StubTrainer)

@@ -1637,26 +1637,30 @@ class PPOTrainer(ABC):
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         """Fetch one ``gen_batch_size`` chunk from the dataloader."""
+        batch_dict = self._next_dataloader_batch()
+        if self.config.data.get("custom_dataloader") is not None:
+            fetch_size = self.config.data.get("gen_batch_size") or self.config.data.train_batch_size
+            validate_custom_batch(batch_dict, split="train", batch_size=fetch_size)
+        batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
+        return tu.get_tensordict(batch_dict)
+
+    def _next_dataloader_batch(self) -> dict:
+        """The train dataloader's next batch, from a new pass over the dataset once a pass has ended; a custom
+        dataloader owns its repetition, so the end of its pass ends the input."""
         custom_loader = self.config.data.get("custom_dataloader") is not None
         if custom_loader and self.replay_buffer.input_exhausted:
             raise DataLoaderExhausted
         try:
             if self.train_dataloader_it is None:
                 self.train_dataloader_it = iter(self.train_dataloader)
-            batch_dict = next(self.train_dataloader_it)
+            return next(self.train_dataloader_it)
         except StopIteration:
             if custom_loader:
                 self.replay_buffer.input_exhausted = True
                 logger.info("Custom training source exhausted; the loader owns repetition.")
                 raise DataLoaderExhausted from None
             self.train_dataloader_it = iter(self.train_dataloader)
-            batch_dict = next(self.train_dataloader_it)
-
-        if self.config.data.get("custom_dataloader") is not None:
-            fetch_size = self.config.data.get("gen_batch_size") or self.config.data.train_batch_size
-            validate_custom_batch(batch_dict, split="train", batch_size=fetch_size)
-        batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
-        return tu.get_tensordict(batch_dict)
+            return next(self.train_dataloader_it)
 
     def _next_train_batch(self, num_prompts: int | None = None) -> TensorDict:
         """Fetch and coalesce the requested number of prompts."""
