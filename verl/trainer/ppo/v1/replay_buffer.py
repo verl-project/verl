@@ -220,22 +220,26 @@ class ReplayBuffer:
                 if tag.get("is_prompt", False):
                     # see: [GRPO group sampling control]
                     self.prompt_global_steps[partition_id][key] = tag["global_steps"]
-                    match tag["status"]:
-                        case "pending":
-                            self.pending_keys[partition_id].add(key)
-                        case "running":
-                            self.running_keys[partition_id].add(key)
-                        case "finished":
-                            self.finished_keys[partition_id].add(key)
-                        case "failure":
-                            self.failure_keys[partition_id].add(key)
-                        case _:
-                            raise ValueError(f"Unknown status: {tag['status']}")
+                    self._track_prompt(partition_id, key, tag)
                 else:
                     # see: [Trajectories storage format]
                     if key not in partition:
                         partition[key] = {}
                     partition[key].update(tag)
+
+    def _track_prompt(self, partition_id: str, key: str, tag: dict) -> None:
+        """Record one prompt group under the status of its tag."""
+        match tag["status"]:
+            case "pending":
+                self.pending_keys[partition_id].add(key)
+            case "running":
+                self.running_keys[partition_id].add(key)
+            case "finished":
+                self.finished_keys[partition_id].add(key)
+            case "failure":
+                self.failure_keys[partition_id].add(key)
+            case _:
+                raise ValueError(f"Unknown status: {tag['status']}")
 
     @staticmethod
     def _metrics_prefix(partition_id: str) -> str:
@@ -313,9 +317,13 @@ class ReplayBuffer:
         for uid in new_finished_uids:
             values = metrics_by_uid[uid]
             classification_cache[uid] = float(values[0]) if len(values) > 1 and float(np.std(values)) == 0.0 else None
+            self._on_group_judged(partition_id, uid, values)
 
         filtered_rewards = {uid: reward for uid, reward in classification_cache.items() if reward is not None}
         return set(filtered_rewards), Counter(filtered_rewards.values())
+
+    def _on_group_judged(self, partition_id: str, uid: str, values: list[float]) -> None:
+        """Hook called once per newly finished group with its sessions' DAPO metric values. Does nothing by default."""
 
     def _terminal_eviction_reasons(
         self, global_steps: int, partition_id: str
@@ -564,6 +572,16 @@ class ReplayBufferAsync(ReplayBuffer):
 
         return len(sampleable_keys) >= batch_size
 
+    def _refill_evicted(self, evicted_uids: set[str]) -> None:
+        """Submit one fresh prompt for each group an eviction pass removed."""
+        if self.refill_fn is not None:
+            self.refill_fn(len(evicted_uids))
+
+    def _refill_free_room(self, partition_id: str) -> bool:
+        """Hook for a refill beyond the replacement of evicted groups. Return True after submitting prompts: the wait
+        then polls again before it samples. Submits nothing by default."""
+        return False
+
     def get_sampleable_count(self, global_steps: int, partition_id: str) -> int:
         """Return the current number of terminal groups eligible for sampling."""
         self._sync_metadata_from_transfer_queue()
@@ -588,8 +606,10 @@ class ReplayBufferAsync(ReplayBuffer):
             )
             if evicted_uids:
                 _accumulate_eviction_metrics(eviction_metrics, metrics, stale_count)
-                if self.refill_fn is not None:
-                    self.refill_fn(len(evicted_uids))
+                self._refill_evicted(evicted_uids)
+                continue
+
+            if self._refill_free_room(partition_id):
                 continue
 
             sampleable_keys = self._sampleable_terminal_keys(partition_id, eviction_reasons)
