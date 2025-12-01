@@ -108,7 +108,7 @@ class OpenAIComparator:
                             "content": comparison_prompt
                         }
                     ],
-                    max_tokens=2048,
+                    max_tokens=4096,
                     temperature=1,
                     top_p=1,
                     presence_penalty=0,
@@ -159,7 +159,7 @@ class OpenAIComparator:
                                 "content": comparison_prompt
                             }
                         ],
-                        max_tokens=2048,
+                        max_tokens=4096,
                         temperature=1,
                         top_p=1,
                         presence_penalty=0,
@@ -221,7 +221,7 @@ class OpenAIComparator:
                             "content": comparison_prompt
                         }
                     ],
-                    max_tokens=2048,
+                    max_tokens=4096,
                     temperature=1,
                     top_p=1,
                     presence_penalty=0,
@@ -287,7 +287,7 @@ class OpenAIComparator:
                                 "content": comparison_prompt
                             }
                         ],
-                        max_tokens=2048,
+                        max_tokens=4096,
                         temperature=1,
                         top_p=1,
                         presence_penalty=0,

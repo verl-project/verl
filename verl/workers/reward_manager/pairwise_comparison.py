@@ -66,21 +66,20 @@ class PairwiseComparisonRewardManager(AbstractRewardManager):
             
             # 从环境变量或配置中获取API密钥
             import os
-            default_api_key = os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
             
             # 从环境变量获取API key
-            hardcoded_api_key = os.getenv("NOVITA_API_KEY")
+            novita_api_key = os.getenv("NOVITA_API_KEY")
             
             # 获取配置参数
             if hasattr(self, 'comparison_model') and self.comparison_model:
-                api_key = self.comparison_model.get("api_key", hardcoded_api_key)
+                api_key = self.comparison_model.get("api_key", novita_api_key)
                 model_name = self.comparison_model.get("model_name", "deepseek/deepseek-r1-distill-qwen-14b")
                 api_base = self.comparison_model.get("api_base", "https://api.novita.ai/openai")
                 max_retries = self.comparison_model.get("max_retries", 3)
                 max_concurrent = self.comparison_model.get("max_concurrent", 10)
                 max_concurrent_groups = self.comparison_model.get("max_concurrent_groups", 8)
             else:
-                api_key = hardcoded_api_key
+                api_key = novita_api_key
                 model_name = "deepseek/deepseek-r1-distill-qwen-14b"
                 api_base = "https://api.novita.ai/openai"
                 max_retries = 3
@@ -718,7 +717,7 @@ class PairwiseComparisonRewardManager(AbstractRewardManager):
                     reward_extra_info["reward_value"].append(rewards[i])
                 
                 # 收集胜率信息
-                if win_info:
+                if win_info: 
                     all_win_rates.append(win_info["win_rate"])
                     all_win_counts.append(win_info["win_count"])
                     all_total_counts.append(win_info["total_count"])
