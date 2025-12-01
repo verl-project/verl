@@ -4,8 +4,8 @@ set -x
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=/home/4dtc/data/ui_design_parquet/train.parquet \
-    data.val_files=/home/4dtc/data/ui_design_parquet/val.parquet \
+    data.train_files=/home/4dtc/rio/verl/data/ui_design_parquet/train.parquet \
+    data.val_files=/home/4dtc/rio/verl/data/ui_design_parquet/val.parquet \
     data.train_batch_size=16 \
     data.max_prompt_length=2048 \
     data.max_response_length=4096 \
@@ -22,7 +22,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    +actor_rollout_ref.model.override_config.attn_implementation=eager \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
