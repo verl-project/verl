@@ -126,3 +126,4 @@ logs
 log
 outputs
 .history
+.vscode/settings.json

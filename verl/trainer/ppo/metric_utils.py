@@ -221,6 +221,18 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    # Add custom reward metrics from reward_extra_infos_dict
+    reward_extra_keys = ["win_rate", "group_win_rate", "win_total", "total_samples"]
+    for key in reward_extra_keys:
+        if key in batch.non_tensor_batch:
+            values = batch.non_tensor_batch[key]
+            if hasattr(values, 'mean'):  # numpy array
+                metrics[f"reward_extra/{key}"] = values.mean().item()
+            elif len(values) > 0:  # list
+                import numpy as np
+                arr = np.array(values)
+                metrics[f"reward_extra/{key}"] = arr.mean().item()
+
     return metrics
 
 

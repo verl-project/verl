@@ -1,15 +1,144 @@
 {
-    "[python]": {
-        "editor.defaultFormatter": "charliermarsh.ruff",
-        "editor.codeActionsOnSave": {
-            "source.organizeImports": "always",
+    // *******************************
+    // 以下設定僅適用於 User Settings
+    // *******************************
+    "github.copilot.enable": {
+        "*": true,
+        "plaintext": false,
+        "markdown": true,
+        "scminput": true,
+        "yaml": true,
+        "html": true,
+        "powershell": true,
+        "javascript": true,
+        "aspnetcorerazor": true
+    },
+    "chat.editing.confirmEditRequestRemoval": true,
+    "chat.editing.confirmEditRequestRetry": true,
+    "telemetry.telemetryLevel": "off",
+
+    // ***************************************************
+    // 以下設定適用於 User Settings 或 Workspace Settings
+    // ***************************************************
+    "window.commandCenter": true,
+    "chat.commandCenter.enabled": false,
+
+    // 目前 gpt-41-copilot 已經是預設值，但明確設定可確保一致性
+    "github.copilot.selectedCompletionModel": "gpt-41-copilot",
+    "github.copilot.editor.enableCodeActions": true,
+    "github.copilot.renameSuggestions.triggerAutomatically": true,
+    "workbench.commandPalette.experimental.askChatLocation": "chatView",
+    "search.searchView.semanticSearchBehavior": "runOnEmpty",
+    "github.copilot.nextEditSuggestions.enabled": true,
+    "editor.inlineSuggest.edits.showCollapsed": true,
+
+    // GitHub Copilot Chat
+    "github.copilot.chat.localeOverride": "zh-TW",
+    "github.copilot.chat.useProjectTemplates": true,
+    "github.copilot.chat.scopeSelection": true,
+    "chat.detectParticipant.enabled": false,
+    "chat.promptFiles": true,
+    "github.copilot.chat.languageContext.typescript.enabled": true,
+    "github.copilot.chat.agent.thinkingTool": true,
+    // GitHub Copilot Chat - 內嵌聊天 (Inline Chat)
+    "github.copilot.chat.editor.temporalContext.enabled": true,
+    "inlineChat.holdToSpeech": true,
+    "inlineChat.finishOnType": false,
+    // GitHub Copilot Chat - 偵錯相關設定
+    "github.copilot.chat.startDebugging.enabled": true,
+    "github.copilot.chat.reviewSelection.enabled": true,
+    "github.copilot.chat.copilotDebugCommand.enabled": true,
+    "github.copilot.chat.edits.temporalContext.enabled": false,
+    // GitHub Copilot Chat - 測試相關設定
+    "github.copilot.chat.setupTests.enabled": true,
+    "github.copilot.chat.generateTests.codeLens": true,
+    "github.copilot.chat.testGeneration.instructions": [
+        {
+            "file": ".copilot-test-instructions.md"
+        },
+        {
+            "text": "Always try uniting related tests in a suite."
+        }
+    ],
+    // GitHub Copilot Chat - 自訂提示
+    "github.copilot.chat.codeGeneration.useInstructionFiles": true,
+    "github.copilot.chat.codeGeneration.instructions": [
+        {
+            "text": "When outputing any text, use the following term mappings: create = 建立, object = 物件, queue = 佇列, stack = 堆疊, information = 資訊, invocation = 呼叫, code = 程式碼, running = 執行, library = 函式庫, schematics = 原理圖, building = 建構, Setting up = 設定, package = 套件, video = 影片, for loop = for 迴圈, class = 類別, Concurrency = 平行處理, Transaction = 交易, Transactional = 交易式, Code Snippet = 程式碼片段, Code Generation = 程式碼產生器, Any Class = 任意類別, Scalability = 延展性, Dependency Package = 相依套件, Dependency Injection = 相依性注入, Reserved Keywords = 保留字, Metadata =  Metadata, Clone = 複製, Memory = 記憶體, Built-in = 內建, Global = 全域, Compatibility = 相容性, Function = 函式, Refresh = 重新整理, document = 文件, example = 範例, demo = 展示, quality = 品質, tutorial = 指南, recipes = 秘訣, byte = 位元組, bit = 位元"
+        },
+        {
+            "text": "Always response in #zh-tw."
+        },
+        {
+            "file": ".copilot-instructions.md"
+        }
+    ],
+    "github.copilot.chat.reviewSelection.instructions": [
+        {
+            "text": "Always response in #zh-tw."
+        },
+        {
+            "file": ".copilot-review-instructions.md"
+        }
+    ],
+    // GitHub Copilot Chat - 自訂 Git Commit 訊息提示
+    "github.copilot.chat.commitMessageGeneration.instructions": [
+        {
+            "text": "# Use Conventional Commits 1.0.0 for commit messages."
+        },
+        {
+            "text": "請一律使用正體中文來撰寫記錄"
+        },
+        {
+            "file": ".copilot-commit-message-instructions.md"
+        }
+    ],
+    // GitHub Copilot Chat - 自訂 Pull Request 描述提示
+    "github.copilot.chat.pullRequestDescriptionGeneration.instructions": [
+        {
+            "text": "請一律使用正體中文來撰寫記錄"
+        },
+        {
+            "file": ".copilot-pull-request-description-instructions.md"
+        }
+    ],
+    // GitHub Copilot Chat Edit
+    "github.copilot.chat.edits.suggestRelatedFilesForTests": true,
+    "github.copilot.chat.edits.suggestRelatedFilesFromGitHistory": true,
+
+    // GitHub Copilot Chat - Agent Mode
+    "chat.agent.enabled": true,
+    "chat.agent.maxRequests": 100,
+    "github.copilot.chat.agent.runTasks": true,
+    "github.copilot.chat.codesearch.enabled": true,
+    "github.copilot.chat.newWorkspaceCreation.enabled": true,
+    "terminal.integrated.scrollback": 50000,
+    "chat.mcp.discovery.enabled": {
+        "claude-desktop": false,
+        "windsurf": false,
+        "cursor-global": false,
+        "cursor-workspace": false
+    },
+    // "chat.mcp.discovery.enabled": {
+    //     "claude-desktop": false,
+    //     "windsurf": false,
+    //     "cursor-global": false,
+    //     "cursor-workspace": false
+    // },
+    "mcp": {
+        "servers": {
         }
     },
-    "files.associations": {
-        "array": "cpp",
-        "string_view": "cpp",
-        "initializer_list": "cpp",
-        "utility": "cpp"
-    },
-    "iis.configDir": ""
+
+    // Accessibility
+    "accessibility.voice.speechLanguage": "zh-TW",
+    "accessibility.voice.autoSynthesize": "off",
+    // accessibility.voice.keywordActivation 預設為 off，習慣用語音輸入可以改為 chatInContext
+    // "accessibility.voice.keywordActivation": "chatInContext",
+    "accessibility.voice.speechTimeout": 10000,
+    "accessibility.voice.ignoreCodeBlocks": true,
+
+    // Live Preview
+    "livePreview.autoRefreshPreview": "On Changes to Saved Files",
+    "chat.mcp.access": "all"
 }
