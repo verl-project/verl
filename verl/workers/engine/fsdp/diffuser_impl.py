@@ -347,7 +347,7 @@ class DiffusersFSDPEngine(BaseEngine):
 
     def _build_scheduler(self):
         # TODO (Mike): generalize to other diffusers scheduler later
-        from ..diffusers.schedulers import FlowMatchSDEDiscreteScheduler
+        from ...utils.diffusers_patch.schedulers import FlowMatchSDEDiscreteScheduler
 
         scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
             pretrained_model_name_or_path=self.model_config.local_path, subfolder="scheduler"
@@ -506,38 +506,42 @@ class DiffusersFSDPEngine(BaseEngine):
         width = tu.get_non_tensor_data(data=micro_batch, key="width", default=1024)
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=8)
         img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]]
-        guidance = None
 
-        if self._guidance_scale > 1.0:
-            hidden_states = torch.cat([latents[:, step]] * 2)
-            timestep = torch.cat([timesteps[:, step]] * 2) / 1000.0
-            if self.model_config.guidance_embeds:
-                guidance = torch.full([1], self._guidance_scale, dtype=torch.float32)
-            encoder_hidden_states_mask = torch.cat([prompt_embeds_mask, negative_prompt_embeds_mask], dim=0)
-            encoder_hidden_states = torch.cat([prompt_embeds, negative_prompt_embeds], dim=0)
-            img_shapes = img_shapes * 2
-            txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() + negative_prompt_embeds_mask.sum(dim=1).tolist()
+        if self.model_config.guidance_embeds:
+            guidance = torch.full([1], self._guidance_scale, dtype=torch.float32)
         else:
-            hidden_states = latents[:, step]
-            timestep = timesteps[:, step] / 1000.0
-            encoder_hidden_states_mask = prompt_embeds_mask
-            encoder_hidden_states = prompt_embeds
-            txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+            guidance = None
+
+        hidden_states = latents[:, step]
+        timestep = timesteps[:, step] / 1000.0
+        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+        negative_txt_seq_lens = negative_prompt_embeds_mask.sum(dim=1).tolist()
 
         model_inputs = {
             "hidden_states": hidden_states,
             "timestep": timestep,
             "guidance": guidance,
-            "encoder_hidden_states_mask": encoder_hidden_states_mask,
-            "encoder_hidden_states": encoder_hidden_states,
+            "encoder_hidden_states_mask": prompt_embeds_mask,
+            "encoder_hidden_states": prompt_embeds,
             "img_shapes": img_shapes,
             "text_seq_lens": txt_seq_lens,
             "return_dict": False,
         }
 
-        return model_inputs, {}
+        negative_model_inputs = {
+            "hidden_states": hidden_states,
+            "timestep": timestep,
+            "guidance": guidance,
+            "encoder_hidden_states_mask": negative_prompt_embeds_mask,
+            "encoder_hidden_states": negative_prompt_embeds,
+            "img_shapes": img_shapes,
+            "text_seq_lens": negative_txt_seq_lens,
+            "return_dict": False,
+        }
 
-    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict):
+        return model_inputs, negative_model_inputs
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
         use_kl_loss = tu.get_non_tensor_data(micro_batch, "use_kl_loss", False)
         log_prob, prev_sample_mean, std_dev_t = output
         model_output = {}
@@ -547,13 +551,13 @@ class DiffusersFSDPEngine(BaseEngine):
             model_output["std_dev_t"] = std_dev_t
         return model_output
 
-    def forward_model_with_scheduler(self, model_inputs, micro_batch, step):
+    def forward_model_with_scheduler(self, model_inputs, negative_model_inputs, micro_batch, step):
         latents = micro_batch["latents"]
         timesteps = micro_batch["timesteps"]
 
         noise_pred = self.module(**model_inputs)
         if self._guidance_scale > 1.0:
-            noise_pred, neg_noise_pred = noise_pred.chunk(2, dim=0)
+            neg_noise_pred = self.module(**negative_model_inputs)
             comb_pred = neg_noise_pred + self._guidance_scale * (noise_pred - neg_noise_pred)
             cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
             noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
@@ -573,9 +577,11 @@ class DiffusersFSDPEngine(BaseEngine):
         device_name = get_device_name()
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
-        model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
-        raw_output = self.forward_model_with_scheduler(model_inputs=model_inputs, micro_batch=micro_batch, step=step)
-        model_output = self.prepare_model_outputs(output=raw_output, output_args=output_args, micro_batch=micro_batch)
+        model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
+        raw_output = self.forward_model_with_scheduler(
+            model_inputs=model_inputs, negative_model_inputs=negative_model_inputs, micro_batch=micro_batch, step=step
+        )
+        model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
 
         if loss_function is not None:
             loss, metrics = loss_function(
