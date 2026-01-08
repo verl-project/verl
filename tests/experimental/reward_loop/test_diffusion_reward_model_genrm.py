@@ -40,7 +40,7 @@ def create_data_samples(tokenizer) -> DataProto:
     pad_token_id = tokenizer.pad_token_id
     prompt_ids = []
     for prompt in prompts:
-        prompt_tokens = tokenizer.encode(prompt, tokenize=True)
+        prompt_tokens = tokenizer.encode(prompt)
         padded_prompt = [pad_token_id] * (prompt_length - len(prompt_tokens)) + prompt_tokens
         prompt_ids.append(torch.tensor(padded_prompt))
     prompt_ids = torch.stack(prompt_ids)

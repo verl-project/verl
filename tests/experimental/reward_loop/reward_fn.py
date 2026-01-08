@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 
 import aiohttp
 import numpy as np
@@ -103,6 +106,14 @@ def compute_score_math_verify(
     )
 
 
+def _pil_image_to_base64(image: Image.Image) -> str:
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    encoded_image_text = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    base64_image = f"data:image;base64,{encoded_image_text}"
+    return base64_image
+
+
 async def compute_score_ocr(
     data_source: str,
     solution_str: Image.Image | np.ndarray | torch.Tensor,
@@ -112,11 +123,11 @@ async def compute_score_ocr(
     reward_model_tokenizer: PreTrainedTokenizer = None,
 ):
     """Compute the reward score."""
-    import base64
     import re
-    from io import BytesIO
 
     import Levenshtein
+
+    from verl.utils.ray_utils import get_event_loop
 
     # preprocess image to base64
     image = solution_str
@@ -127,10 +138,9 @@ async def compute_score_ocr(
         image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    encoded_image_text = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    image_base64 = f"data:image;base64,{encoded_image_text}"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        image_base64 = await get_event_loop().run_in_executor(executor, _pil_image_to_base64, image)
 
     # prepare chat template
     grm_prompt = "Please output only the text content from the image without any additional descriptions or formatting."
