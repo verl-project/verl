@@ -45,7 +45,6 @@ class DiffusionRewardManager(RewardManagerBase):
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
-        # prompt_str = self.tokenizer.decode(data_item.batch["prompts"], skip_special_tokens=True)
         response_image = data_item.batch["responses"]
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]

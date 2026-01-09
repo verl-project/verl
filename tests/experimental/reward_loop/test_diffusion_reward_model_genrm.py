@@ -47,7 +47,7 @@ def create_data_samples(tokenizer) -> DataProto:
 
     data = DataProto.from_dict(
         tensors={
-            "prompts": prompt_ids,
+            "input_ids": prompt_ids,
             "responses": responses,
         },
         non_tensors={
