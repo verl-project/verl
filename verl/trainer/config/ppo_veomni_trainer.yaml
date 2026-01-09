@@ -1,0 +1,183 @@
+# specify the default per-component configs
+defaults:
+  # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
+  # actor_rollout_ref.actor: trainer/config/actor/veomni_actor.yaml
+  - actor@actor_rollout_ref.actor: veomni_actor
+  # data: trainer/config/data/legacy_data.yaml
+  - data@data: legacy_data
+  # (Rule-based) Reward manager config.
+  - reward_manager@reward_manager
+  # load the reference default config, then apply the fields in the current yaml
+  # Reference model config.
+  # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
+  - ref@actor_rollout_ref.ref: veomni_ref
+  # Rollout model config.
+  - rollout@actor_rollout_ref.rollout: rollout
+  # Model config.
+  - model@actor_rollout_ref.model: hf_model
+  # Critic model config.
+  - critic@critic: veomni_critic
+  # Reward model config.
+  - reward_model@reward_model: veomni_reward_loop
+  # Rollout correction config.
+  - algorithm@algorithm.rollout_correction: rollout_correction
+  - _self_
+
+actor_rollout_ref:
+  hybrid_engine: True
+
+  nccl_timeout: 600 # seconds, default is 10 minutes for torch, you can set it to a larger value if you have long-running operations like 32B or 72B model using veomni
+
+  model:
+    override_config:
+      model_config: {}
+      moe_config:
+        freeze_moe_router: False
+
+    use_fused_kernels: False # Whether to use custom fused kernels (PostProcessing, for memory efficiency)
+
+    trust_remote_code: False
+
+    # Whether to remove padding tokens in inputs during training
+    use_remove_padding: false
+
+  rollout:
+    quantization: null
+
+    layer_name_map:
+      qkv_layer_name: qkv
+      gate_proj_layer_name: gate_up
+
+custom_reward_function:
+  path: null
+  name: compute_score
+
+algorithm:
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.trainer.config.AlgoConfig
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: gae
+  norm_adv_by_std_in_grpo: True
+  use_kl_in_reward: False
+  kl_penalty: kl # how to estimate kl divergence
+  kl_ctrl:
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.KLControlConfig
+    type: fixed
+    kl_coef: 0.001
+    horizon: 10000
+    target_kl: 0.1
+  use_pf_ppo: False
+  pf_ppo:
+    reweight_method: pow # ["pow", "max_min", "max_random"]
+    weight_pow: 2.0
+
+trainer:
+  balance_batch: True
+  total_epochs: 30
+  total_training_steps: null
+  project_name: verl_examples
+  experiment_name: gsm8k
+  logger: ["console", "wandb"]
+  log_val_generations: 0
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: -1
+  esi_redundant_time: 0
+
+  # auto: find the last ckpt to resume. If can't find, start from scratch
+  resume_mode: auto # or disable or resume_path if resume_from_path is set
+  resume_from_path: null
+  del_local_ckpt_after_load: False
+  val_before_train: True
+  test_freq: -1
+  critic_warmup: 0
+  default_hdfs_dir: null
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  # The timeout for ray worker group to wait for the register center to be ready
+  ray_wait_register_center_timeout: 300
+  device: cuda
+  # Directory for logging rollout data; no dump if null
+  rollout_data_dir: null
+
+  # whether to use legacy worker implementation
+  #  mode: "auto", "enable", or "disable"
+  use_legacy_worker_impl: disable
+
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null # choose between nsys, npu, torch, torch_memory
+  steps: null # profile steps
+  profile_continuous_steps: False
+  save_path: "outputs/profile" # profiler saving path
+  # Specific tool configs, can use +profiler.tool_config.[tool].xxx to config
+  global_tool_config:
+    # nsys config
+    nsys:
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+
+      # controller Nvidia Nsight Systems Options. Must set when profile_steps is not None.
+      ## reference https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+      ## reference https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html
+      controller_nsight_options:
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track the GPU memory usage by CUDA kernels. Must be string type "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole
+        cuda-graph-trace: "graph"
+
+      # worker Nvidia Nsight Systems Options. Must set when profile_steps is not None.
+      worker_nsight_options:
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track the GPU memory usage by CUDA kernels. Must be string type "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole
+        cuda-graph-trace: "graph"
+
+        # Profiling only in a range of torch.cuda.profiler.start and stop. Do not change this config.
+        capture-range: "cudaProfilerApi"
+
+        # Specify the desired behavior when a capture range ends.
+        # In verl we need the torch.cuda.profiler.start/stop pair to repeats n times.
+        # valid values are "repeat-shutdown:n" or null.
+        # For normal whole step profiling, n = len(profile_steps);
+        # but for discrete profiling, n = len(profile_steps) * Number(subtasks).
+        # Or you can just leave it null and the program will use n = len(profile_steps) * 6;
+        capture-range-end: null
+
+        # Send signal to the target application's process group. We let the program to exit by itself.
+        kill: none
+
+    # enable memory visualization for debugging memory usage
+    torch_memory:
+      #  Maximum number of allocation entries to record
+      trace_alloc_max_entries: 100_000
+      # The depth of the call stack to capture for each allocation
+      stack_depth: 32
+      # 'alloc': records only allocation events || 'state': records memory state changes || 'all': records both.
+      context: "all"
+      # 'python': records Python stacks || 'cpp': records C++ stacks (available in some versions) || 'all': records both.
+      stacks: "all"
+      # devices, record_context etc.
+      kw_args: {}
+
+# configs for TransferQueue
+transfer_queue:
+  # Whether to enable transfer queue
+  enable: False
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
+  timeline_json_file: null
+
