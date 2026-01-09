@@ -19,6 +19,12 @@ if TYPE_CHECKING:
 
 
 def inject_SDE_scheduler_into_pipeline(pipeline: "DiffusionPipeline", pretrained_model_name_or_path: str):
+    """Inject FlowMatchSDEDiscreteScheduler into the given diffusion pipeline.
+
+    Args:
+        pipeline (DiffusionPipeline): The diffusion pipeline to modify.
+        pretrained_model_name_or_path (str): Path to the pretrained model.
+    """
     from diffusers import QwenImagePipeline
 
     from .pipelines import QwenImagePipelineWithLogProb

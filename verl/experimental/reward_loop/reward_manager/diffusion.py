@@ -23,6 +23,8 @@ from verl.utils.reward_score import default_compute_score
 
 @register("diffusion")
 class DiffusionRewardManager(RewardManagerBase):
+    """The reward manager for diffusion models."""
+
     def __init__(self, config, tokenizer, compute_score=None, reward_router_address=None, reward_model_tokenizer=None):
         """Initialize reward manager.
 
