@@ -31,6 +31,7 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
+from verl.utils.distillation import compute_topk_outputs
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
@@ -997,6 +998,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
+
+        # TODO: test with not use_remove_padding and test with ulysses SP and test with dynamic bsz
+        model_output.update(
+            compute_topk_outputs(logits=output.logits, batch=micro_batch, cu_seqlens=cu_seqlens)
+        )
 
         model_output["log_probs"] = log_probs
         if calculate_entropy:
