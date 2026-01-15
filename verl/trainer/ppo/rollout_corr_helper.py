@@ -64,10 +64,12 @@ import math
 from typing import Any, Optional
 
 import torch
+from tensordict import TensorDict
 
 import verl.utils.torch_functional as verl_F
 from verl.protocol import DataProto
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
+from verl.utils.transferqueue_utils import tqbridge
 from verl.workers.config.actor import PolicyLossConfig
 
 # Safety bound to prevent numerical overflow/underflow when exponentiating
@@ -940,6 +942,7 @@ def compute_offpolicy_metrics(
     return metrics
 
 
+@tqbridge(put_data=False)
 def compute_rollout_correction_and_add_to_batch(
     batch: DataProto, rollout_corr_config: RolloutCorrectionConfig
 ) -> tuple[DataProto, dict]:
@@ -1036,11 +1039,12 @@ def compute_rollout_corr_metrics_from_logprobs(
     return metrics_with_prefix
 
 
+@tqbridge()
 def apply_bypass_mode(
     batch: DataProto,
     rollout_corr_config: Optional[RolloutCorrectionConfig] = None,
     policy_loss_config: PolicyLossConfig = None,
-) -> None:
+) -> TensorDict:
     """
     Setup bypass mode: Use rollout_log_probs as old_log_probs.
 
@@ -1065,10 +1069,16 @@ def apply_bypass_mode(
         )
 
     # Use rollout log probs as old log probs (zero-cost substitution)
-    batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+    old_log_probs = batch.batch["rollout_log_probs"]
+    batch.batch["old_log_probs"] = old_log_probs
 
     with open_dict(policy_loss_config):
         # Pass rollout_correction config to actor for loss computation and metrics
         policy_loss_config["rollout_correction"] = rollout_corr_config
         # Always use bypass_mode loss function which handles both loss_types
         policy_loss_config["loss_mode"] = "bypass_mode"
+
+    # use return value to update the old_log_probs stored in TransferQueue
+    output = TensorDict({"old_log_probs": old_log_probs}, batch_size=old_log_probs.size(0))
+
+    return output

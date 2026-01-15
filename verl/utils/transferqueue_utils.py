@@ -21,10 +21,16 @@ import threading
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable
 
+import numpy as np
+import torch
+from tensordict.tensorclass import NonTensorData, NonTensorStack
+
 if TYPE_CHECKING:
     from verl.single_controller.base.decorator import Dispatch
 
 from tensordict import TensorDict
+
+from verl.utils import tensordict_utils as tu
 
 try:
     from transfer_queue import (
@@ -34,8 +40,7 @@ try:
     )
 
 except ImportError:
-    # TODO: Use a hacky workaround for ImportError since
-    # transfer_queue isn't a default verl dependency.
+    # TODO (TQ): this fix is temporary. Remove once TransferQueue is default dependency.
     class BatchMeta:
         pass
 
@@ -70,6 +75,47 @@ def get_transferqueue_client() -> "AsyncTransferQueueClient | TransferQueueClien
     return _TRANSFER_QUEUE_CLIENT
 
 
+def repeat_dict(
+    batch_dict: dict[str, torch.Tensor | np.ndarray], repeat_times=2, interleave=True
+) -> dict[str, torch.Tensor | np.ndarray]:
+    """
+    Repeat the batch dict a specified number of times.
+
+    Args:
+        repeat_times (int): Number of times to repeat the data.
+        interleave (bool): Whether to interleave the repeated data.
+
+    Returns:
+        dict: A new dict with repeated data.
+    """
+    if repeat_times == 1:
+        return batch_dict
+
+    repeated_batch_dict = {}
+    if batch_dict:
+        if interleave:
+            # Interleave the data
+            for key, val in batch_dict.items():
+                if isinstance(val, torch.Tensor):
+                    repeated_batch_dict[key] = val.repeat_interleave(repeat_times, dim=0)
+                elif isinstance(val, np.ndarray):
+                    repeated_batch_dict[key] = np.repeat(val, repeat_times, axis=0)
+                else:
+                    raise ValueError(f"Unsupported type in data {type(val)}")
+        else:
+            # Stack the data
+            for key, val in batch_dict.items():
+                if isinstance(val, torch.Tensor):
+                    repeated_batch_dict[key] = (
+                        val.unsqueeze(0).expand(repeat_times, *val.shape).reshape(-1, *val.shape[1:])
+                    )
+                elif isinstance(val, np.ndarray):
+                    repeated_batch_dict[key] = np.tile(val, (repeat_times,) + (1,) * (val.ndim - 1))
+                else:
+                    raise ValueError(f"Unsupported type in data {type(val)}")
+    return repeated_batch_dict
+
+
 # TODO (TQ): verl will make all actor async, so this can be cleanup later.
 def _run_async_in_temp_loop(async_func: Callable[..., Any], *args, **kwargs) -> Any:
     # Use a temporary event loop in a new thread because event
@@ -77,7 +123,7 @@ def _run_async_in_temp_loop(async_func: Callable[..., Any], *args, **kwargs) -> 
     tmp_event_loop = asyncio.new_event_loop()
     thread = threading.Thread(
         target=tmp_event_loop.run_forever,
-        name="batchmeta dataproto converter",
+        name="batchmeta dataproto/tensordict converter",
         daemon=True,
     )
 
@@ -108,47 +154,88 @@ def _find_batchmeta(*args, **kwargs):
     return None
 
 
-async def _async_batchmeta_to_dataproto(batchmeta: "BatchMeta") -> DataProto:
+async def _async_batchmeta_to_realdata(
+    batchmeta: "BatchMeta",
+    convert_type: str = "DataProto",
+) -> DataProto | TensorDict:
+    meta_info = batchmeta.get_all_extra_info()
     if batchmeta.samples == [] or batchmeta.samples is None:
-        return DataProto(
-            batch=TensorDict({}, batch_size=(0,)),
-            non_tensor_batch={},
-            meta_info=batchmeta.extra_info.copy(),
-        )
+        if convert_type == "DataProto":
+            return DataProto(
+                batch=TensorDict({}, batch_size=(0,)),
+                non_tensor_batch={},
+                meta_info=meta_info,
+            )
+        else:
+            empty_td = TensorDict({}, batch_size=(0,))
+            tu.assign_non_tensor(empty_td, **meta_info)
+            return empty_td
 
     tensordict = await _TRANSFER_QUEUE_CLIENT.async_get_data(batchmeta)
-    return DataProto.from_tensordict(tensordict, meta_info=batchmeta.extra_info.copy())
+    # depends on whether to use new version TQ
+    # tu.strided_to_jagged(tensordict)
+
+    if convert_type == "DataProto":
+        if all(not isinstance(val, torch.Tensor) for val in tensordict.values()):
+            non_tensor_batch = {}
+            for key, val in tensordict.items():
+                if isinstance(val, NonTensorStack):
+                    non_tensor_batch[key] = np.array([elem.data for elem in val], dtype=object)
+                elif isinstance(val, NonTensorData) and key not in meta_info.keys():
+                    meta_info[key] = val.data
+            dataproto = DataProto(batch=None, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
+        else:
+            dataproto = DataProto.from_tensordict(tensordict, meta_info=meta_info)
+        return dataproto
+    else:
+        for key, val in meta_info.items():
+            if isinstance(val, (NonTensorData | NonTensorStack)):
+                tensordict[key] = val
+            else:
+                tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
+        return tensordict
 
 
-def _batchmeta_to_dataproto(batchmeta: "BatchMeta") -> DataProto:
-    return _run_async_in_temp_loop(_async_batchmeta_to_dataproto, batchmeta)
+def _batchmeta_to_realdata(batchmeta: "BatchMeta", convert_type: str) -> DataProto | TensorDict:
+    return _run_async_in_temp_loop(_async_batchmeta_to_realdata, batchmeta, convert_type)
 
 
-async def _async_update_batchmeta_with_output(output: DataProto, batchmeta: "BatchMeta", func_name=None) -> "BatchMeta":
-    pid = os.getpid()
-
-    for k, v in output.meta_info.items():
-        batchmeta.set_extra_info(k, v)
-
-    if len(output) > 0:
+async def _async_update_batchmeta_with_output(
+    output: DataProto | TensorDict, batchmeta: "BatchMeta", func_name=None
+) -> "BatchMeta":
+    if isinstance(output, TensorDict):
+        is_empty = output.batch_size[0] == 0
+        meta_data = {}
+        for key, val in output.items():
+            if isinstance(val, NonTensorData):
+                meta_data[key] = val.data
+        tensordict = output
+    elif isinstance(output, DataProto):
+        is_empty = len(output) == 0
+        meta_data = output.meta_info
         tensordict = output.to_tensordict()
-        # pop meta_info
-        for key in output.meta_info.keys():
+    else:
+        raise TypeError(f"Only support DataProto|TensorDict format of output, but got {type(output)}")
+
+    batchmeta.update_extra_info(meta_data)
+
+    # process tensordict containing data to be put into TQ. meta_info should not be saved
+    if not is_empty:
+        for key in meta_data.keys():
             tensordict.pop(key)
-
-        logger.info(
-            f"Task {func_name} (pid={pid}) putting output data to TransferQueue with "
-            f"batch_size={tensordict.batch_size},\n"
-            f"tensordict keys={list(tensordict.keys())}"
-        )
-
         updated_batch_meta = await _TRANSFER_QUEUE_CLIENT.async_put(data=tensordict, metadata=batchmeta)
+        # turn the lists in batchmeta into tuples to avoid concating them when collecting from remote workers
+        for key, val in updated_batch_meta.extra_info.items():
+            if isinstance(val, list):
+                updated_batch_meta.set_extra_info(key, tuple(val))
         return updated_batch_meta
     else:
         return batchmeta
 
 
-def _update_batchmeta_with_output(output: DataProto, batchmeta: "BatchMeta", func_name=None) -> "BatchMeta":
+def _update_batchmeta_with_output(
+    output: TensorDict | DataProto, batchmeta: "BatchMeta", func_name=None
+) -> "BatchMeta":
     updated_batch_meta = _run_async_in_temp_loop(_async_update_batchmeta_with_output, output, batchmeta, func_name)
     return updated_batch_meta
 
@@ -237,11 +324,13 @@ def _postprocess_common(output, put_data, need_collect):
         return BatchMeta.empty()
     elif not put_data and not need_collect and isinstance(output, DataProto):
         return DataProto()
+    elif not put_data and not need_collect and isinstance(output, TensorDict):
+        return TensorDict({}, batch_size=(0,))
     else:
         return output
 
 
-def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
+def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True, convert_type: str = "DataProto"):
     """Creates a decorator for bridging BatchMeta and DataProto.
 
     This decorator automatically handles conversions between `BatchMeta` and
@@ -271,6 +360,7 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
         @wraps(func)
         def inner(*args, **kwargs):
             batchmeta = _find_batchmeta(*args, **kwargs)
+
             if batchmeta is None:
                 return func(*args, **kwargs)
             else:
@@ -278,8 +368,13 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
                     f"Task {func.__name__} (pid={pid}) is getting len_samples={batchmeta.size}, "
                     f"global_idx={batchmeta.global_indexes}"
                 )
-                args = [_batchmeta_to_dataproto(arg) if isinstance(arg, BatchMeta) else arg for arg in args]
-                kwargs = {k: _batchmeta_to_dataproto(v) if isinstance(v, BatchMeta) else v for k, v in kwargs.items()}
+                args = [
+                    _batchmeta_to_realdata(arg, convert_type) if isinstance(arg, BatchMeta) else arg for arg in args
+                ]
+                kwargs = {
+                    k: _batchmeta_to_realdata(v, convert_type) if isinstance(v, BatchMeta) else v
+                    for k, v in kwargs.items()
+                }
                 output = func(*args, **kwargs)
                 need_collect = _compute_need_collect(dispatch_mode, args)
                 if put_data and need_collect:
@@ -297,9 +392,12 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
                     f"Task {func.__name__} (pid={pid}) is getting len_samples={batchmeta.size}, "
                     f"global_idx={batchmeta.global_indexes}"
                 )
-                args = [await _async_batchmeta_to_dataproto(arg) if isinstance(arg, BatchMeta) else arg for arg in args]
+                args = [
+                    await _async_batchmeta_to_realdata(arg, convert_type) if isinstance(arg, BatchMeta) else arg
+                    for arg in args
+                ]
                 kwargs = {
-                    k: await _async_batchmeta_to_dataproto(v) if isinstance(v, BatchMeta) else v
+                    k: await _async_batchmeta_to_realdata(v, convert_type) if isinstance(v, BatchMeta) else v
                     for k, v in kwargs.items()
                 }
                 output = await func(*args, **kwargs)

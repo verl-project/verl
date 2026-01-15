@@ -17,7 +17,7 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
 
 import hydra
@@ -28,9 +28,11 @@ from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
-from tensordict import TensorDict
+from tensordict import NonTensorData, NonTensorStack, TensorDict
+from transfer_queue import BatchMeta
 from transformers import AutoProcessor, AutoTokenizer
 
+import verl.utils.tensordict_utils as tu
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.experimental.reward_loop import RewardLoopWorker
@@ -47,8 +49,11 @@ from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
 )
-from verl.utils.transferqueue_utils import tqbridge
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
+
+if TYPE_CHECKING:
+    # TODO (TQ): this fix is temporary. Remove once TransferQueue is default dependency.
+    from verl.utils.transferqueue_utils import BatchMeta
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -180,6 +185,84 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Multi-modal inputs for processors (e.g., pixel_values, image_grid_thw)."""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
+
+    def to_tensordict(self):
+        """
+        Convert to a TensorDict.
+
+        Returns:
+            TensorDict: converted TensorDict.
+        """
+        tensor_data = {}
+        non_tensor_data = {}
+        meta_info = {}
+
+        # 1. compulsory tensor fields
+        tensor_data.update(
+            {
+                "prompts": self.prompt_ids,
+                "responses": self.response_ids,
+                "input_ids": self.input_ids,
+                "position_ids": self.position_ids,
+                "response_mask": self.response_mask,
+                "attention_mask": self.attention_mask,
+            }
+        )
+
+        # 2. optional tensor fields
+        if self.response_logprobs is not None:
+            tensor_data["rollout_log_probs"] = self.response_logprobs
+
+        if self.routed_experts is not None:
+            tensor_data["routed_experts"] = self.routed_experts
+
+        if self.reward_score is not None:
+            scores = self.reward_score
+            prompt_length = self.prompt_ids.size(1)
+            response_length = self.attention_mask[:, prompt_length:].sum(dim=1) - 1
+            rm_scores = torch.zeros_like(self.response_mask, dtype=torch.float32)
+            rm_scores[torch.arange(self.response_mask.size(0)), response_length] = torch.tensor(
+                scores, dtype=torch.float32
+            )
+            tensor_data["rm_scores"] = rm_scores
+
+        # 3. optional non-tensor fields
+        # 3.1 multi-modal inputs
+        if self.multi_modal_inputs is not None:
+            non_tensor_data["multi_modal_inputs"] = [self.multi_modal_inputs]
+        # 3.2 multi_modal_data ----- the original _postprocess() func does not include this data
+        # 3.3 num_turns
+        if self.num_turns is not None:
+            non_tensor_data["__num_turns__"] = [self.num_turns]
+        # 3.4 metrics
+        if self.metrics is not None:
+            metrics = self.metrics.model_dump()
+            meta_info["metrics"] = [metrics]
+
+        # 4. extra_fields
+        extra_fields = {}
+        all_keys = set(key for key in self.extra_fields)
+        for key in all_keys:
+            extra_fields[key] = [self.extra_fields.get(key)]
+        non_tensor_data.update(extra_fields)
+
+        reward_extra_infos = self.extra_fields.get("reward_extra_info", {})
+        reward_extra_keys = set(reward_extra_infos.keys())
+        if reward_extra_keys is not None:
+            for key in reward_extra_keys:
+                non_tensor_data[key] = [reward_extra_infos[key]]
+            meta_info["reward_extra_keys"] = reward_extra_keys
+
+        # meta_info contains "metrics" and "reward_extra_keys"
+        # non_tensor_data contains other non-tensor data with batch_size dimension that need to be saved into TQ
+        for key, val in non_tensor_data.items():
+            if isinstance(val, list):
+                tensor_data[key] = NonTensorStack.from_list([NonTensorData(item) for item in val])
+
+        # 5. construct tensordict
+        td = tu.get_tensordict(tensor_dict=tensor_data, non_tensor_dict=meta_info)
+
+        return td
 
 
 class DictConfigWrap:
@@ -402,15 +485,18 @@ class AgentLoopWorker:
             trace_config.get("max_samples_per_step_per_worker", None),
         )
 
-    @tqbridge()
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+        self.tq_client = None
+        if self.config.get("transfer_queue", None) and self.config.transfer_queue.get("enable", False):
+            self._create_transferqueue_client()
+
+    async def generate_sequences(self, batch: DataProto | BatchMeta) -> DataProto | BatchMeta:
         """Generate sequences from agent loop.
 
         Args:
-            batch (DataProto): Input batch.
+            batch (DataProto | BatchMeta): Input batch.
 
         Returns:
-            DataProto: Output batch.
+            DataProto | BatchMeta: Output batch.
             - prompts: [bsz, prompt_length], prompt token ids from dataset.
             - responses: [bsz, response_length], output token ids include response tokens
               from LLM generation and observation tokens from tool_calls.
@@ -424,6 +510,20 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        if isinstance(batch, BatchMeta) and self.tq_client is not None:
+            batch_meta = batch
+            batch = await self.tq_client.async_get_data(batch_meta)
+            meta_info = batch_meta.get_all_extra_info()
+            non_tensor_batch = {}
+            for key, val in batch.items():
+                if isinstance(val, NonTensorStack):
+                    non_tensor_batch[key] = np.array([elem.data for elem in val], dtype=object)
+                elif isinstance(val, NonTensorData) and key not in meta_info.keys():
+                    meta_info[key] = val.data
+            batch = DataProto(batch=None, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
+        else:
+            batch_meta = None
+
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -473,15 +573,35 @@ class AgentLoopWorker:
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            tasks.append(
-                asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
+            if self.tq_client is not None:
+                tasks.append(
+                    asyncio.create_task(
+                        self._run_agent_loop(
+                            sampling_params,
+                            trajectory_info[i],
+                            trace=trace_this_sample,
+                            batch_meta=batch_meta.select_samples([i]),
+                            **kwargs,
+                        )
+                    )
                 )
-            )
+            else:
+                tasks.append(
+                    asyncio.create_task(
+                        self._run_agent_loop(
+                            sampling_params,
+                            trajectory_info[i],
+                            trace=trace_this_sample,
+                            **kwargs,
+                        )
+                    )
+                )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs)
-
+        if self.tq_client is not None:
+            output = BatchMeta.concat(outputs)
+        else:
+            output = self._postprocess(outputs)
         return output
 
     async def _run_agent_loop(
@@ -492,7 +612,7 @@ class AgentLoopWorker:
         agent_name: str,
         trace: bool = True,
         **kwargs,
-    ) -> _InternalAgentLoopOutput:
+    ) -> _InternalAgentLoopOutput | BatchMeta:
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -516,9 +636,106 @@ class AgentLoopWorker:
                 dataset_config=self.config.data,
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-            return await self._agent_loop_postprocess(output, **kwargs)
 
-    async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
+            if self.tq_client is not None:
+                return await self._agent_loop_postprocess_tq(output, **kwargs)
+            else:
+                return await self._agent_loop_postprocess(output, **kwargs)
+
+    async def _agent_loop_postprocess_tq(self, output: AgentLoopOutput, **kwargs) -> BatchMeta:
+        """
+        This function merges the original _agent_loop_postprocess and _postprocess and returns BatchMeta.
+        """
+        # from here is what the original _agent_loop_postprocess does
+        batch_meta = kwargs.pop("batch_meta", None)
+        output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+
+        prompt_ids = torch.tensor(output.prompt_ids)
+        response_ids = torch.tensor(output.response_ids)
+        response_mask = torch.tensor(output.response_mask)
+
+        response_logprobs = None
+        if output.response_logprobs is not None:
+            response_logprobs = torch.tensor(output.response_logprobs)
+
+        if prompt_ids.dim() == 1:
+            prompt_ids = prompt_ids.unsqueeze(0)
+            response_ids = response_ids.unsqueeze(0)
+            response_mask = response_mask.unsqueeze(0)
+            if response_logprobs is not None:
+                response_logprobs = response_logprobs.unsqueeze(0)
+
+        input_ids = torch.cat([prompt_ids, response_ids], dim=1)
+        attention_mask = torch.cat([torch.ones_like(prompt_ids), torch.ones_like(response_ids)], dim=1)
+
+        routed_experts = None
+        if output.routed_experts is not None:
+            total_length = input_ids.shape[1]
+            length, layer_num, topk_num = output.routed_experts.shape
+            if isinstance(output.routed_experts, np.ndarray):
+                experts_tensor = torch.from_numpy(output.routed_experts)
+            elif isinstance(output.routed_experts, torch.Tensor):
+                experts_tensor = output.routed_experts
+            else:
+                raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
+            routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
+
+            start_pos = 0  # there is no padding when using TransferQueue
+            end_pos = min(start_pos + length, total_length)
+
+            # Add boundary checks for robustness
+            if start_pos < 0 or end_pos > total_length:
+                raise ValueError(
+                    f"Invalid position range: start_pos={start_pos}, end_pos={end_pos}, total_length={total_length}"
+                )
+
+            routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
+
+        multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+        position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
+
+        await self._compute_score(
+            output,
+            prompts=prompt_ids,
+            responses=response_ids,
+            attention_mask=attention_mask,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            kwargs=kwargs,
+        )
+
+        data = _InternalAgentLoopOutput(
+            prompt_ids=prompt_ids,
+            response_ids=response_ids,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            response_mask=response_mask,
+            attention_mask=attention_mask,
+            response_logprobs=response_logprobs,
+            routed_experts=routed_experts,
+            multi_modal_inputs=multi_modal_inputs,
+            multi_modal_data=output.multi_modal_data,
+            reward_score=output.reward_score,
+            num_turns=output.num_turns,
+            metrics=output.metrics,
+            extra_fields=output.extra_fields,
+        ).to_tensordict()  # Note what the original _postprocess does has been merged into .to_tensordict()
+
+        keys_to_pop = []
+        for key, val in data.items():
+            if isinstance(val, NonTensorData):
+                batch_meta.set_extra_info(key, val.data)
+                if key not in keys_to_pop:
+                    keys_to_pop.append(key)
+
+        for key in keys_to_pop:
+            del data[key]
+
+        # TODO(TQ): we do not need to put everything into TQ, skip the unchanged input variables
+
+        return await self.tq_client.async_put(data=data, metadata=batch_meta)
+
+    async def _agent_loop_postprocess(self, output: AgentLoopOutput, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
@@ -744,6 +961,8 @@ class AgentLoopWorker:
         if inputs[0].routed_experts is not None:
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
 
+        # TODO(TQ): check if non-padded data is saved in TQ
+        # if so, set data["loss_mask"] = data["response_mask"]
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
@@ -772,7 +991,7 @@ class AgentLoopWorker:
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
+        reward_extra_keys = set(reward_extra_infos[0].keys())
         for key in reward_extra_keys:
             non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
 
@@ -805,10 +1024,10 @@ class AgentLoopWorker:
             meta_info=meta_info,
         )
 
-    def create_transferqueue_client(
+    def _create_transferqueue_client(
         self,
     ):
-        """Create a client for data system (TransferQueue)."""
+        """Create TransferQueue client."""
         from verl.single_controller.ray.base import get_random_string
         from verl.utils.transferqueue_utils import create_transferqueue_client
 
@@ -879,6 +1098,9 @@ class AgentLoopManager:
         self._initialize_llm_servers(rollout_resource_pool)
         self._init_agent_loop_workers()
 
+        if self.config.get("transfer_queue", None) and self.config.transfer_queue.get("enable", False):
+            self._create_transferqueue_client()
+
         # Initially we're in sleep mode.
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.sleep()
@@ -948,14 +1170,27 @@ class AgentLoopManager:
                 ).remote(self.config, self.server_handles, self.reward_router_address)
             )
 
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def _create_transferqueue_client(self):
+        """Create TransferQueue client."""
+        from verl.single_controller.ray.base import get_random_string
+        from verl.utils.transferqueue_utils import create_transferqueue_client
+
+        client_name = get_random_string(length=6)
+
+        self.tq_client = create_transferqueue_client(
+            client_id=f"AgentLoopManager_{client_name}",
+            config=self.config.transfer_queue,
+            sync=True,
+        )
+
+    def generate_sequences(self, prompts: "DataProto|BatchMeta") -> "DataProto|BatchMeta":
         """Split input batch and dispatch to agent loop workers.
 
         Args:
-            prompts (DataProto): Input batch.
+            prompts (DataProto|BatchMeta): Input batch.
 
         Returns:
-            DataProto: Output batch.
+            DataProto|BatchMeta: Output batch.
         """
 
         # Fix for Issue #4147: Always call wake_up() to ensure weight sync
@@ -971,20 +1206,37 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        output = DataProto.concat(outputs)
+
+        if self.config.get("transfer_queue", None) and self.config.transfer_queue.get("enable", False):
+            from transfer_queue.metadata import BatchMeta
+
+            output = BatchMeta.concat(outputs)
+        else:
+            output = DataProto.concat(outputs)
+
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
         self.sleep()
         if self.reward_model_manager:
             self.reward_model_manager.sleep()
 
         # calculate performance metrics
-        metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
-        timing = self._performance_metrics(metrics, output)
+        if isinstance(prompts, DataProto):
+            metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
+            timing = self._performance_metrics(metrics, output)
 
-        output.meta_info = {"timing": timing, **outputs[0].meta_info}
-        return output
+            output.meta_info = {"timing": timing, **outputs[0].meta_info}
+            return output
+        else:
+            metrics = [output.extra_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
+            timing = self._performance_metrics(metrics, output)
 
-    def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
+            output.update_extra_info({"timing": timing, **outputs[0].get_all_extra_info()})
+            output.remove_extra_info("metrics")
+            return output
+
+    def _performance_metrics(
+        self, metrics: list[list[dict[str, str]]], output: "DataProto|BatchMeta"
+    ) -> dict[str, float]:
         timing = {}
         t_generate_sequences = np.array([metric["generate_sequences"] for chunk in metrics for metric in chunk])
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
@@ -1001,8 +1253,16 @@ class AgentLoopManager:
 
         # batch sequence generation is bounded by the slowest sample
         slowest = np.argmax(t_generate_sequences + t_tool_calls)
-        attention_mask = output.batch["attention_mask"][slowest]
-        prompt_length = output.batch["prompts"].shape[1]
+
+        if self.config.get("transfer_queue", None) and self.config.transfer_queue.get("enable", False):
+            attention_mask = self.tq_client.get_data(output[slowest])["attention_mask"]
+            # TODO: debug prompt length retrieval.
+            prompt_length = output.samples[0].get_field_by_name("prompts").shape[0]
+            # prompt_length = self.tq_client.get_data(output)["prompts"].shape[1]
+        else:
+            attention_mask = output.batch["attention_mask"][slowest]
+            prompt_length = output.batch["prompts"].shape[1]
+
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
         timing["agent_loop/slowest/prompt_length"] = attention_mask[:prompt_length].sum().item()

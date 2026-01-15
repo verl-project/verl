@@ -6,9 +6,20 @@ defaults:
   - ppo_trainer
   - _self_
 
-# config for TransferQueue
+# configs for TransferQueue
 transfer_queue:
+  # Whether to enable TransferQueue
   enable: True
+  # Number of global batch to be simultaneously managed in TransferQueue
   num_global_batch: 1
+  # Pluggable storage/transport backend of TransferQueue. Choose from:
+  # AsyncSimpleStorageManager
   storage_backend: AsyncSimpleStorageManager
+  # Number of distributed storage units for AsyncSimpleStorageManager.
   num_data_storage_units: 8
+
+# config for the trainer
+trainer:
+  # whether to use legacy worker implementation
+  #  mode: "auto", "enable", or "disable"
+  use_legacy_worker_impl: disable

@@ -47,9 +47,9 @@ on:
       # Other entrypoints
       - "!examples/*trainer*"
       - "!tests/**"
-      - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
       - "verl/experimental/transfer_queue/**"
+      - "verl/trainer/ppo/ray_trainer_tq.py"
   pull_request:
     branches:
       - main
@@ -61,13 +61,12 @@ on:
       # Other entrypoints
       - "!examples/**"
       - "!tests/**"
-      - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
       # Home
       - "verl/experimental/transfer_queue"
       # Entrypoints
+      - "verl/trainer/ppo/ray_trainer_tq.py"
       - ".github/workflows/e2e_transferqueue.yml"
-      - "examples/data_preprocess/gsm8k.py"
       - "tests/special_e2e/run_transferqueue.sh"
 
 # Cancel jobs on the same ref if a new one is triggered
@@ -119,7 +118,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple TransferQueue==0.1.5
+          pip3 install TransferQueue==0.1.5
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -149,7 +148,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple TransferQueue==0.1.5
+          pip3 install TransferQueue==0.1.5
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k

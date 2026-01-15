@@ -304,8 +304,18 @@ global_profiler:
 # configs for TransferQueue
 transfer_queue:
 
-  # Whether to enable transfer queue
+  # Whether to enable TransferQueue
   enable: False
+
+  # Number of global batch to be simultaneously managed in TransferQueue
+  num_global_batch: 1
+
+  # Pluggable storage/transport backend of TransferQueue. Choose from:
+  # AsyncSimpleStorageManager
+  storage_backend: AsyncSimpleStorageManager
+
+  # Number of distributed storage units for AsyncSimpleStorageManager.
+  num_data_storage_units: 8
 
 # configs related to ray
 ray_kwargs:

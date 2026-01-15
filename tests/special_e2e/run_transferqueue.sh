@@ -131,8 +131,8 @@ if [ "${ACTOR_STRATEGY}" == "fsdp" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m verl.experimental.transfer_queue.main_ppo \
-        --config-path=config \
+    python3 -m verl.trainer.main_ppo \
+        --config-path=../experimental/transfer_queue/config \
         --config-name='transfer_queue_ppo_trainer' \
         "${common_params[@]}" \
         actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -164,8 +164,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     # For Ascend NPU, please add:
     #++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
     #++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
-    python3 -m verl.experimental.transfer_queue.main_ppo \
-        --config-path=config \
+    python3 -m verl.trainer.main_ppo \
+        --config-path=../experimental/transfer_queue/config \
         --config-name='transfer_queue_ppo_megatron_trainer' \
         "${common_params[@]}" \
         actor_rollout_ref.actor.strategy=megatron \

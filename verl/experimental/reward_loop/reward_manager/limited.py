@@ -492,7 +492,7 @@ class RateLimitedRewardManager(RewardManagerBase):
         # If there are pre-computed rm_scores, return them directly
         if "rm_scores" in data.batch.keys():
             if return_dict:
-                reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
+                reward_extra_keys = data.meta_info.get("reward_extra_keys", set())
                 reward_extra_info = {key: data.non_tensor_batch[key] for key in reward_extra_keys}
                 return {"reward_tensor": data.batch["rm_scores"], "reward_extra_info": reward_extra_info}
             else:

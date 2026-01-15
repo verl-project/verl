@@ -14,6 +14,7 @@
 import logging
 
 import torch
+from tensordict import TensorDict
 
 from verl.protocol import DataProto
 
@@ -60,7 +61,7 @@ def calculate_log_prob_diff(log_probs1: torch.Tensor, log_probs2: torch.Tensor, 
     return torch.masked_select(full_diff, mask)
 
 
-def calculate_debug_metrics(data: DataProto) -> dict:
+def calculate_debug_metrics(data: DataProto | TensorDict) -> dict:
     """
     calculate rollout vs actor logprobs diff, for debugging purpose
 
@@ -79,18 +80,21 @@ def calculate_debug_metrics(data: DataProto) -> dict:
             "training/rollout_probs_diff_std": std value of logprob diff of rollout vs. actor
             "training/rollout_actor_probs_pearson_corr": logprob's pearson corrcoef of rollout vs. actor, reference to https://arxiv.org/pdf/2506.13585
     """
-
-    rollout_old_log_probs = data.batch["rollout_log_probs"]
-    actor_old_log_probs = data.batch["old_log_probs"]
-    if "response_mask" in data.batch:
-        logger.debug("response mask found, use it to mask log probs")
-        log_prob_mask = data.batch["response_mask"]
-    elif "attention_mask" in data.batch:
-        log_prob_mask = data.batch["attention_mask"]
+    if isinstance(data, DataProto):
+        tensor_batch = data.batch
     else:
-        logger.warning(f"no mask info found, use all log probs, {(data.batch.keys())=}")
+        tensor_batch = data
+    rollout_old_log_probs = tensor_batch["rollout_log_probs"]
+    actor_old_log_probs = tensor_batch["old_log_probs"]
+    if "response_mask" in tensor_batch:
+        logger.debug("response mask found, use it to mask log probs")
+        log_prob_mask = tensor_batch["response_mask"]
+    elif "attention_mask" in tensor_batch:
+        log_prob_mask = tensor_batch["attention_mask"]
+    else:
+        logger.warning(f"no mask info found, use all log probs, {(tensor_batch.keys())=}")
         log_prob_mask = torch.ones_like(rollout_old_log_probs)
-    responses = data.batch["responses"]
+    responses = tensor_batch["responses"]
     response_length = responses.size(1)
 
     response_mask = log_prob_mask[:, -response_length:]

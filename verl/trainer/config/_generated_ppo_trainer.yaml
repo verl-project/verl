@@ -643,6 +643,9 @@ global_profiler:
       kw_args: {}
 transfer_queue:
   enable: false
+  num_global_batch: 1
+  storage_backend: AsyncSimpleStorageManager
+  num_data_storage_units: 8
 ray_kwargs:
   ray_init:
     num_cpus: null

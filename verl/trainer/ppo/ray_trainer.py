@@ -31,6 +31,7 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf, open_dict
+from tensordict import TensorDict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -63,6 +64,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.transferqueue_utils import tqbridge
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
@@ -124,6 +126,7 @@ class ResourcePoolManager:
             )
 
 
+@tqbridge(put_data=False)
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -478,6 +481,7 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    @tqbridge(put_data=False)
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
     ):
@@ -534,9 +538,10 @@ class RayPPOTrainer:
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
+    @tqbridge(put_data=False, convert_type="TensorDict")
     def _compute_or_extract_reward(
         self,
-        batch: DataProto,
+        batch: TensorDict | DataProto,
         reward_fn=None,
         reward_for_val: bool = False,
         sum_reward: bool = False,
@@ -559,19 +564,42 @@ class RayPPOTrainer:
             Otherwise: tuple of (reward_tensor, reward_extra_infos_dict)
         """
         # When rm_scores already exists, extract it directly (format conversion only)
-        if "rm_scores" in batch.batch.keys():
-            reward_tensor = batch.batch["rm_scores"]
-            if sum_reward:
-                reward_tensor = reward_tensor.sum(dim=-1)
+        if isinstance(batch, DataProto):
+            if "rm_scores" in batch.batch.keys():
+                reward_tensor = batch.batch["rm_scores"]
+                if sum_reward:
+                    reward_tensor = reward_tensor.sum(dim=-1)
+                if not reward_for_val and sum_reward:
+                    return reward_tensor
 
-            if not reward_for_val and sum_reward:
-                return reward_tensor
+                reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
+                reward_extra_infos_dict = (
+                    {key: batch.non_tensor_batch[key] for key in reward_extra_keys} if reward_extra_keys else {}
+                )
+                return reward_tensor, reward_extra_infos_dict
+            # else: no extra processing needs to do, just use dataproto for following calculation
+        else:
+            if "rm_scores" in batch.keys():
+                reward_tensor = batch["rm_scores"]
+                if sum_reward:
+                    reward_tensor = reward_tensor.sum(dim=-1)
+                if not reward_for_val and sum_reward:
+                    return reward_tensor
 
-            reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
-            reward_extra_infos_dict = (
-                {key: batch.non_tensor_batch[key] for key in reward_extra_keys} if reward_extra_keys else {}
-            )
-            return reward_tensor, reward_extra_infos_dict
+                reward_extra_keys = batch.get("reward_extra_keys", [])
+                reward_extra_infos_dict = (
+                    {key: batch[key] for key in reward_extra_keys.data} if reward_extra_keys != [] else {}
+                )
+                return reward_tensor, reward_extra_infos_dict
+            else:
+                # wrap tensordict batch up into a DataProto
+                meta_info = {}
+                from tensordict import NonTensorData
+
+                for key, val in batch.items():
+                    if isinstance(val, NonTensorData):
+                        meta_info[key] = val.data
+                batch = DataProto.from_tensordict(tensor_dict=batch, meta_info=meta_info)
 
         # Otherwise, compute reward using reward_fn
         if reward_fn is None:
@@ -795,6 +823,12 @@ class RayPPOTrainer:
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+
+        tq_config = OmegaConf.select(self.config, "transfer_queue", default=None)
+        assert tq_config is None or not tq_config["enable"], (
+            "tq_config should not exist or TQ should be disabled when running default RayPPOTrainer"
+        )
+        # in this case we do not need to modify config and remote workers will check and find tq_config is None
 
         # create actor and rollout
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
@@ -1141,25 +1175,38 @@ class RayPPOTrainer:
             dp_rank_mapping = worker_group._dispatch_info[role]
         return max(dp_rank_mapping) + 1
 
-    def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
+    @tqbridge(put_data=False, convert_type="TensorDict")
+    def _balance_batch(
+        self, batch: DataProto | TensorDict, metrics, logging_prefix="global_seqlen", keep_minibatch=False
+    ):
         """Reorder the data on single controller such that each dp rank gets similar total tokens.
 
         When use_prefix_grouper is enabled, uses group-level balancing to keep samples with
         the same uid together on the same rank for prefix sharing optimization.
         """
-        attention_mask = batch.batch["attention_mask"]
-        batch_size = attention_mask.shape[0]
-        global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1)  # (train_batch_size,)
+        if isinstance(batch, DataProto):
+            attention_mask = batch.batch["attention_mask"]
+            batch_size = attention_mask.shape[0]
+            global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1)  # (train_batch_size,)
+            uid_container = batch.non_tensor_batch
+            is_dataproto = True
+        else:
+            attention_mask = batch["attention_mask"]
+            batch_size = attention_mask.shape[0]
+            global_seqlen_lst = attention_mask.sum(-1)
+            uid_container = deepcopy(batch)
+            is_dataproto = False
+
         workload_lst = calculate_workload(global_seqlen_lst)
         # Get dp_size from dispatch info to correctly balance across data parallel ranks
         # Note: world_size may include tensor/pipeline parallel dimensions, but we only want DP
         dp_size = self._get_dp_size(self.actor_rollout_wg, "actor")
 
         # Use group-level balancing for PrefixGrouper to keep same-uid samples together
-        if getattr(self, "use_prefix_grouper", False) and "uid" in batch.non_tensor_batch:
+        if getattr(self, "use_prefix_grouper", False) and "uid" in uid_container:
             from verl.utils.seqlen_balancing import get_group_balanced_partitions
 
-            uid_list = list(batch.non_tensor_batch["uid"])
+            uid_list = list(uid_container["uid"])
             seqlen_list = global_seqlen_lst.tolist()
 
             # Count number of uid groups
@@ -1204,12 +1251,19 @@ class RayPPOTrainer:
                 global_partition_lst[idx] = ordered_partition
 
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
-        global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
-        batch.reorder(global_idx)
+        if is_dataproto:
+            global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
+            batch.reorder(global_idx)
+        else:
+            global_idx = [j for partition in global_partition_lst for j in partition]
+
         global_balance_stats = log_seqlen_unbalance(
             seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
         )
         metrics.update(global_balance_stats)
+
+        if not is_dataproto:
+            return global_idx
 
     def _compute_values(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":

@@ -65,7 +65,7 @@ def run_ppo(config, task_runner_class=None) -> None:
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
-        if config.transfer_queue.enable:
+        if OmegaConf.select(config, "transfer_queue.enable", default=False):
             # Add runtime environment variables for transfer queue
             runtime_env_vars = runtime_env_kwargs.get("env_vars", {})
             runtime_env_vars["TRANSFER_QUEUE_ENABLE"] = "1"
@@ -346,20 +346,38 @@ class TaskRunner:
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
-            config=config,
-            tokenizer=tokenizer,
-            processor=processor,
-            role_worker_mapping=self.role_worker_mapping,
-            resource_pool_manager=resource_pool_manager,
-            ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            collate_fn=collate_fn,
-            train_sampler=train_sampler,
-        )
+        if OmegaConf.select(config, "transfer_queue.enable", default=False):
+            from verl.trainer.ppo.ray_trainer_tq import RayPPOTrainerTransferQueue
+
+            trainer = RayPPOTrainerTransferQueue(
+                config=config,
+                tokenizer=tokenizer,
+                processor=processor,
+                role_worker_mapping=self.role_worker_mapping,
+                resource_pool_manager=resource_pool_manager,
+                ray_worker_group_cls=ray_worker_group_cls,
+                reward_fn=reward_fn,
+                val_reward_fn=val_reward_fn,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                collate_fn=collate_fn,
+                train_sampler=train_sampler,
+            )
+        else:
+            trainer = RayPPOTrainer(
+                config=config,
+                tokenizer=tokenizer,
+                processor=processor,
+                role_worker_mapping=self.role_worker_mapping,
+                resource_pool_manager=resource_pool_manager,
+                ray_worker_group_cls=ray_worker_group_cls,
+                reward_fn=reward_fn,
+                val_reward_fn=val_reward_fn,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                collate_fn=collate_fn,
+                train_sampler=train_sampler,
+            )
         # Initialize the workers of the trainer.
         trainer.init_workers()
 

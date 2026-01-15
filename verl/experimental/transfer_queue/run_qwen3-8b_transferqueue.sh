@@ -21,7 +21,8 @@ fi
 
 # You may also refer to tests/special_e2e/run_transferqueue.sh for more demo scripts
 
-python3 -m verl.experimental.transfer_queue.main_ppo \
+python3 -m verl.trainer.main_ppo \
+    --config-path=../experimental/transfer_queue/config \
     --config-name='transfer_queue_ppo_trainer' \
     algorithm.adv_estimator=grpo \
     data.train_files=${TRAIN_FILE} \

@@ -54,8 +54,11 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
-def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
-    """Slice response from unpad model output.
+def _slice_response_from_unpad_output(
+    tensor: torch.Tensor, data: TensorDict, include_prompt: bool = True
+) -> torch.Tensor:
+    """Slice response from unpad model output, considering variables with
+       response_length or prompt+response_mask length.
 
     Args:
         tensor: model output tensor of shape [bsz, 1]
@@ -72,28 +75,44 @@ def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) ->
     if prompt_ids.is_nested:
         prompt_lens = prompt_ids.offsets().diff()
         response_lens = response_ids.offsets().diff()
-        max_response_len = response_ids.offsets().max().item()
+        ####### TODO weird
+        max_response_len = response_ids.offsets().diff().max().item()
     else:
         assert not attention_mask.is_nested
         prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
         response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
         max_response_len = response_ids.shape[1]
 
-    sequence_lens = prompt_lens + response_lens
-    sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0]
+    if include_prompt:
+        sequence_lens = prompt_lens + response_lens
+        sequence_offsets = sequence_lens.cumsum(dim=0)
+        assert sequence_offsets[-1].item() == values.shape[0]
 
-    response_list = []
-    for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
-        pad_size = max_response_len - resp_len
-        # left-shift model output by one token for log_probs/values
-        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
-
-    output = torch.stack(response_list, dim=0)
+        response_list = []
+        for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
+            pad_size = max_response_len - resp_len
+            # left-shift model output by one token for log_probs/values
+            response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
+        output = torch.stack(response_list, dim=0)
+    else:
+        tensor = tensor.unbind()
+        resp_len_list = [len(i) for i in tensor]
+        max_response_length = max(resp_len_list)
+        assert max_response_len == max_response_length
+        response_list = []
+        for resp_len, nt in zip(response_lens, tensor, strict=False):
+            # assert nt.size(0) == resp_len, \
+            #     f"Length mismatch: tensor={nt.size(0)}, resp_len={resp_len}"
+            pad_size = max_response_len - resp_len
+            response_list.append(F.pad(nt, (0, pad_size)))
+        output = torch.stack(response_list, dim=0)
     return output
 
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+    """
+    Convert tensors into padded ones even for TQ version.
+    """
     log_prob = _slice_response_from_unpad_output(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
@@ -119,18 +138,21 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         metric_aggregation = AggregationType.MEAN
 
     metrics = {}
-
-    response_mask = data["response_mask"].to(bool)
     # compute policy loss
+    response_mask = data["response_mask"].to(bool)
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
     rollout_is_weights = data.get("rollout_is_weights", None)
 
     loss_agg_mode = config.loss_agg_mode
-
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
-
     policy_loss_fn = get_policy_loss_fn(loss_mode)
+
+    if old_log_prob.is_nested:
+        old_log_prob = _slice_response_from_unpad_output(old_log_prob, data, include_prompt=True)
+        response_mask = _slice_response_from_unpad_output(response_mask, data, include_prompt=False)
+        advantages = _slice_response_from_unpad_output(advantages, data, include_prompt=False)
+
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
@@ -161,6 +183,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     # add kl loss
     if config.use_kl_loss:
         ref_log_prob = data["ref_log_prob"]
+        if ref_log_prob.is_nested:
+            ref_log_prob = _slice_response_from_unpad_output(ref_log_prob, data, include_prompt=True)
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
         kl_loss = agg_loss(

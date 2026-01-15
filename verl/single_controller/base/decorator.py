@@ -166,7 +166,12 @@ def _concat_data_proto_or_future(output: list):
     elif isinstance(o, ray.ObjectRef):
         return DataProtoFuture.concat(output)
     elif isinstance(o, BatchMeta):
-        return BatchMeta.concat(output)
+        concat_batchmeta = BatchMeta.concat(output)
+        # turn the tuples in batchmeta back as lists
+        for key, val in concat_batchmeta.extra_info.items():
+            if isinstance(val, tuple):
+                concat_batchmeta.set_extra_info(key, list(val))
+        return concat_batchmeta
     elif isinstance(o, TensorDict):
         return concat_tensordict(output)
     else:
@@ -426,7 +431,14 @@ def _materialize_futures(*args, **kwargs):
     return new_args, kwargs
 
 
-def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocking=True, materialize_futures=True):
+def register(
+    dispatch_mode=Dispatch.ALL_TO_ALL,
+    execute_mode=Execute.ALL,
+    blocking=True,
+    materialize_futures=True,
+    put_data=True,
+    convert_type="DataProto",
+):
     """Register a function with distributed execution configuration.
 
     This decorator registers a function with specific dispatch and execution modes
@@ -453,7 +465,11 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
     _check_execute_mode(execute_mode=execute_mode)
 
     def decorator(func):
-        func = tqbridge(dispatch_mode=dispatch_mode)(func)
+        func = tqbridge(
+            dispatch_mode=dispatch_mode,
+            put_data=put_data,
+            convert_type=convert_type,
+        )(func)
 
         @wraps(func)
         def inner(*args, **kwargs):
