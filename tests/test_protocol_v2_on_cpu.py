@@ -1105,6 +1105,65 @@ def test_concat_nested_tensor_3d():
     assert output_unbind[3].shape == torch.Size([4, 7])
 
 
+def test_chunk_tensordict_multiple_3d():
+    """Test chunking TensorDict with multiple 3D nested tensors."""
+
+    # Create multiple 3D nested tensors
+    position_ids = torch.nested.as_nested_tensor(
+        [
+            torch.arange(4).expand(4, 4),
+            torch.arange(5).expand(4, 5),
+            torch.arange(6).expand(4, 6),
+            torch.arange(7).expand(4, 7),
+        ],
+        layout=torch.jagged,
+    )
+
+    # Second 3D nested tensor with different values
+    attention_mask = torch.nested.as_nested_tensor(
+        [
+            torch.ones(3, 4),
+            torch.ones(3, 5),
+            torch.ones(3, 6),
+            torch.ones(3, 7),
+        ],
+        layout=torch.jagged,
+    )
+
+    # Create TensorDict with 2 3D nested tensors
+    td = tu.get_tensordict(
+        {
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        },
+    )
+
+    # Chunk the TensorDict
+    chunks = tu.chunk_tensordict(td, chunks=2)
+
+    assert len(chunks) == 2
+    assert len(chunks[0]) == 2
+    assert len(chunks[1]) == 2
+
+    # Verify first chunk has correct data for both 3D tensors
+    chunk0_position_unbind = chunks[0]["position_ids"].unbind(0)
+    chunk0_attention_unbind = chunks[0]["attention_mask"].unbind(0)
+
+    assert torch.all(torch.eq(chunk0_position_unbind[0], torch.arange(4).expand(4, 4))).item()
+    assert torch.all(torch.eq(chunk0_position_unbind[1], torch.arange(5).expand(4, 5))).item()
+    assert torch.all(torch.eq(chunk0_attention_unbind[0], torch.ones(3, 4))).item()
+    assert torch.all(torch.eq(chunk0_attention_unbind[1], torch.ones(3, 5))).item()
+
+    # Verify second chunk has correct data for both 3D tensors
+    chunk1_position_unbind = chunks[1]["position_ids"].unbind(0)
+    chunk1_attention_unbind = chunks[1]["attention_mask"].unbind(0)
+
+    assert torch.all(torch.eq(chunk1_position_unbind[0], torch.arange(6).expand(4, 6))).item()
+    assert torch.all(torch.eq(chunk1_position_unbind[1], torch.arange(7).expand(4, 7))).item()
+    assert torch.all(torch.eq(chunk1_attention_unbind[0], torch.ones(3, 6))).item()
+    assert torch.all(torch.eq(chunk1_attention_unbind[1], torch.ones(3, 7))).item()
+
+
 def test_chunk_concat_roundtrip_3d():
     """Test that chunk and concat are inverse operations for 3D nested tensors."""
     # Create a TensorDict with 3D nested tensors
