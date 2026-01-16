@@ -51,3 +51,10 @@ try:
     __all__ += ["NIXLCheckpointEngine"]
 except ImportError:
     NIXLCheckpointEngine = None
+
+try:
+    from .kimi_checkpoint_engine import KIMICheckpointEngine
+
+    __all__ += ["KIMICheckpointEngine"]
+except ImportError:
+    KIMICheckpointEngine = None
