@@ -51,8 +51,8 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.distillation import Stage, gather_topk_outputs
 from verl.utils import tensordict_utils as tu
-from verl.utils.distillation import Stage, gather_topk_outputs
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
