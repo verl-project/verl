@@ -106,10 +106,10 @@ def test_nccl_checkpoint_engine(
 if __name__ == "__main__":
     test_nccl_checkpoint_engine(
         rebuild_group=False,
-        num_trainer=4,
-        num_rollout=12,
-        num_nodes=1,
+        num_trainer=2,
+        num_rollout=30,
+        num_nodes=2,
         num_gpus_per_node=16,
-        check_allclose=True,
-        model_path="/mnt/share/Qwen3-30B-A3B",
+        check_allclose=False,
+        model_path=os.environ["HDFS_ROOT"] + "/model/Qwen3-30B-A3B-Base",
     )

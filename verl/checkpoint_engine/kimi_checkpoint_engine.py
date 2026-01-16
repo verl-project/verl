@@ -16,6 +16,7 @@ import concurrent.futures
 import logging
 import os
 import time
+import types
 from dataclasses import dataclass
 from typing import AsyncGenerator, Generator
 
@@ -273,9 +274,10 @@ class KIMICheckpointEngine(CheckpointEngine):
             rank (int): The rank of the current process.
             world_size (int): The total number of processes.
         """
+        self.rank = rank
         if not self.initialized:
-            self.parameter_server = ParameterServer(rank=rank, world_size=self.world_size, auto_pg=False, custom_dist=True)
-            self.parameter_server.revice_tensor = revice_tensor
+            self.parameter_server = ParameterServer(rank=rank, world_size=world_size, auto_pg=False, custom_dist=True)
+            self.parameter_server.revice_tensor = types.MethodType(revice_tensor, self.parameter_server)
             dist.init_process_group(
                 host=master_metadata.ip,
                 port=master_metadata.port,
@@ -284,7 +286,7 @@ class KIMICheckpointEngine(CheckpointEngine):
                 backend=get_nccl_backend(),
             )
 
-            self.rollout_ranks = list(range(self.train_world_size, self.world_size))
+            self.rollout_ranks = list(range(self.train_world_size, world_size))
             self.rollout_group = dist.new_group(self.rollout_ranks)
             self.initialized = True
 
