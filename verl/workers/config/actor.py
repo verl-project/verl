@@ -25,6 +25,7 @@ from verl.utils.qat import QATConfig
 from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig, VeOmniEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
+from .distillation import DistillationConfig, FSDPDistillationConfig
 
 __all__ = [
     "PolicyLossConfig",
@@ -91,20 +92,6 @@ class PolicyLossConfig(BaseConfig):
     ppo_kl_coef: float = 0.1
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
-@dataclass
-class DistillationConfig(BaseConfig):
-    """Configuration for distillation training.
-    TODO
-    """
-    loss_mode: str
-    topk: Optional[int]
-    use_policy_loss: bool
-    distillation_loss_coef: float
-
-@dataclass
-class FSDPDistillationConfig(DistillationConfig):
-    """Configuration for distillation training with FSDP."""
-    pass
 
 @dataclass
 class ActorConfig(BaseConfig):
@@ -142,6 +129,7 @@ class ActorConfig(BaseConfig):
         use_fused_kernels (bool): Whether to use custom fused kernels (e.g., FlashAttention, fused MLP).
         data_loader_seed (int): Seed for data loader. If None, uses global seed.
         router_replay (RouterReplayConfig): Configuration for router replay in MoE models.
+        distillation_config (DistillationConfig): Configuration for distillation settings.
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {
@@ -151,6 +139,7 @@ class ActorConfig(BaseConfig):
         "ppo_infer_micro_batch_size_per_gpu",
         "engine",
         "model_config",
+        "distillation_config",
     }
 
     strategy: str = MISSING
@@ -187,6 +176,7 @@ class ActorConfig(BaseConfig):
     use_fused_kernels: bool = False
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     engine: BaseConfig = field(default_factory=BaseConfig)
+    distillation_config: DistillationConfig = field(default_factory=DistillationConfig)
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
@@ -300,7 +290,7 @@ class FSDPActorConfig(ActorConfig):
             with chunking for memory efficiency.
         entropy_checkpointing (bool): Whether to use gradient checkpointing for entropy computation.
         fsdp_config (dict[str, Any]): Configuration for FSDP settings.
-        distillation_config (FSDPDistillationConfig): Configuration for distillation settings.
+        fsdp_distillation_config (FSDPDistillationConfig): Configuration for distillation settings.
         use_remove_padding (bool): Whether to remove padding tokens in inputs during training
     """
 
@@ -310,7 +300,7 @@ class FSDPActorConfig(ActorConfig):
     entropy_from_logits_with_chunking: bool = False
     entropy_checkpointing: bool = False
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
-    distillation_config: FSDPDistillationConfig = field(default_factory=FSDPDistillationConfig)
+    fsdp_distillation_config: FSDPDistillationConfig = field(default_factory=FSDPDistillationConfig)
     use_remove_padding: bool = False
     use_rollout_log_probs: bool = False
     calculate_sum_pi_squared: bool = False
@@ -321,6 +311,7 @@ class FSDPActorConfig(ActorConfig):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
         self.engine = self.fsdp_config
+        self.distillation_config = self.fsdp_distillation_config
 
         # backward compatibility
         if self.ulysses_sequence_parallel_size > 1:

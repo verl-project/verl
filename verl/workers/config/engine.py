@@ -22,6 +22,7 @@ from verl.trainer.config import CheckpointConfig
 from ...utils.profiler import ProfilerConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
+from .distillation import DistillationConfig
 
 __all__ = [
     "FSDPEngineConfig",

@@ -31,7 +31,7 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
-from verl.utils.distillation import compute_topk_outputs
+from verl.trainer.distillation import compute_topk_outputs
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
 from verl.trainer.distillation import is_distillation_enabled, prepare_student_distillation_inputs

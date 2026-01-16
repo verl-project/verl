@@ -13,6 +13,9 @@ defaults:
 # Target class for this configuration
 _target_: verl.workers.config.FSDPActorConfig
 
+# fsdp distillation config
+distillation_config: ${oc.select:actor_rollout_ref.actor.distillation_config}
+
 # fsdp config
 fsdp_config:
 
