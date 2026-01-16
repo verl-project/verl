@@ -56,6 +56,8 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+    distillation_config: DistillationConfig = config.distillation_config
+    distillation_enabled = distillation_config.enabled
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
@@ -83,36 +85,40 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     metrics = {}
 
     response_mask = data["response_mask"].to(bool)
-    # compute policy loss
-    old_log_prob = data["old_log_probs"]
-    advantages = data["advantages"]
-    rollout_is_weights = data.get("rollout_is_weights", None)
-
     loss_agg_mode = config.loss_agg_mode
 
-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+    # compute policy loss
+    if not distillation_enabled or distillation_config.use_policy_loss:
+        old_log_prob = data["old_log_probs"]
+        advantages = data["advantages"]
+        rollout_is_weights = data.get("rollout_is_weights", None)
 
-    policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_metrics = policy_loss_fn(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        response_mask=response_mask,
-        loss_agg_mode=loss_agg_mode,
-        config=config,
-        rollout_is_weights=rollout_is_weights,
-    )
 
-    # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
-    # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
-    pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+        loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
-    metrics.update(pg_metrics)
-    metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
-    policy_loss = pg_loss
+        policy_loss_fn = get_policy_loss_fn(loss_mode)
+        pg_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=config,
+            rollout_is_weights=rollout_is_weights,
+        )
+
+        # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
+        # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
+        pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+
+        metrics.update(pg_metrics)
+        metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
+        policy_loss = pg_loss
+    else:
+        policy_loss = 0
 
     # add entropy loss
-    if entropy is not None:
+    if entropy is not None and not distillation_enabled:
         entropy_loss = agg_loss(
             loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
         )
@@ -121,7 +127,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
 
     # add kl loss
-    if config.use_kl_loss:
+    if config.use_kl_loss and not distillation_enabled:
         ref_log_prob = data["ref_log_prob"]
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
@@ -132,6 +138,29 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         policy_loss += kl_loss * config.kl_loss_coef
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
         metrics["kl_coef"] = config.kl_loss_coef
+
+    # distillation loss
+    if distillation_enabled:
+        teacher_log_probs = data["ref_log_prob"]
+        student_log_probs = log_prob
+        teacher_topk_logprobs_key, _ = Stage.get_topk_keys(Stage.REF_LOG_PROB)
+        student_topk_logprobs_key, _ = Stage.get_topk_keys(Stage.ACTOR_UPDATE)
+        teacher_topk_logprobs = tu.get(data, teacher_topk_logprobs_key)
+        student_topk_logprobs = tu.get(data, student_topk_logprobs_key)
+        distillation_loss_fn = get_distillation_loss_fn(distillation_config.loss_mode)
+        distillation_loss, distillation_metrics = distillation_loss_fn(
+            teacher_log_probs=teacher_log_probs,
+            student_log_probs=student_log_probs,
+            teacher_topk_logprobs=teacher_topk_logprobs,
+            student_topk_logprobs=student_topk_logprobs,
+            loss_agg_mode=loss_agg_mode,
+            config=distillation_config,
+        )
+        metrics.update(distillation_metrics)
+        distillation_loss_coef = distillation_config.distillation_loss_coef if distillation_config.use_policy_loss else 1.0
+        policy_loss += distillation_loss * distillation_loss_coef
+        metrics["distillation_loss"] = Metric(value=distillation_loss, aggregation=metric_aggregation)
+        
 
     return policy_loss, metrics
 
