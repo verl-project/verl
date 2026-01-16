@@ -58,6 +58,7 @@ from sglang.srt.entrypoints.EngineBase import EngineBase
 from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.managers.io_struct import (
     UpdateWeightsFromTensorReqInput,
+    LoadLoRAAdapterFromTensorsReqInput
 )
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
@@ -104,10 +105,10 @@ async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
 
 
 def launch_server_process(
-    server_args: ServerArgs,
-    timeout: float = DEFAULT_TIMEOUT,
-    max_wait_time=DEFAULT_MAX_WAIT_TIME,
-    first_rank_in_node=False,
+        server_args: ServerArgs,
+        timeout: float = DEFAULT_TIMEOUT,
+        max_wait_time=DEFAULT_MAX_WAIT_TIME,
+        first_rank_in_node=False,
 ) -> multiprocessing.Process:
     """Launch an SGLang HTTP server process and wait for it to be ready.
 
@@ -214,16 +215,16 @@ class HttpServerAdapter(EngineBase):
     """
 
     def __init__(
-        self,
-        router_ip: Optional[str] = None,
-        router_port: Optional[int] = None,
-        timeout: float = DEFAULT_TIMEOUT,
-        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        retry_delay: float = DEFAULT_RETRY_DELAY,
-        first_rank_in_node: bool = False,
-        max_start_wait_time: float = DEFAULT_MAX_WAIT_TIME,
-        launch_server: bool = True,
-        **kwargs: Any,
+            self,
+            router_ip: Optional[str] = None,
+            router_port: Optional[int] = None,
+            timeout: float = DEFAULT_TIMEOUT,
+            max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+            retry_delay: float = DEFAULT_RETRY_DELAY,
+            first_rank_in_node: bool = False,
+            max_start_wait_time: float = DEFAULT_MAX_WAIT_TIME,
+            launch_server: bool = True,
+            **kwargs: Any,
     ) -> None:
         """Initialize the HTTP server engine adapter.
 
@@ -288,12 +289,12 @@ class HttpServerAdapter(EngineBase):
             # Don't raise here - server can still work without router
 
     def _make_request(
-        self,
-        endpoint: str,
-        payload: Optional[dict[str, Any]] = None,
-        method: str = "POST",
-        timeout: float = DEFAULT_TIMEOUT,
-        only_master: bool = True,
+            self,
+            endpoint: str,
+            payload: Optional[dict[str, Any]] = None,
+            method: str = "POST",
+            timeout: float = DEFAULT_TIMEOUT,
+            only_master: bool = True,
     ) -> dict[str, Any]:
         """Make a HTTP request with retry logic and consistent error handling.
 
@@ -422,17 +423,17 @@ class HttpServerAdapter(EngineBase):
                 logger.error(f"Failed to terminate server process: {e}")
 
     def generate(
-        self,
-        prompt: Optional[str] = None,
-        sampling_params: Optional[dict[str, Any]] = None,
-        input_ids: Optional[list[int]] = None,
-        image_data: Optional[Any] = None,
-        return_logprob: bool = False,
-        logprob_start_len: Optional[int] = None,
-        top_logprobs_num: Optional[int] = None,
-        token_ids_logprob: Optional[list[int]] = None,
-        lora_path: Optional[str] = None,
-        custom_logit_processor: Optional[Callable] = None,
+            self,
+            prompt: Optional[str] = None,
+            sampling_params: Optional[dict[str, Any]] = None,
+            input_ids: Optional[list[int]] = None,
+            image_data: Optional[Any] = None,
+            return_logprob: bool = False,
+            logprob_start_len: Optional[int] = None,
+            top_logprobs_num: Optional[int] = None,
+            token_ids_logprob: Optional[list[int]] = None,
+            lora_path: Optional[str] = None,
+            custom_logit_processor: Optional[Callable] = None,
     ) -> dict[str, Any]:
         """Generate text using the SGLang server.
 
@@ -481,11 +482,11 @@ class HttpServerAdapter(EngineBase):
         return self._make_request("generate", payload, only_master=False)
 
     def reward_score(
-        self,
-        prompt: Optional[str] = None,
-        input_ids: Optional[list[int]] = None,
-        image_data: Optional[Any] = None,
-        lora_path: Optional[str] = None,
+            self,
+            prompt: Optional[str] = None,
+            input_ids: Optional[list[int]] = None,
+            image_data: Optional[Any] = None,
+            lora_path: Optional[str] = None,
     ) -> dict[str, Any]:
         assert self.server_args.is_embedding, "Score is only supported for embedding models"
         payload = {
@@ -585,16 +586,16 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
     """
 
     def __init__(
-        self,
-        router_ip: Optional[str] = None,
-        router_port: Optional[int] = None,
-        timeout: float = DEFAULT_TIMEOUT,
-        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        retry_delay: float = DEFAULT_RETRY_DELAY,
-        max_connections: int = DEFAULT_MAX_CONNECTIONS,
-        first_rank_in_node: bool = False,
-        launch_server: bool = True,
-        **kwargs: Any,
+            self,
+            router_ip: Optional[str] = None,
+            router_port: Optional[int] = None,
+            timeout: float = DEFAULT_TIMEOUT,
+            max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+            retry_delay: float = DEFAULT_RETRY_DELAY,
+            max_connections: int = DEFAULT_MAX_CONNECTIONS,
+            first_rank_in_node: bool = False,
+            launch_server: bool = True,
+            **kwargs: Any,
     ) -> None:
         """Initialize the async HTTP server engine adapter.
 
@@ -656,12 +657,12 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 await session.close()
 
     async def _make_async_request(
-        self,
-        endpoint: str,
-        payload: Optional[dict[str, Any]] = None,
-        method: str = "POST",
-        timeout: float = DEFAULT_TIMEOUT,
-        only_master: bool = True,
+            self,
+            endpoint: str,
+            payload: Optional[dict[str, Any]] = None,
+            method: str = "POST",
+            timeout: float = DEFAULT_TIMEOUT,
+            only_master: bool = True,
     ) -> dict[str, Any]:
         """Make an async HTTP request with retry logic and consistent error handling.
 
@@ -745,8 +746,8 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         return await self._make_async_request("resume_memory_occupation", {"tags": tags})
 
     async def update_weights_from_tensor(
-        self,
-        req: UpdateWeightsFromTensorReqInput,
+            self,
+            req: UpdateWeightsFromTensorReqInput,
     ) -> dict[str, Any]:
         """Update model weights from tensor data asynchronously.
 
@@ -775,6 +776,25 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 "flush_cache": flush_cache,
             },
         )
+
+    async def load_lora_adapter_from_tensor(self, req: LoadLoRAAdapterFromTensorsReqInput):
+        return await self._make_async_request(
+            "load_lora_adapter_from_tensors",
+            {
+                "lora_name": req.lora_name,
+                "config_dict": req.config_dict,
+                "serialized_tensors": req.serialized_tensors,
+            },
+        )
+    async def unload_lora_adapter(self, lora_name: str):
+        return await self._make_async_request(
+            "unload_lora_adapter",
+            {
+                "lora_name": lora_name,
+            },
+        )
+    async def available_models(self):
+        return await self._make_async_request(endpoint="v1/models", method="GET")
 
     async def flush_cache(self) -> dict[str, Any]:
         """Flush the cache of the server asynchronously.
@@ -810,17 +830,17 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         return {}
 
     async def generate(
-        self,
-        prompt: Optional[str] = None,
-        sampling_params: Optional[dict[str, Any]] = None,
-        input_ids: Optional[list[int]] = None,
-        image_data: Optional[Any] = None,
-        return_logprob: bool = False,
-        logprob_start_len: Optional[int] = None,
-        top_logprobs_num: Optional[int] = None,
-        token_ids_logprob: Optional[list[int]] = None,
-        lora_path: Optional[str] = None,
-        custom_logit_processor: Optional[Callable] = None,
+            self,
+            prompt: Optional[str] = None,
+            sampling_params: Optional[dict[str, Any]] = None,
+            input_ids: Optional[list[int]] = None,
+            image_data: Optional[Any] = None,
+            return_logprob: bool = False,
+            logprob_start_len: Optional[int] = None,
+            top_logprobs_num: Optional[int] = None,
+            token_ids_logprob: Optional[list[int]] = None,
+            lora_path: Optional[str] = None,
+            custom_logit_processor: Optional[Callable] = None,
     ) -> dict[str, Any]:
         """Generate text using the SGLang server asynchronously."""
         logger.info("generate() started")
@@ -847,17 +867,17 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         return response
 
     async def async_generate(
-        self,
-        prompt: Optional[str] = None,
-        sampling_params: Optional[dict[str, Any]] = None,
-        input_ids: Optional[list[int]] = None,
-        image_data: Optional[Any] = None,
-        return_logprob: bool = False,
-        logprob_start_len: Optional[int] = None,
-        top_logprobs_num: Optional[int] = None,
-        token_ids_logprob: Optional[list[int]] = None,
-        lora_path: Optional[str] = None,
-        custom_logit_processor: Optional[Callable] = None,
+            self,
+            prompt: Optional[str] = None,
+            sampling_params: Optional[dict[str, Any]] = None,
+            input_ids: Optional[list[int]] = None,
+            image_data: Optional[Any] = None,
+            return_logprob: bool = False,
+            logprob_start_len: Optional[int] = None,
+            top_logprobs_num: Optional[int] = None,
+            token_ids_logprob: Optional[list[int]] = None,
+            lora_path: Optional[str] = None,
+            custom_logit_processor: Optional[Callable] = None,
     ) -> dict[str, Any]:
         """Async generate method that mirrors AsyncEngine.async_generate interface.
 
@@ -906,11 +926,11 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         )
 
     async def reward_score(
-        self,
-        prompt: Optional[str] = None,
-        input_ids: Optional[list[int]] = None,
-        image_data: Optional[Any] = None,
-        lora_path: Optional[str] = None,
+            self,
+            prompt: Optional[str] = None,
+            input_ids: Optional[list[int]] = None,
+            image_data: Optional[Any] = None,
+            lora_path: Optional[str] = None,
     ) -> dict[str, Any]:
         logger.info("reward_score() started")
         payload = {
@@ -928,11 +948,11 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         return response
 
     async def async_reward_score(
-        self,
-        prompt: Optional[str] = None,
-        input_ids: Optional[list[int]] = None,
-        image_data: Optional[Any] = None,
-        lora_path: Optional[str] = None,
+            self,
+            prompt: Optional[str] = None,
+            input_ids: Optional[list[int]] = None,
+            image_data: Optional[Any] = None,
+            lora_path: Optional[str] = None,
     ) -> dict[str, Any]:
         return await self.reward_score(
             prompt=prompt,

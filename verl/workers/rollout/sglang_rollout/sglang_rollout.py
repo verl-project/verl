@@ -18,7 +18,9 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
-from typing import Generator
+from typing import Generator, Dict
+from dataclasses import asdict
+from peft import LoraConfig
 
 import ray
 import sglang.srt.entrypoints.engine
@@ -29,15 +31,22 @@ from sglang.srt.utils import (
     is_cuda,
     set_prometheus_multiproc_dir,
     set_ulimit,
+    MultiprocessingSerializer,
 )
-from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
+from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights, \
+    _preprocess_tensor_for_update_weights
+from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
+
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
-from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
+from verl.workers.rollout.sglang_rollout.utils import (
+    get_named_tensor_buckets,
+    SGLANG_LORA_NAME,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -191,26 +200,69 @@ class ServerAdapter(BaseRollout):
         """
         await self._init_server_adapter()
 
-        update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-        if self.config.get("quantization", None) == "fp8":
-            from verl.utils.sglang.sglang_fp8_utils import quant_weights_by_name
+        peft_config, base_sync_done = kwargs.get("peft_config", None), kwargs.get("base_sync_done", False)
+        if peft_config and base_sync_done:
+            if self.device_mesh["infer_tp"].get_local_rank() == 0:
+                # unload lora
+                models_result = await self._engine.available_models()
+                exists = any(item['id'] == SGLANG_LORA_NAME for item in models_result['data'])
+                if exists:
+                    await self._engine.unload_lora_adapter(SGLANG_LORA_NAME)
 
-            logger.info("Convert bf16 weights to fp8 format before loading")
-            weights = quant_weights_by_name(
-                weights,
-                self.model_config.hf_config.quantization_config,
-                dtype=self.model_config.hf_config.dtype,
-            )
+                # load lora by tensor
+                serialize_peft_config, serialize_named_tensors = self.wrap_lora_params(peft_config, weights)
+                req = LoadLoRAAdapterFromTensorsReqInput(
+                    lora_name=SGLANG_LORA_NAME,
+                    config_dict=serialize_peft_config,
+                    serialized_tensors=serialize_named_tensors,
+                )
+                # send http request
+                await self._engine.load_lora_adapter_from_tensor(req)
+
         else:
-            weights = weights
+            update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+            if self.config.get("quantization", None) == "fp8":
+                from verl.utils.sglang.sglang_fp8_utils import quant_weights_by_name
 
-        async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
-            await sgl_update_weights(
-                engine=self._engine,
-                params_batch=params_batch,
-                device_mesh_key="infer_tp",
-                device_mesh=self.device_mesh,
-            )
+                logger.info("Convert bf16 weights to fp8 format before loading")
+                weights = quant_weights_by_name(
+                    weights,
+                    self.model_config.hf_config.quantization_config,
+                    dtype=self.model_config.hf_config.dtype,
+                )
+            else:
+                weights = weights
+
+            async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+                await sgl_update_weights(
+                    engine=self._engine,
+                    params_batch=params_batch,
+                    device_mesh_key="infer_tp",
+                    device_mesh=self.device_mesh,
+                )
 
         if self.device_mesh["infer_tp"].get_local_rank() == 0:
             await self._engine.flush_cache()
+
+    def wrap_lora_params(self, peft_config: LoraConfig, weights: Generator[tuple[str, torch.Tensor]]):
+        # peft config
+        peft_config_json = asdict(peft_config)
+        peft_config_json["task_type"] = peft_config_json["task_type"].value
+        peft_config_json["peft_type"] = peft_config_json["peft_type"].value
+        peft_config_json["target_modules"] = list(peft_config_json["target_modules"])
+
+        # lora weights
+        processed_weights: Dict[str, torch.Tensor] = {
+            name: _preprocess_tensor_for_update_weights(tensor.detach())
+            for name, tensor in weights
+        }
+
+        infer_tp_size = self.device_mesh["infer_tp"].mesh.size()[0]
+        serialized_named_tensors = []
+        for i in range(infer_tp_size):
+            serialized_tensors = MultiprocessingSerializer.serialize(
+                processed_weights, output_str=True
+            )
+            serialized_named_tensors.append(serialized_tensors)
+
+        return peft_config_json, serialized_named_tensors
