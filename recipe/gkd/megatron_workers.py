@@ -346,6 +346,20 @@ class OnPolicyDistillActor:
                 device = get_device_id()
                 teacher_topk_logps = batch["teacher_topk_logps"].to(device, non_blocking=True)
                 teacher_topk_indices = batch["teacher_topk_indices"].to(device, non_blocking=True)
+                ''' 
+                NOTE: logits_processor needs logits as first input, but it is not in the args here
+                because it will be popuated in forward_fn such as verl/verl/models/mcore/model_forward.py -> model_forward()
+                
+                input_args = dict(
+                    input_ids=input_ids_rmpad,
+                    attention_mask=None,
+                    position_ids=position_ids if not vision_model else None,  # vision models will calculate position_ids
+                    packed_seq_params=packed_seq_params,
+                    **model_kwargs,
+                )
+                output_orig = model(**input_args)
+                output_dict = logits_processor(output_orig, **args)
+                '''
                 logits_processor_args = {
                     "calc_kl_mask": batch["calc_kl_mask"],
                     "kl_losses": batch["kl_losses"],

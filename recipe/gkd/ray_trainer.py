@@ -214,6 +214,36 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
 
+        # Create off-policy dataloader if enabled
+        self.off_policy_dataloader = None
+        if self.config.trainer.get("enable_off_policy", False):
+            from recipe.gkd.off_policy_dataset import GKDOffPolicyDataset
+
+            if self.config.data.get("off_policy_files") is not None:
+                print("Creating off-policy dataloader with ground truth answers...")
+                off_policy_dataset = GKDOffPolicyDataset(
+                    self.config.data.off_policy_files, self.tokenizer, self.config.data
+                )
+                off_policy_batch_size = self.config.data.get("off_policy_batch_size")
+                if off_policy_batch_size is None:
+                    off_policy_batch_size = self.config.data.train_batch_size
+
+                self.off_policy_dataloader = StatefulDataLoader(
+                    dataset=off_policy_dataset,
+                    batch_size=off_policy_batch_size,
+                    num_workers=num_workers,
+                    drop_last=True,
+                    collate_fn=collate_fn,
+                    shuffle=self.config.data.get("shuffle", True),
+                )
+                print(f"Size of off-policy dataloader: {len(self.off_policy_dataloader)}")
+            else:
+                raise ValueError(
+                    "enable_off_policy is True but off_policy_files is not set in config.data.off_policy_files"
+                )
+
+
+
         if self.val_dataset:
             val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
             if val_batch_size is None:
@@ -342,18 +372,93 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
 
     def _create_continuous_iterator(self):
         """
-        Create a continuous data iterator across epoch
+        Create a continuous data iterator across epoch.
+        If off-policy is enabled, mixes on-policy and off-policy data according to gkd_lambda.
         """
+        import random
+
+        gkd_lambda = self.config.trainer.get("gkd_lambda", 1.0)
+        enable_off_policy = self.config.trainer.get("enable_off_policy", False)
+
         for epoch in range(self.config.trainer.total_epochs):
-            iterator = iter(self.train_dataloader)
-            for batch_dict in iterator:
+            on_policy_iterator = iter(self.train_dataloader)
+            off_policy_iterator = iter(self.off_policy_dataloader) if enable_off_policy else None
+
+            # Calculate how many batches we need
+            total_batches = len(self.train_dataloader)
+
+            for _ in range(total_batches):
+                # Decide whether to use on-policy or off-policy data
+                use_on_policy = True
+                if enable_off_policy and off_policy_iterator is not None:
+                    # Sample based on lambda: lambda=1.0 means always on-policy
+                    use_on_policy = random.random() < gkd_lambda
+                if use_on_policy:
+                    try:
+                        batch_dict = next(on_policy_iterator)
+                        batch_dict["is_on_policy"] = True
+                    except StopIteration:
+                        # If on-policy iterator exhausted, fall back to off-policy if available
+                        if off_policy_iterator is not None:
+                            try:
+                                batch_dict = next(off_policy_iterator)
+                                batch_dict["is_on_policy"] = False
+                            except StopIteration:
+                                # Both exhausted, restart off-policy
+                                off_policy_iterator = iter(self.off_policy_dataloader)
+                                batch_dict = next(off_policy_iterator)
+                                batch_dict["is_on_policy"] = False
+                        else:
+                            break
+                else:
+                    try:
+                        batch_dict = next(off_policy_iterator)
+                        batch_dict["is_on_policy"] = False
+                    except StopIteration:
+                        # If off-policy iterator exhausted, restart it
+                        off_policy_iterator = iter(self.off_policy_dataloader)
+                        batch_dict = next(off_policy_iterator)
+                        batch_dict["is_on_policy"] = False
+
                 yield epoch, batch_dict
 
     def _async_gen_next_batch(self, epoch, batch_dict, sync_before_generation=True):
         """
         Call parameter synchronization and asynchronous sequence generation.
+        For off-policy data, skip generation as responses (ground truth answers) are already in batch.
         """
+        is_on_policy = batch_dict.get("is_on_policy", True)
+        # DataProto doesn't support bool; also avoid side effects of pop()
+        if "is_on_policy" in batch_dict:
+            batch_dict = dict(batch_dict)  # shallow copy
+            batch_dict.pop("is_on_policy", None)
+
+        if not is_on_policy:
+            # Off-policy data: already has full sequence (prompt + ground truth answer)
+            batch = DataProto.from_single_dict(batch_dict)
+            batch.meta_info["global_steps"] = self.global_steps
+            batch.meta_info["is_on_policy"] = False
+
+            # For off-policy, we pop everything to gen_batch (similar to on-policy structure)
+            # This keeps batch mostly empty, and gen_batch contains all data
+            gen_batch = batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids", "responses"],
+                non_tensor_batch_keys=["raw_prompt_ids"]
+            )
+            # IMPORTANT: metrics read from gen_batch_output.meta_info
+            gen_batch.meta_info["global_steps"] = self.global_steps
+            gen_batch.meta_info["is_on_policy"] = False
+            
+            # Create future with separated batch and gen_batch_output
+            future = GenerationBatchFuture(epoch, batch, gen_batch)
+            future.gen_batch_output = gen_batch
+
+            return future
+
+
+        # On-policy data: normal generation flow
         batch = DataProto.from_single_dict(batch_dict)
+        batch.meta_info["is_on_policy"] = True
         # pop those keys for generation
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
         non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
@@ -384,6 +489,13 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
         and asynchronously queries the teacher model for knowledge distillation. The teacher model's output
         is set in the future object for subsequent processing.
 
+        For off-policy data, we still query teacher but on the full sequence (prompt + ground truth answer).
+
+        Both on-policy and off-policy need teacher knowledge!
+        The difference is:
+            - On-policy: teacher sees (prompt + generated response)
+            - Off-policy: teacher sees (prompt + ground truth answer)
+
         Args:
             future (GenerationBatchFuture): Future object containing generated sequences and metadata
 
@@ -400,6 +512,7 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
             get_teacher_knowledge(gen_batch_output, self.teacher_client, self.n_server_workers, is_async=True)
         )
         return future
+
 
     def one_step_off_scheduler(self, continuous_iterator):
         """One-step-off scheduler implementation (version 1) for GKD training with improved pipeline.
@@ -639,6 +752,12 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
                         timing_raw[k] = v
 
                 timing_raw.update(teacher_batch_output.meta_info.pop("timing"))
+                
+                # Track on-policy vs off-policy samples
+                if "is_on_policy" not in gen_batch_output.meta_info:
+                    print("WARN: gen_batch_output.meta_info missing is_on_policy; keys=", gen_batch_output.meta_info.keys())
+                is_on_policy_batch = gen_batch_output.meta_info.get("is_on_policy", True)
+                metrics["data/is_on_policy"] = 1.0 if is_on_policy_batch else 0.0
 
                 # Compute statistics of generated response lengths distribution
                 response_lens = (

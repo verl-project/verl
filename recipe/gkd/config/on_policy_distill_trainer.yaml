@@ -15,7 +15,8 @@ data:
   tokenizer: null
   train_files: /path/to/train.parquet
   val_files: null
-  prompt_key: question
+  prompt_key: prompt
+  answer_key: extra_info.answer  # Ground truth answer/solution string for off-policy distillation
   reward_fn_key: data_source
   max_prompt_length: 512
   max_response_length: 512
@@ -37,6 +38,12 @@ data:
     class_name: null
   dataloader_num_workers: 8
   return_multi_modal_inputs: True
+
+  # For off-policy, we use ground truth answers as responses
+  # Required fields: question (prompt_key), answer (answer_key)
+  # The answer will be tokenized and used as the response (no generation needed)
+  off_policy_files: null  # /path/to/off_policy_data.parquet (e.g., gsm8k with answer key)
+  off_policy_batch_size: null  # if null, use train_batch_size
 
 actor_rollout_ref:
   hybrid_engine: False
@@ -316,6 +323,15 @@ trainer:
   ray_wait_register_center_timeout: 300
   device: cuda
   scheduler: one_step_off
+
+  # GKD mixing parameters
+  # lambda controls the ratio of on-policy vs off-policy data
+  # lambda=1.0: pure on-policy (current behavior)
+  # lambda=0.0: pure off-policy
+  # lambda=0.5: 50% on-policy, 50% off-policy
+  gkd_lambda: 1.0
+  # Whether to enable off-policy distillation
+  enable_off_policy: False
 
 rollout:
   nnodes: 1
