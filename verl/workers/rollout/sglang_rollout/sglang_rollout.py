@@ -25,6 +25,8 @@ from peft import LoraConfig
 import ray
 import sglang.srt.entrypoints.engine
 import torch
+from peft import LoraConfig
+from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     assert_pkg_version,
@@ -205,7 +207,7 @@ class ServerAdapter(BaseRollout):
             if self.device_mesh["infer_tp"].get_local_rank() == 0:
                 # unload lora
                 models_result = await self._engine.available_models()
-                exists = any(item['id'] == SGLANG_LORA_NAME for item in models_result['data'])
+                exists = any(item["id"] == SGLANG_LORA_NAME for item in models_result["data"])
                 if exists:
                     await self._engine.unload_lora_adapter(SGLANG_LORA_NAME)
 
@@ -252,17 +254,14 @@ class ServerAdapter(BaseRollout):
         peft_config_json["target_modules"] = list(peft_config_json["target_modules"])
 
         # lora weights
-        processed_weights: Dict[str, torch.Tensor] = {
-            name: _preprocess_tensor_for_update_weights(tensor.detach())
-            for name, tensor in weights
+        processed_weights: dict[str, torch.Tensor] = {
+            name: _preprocess_tensor_for_update_weights(tensor.detach()) for name, tensor in weights
         }
 
         infer_tp_size = self.device_mesh["infer_tp"].mesh.size()[0]
         serialized_named_tensors = []
         for i in range(infer_tp_size):
-            serialized_tensors = MultiprocessingSerializer.serialize(
-                processed_weights, output_str=True
-            )
+            serialized_tensors = MultiprocessingSerializer.serialize(processed_weights, output_str=True)
             serialized_named_tensors.append(serialized_tensors)
 
         return peft_config_json, serialized_named_tensors
