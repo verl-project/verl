@@ -17,6 +17,7 @@ import torch
 from tensordict import TensorDict
 
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.distillation import get_distillation_loss_fn, get_topk_keys, Stage
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
@@ -143,16 +144,19 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     if distillation_enabled:
         teacher_log_probs = data["ref_log_prob"]
         student_log_probs = log_prob
-        teacher_topk_logprobs_key, _ = Stage.get_topk_keys(Stage.REF_LOG_PROB)
-        student_topk_logprobs_key, _ = Stage.get_topk_keys(Stage.ACTOR_UPDATE)
+        teacher_topk_logprobs_key, teacher_topk_indices_key = get_topk_keys(Stage.REF_LOG_PROB)
+        student_topk_logprobs_key, student_topk_indices_key = get_topk_keys(Stage.ACTOR_UPDATE)
         teacher_topk_logprobs = tu.get(data, teacher_topk_logprobs_key)
         student_topk_logprobs = tu.get(data, student_topk_logprobs_key)
+        teacher_topk_indices = tu.get(data, teacher_topk_indices_key)
+        student_topk_indices = tu.get(data, student_topk_indices_key)
         distillation_loss_fn = get_distillation_loss_fn(distillation_config.loss_mode)
         distillation_loss, distillation_metrics = distillation_loss_fn(
             teacher_log_probs=teacher_log_probs,
             student_log_probs=student_log_probs,
             teacher_topk_logprobs=teacher_topk_logprobs,
             student_topk_logprobs=student_topk_logprobs,
+            response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
             config=distillation_config,
         )

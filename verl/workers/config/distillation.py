@@ -12,23 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import actor, critic, engine, model, optimizer, reward, rollout
-from .actor import *  # noqa: F401
-from .critic import *  # noqa: F401
-from .engine import *  # noqa: F401
-from .model import *  # noqa: F401
-from .optimizer import *  # noqa: F401
-from .reward import *  # noqa: F401
-from .rollout import *  # noqa: F401
-from .distillation import *  # noqa: F401
+from verl.base_config import BaseConfig
+from dataclasses import dataclass
+from typing import Optional
 
-__all__ = (
-    actor.__all__
-    + critic.__all__
-    + reward.__all__
-    + engine.__all__
-    + optimizer.__all__
-    + rollout.__all__
-    + model.__all__
-    + distillation.__all__
-)
+__all__ = ["DistillationConfig", "FSDPDistillationConfig"]
+
+@dataclass
+class DistillationConfig(BaseConfig):
+    """Configuration for distillation training.
+    TODO
+    """
+    enabled: bool = False
+    loss_mode: str = "k3"
+    topk: Optional[int] = 128
+    use_policy_loss: bool = False
+    distillation_loss_coef: float = 1.0
+
+
+@dataclass
+class FSDPDistillationConfig(DistillationConfig):
+    """Configuration for distillation training with FSDP."""
+    pass
