@@ -33,6 +33,8 @@ __all__ = [
     "FSDPActorConfig",
     "McoreActorConfig",
     "VeOmniActorConfig",
+    "FSDPDistillationConfig", 
+    "DistillationConfig" 
     "QATConfig",
     "TorchTitanActorConfig",
 ]
@@ -91,6 +93,20 @@ class PolicyLossConfig(BaseConfig):
     ppo_kl_coef: float = 0.1
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
+@dataclass
+class DistillationConfig(BaseConfig):
+    """Configuration for distillation training.
+    TODO
+    """
+    loss_mode: str
+    topk: Optional[int]
+    use_policy_loss: bool
+    distillation_loss_coef: float
+
+@dataclass
+class FSDPDistillationConfig(DistillationConfig):
+    """Configuration for distillation training with FSDP."""
+    pass
 
 @dataclass
 class ActorConfig(BaseConfig):
@@ -286,6 +302,7 @@ class FSDPActorConfig(ActorConfig):
             with chunking for memory efficiency.
         entropy_checkpointing (bool): Whether to use gradient checkpointing for entropy computation.
         fsdp_config (dict[str, Any]): Configuration for FSDP settings.
+        distillation_config (FSDPDistillationConfig): Configuration for distillation settings.
         use_remove_padding (bool): Whether to remove padding tokens in inputs during training
     """
 
@@ -295,6 +312,7 @@ class FSDPActorConfig(ActorConfig):
     entropy_from_logits_with_chunking: bool = False
     entropy_checkpointing: bool = False
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
+    distillation_config: FSDPDistillationConfig = field(default_factory=FSDPDistillationConfig)
     use_remove_padding: bool = False
     use_rollout_log_probs: bool = False
     calculate_sum_pi_squared: bool = False
