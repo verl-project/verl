@@ -84,6 +84,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.engine_config = self.config.engine_config
         self.optimizer_config = self.config.optimizer_config
         self.checkpoint_config = self.config.checkpoint_config
+        self.distillation_config = self.config.get("distillation_config")
         self.device_name = get_device_name()
 
         if self.engine_config is None:
@@ -125,6 +126,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             engine_config=self.engine_config,
             optimizer_config=self.optimizer_config,
             checkpoint_config=self.checkpoint_config,
+            distillation_config=self.distillation_config,
         )
 
         # build dispatch info
@@ -514,6 +516,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
+                distillation_config=actor_config.distillation_config
             )
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
