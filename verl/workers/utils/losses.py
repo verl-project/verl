@@ -128,7 +128,7 @@ def ppo_loss(
         policy_loss = 0
 
     # add entropy loss
-    if entropy is not None:
+    if entropy is not None and not distillation_enabled:
         entropy_loss = agg_loss(
             loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
         )
@@ -137,7 +137,7 @@ def ppo_loss(
         metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
 
     # add kl loss
-    if config.use_kl_loss:
+    if config.use_kl_loss and not distillation_enabled:
         ref_log_prob = data["ref_log_prob"]
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
