@@ -1,0 +1,14 @@
+# Whether to enable distillation.
+enabled: false
+
+# Loss function mode for distillation
+loss_mode: student_kl_topk
+
+# If distillation loss requires top-k logits, this is the value of k
+topk: 32
+
+# Whether the loss should just be the distillation loss or a combination of the distillation loss and the policy loss
+use_policy_loss: false
+
+# The coef of the distillation loss when use_policy_loss is true
+distillation_loss_coef: 1.0

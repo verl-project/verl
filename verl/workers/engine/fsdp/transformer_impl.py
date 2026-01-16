@@ -64,7 +64,7 @@ from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
-from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
+from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, FSDPDistillationConfig, HFModelConfig
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
@@ -90,6 +90,7 @@ class FSDPEngine(BaseEngine):
         engine_config: FSDPEngineConfig,
         optimizer_config: FSDPOptimizerConfig,
         checkpoint_config: CheckpointConfig,
+        distillation_config: FSDPDistillationConfig
     ):
         """
         Initialize the FSDPEngine.
@@ -105,6 +106,7 @@ class FSDPEngine(BaseEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
+        self.distillation_config = distillation_config
 
         self.mode = None
 
