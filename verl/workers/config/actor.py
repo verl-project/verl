@@ -25,7 +25,7 @@ from verl.utils.qat import QATConfig
 from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig, VeOmniEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
-from .distillation import DistillationConfig, FSDPDistillationConfig
+from .distillation import DistillationConfig
 
 __all__ = [
     "PolicyLossConfig",
@@ -139,7 +139,6 @@ class ActorConfig(BaseConfig):
         "ppo_infer_micro_batch_size_per_gpu",
         "engine",
         "model_config",
-        "distillation_config",
     }
 
     strategy: str = MISSING
@@ -290,7 +289,6 @@ class FSDPActorConfig(ActorConfig):
             with chunking for memory efficiency.
         entropy_checkpointing (bool): Whether to use gradient checkpointing for entropy computation.
         fsdp_config (dict[str, Any]): Configuration for FSDP settings.
-        fsdp_distillation_config (FSDPDistillationConfig): Configuration for distillation settings.
         use_remove_padding (bool): Whether to remove padding tokens in inputs during training
     """
 
@@ -300,7 +298,6 @@ class FSDPActorConfig(ActorConfig):
     entropy_from_logits_with_chunking: bool = False
     entropy_checkpointing: bool = False
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
-    fsdp_distillation_config: FSDPDistillationConfig = field(default_factory=FSDPDistillationConfig)
     use_remove_padding: bool = False
     use_rollout_log_probs: bool = False
     calculate_sum_pi_squared: bool = False
@@ -311,7 +308,6 @@ class FSDPActorConfig(ActorConfig):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
         self.engine = self.fsdp_config
-        self.distillation_config = self.fsdp_distillation_config
 
         # backward compatibility
         if self.ulysses_sequence_parallel_size > 1:

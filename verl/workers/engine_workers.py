@@ -503,6 +503,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
+                distillation_config=ref_config.distillation_config
             )
 
             # assign engine configs

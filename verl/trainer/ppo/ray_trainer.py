@@ -1141,11 +1141,11 @@ class RayPPOTrainer:
                 output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
             # gather output
             log_probs = tu.get(output, "log_probs")
-            topk_outputs = gather_topk_outputs(Stage.REF_LOG_PROB, output)
+            distillation_inputs = extract_distillation_inputs(stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.ref.distillation_config)
             # step 4. No padding to padding
             log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
-            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float(), **topk_outputs})
+            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float(), **distillation_inputs})
             ref_log_prob = DataProto.from_tensordict(ref_log_prob)
         else:
             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
@@ -1165,13 +1165,13 @@ class RayPPOTrainer:
             # gather output
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
-            topk_outputs = gather_topk_outputs(Stage.OLD_LOG_PROB, output)
+            distillation_inputs = extract_distillation_inputs(stage=Stage.OLD_LOG_PROB, output=output, config=self.config.actor_rollout_ref.actor.distillation_config)
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
             entropy = no_padding_2_padding(entropy, batch_td)
             log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
-            old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float(), **topk_outputs})
+            old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float(), **distillation_inputs})
             old_log_prob = DataProto.from_tensordict(old_log_prob)
         else:
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
