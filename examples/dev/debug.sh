@@ -5,7 +5,7 @@ set -exo pipefail
 
 export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=7
 NUM_DEV=1
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
@@ -65,4 +65,8 @@ python -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.use_torch_compile=False \
     actor_rollout_ref.rollout.agent.num_workers=1 \
     trainer.use_legacy_worker_impl=disable \
-    actor_rollout_ref.actor.distillation_config.enabled=True
+    actor_rollout_ref.actor.distillation_config.enabled=True \
+    actor_rollout_ref.actor.distillation_config.loss_mode=jsd_topk \
+    actor_rollout_ref.actor.distillation_config.topk=32 \
+    actor_rollout_ref.actor.distillation_config.jsd_beta=0.5 \
+    trainer.resume_mode=disable

@@ -16,7 +16,7 @@ from verl.base_config import BaseConfig
 from dataclasses import dataclass
 from typing import Optional
 
-__all__ = ["DistillationConfig", "FSDPDistillationConfig"]
+__all__ = ["DistillationConfig"]
 
 @dataclass
 class DistillationConfig(BaseConfig):
@@ -28,9 +28,4 @@ class DistillationConfig(BaseConfig):
     topk: Optional[int] = 128
     use_policy_loss: bool = False
     distillation_loss_coef: float = 1.0
-
-
-@dataclass
-class FSDPDistillationConfig(DistillationConfig):
-    """Configuration for distillation training with FSDP."""
-    pass
+    jsd_beta: float = 0.5
