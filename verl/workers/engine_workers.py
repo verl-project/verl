@@ -50,6 +50,7 @@ from verl.workers.config import (
     HFModelConfig,
     RolloutConfig,
     TrainingWorkerConfig,
+    DistillationConfig
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
@@ -495,6 +496,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
             ref_config.model_config = model_config
+            distillation_config: DistillationConfig = omega_conf_to_dataclass(ref_config.distillation_config)
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
@@ -503,7 +505,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
-                distillation_config=ref_config.distillation_config
+                distillation_config=distillation_config
             )
 
             # assign engine configs
@@ -521,6 +523,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 2. build actor model
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
+            distillation_config: DistillationConfig = omega_conf_to_dataclass(actor_config.distillation_config)
             actor_config.model_config = model_config
 
             distillation_config = self.distillation_config

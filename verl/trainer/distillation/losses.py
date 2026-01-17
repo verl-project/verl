@@ -154,6 +154,8 @@ def distillation_loss(
     """
     Compute the distillation loss and related metrics.
 
+    TODO: add clamping
+
     Args:
         inputs (DistillationLossInputs):
             Inputs containing probabilities from teacher and student policies.
