@@ -156,7 +156,7 @@ def ppo_loss(config: ActorConfig, model_output: dict[str, torch.Tensor], data: T
         metrics.update(distillation_metrics)
         distillation_loss_coef = distillation_config.distillation_loss_coef if distillation_config.use_policy_loss else 1.0
         policy_loss += distillation_loss * distillation_loss_coef
-        metrics["distillation_loss"] = Metric(value=distillation_loss, aggregation=metric_aggregation)
+        metrics["distillation/loss"] = Metric(value=distillation_loss, aggregation=metric_aggregation)
         
 
     return policy_loss, metrics

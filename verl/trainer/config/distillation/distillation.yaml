@@ -1,3 +1,6 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.DistillationConfig
+
 # Whether to enable distillation.
 enabled: false
 
