@@ -17,12 +17,12 @@ import torch
 from tensordict import TensorDict
 
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
-from verl.trainer.distillation import get_distillation_loss_fn, get_topk_keys, Stage
+from verl.trainer.distillation import get_distillation_loss_fn, prepare_distillation_inputs
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
-from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.config import ActorConfig, CriticConfig, DistillationConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
 
@@ -55,8 +55,7 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
-def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
-    """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+def ppo_loss(config: ActorConfig, model_output: dict[str, torch.Tensor], data: TensorDict, dp_group=None):
     distillation_config: DistillationConfig = config.distillation_config
     distillation_enabled = distillation_config.enabled
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
@@ -144,21 +143,15 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     if distillation_enabled:
         teacher_log_probs = data["ref_log_prob"]
         student_log_probs = log_prob
-        teacher_topk_logprobs_key, teacher_topk_indices_key = get_topk_keys(Stage.REF_LOG_PROB)
-        student_topk_logprobs_key, student_topk_indices_key = get_topk_keys(Stage.ACTOR_UPDATE)
-        teacher_topk_logprobs = tu.get(data, teacher_topk_logprobs_key)
-        student_topk_logprobs = tu.get(data, student_topk_logprobs_key)
-        teacher_topk_indices = tu.get(data, teacher_topk_indices_key)
-        student_topk_indices = tu.get(data, student_topk_indices_key)
+        distillation_inputs = prepare_distillation_inputs(data=data, model_output=model_output, config=distillation_config)
         distillation_loss_fn = get_distillation_loss_fn(distillation_config.loss_mode)
         distillation_loss, distillation_metrics = distillation_loss_fn(
             teacher_log_probs=teacher_log_probs,
             student_log_probs=student_log_probs,
-            teacher_topk_logprobs=teacher_topk_logprobs,
-            student_topk_logprobs=student_topk_logprobs,
+            **distillation_inputs,
             response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
-            config=distillation_config,
+            config=config,
         )
         metrics.update(distillation_metrics)
         distillation_loss_coef = distillation_config.distillation_loss_coef if distillation_config.use_policy_loss else 1.0
