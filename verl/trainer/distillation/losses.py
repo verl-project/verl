@@ -148,7 +148,23 @@ def get_distillation_loss_fn(name):
         )
     return DISTILLATION_LOSS_REGISTRY[loss_name]
 
-def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: float):
+def clamp_log_probs(log_p: torch.Tensor, log_q: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
+    """Clamp log probabilities to avoid numerical instability.
+
+    Args:
+        log_p (torch.Tensor): Log probabilities of the teacher distribution.
+        log_q (torch.Tensor): Log probabilities of the student distribution.
+        eps (float): Small constant to avoid numerical instability when computing log probabilities.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: Clamped log probabilities of the teacher and student distributions.
+    """
+    min_log_prob = torch.log(torch.tensor(eps)).item()
+    log_p_clamped = torch.clamp(log_p, min=min_log_prob)
+    log_q_clamped = torch.clamp(log_q, min=min_log_prob)
+    return log_p_clamped, log_q_clamped
+
+def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: float) -> torch.Tensor:
     """
     Computes Jensen-Shannon Divergence between two distributions given their log probabilities.
     
@@ -170,10 +186,11 @@ def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: fl
     Returns:
         torch.Tensor: JSD loss
     """
+    log_p, log_q = clamp_log_probs(log_p, log_q)
     q = log_q.exp()
     p = log_p.exp()
     m = beta * p + (1 - beta) * q
-    log_m = m.log()
+    log_m = m.log()    
     kl1 = F.kl_div(input=log_m, target=log_p, reduction='none', log_target=True).sum(dim=-1)
     kl2 = F.kl_div(input=log_m, target=log_q, reduction='none', log_target=True).sum(dim=-1)
     loss = beta * kl1 + (1 - beta) * kl2
@@ -197,6 +214,7 @@ def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_m
     Returns:
         torch.Tensor: KL divergence loss
     """
+    log_p, log_q = clamp_log_probs(log_p, log_q)
     match loss_mode:
         case "forward":
             return F.kl_div(input=log_q, target=log_p, reduction='none', log_target=True).sum(dim=-1)
@@ -224,6 +242,8 @@ def compute_distillation_loss_jsd(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics for KL div wrt the student using top-k log probs.
+
+    TODO: add clamping
 
     Args:
         teacher_log_probs (torch.Tensor):
@@ -286,19 +306,19 @@ def compute_distillation_loss_jsd(
             "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min().item()),
             "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max().item()),
         }
-
     match distillation_config.loss_mode:
         case "forward_kl_topk" | "forward_kl_full":
             distillation_losses = kullback_leibler_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward")
         case "reverse_kl_topk" | "reverse_kl_full":
             distillation_losses = kullback_leibler_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse")
         case "jsd_topk" | "jsd_full":
-            distillation_losses = jensen_shannon_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=distillation_config.jsd_beta)
+            distillation_losses = jensen_shannon_divergence(log_q=student_topk_logprobs.clone(), log_p=teacher_topk_logprobs.clone(), beta=distillation_config.jsd_beta)
         case _:
             raise NotImplementedError(f"Unsupported distillation loss mode: {distillation_config.loss_mode}")
-
     distillation_loss = agg_loss(
         loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
 
     return distillation_loss, distillation_metrics
+
+
