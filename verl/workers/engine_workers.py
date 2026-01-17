@@ -42,7 +42,13 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import (
+    ActorConfig,
+    HFModelConfig,
+    RolloutConfig,
+    TrainingWorkerConfig,
+    DistillationConfig
+)
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -484,6 +490,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
             ref_config.model_config = model_config
+            distillation_config: DistillationConfig = omega_conf_to_dataclass(ref_config.distillation_config)
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
@@ -492,7 +499,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
-                distillation_config=ref_config.distillation_config
+                distillation_config=distillation_config
             )
 
             # assign engine configs
@@ -510,6 +517,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 2. build actor model
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
+            distillation_config: DistillationConfig = omega_conf_to_dataclass(actor_config.distillation_config)
             actor_config.model_config = model_config
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",
@@ -517,7 +525,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
-                distillation_config=actor_config.distillation_config
+                distillation_config=distillation_config
             )
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
