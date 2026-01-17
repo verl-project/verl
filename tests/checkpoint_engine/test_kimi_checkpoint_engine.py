@@ -26,7 +26,7 @@ from verl.utils.device import get_device_name
 
 @pytest.mark.parametrize("rebuild_group", [False, True])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
-def test_nccl_checkpoint_engine(
+def test_kimi_checkpoint_engine(
     rebuild_group,
     num_trainer,
     num_rollout,
@@ -104,7 +104,7 @@ def test_nccl_checkpoint_engine(
 
 
 if __name__ == "__main__":
-    test_nccl_checkpoint_engine(
+    test_kimi_checkpoint_engine(
         rebuild_group=False,
         num_trainer=2,
         num_rollout=30,
