@@ -8,4 +8,4 @@ defaults:
   - _self_
 
 # Target class for this configuration
-_target_: verl.workers.config.FSDPDistillationConfig
+_target_: verl.workers.config.DistillationConfig
