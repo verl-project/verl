@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Union
+from typing import Any, Callable, Protocol, Union
 
 import torch
 import torch.nn.functional as F
@@ -23,20 +23,21 @@ from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import DistillationConfig
 from verl.base_config import BaseConfig
 
-DistillationLossFn = Callable[
-    [
-        torch.Tensor,  # teacher_log_probs
-        torch.Tensor,  # student_log_probs
-        torch.Tensor,  # teacher_topk_logprobs
-        torch.Tensor,  # student_topk_logprobs
-        torch.Tensor,  # teacher_topk_indices
-        torch.Tensor,  # student_topk_indices
-        torch.Tensor,  # response_mask
-        DistillationConfig,  # config
-        str,  # loss_agg_mode
-    ],
-    tuple[torch.Tensor, dict[str, Any]],
-]
+
+class DistillationLossFn(Protocol):
+    """Protocol for distillation loss functions.
+    """
+
+    def __call__(
+        self,
+        *,
+        teacher_log_probs: torch.Tensor,
+        student_log_probs: torch.Tensor,
+        response_mask: torch.Tensor,
+        config: DistillationConfig,
+        loss_agg_mode: str = "token-mean",
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, dict[str, Any]]: ...
 
 
 @dataclass
@@ -196,6 +197,9 @@ def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_m
 @register_distillation_loss(DistillationLossSettings(names="reverse_kl_topk", use_student_topk=True))  # type: ignore[arg-type]
 @register_distillation_loss(DistillationLossSettings(names="jsd_topk", use_student_topk=True, use_teacher_topk=True))  # type: ignore[arg-type]
 def compute_distillation_loss_topk(
+    *,
+    teacher_log_probs: torch.Tensor,
+    student_log_probs: torch.Tensor,
     teacher_topk_logprobs: torch.Tensor,
     student_topk_logprobs: torch.Tensor,
     teacher_topk_indices: torch.Tensor,
@@ -203,7 +207,6 @@ def compute_distillation_loss_topk(
     response_mask: torch.Tensor,
     config: DistillationConfig,
     loss_agg_mode: str = "token-mean",
-    **kwargs
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics for JSD and variants using top-k/full log probs.
@@ -295,13 +298,13 @@ def compute_distillation_loss_topk(
 
 @register_distillation_loss(DistillationLossSettings(names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"], use_estimator=True))  # type: ignore[arg-type]
 def compute_distillation_loss_kl_estimator(
+    *,
     teacher_log_probs: torch.Tensor,
     student_log_probs: torch.Tensor,
     response_mask: torch.Tensor,
     config: DistillationConfig,
     loss_agg_mode: str = "token-mean",
-    **kwargs
-):
+) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute the distillation loss and related metrics using KL estimator"""
     assert config is not None
     distillation_losses = kl_penalty(

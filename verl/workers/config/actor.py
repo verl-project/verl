@@ -399,4 +399,4 @@ class FSDPDistillationConfig(FSDPActorConfig, DistillationConfig):
     TODO
     """
     def __post_init__(self):
-        FSDPActorConfig.__post_init__(self)
+        super().__post_init__()
