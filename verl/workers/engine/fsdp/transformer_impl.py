@@ -95,7 +95,7 @@ class FSDPEngine(BaseEngine):
         engine_config: FSDPEngineConfig,
         optimizer_config: FSDPOptimizerConfig,
         checkpoint_config: CheckpointConfig,
-        distillation_config: Optional[DistillationConfig],
+        disxztillation_config: Optional[DistillationConfig],
     ):
         """
         Initialize the FSDPEngine.
@@ -913,6 +913,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             if use_fused_kernels:
                 # temperature is singleton
+                if self.distillation_config.enabled:
+                    raise NotImplementedError("Distillation with fused kernels is not supported yet") # TODO: JacobHelwig
                 log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
             else:
