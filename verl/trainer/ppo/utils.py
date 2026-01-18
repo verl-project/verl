@@ -73,12 +73,13 @@ def need_reference_policy(
     config: DictConfig,
 ) -> bool:
     """Given the config, do we need ref policy."""
-    return (
-        config.algorithm.use_kl_in_reward
-        or config.actor_rollout_ref.actor.use_kl_loss
-        or config.actor_rollout_ref.distillation_config.enabled
-    )
+    return config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss
 
+def need_distillation_policy(
+    config: DictConfig,
+) -> bool:
+    """Given the config, do we need distillation policy."""
+    return config.actor_rollout_ref.distillation_config.enabled
 
 def need_reward_model(
     config: DictConfig,

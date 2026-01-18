@@ -177,7 +177,6 @@ class ActorConfig(BaseConfig):
     use_fused_kernels: bool = False
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     engine: BaseConfig = field(default_factory=BaseConfig)
-    distillation_config: DistillationConfig = field(default_factory=DistillationConfig)
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
@@ -371,3 +370,25 @@ class TorchTitanActorConfig(ActorConfig):
         """Validate TorchTitan actor configuration parameters."""
         super().__post_init__()
         self.engine = self.torchtitan
+@dataclass
+class DistillationConfig(ActorConfig):
+    """Configuration for distillation training.
+    TODO
+    """
+
+    enabled: bool = False
+    loss_mode: str = "k3"
+    topk: Optional[int] = 128
+    use_policy_loss: bool = False
+    distillation_loss_coef: float = 1.0
+    jsd_beta: float = 0.5
+    teacher_model: HFModelConfig = field(default_factory=BaseConfig)
+    loss_clamp: Optional[float] = None
+
+@dataclass
+class FSDPDistillationConfig(FSDPActorConfig, DistillationConfig):
+    """Configuration for distillation training with FSDP.
+    TODO
+    """
+    def __post_init__(self):
+        FSDPActorConfig.__post_init__(self)
