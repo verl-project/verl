@@ -13,9 +13,6 @@ defaults:
   # fsdp engine config
   - ../engine@fsdp_config: fsdp
 
-  # distillation config
-  - ../distillation@distillation_config: distillation 
-
   # dp actor config, inheriting from trainer/config/actor/actor.yaml
   - actor
 
