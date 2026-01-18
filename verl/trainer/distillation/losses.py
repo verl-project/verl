@@ -203,6 +203,7 @@ def compute_distillation_loss_topk(
     response_mask: torch.Tensor,
     config: DistillationConfig,
     loss_agg_mode: str = "token-mean",
+    **kwargs
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics for JSD and variants using top-k/full log probs.
@@ -302,7 +303,6 @@ def compute_distillation_loss_kl_estimator(
     **kwargs
 ):
     """Compute the distillation loss and related metrics using KL estimator"""
-    breakpoint()
     assert config is not None
     distillation_losses = kl_penalty(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode

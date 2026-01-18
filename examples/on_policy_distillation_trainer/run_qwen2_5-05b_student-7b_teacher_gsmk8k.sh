@@ -20,10 +20,10 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
-TEACHER_MODEL=Qwen2.5-0.5B-Instruct
+TEACHER_MODEL=Qwen2.5-7B-Instruct
 
+# DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="jsd_topk"
-DISTILLATION_LOSS_MODE="k3"
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
 EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}"
@@ -31,10 +31,10 @@ EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DIS
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
 TRAIN_PROMPT_BSZ=128
-MICRO_BATCH_SIZE=1
-MAX_TOKEN_LEN_PER_GPU=$((MAX_PROMPT + MAX_RESPONSE_LENGTH))
+MICRO_BATCH_SIZE=4
+MAX_TOKEN_LEN_PER_GPU=$(( MICRO_BATCH_SIZE * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
-DP_SIZE=1
+DP_SIZE=2
 
 ############################ Paths ############################
 
@@ -64,16 +64,16 @@ MODEL=(
 )
 
 DISTILLATION=(
-    actor_rollout_ref.distillation_config.enabled=True
-    actor_rollout_ref.distillation_config.loss_mode=$DISTILLATION_LOSS_MODE
-    actor_rollout_ref.distillation_config.jsd_beta=0.5
-    actor_rollout_ref.distillation_config.topk=32
-    actor_rollout_ref.distillation_config.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.distillation_config.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE
-    actor_rollout_ref.distillation_config.log_prob_max_token_len_per_gpu=$MAX_TOKEN_LEN_PER_GPU
-    actor_rollout_ref.distillation_config.fsdp_config.param_offload=True
-    actor_rollout_ref.distillation_config.teacher_model.path="${FAMILY}/${TEACHER_MODEL}"
-    actor_rollout_ref.distillation_config.teacher_model.use_remove_padding=True
+    actor_rollout_ref.distillation.enabled=True
+    actor_rollout_ref.distillation.loss_mode=$DISTILLATION_LOSS_MODE
+    actor_rollout_ref.distillation.jsd_beta=0.5
+    actor_rollout_ref.distillation.topk=32
+    actor_rollout_ref.distillation.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE
+    actor_rollout_ref.distillation.log_prob_max_token_len_per_gpu=$MAX_TOKEN_LEN_PER_GPU
+    actor_rollout_ref.distillation.fsdp_config.param_offload=True
+    actor_rollout_ref.distillation.teacher_model.path="${FAMILY}/${TEACHER_MODEL}"
+    actor_rollout_ref.distillation.teacher_model.use_remove_padding=True
 )
 
 ACTOR=(
@@ -100,7 +100,7 @@ ALGORITHM=(
 )
 
 TRAINER=(
-    trainer.logger='["console"]'
+    trainer.logger='["console","wandb"]'
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXP_NAME
     trainer.n_gpus_per_node=$DP_SIZE

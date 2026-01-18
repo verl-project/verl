@@ -1118,7 +1118,7 @@ class RayPPOTrainer:
             # gather output
             log_probs = tu.get(output, "log_probs")
             distillation_inputs = extract_distillation_inputs(
-                stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation_config
+                stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation
             )
             # step 4. No padding to padding
             log_probs = no_padding_2_padding(log_probs, batch_td)
@@ -1144,7 +1144,7 @@ class RayPPOTrainer:
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
             distillation_inputs = extract_distillation_inputs(
-                stage=Stage.OLD_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation_config
+                stage=Stage.OLD_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation
             )
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
