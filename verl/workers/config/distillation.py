@@ -13,8 +13,10 @@
 # limitations under the License.
 
 from verl.base_config import BaseConfig
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+from .model import HFModelConfig
+
 
 __all__ = ["DistillationConfig"]
 
@@ -29,3 +31,4 @@ class DistillationConfig(BaseConfig):
     use_policy_loss: bool = False
     distillation_loss_coef: float = 1.0
     jsd_beta: float = 0.5
+    teacher_model: HFModelConfig = field(default_factory=BaseConfig)
