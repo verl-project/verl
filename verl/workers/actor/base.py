@@ -33,8 +33,6 @@ class BasePPOActor(ABC):
                 DictConfig (https://omegaconf.readthedocs.io/), but it can be any namedtuple in general.
         """
         super().__init__()
-        if config.distillation_config.enabled:
-            raise NotImplementedError("Distillation is not implemented for Legacy workers. Please set trainer.use_legacy_worker_impl=disable")
         self.config = config
 
     @abstractmethod

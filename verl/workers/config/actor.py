@@ -22,9 +22,9 @@ from verl.trainer.config import CheckpointConfig
 from verl.utils.profiler.config import ProfilerConfig
 
 from .engine import FSDPEngineConfig, McoreEngineConfig, VeOmniEngineConfig
+from .distillation import DistillationConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
-from .distillation import DistillationConfig
 
 __all__ = [
     "PolicyLossConfig",
