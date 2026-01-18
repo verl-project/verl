@@ -56,7 +56,7 @@ from verl.utils.megatron_utils import (
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
 from verl.utils.seqlen_balancing import restore_dynamic_batch
-from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
+from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig, DistillationConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import postprocess_batch_func, prepare_micro_batches
@@ -73,6 +73,7 @@ class MegatronEngine(BaseEngine):
         engine_config: McoreEngineConfig,
         optimizer_config: McoreOptimizerConfig,
         checkpoint_config: CheckpointConfig,
+        distillation_config: Optional[DistillationConfig],
     ):
         super().__init__()
 
@@ -80,6 +81,10 @@ class MegatronEngine(BaseEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
+        self.distillation_config = distillation_config
+        if distillation_config.enabled:
+            raise NotImplementedError("Distillation is not supported yet in MegatronEngine") # TODO: JacobHelwig
+
         assert self.engine_config.use_mbridge, "use_mbridge must be True"
         self._init_device_mesh()
 
