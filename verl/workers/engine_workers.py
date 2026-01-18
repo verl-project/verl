@@ -484,7 +484,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
 
         # 0. Setup distillation config for both actor and ref
-        distillation_config = self.config.get("distillation_config")
+        distillation_config = self.config.get("distillation")
         distillation_enabled = distillation_config is not None and distillation_config.enabled
         if distillation_enabled:
             with open_dict(distillation_config):

@@ -89,7 +89,7 @@ def need_distillation_policy(
     config: DictConfig,
 ) -> bool:
     """Given the config, do we need distillation policy."""
-    return config.actor_rollout_ref.distillation_config.enabled
+    return config.actor_rollout_ref.distillation.enabled
 
 def need_reward_model(
     config: DictConfig,
