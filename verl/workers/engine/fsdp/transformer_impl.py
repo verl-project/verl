@@ -951,6 +951,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     unpad_dim=0,
                     padding_size=pad_size,
                 )
+                if self.distillation_config.enabled:
+                    logits_rmpad = gather_outputs_and_unpad(
+                        logits_rmpad,
+                        gather_dim=0,
+                        unpad_dim=0,
+                        padding_size=pad_size,
+                    )
                 if calculate_entropy:
                     entropy_rmpad = gather_outputs_and_unpad(
                         entropy_rmpad,
