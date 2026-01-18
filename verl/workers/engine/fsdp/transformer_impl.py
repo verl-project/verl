@@ -95,7 +95,7 @@ class FSDPEngine(BaseEngine):
         engine_config: FSDPEngineConfig,
         optimizer_config: FSDPOptimizerConfig,
         checkpoint_config: CheckpointConfig,
-        disxztillation_config: Optional[DistillationConfig],
+        distillation_config: Optional[DistillationConfig],
     ):
         """
         Initialize the FSDPEngine.
@@ -973,7 +973,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if use_fused_kernels:
                 log_probs = output.log_probs[:, -response_length - 1 : -1]
                 entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
-
+                if self.distillation_config.enabled: 
+                    raise NotImplementedError("Distillation with fused kernels is not supported yet") # TODO: JacobHelwig
             else:
                 logits = output.logits  # (bsz, response_length, vocab_size)
                 temperature = output_args["temperature"]  # (bsz,)
@@ -1006,7 +1007,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         # TODO: test with not use_remove_padding and test with ulysses SP and test with dynamic bsz
         model_output.update(
             compute_distillation_inputs(
-                logits=output.logits, batch=micro_batch, cu_seqlens=cu_seqlens, config=self.distillation_config
+                logits=logits_rmpad, batch=micro_batch, cu_seqlens=cu_seqlens, config=self.distillation_config
             )
         )
 
