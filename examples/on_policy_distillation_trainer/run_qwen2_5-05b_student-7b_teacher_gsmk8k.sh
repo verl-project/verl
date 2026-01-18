@@ -22,8 +22,8 @@ FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
 TEACHER_MODEL=Qwen2.5-7B-Instruct
 
-# DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="jsd_topk"
+DISTILLATION_LOSS_MODE="k3"
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
 EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}"
@@ -34,7 +34,8 @@ TRAIN_PROMPT_BSZ=128
 MICRO_BATCH_SIZE=4
 MAX_TOKEN_LEN_PER_GPU=$(( MICRO_BATCH_SIZE * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
-DP_SIZE=2
+WORLD_SIZE=2
+SP_SIZE=1
 
 ############################ Paths ############################
 
@@ -74,6 +75,7 @@ DISTILLATION=(
     actor_rollout_ref.distillation.fsdp_config.param_offload=True
     actor_rollout_ref.distillation.teacher_model.path="${FAMILY}/${TEACHER_MODEL}"
     actor_rollout_ref.distillation.teacher_model.use_remove_padding=True
+    actor_rollout_ref.distillation.ulysses_sequence_parallel_size=$SP_SIZE
 )
 
 ACTOR=(
@@ -84,6 +86,7 @@ ACTOR=(
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP_SIZE
 )
 
 ROLLOUT=(
@@ -103,7 +106,7 @@ TRAINER=(
     trainer.logger='["console","wandb"]'
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXP_NAME
-    trainer.n_gpus_per_node=$DP_SIZE
+    trainer.n_gpus_per_node=$WORLD_SIZE
     trainer.nnodes=1
     trainer.save_freq=200
     trainer.test_freq=10
