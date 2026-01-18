@@ -55,8 +55,7 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
-def ppo_loss(config: ActorConfig, model_output: dict[str, torch.Tensor], data: TensorDict, dp_group=None):
-    distillation_config: DistillationConfig = config.distillation_config
+def ppo_loss(config: ActorConfig, distillation_config: DistillationConfig, model_output: dict[str, torch.Tensor], data: TensorDict, dp_group=None):
     distillation_enabled = distillation_config.enabled
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
@@ -141,6 +140,10 @@ def ppo_loss(config: ActorConfig, model_output: dict[str, torch.Tensor], data: T
 
     # distillation loss
     if distillation_enabled:
+        distillation_config.global_batch_info["dp_size"] = data["dp_size"]
+        distillation_config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
+        distillation_config.global_batch_info["global_batch_size"] = data["global_batch_size"]
+        distillation_config.global_batch_info["loss_scale_factor"] = distillation_config.loss_scale_factor
         teacher_log_probs = data["ref_log_prob"]
         student_log_probs = log_prob
         distillation_inputs = prepare_distillation_inputs(data=data, model_output=model_output, config=distillation_config)
@@ -151,7 +154,7 @@ def ppo_loss(config: ActorConfig, model_output: dict[str, torch.Tensor], data: T
             **distillation_inputs,
             response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
-            config=config,
+            config=distillation_config,
         )
         metrics.update(distillation_metrics)
         distillation_loss_coef = distillation_config.distillation_loss_coef if distillation_config.use_policy_loss else 1.0

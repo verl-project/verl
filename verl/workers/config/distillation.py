@@ -32,3 +32,10 @@ class DistillationConfig(BaseConfig):
     distillation_loss_coef: float = 1.0
     jsd_beta: float = 0.5
     teacher_model: HFModelConfig = field(default_factory=BaseConfig)
+    loss_clamp: Optional[float] = None
+
+    # Store global batch info for loss aggregation:
+    # dp_size: data parallel size
+    # batch_num_tokens: number of valid tokens in global batch
+    # global_batch_size: global batch size
+    global_batch_info: dict = field(default_factory=dict)
