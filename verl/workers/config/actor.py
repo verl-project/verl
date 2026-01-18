@@ -342,6 +342,8 @@ class VeOmniActorConfig(ActorConfig):
         """Validate VeOmni actor configuration parameters."""
         super().__post_init__()
         self.engine = self.veomni
+
+
 @dataclass
 class DistillationConfig(ActorConfig):
     """Configuration for on-policy distillation training.

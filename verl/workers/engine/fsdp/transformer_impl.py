@@ -914,7 +914,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if use_fused_kernels:
                 # temperature is singleton
                 if self.distillation_config.enabled:
-                    raise NotImplementedError("Distillation with fused kernels is not supported yet") # TODO: JacobHelwig
+                    raise NotImplementedError(
+                        "Distillation with fused kernels is not supported yet"
+                    )  # TODO: JacobHelwig
                 log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
             else:
@@ -980,8 +982,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if use_fused_kernels:
                 log_probs = output.log_probs[:, -response_length - 1 : -1]
                 entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
-                if self.distillation_config.enabled: 
-                    raise NotImplementedError("Distillation with fused kernels is not supported yet") # TODO: JacobHelwig
+                if self.distillation_config.enabled:
+                    raise NotImplementedError(
+                        "Distillation with fused kernels is not supported yet"
+                    )  # TODO: JacobHelwig
             else:
                 logits = output.logits  # (bsz, response_length, vocab_size)
                 temperature = output_args["temperature"]  # (bsz,)
