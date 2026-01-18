@@ -12,40 +12,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Contains utilities/classes for on-policy distillation 
+Contains utilities/classes for on-policy distillation
 """
 
-from typing import Union, Optional
+from enum import Enum
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
+
+from verl.trainer.distillation.losses import DistillationLossInfo
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import DistillationConfig
 from verl.workers.utils.padding import _slice_response_from_unpad_output
-from verl.trainer.distillation.losses import DistillationLossInfo
-from enum import Enum
+
 
 class Stage(Enum):
     """
     Stages for PPO training
     """
+
     OLD_LOG_PROB = "old_log_prob"
     REF_LOG_PROB = "ref_log_prob"
     ACTOR_UPDATE = "actor_update"
 
-def get_topk_keys(stage: Union[str, Stage]):
+
+def get_topk_keys(stage: str | Stage):
     """TODO: Docstring for get_topk_keys"""
     if isinstance(stage, Stage):
         stage = stage.value
     return f"{stage}_topk_log_probs", f"{stage}_topk_indices"
 
-def topk_logprobs_from_logits(logits: torch.Tensor, k: int, compute_topk: bool, gather_topk: bool, topk_indices: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:    
+
+def topk_logprobs_from_logits(
+    logits: torch.Tensor, k: int, compute_topk: bool, gather_topk: bool, topk_indices: Optional[torch.Tensor] = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """TODO: Docstring for topk_logprobs_from_logits"""
 
     logprobs = F.log_softmax(logits, dim=-1)
     topk_logprobs_ls = []
     topk_logprobs_indices_ls = []
-    
+
     # Gather logits for provided indices.
     if gather_topk:
         if topk_indices is None:
@@ -53,7 +61,9 @@ def topk_logprobs_from_logits(logits: torch.Tensor, k: int, compute_topk: bool, 
         if topk_indices.is_nested:
             topk_indices = topk_indices.values()
         if topk_indices.shape[-1] not in [k, 2 * k]:
-            raise ValueError(f"Expected topk_indices to have shape [-1, {k}] or [-1, {2 * k}], but got {topk_indices.shape}.")
+            raise ValueError(
+                f"Expected topk_indices to have shape [-1, {k}] or [-1, {2 * k}], but got {topk_indices.shape}."
+            )
         topk_logprobs = torch.gather(logprobs, dim=-1, index=topk_indices)
         topk_logprobs_ls.append(topk_logprobs)
         topk_logprobs_indices_ls.append(topk_indices)
@@ -69,14 +79,17 @@ def topk_logprobs_from_logits(logits: torch.Tensor, k: int, compute_topk: bool, 
     topk_logprobs = torch.cat(topk_logprobs_ls, dim=-1)
     topk_indices = torch.cat(topk_logprobs_indices_ls, dim=-1)
     if topk_logprobs.shape != topk_indices.shape:
-        raise ValueError(f"Expected topk_logprobs and topk_indices to have the same shape, but got {topk_logprobs.shape} and {topk_indices.shape}.")
+        raise ValueError(
+            f"Expected topk_logprobs and topk_indices to have the same shape, but got {topk_logprobs.shape} and {topk_indices.shape}."
+        )
     if topk_logprobs.shape[-1] not in [k, 2 * k]:
-        raise ValueError(f"Expected topk_logprobs to have shape [-1, {k}] or [-1, {2 * k}], but got {topk_logprobs.shape}.")
+        raise ValueError(
+            f"Expected topk_logprobs to have shape [-1, {k}] or [-1, {2 * k}], but got {topk_logprobs.shape}."
+        )
 
     # If we have 2 * k logprobs at this point, it means that we are gathering top-k logprobs from both teacher and student.
-    # We need to de-duplicate to handle overlap between teacher and student top-k logprobs.  
+    # We need to de-duplicate to handle overlap between teacher and student top-k logprobs.
     if topk_logprobs.shape[-1] == 2 * k:
-
         # Make sure indices are sorted so that we can identify duplicates.
         topk_indices_diff = topk_indices.diff(dim=-1)
         if topk_indices_diff.lt(0).any():
@@ -92,7 +105,10 @@ def topk_logprobs_from_logits(logits: torch.Tensor, k: int, compute_topk: bool, 
 
     return topk_logprobs, topk_indices
 
-def compute_distillation_inputs(logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig):
+
+def compute_distillation_inputs(
+    logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig
+):
     """
     Computes the distillation inputs for a given stage of PPO training. Called inside engine.
     """
@@ -104,14 +120,22 @@ def compute_distillation_inputs(logits: torch.Tensor, batch: TensorDict, cu_seql
     elif loss_info.use_topk:
         return compute_topk_distillation_inputs(logits=logits, batch=batch, cu_seqlens=cu_seqlens, config=config)
 
-def compute_full_distillation_inputs(logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig):
-    """ TODO: Docstring"""
-    raise NotImplementedError("Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead.")
 
-def compute_topk_distillation_inputs(logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig):
+def compute_full_distillation_inputs(
+    logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig
+):
+    """TODO: Docstring"""
+    raise NotImplementedError(
+        "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
+    )
+
+
+def compute_topk_distillation_inputs(
+    logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig
+):
     """TODO: Docstring"""
     # Gather inputs for top-k distillation losses.
-    logits = logits.squeeze(0)  
+    logits = logits.squeeze(0)
     topk = config.topk
     loss_mode = config.loss_mode
     loss_info = DistillationLossInfo.from_loss_name(loss_mode)
@@ -135,9 +159,13 @@ def compute_topk_distillation_inputs(logits: torch.Tensor, batch: TensorDict, cu
                 _, student_topk_indices_key = get_topk_keys(Stage.OLD_LOG_PROB)
                 topk_indices = tu.get(batch, student_topk_indices_key)
                 if topk_indices is None:
-                    raise ValueError(f"Expected student topk indices to be present for teacher log prob stage, but got None with {loss_mode=}.")
+                    raise ValueError(
+                        f"Expected student topk indices to be present for teacher log prob stage, but got None with {loss_mode=}."
+                    )
                 if topk_indices.shape[-1] != topk:
-                    raise ValueError(f"Expected student topk indices to have shape [-1, {topk}], but got {topk_indices.shape} with {loss_mode=}.")
+                    raise ValueError(
+                        f"Expected student topk indices to have shape [-1, {topk}], but got {topk_indices.shape} with {loss_mode=}."
+                    )
         case Stage.ACTOR_UPDATE:
             # 3. Second pass with student model
             if use_student_topk or use_teacher_topk:
@@ -145,29 +173,44 @@ def compute_topk_distillation_inputs(logits: torch.Tensor, batch: TensorDict, cu
                 _, teacher_topk_indices_key = get_topk_keys(Stage.REF_LOG_PROB)
                 topk_indices = tu.get(batch, teacher_topk_indices_key)
                 if topk_indices is None:
-                    raise ValueError(f"Expected teacher topk indices to be present for student update stage, but got None with {loss_mode=}.") 
+                    raise ValueError(
+                        f"Expected teacher topk indices to be present for student update stage, but got None with {loss_mode=}."
+                    )
                 if use_student_topk and use_teacher_topk:
                     if topk_indices.shape[-1] != 2 * topk:
-                        raise ValueError(f"Expected teacher topk indices to have shape [-1, {2 * topk}], but got {topk_indices.shape} with {loss_mode=}.")
+                        raise ValueError(
+                            f"Expected teacher topk indices to have shape [-1, {2 * topk}], but got {topk_indices.shape} with {loss_mode=}."
+                        )
                 elif topk_indices.shape[-1] != topk:
-                    raise ValueError(f"Expected teacher topk indices to have shape [-1, {topk}], but got {topk_indices.shape} with {loss_mode=}.")
+                    raise ValueError(
+                        f"Expected teacher topk indices to have shape [-1, {topk}], but got {topk_indices.shape} with {loss_mode=}."
+                    )
         case _:
             raise ValueError(f"Unexpected stage: {stage}")
-    topk_logprobs, topk_indices = topk_logprobs_from_logits(logits=logits, k=topk, compute_topk=should_compute_topk, gather_topk=should_gather_topk, topk_indices=topk_indices)
+    topk_logprobs, topk_indices = topk_logprobs_from_logits(
+        logits=logits,
+        k=topk,
+        compute_topk=should_compute_topk,
+        gather_topk=should_gather_topk,
+        topk_indices=topk_indices,
+    )
     topk_logprobs_key, topk_indices_key = get_topk_keys(stage)
     return {
         topk_logprobs_key: torch.nested.nested_tensor_from_jagged(topk_logprobs, cu_seqlens),
         topk_indices_key: torch.nested.nested_tensor_from_jagged(topk_indices, cu_seqlens),
     }
 
+
 def extract_distillation_inputs(stage: Stage, output: TensorDict, config: DistillationConfig):
     """
     TODO: Docstring
-    Used in trainer to extract distillation loss inputs from model output for a given stage. 
+    Used in trainer to extract distillation loss inputs from model output for a given stage.
     """
     distillation_info = DistillationLossInfo.from_loss_name(config.loss_mode)
     if distillation_info.use_full:
-        raise NotImplementedError("Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead.")
+        raise NotImplementedError(
+            "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
+        )
     elif distillation_info.use_topk:
         topk_logprobs_key, topk_indices_key = get_topk_keys(stage)
         topk_logprobs = tu.get(output, topk_logprobs_key)
@@ -179,6 +222,7 @@ def extract_distillation_inputs(stage: Stage, output: TensorDict, config: Distil
         else:
             return {}
 
+
 def prepare_distillation_inputs(data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig):
     """
     TODO: Docstring
@@ -186,10 +230,16 @@ def prepare_distillation_inputs(data: TensorDict, model_output: dict[str, torch.
     """
     distillation_info = DistillationLossInfo.from_loss_name(config.loss_mode)
     if distillation_info.use_full:
-        raise NotImplementedError("Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead.")
+        raise NotImplementedError(
+            "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
+        )
     elif distillation_info.use_topk:
-        teacher_topk_logprobs, teacher_topk_indices = unpad_distillation_logprobs(topk_outputs=data, data=data, stage=Stage.REF_LOG_PROB, info=distillation_info)
-        student_topk_logprobs, student_topk_indices = unpad_distillation_logprobs(topk_outputs=model_output, data=data, stage=Stage.ACTOR_UPDATE, info=distillation_info)
+        teacher_topk_logprobs, teacher_topk_indices = unpad_distillation_logprobs(
+            topk_outputs=data, data=data, stage=Stage.REF_LOG_PROB, info=distillation_info
+        )
+        student_topk_logprobs, student_topk_indices = unpad_distillation_logprobs(
+            topk_outputs=model_output, data=data, stage=Stage.ACTOR_UPDATE, info=distillation_info
+        )
         return dict(
             teacher_topk_logprobs=teacher_topk_logprobs,
             teacher_topk_indices=teacher_topk_indices,
@@ -197,10 +247,15 @@ def prepare_distillation_inputs(data: TensorDict, model_output: dict[str, torch.
             student_topk_indices=student_topk_indices,
         )
 
-def unpad_distillation_logprobs(topk_outputs: Union[TensorDict, dict[str, torch.Tensor]], data: TensorDict, stage: Stage, info: DistillationLossInfo):
+
+def unpad_distillation_logprobs(
+    topk_outputs: TensorDict | dict[str, torch.Tensor], data: TensorDict, stage: Stage, info: DistillationLossInfo
+):
     """TODO: Docstring"""
     if info.use_full:
-        raise NotImplementedError("Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead.")
+        raise NotImplementedError(
+            "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
+        )
     elif info.use_topk:
         topk_logprobs_key, topk_indices_key = get_topk_keys(stage)
         topk_logprobs, topk_indices = topk_outputs[topk_logprobs_key], topk_outputs[topk_indices_key]
