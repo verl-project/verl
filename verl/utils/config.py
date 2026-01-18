@@ -217,7 +217,7 @@ def validate_config(
 
     # check that distillation is not enabled with legacy worker implementation
     if use_distillation_policy and config.trainer.use_legacy_worker_impl != "disable":
-        raise ValueError(
+        raise NotImplementedError(
             "Distillation is not supported with legacy worker implementation. Please set trainer.use_legacy_worker_impl to 'disable' to use distillation."
         )
 
