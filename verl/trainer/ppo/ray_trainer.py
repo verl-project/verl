@@ -1199,7 +1199,7 @@ class RayPPOTrainer:
                 output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
             # gather output
             log_probs = tu.get(output, "log_probs")
-            distillation_inputs = extract_distillation_inputs(stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.ref.distillation_config)
+            distillation_inputs = extract_distillation_inputs(stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation_config)
             # step 4. No padding to padding
             log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
@@ -1223,7 +1223,7 @@ class RayPPOTrainer:
             # gather output
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
-            distillation_inputs = extract_distillation_inputs(stage=Stage.OLD_LOG_PROB, output=output, config=self.config.actor_rollout_ref.actor.distillation_config)
+            distillation_inputs = extract_distillation_inputs(stage=Stage.OLD_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation_config)
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
             entropy = no_padding_2_padding(entropy, batch_td)

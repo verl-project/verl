@@ -36,6 +36,9 @@ defaults:
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
 
+  # distillation config
+  - distillation@actor_rollout_ref.distillation_config: distillation 
+
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
   - _self_

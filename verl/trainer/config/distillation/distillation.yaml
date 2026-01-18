@@ -1,6 +1,16 @@
 # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
 _target_: verl.workers.config.DistillationConfig
 
+# specify the default per-component configs
+defaults:
+
+  # Model config.
+  - ../model@teacher_model: hf_model
+
+  # load the reference default config, then apply the fields in the current yaml
+  # self config override anything above
+  - _self_
+
 # Whether to enable distillation.
 enabled: false
 
