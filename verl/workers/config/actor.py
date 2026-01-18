@@ -323,6 +323,15 @@ class DistillationConfig(ActorConfig):
     teacher_model: HFModelConfig = field(default_factory=BaseConfig)
     loss_clamp: Optional[float] = None
 
+    # Store distillation loss settings for computing the specified loss_mode
+    # Not set by user, populated at runtime
+    loss_settings: Optional[dict] = None
+
+    def __post_init__(self):
+        super().__post_init__()    
+        self._mutable_fields.add("loss_settings")
+
+
 @dataclass
 class FSDPDistillationConfig(FSDPActorConfig, DistillationConfig):
     """Configuration for distillation training with FSDP.
