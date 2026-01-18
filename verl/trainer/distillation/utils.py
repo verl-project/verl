@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from verl.trainer.distillation.losses import DistillationLossInfo
+from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import DistillationConfig
 from verl.workers.utils.padding import _slice_response_from_unpad_output
@@ -114,10 +114,10 @@ def compute_distillation_inputs(
     """
     if not config.enabled:
         return {}
-    loss_info = DistillationLossInfo.from_loss_name(config.loss_mode)
-    if loss_info.use_full:
+    distillation_settings: DistillationLossSettings = config.loss_settings
+    if distillation_settings.use_full:
         return compute_full_distillation_inputs(logits=logits, batch=batch, cu_seqlens=cu_seqlens, config=config)
-    elif loss_info.use_topk:
+    elif distillation_settings.use_topk:
         return compute_topk_distillation_inputs(logits=logits, batch=batch, cu_seqlens=cu_seqlens, config=config)
 
 
@@ -138,11 +138,11 @@ def compute_topk_distillation_inputs(
     logits = logits.squeeze(0)
     topk = config.topk
     loss_mode = config.loss_mode
-    loss_info = DistillationLossInfo.from_loss_name(loss_mode)
+    distillation_settings: DistillationLossSettings = config.loss_settings
     stage = batch["stage"]
 
-    use_student_topk = loss_info.use_student_topk
-    use_teacher_topk = loss_info.use_teacher_topk
+    use_student_topk = distillation_settings.use_student_topk
+    use_teacher_topk = distillation_settings.use_teacher_topk
     should_compute_topk = should_gather_topk = False
     topk_indices = None
     match stage:
@@ -206,12 +206,12 @@ def extract_distillation_inputs(stage: Stage, output: TensorDict, config: Distil
     TODO: Docstring
     Used in trainer to extract distillation loss inputs from model output for a given stage.
     """
-    distillation_info = DistillationLossInfo.from_loss_name(config.loss_mode)
-    if distillation_info.use_full:
+    distillation_settings = get_distillation_loss_settings(config.loss_mode)
+    if distillation_settings.use_full:
         raise NotImplementedError(
             "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
         )
-    elif distillation_info.use_topk:
+    elif distillation_settings.use_topk:
         topk_logprobs_key, topk_indices_key = get_topk_keys(stage)
         topk_logprobs = tu.get(output, topk_logprobs_key)
         if topk_logprobs is not None:
@@ -228,17 +228,17 @@ def prepare_distillation_inputs(data: TensorDict, model_output: dict[str, torch.
     TODO: Docstring
     Used in ppo_loss to prepare distillation loss inputs for distillation loss computation.
     """
-    distillation_info = DistillationLossInfo.from_loss_name(config.loss_mode)
-    if distillation_info.use_full:
+    distillation_settings: DistillationLossSettings = config.loss_settings
+    if distillation_settings.use_full:
         raise NotImplementedError(
             "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
         )
-    elif distillation_info.use_topk:
+    elif distillation_settings.use_topk:
         teacher_topk_logprobs, teacher_topk_indices = unpad_distillation_logprobs(
-            topk_outputs=data, data=data, stage=Stage.REF_LOG_PROB, info=distillation_info
+            topk_outputs=data, data=data, stage=Stage.REF_LOG_PROB, distillation_settings=distillation_settings
         )
         student_topk_logprobs, student_topk_indices = unpad_distillation_logprobs(
-            topk_outputs=model_output, data=data, stage=Stage.ACTOR_UPDATE, info=distillation_info
+            topk_outputs=model_output, data=data, stage=Stage.ACTOR_UPDATE, distillation_settings=distillation_settings
         )
         return dict(
             teacher_topk_logprobs=teacher_topk_logprobs,
@@ -249,14 +249,14 @@ def prepare_distillation_inputs(data: TensorDict, model_output: dict[str, torch.
 
 
 def unpad_distillation_logprobs(
-    topk_outputs: TensorDict | dict[str, torch.Tensor], data: TensorDict, stage: Stage, info: DistillationLossInfo
+    topk_outputs: TensorDict | dict[str, torch.Tensor], data: TensorDict, stage: Stage, distillation_settings: DistillationLossSettings
 ):
     """TODO: Docstring"""
-    if info.use_full:
+    if distillation_settings.use_full:
         raise NotImplementedError(
             "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
         )
-    elif info.use_topk:
+    elif distillation_settings.use_topk:
         topk_logprobs_key, topk_indices_key = get_topk_keys(stage)
         topk_logprobs, topk_indices = topk_outputs[topk_logprobs_key], topk_outputs[topk_indices_key]
         topk_logprobs_unpad = _slice_response_from_unpad_output(topk_logprobs, data)

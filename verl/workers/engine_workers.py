@@ -51,6 +51,7 @@ from verl.workers.config import (
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
+from verl.trainer.distillation import get_distillation_loss_settings
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -490,7 +491,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 distillation_config.use_dynamic_bsz = distillation_config.pop("log_prob_use_dynamic_bsz", False)
                 distillation_config.ppo_max_token_len_per_gpu = distillation_config.pop("log_prob_max_token_len_per_gpu", None)
                 distillation_config.model_config = distillation_config.pop("teacher_model", None)
+            loss_mode = distillation_config.loss_mode
             distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
+            distillation_config.loss_settings = get_distillation_loss_settings(loss_mode)
 
         # 1. build reference/distillation teacher model
         if "ref" in self.role:
