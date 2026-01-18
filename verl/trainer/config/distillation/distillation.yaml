@@ -28,3 +28,6 @@ distillation_loss_coef: 1.0
 
 # Jensen-Shannon Divergence beta for jsd loss mode.
 jsd_beta: 0.5
+
+# Optional clamp value for distillation loss. If null, no clamping is applied.
+loss_clamp: null

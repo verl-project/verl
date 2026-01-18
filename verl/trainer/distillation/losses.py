@@ -21,16 +21,17 @@ from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.metric import Metric, AggregationType 
 from dataclasses import dataclass
 
-# TODO: Update args
 DistillationLossFn = Callable[
     [
-        torch.Tensor,  # old_log_prob
-        torch.Tensor,  # log_prob
-        torch.Tensor,  # advantages
+        torch.Tensor,  # teacher_log_probs
+        torch.Tensor,  # student_log_probs
+        torch.Tensor,  # teacher_topk_logprobs
+        torch.Tensor,  # student_topk_logprobs
+        torch.Tensor,  # teacher_topk_indices
+        torch.Tensor,  # student_topk_indices
         torch.Tensor,  # response_mask
-        str,  # loss_agg_mode
-        Optional[DictConfig | ActorConfig],  # config
-        torch.Tensor | None,  # rollout_log_probs
+        DistillationConfig,   # config
+        str,           # loss_agg_mode
     ],
     tuple[torch.Tensor, dict[str, Any]],
 ]
@@ -223,9 +224,7 @@ def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_m
         case _:
             raise ValueError(f"Unsupported loss mode: {loss_mode}. Supported modes are: ['forward', 'reverse']")
 
-@register_distillation_loss(DistillationLossInfo(names="forward_kl_full", use_full=True))  # type: ignore[arg-type]
-@register_distillation_loss(DistillationLossInfo(names="reverse_kl_full", use_full=True))  # type: ignore[arg-type]
-@register_distillation_loss(DistillationLossInfo(names="jsd_full", use_full=True))  # type: ignore[arg-type]
+@register_distillation_loss(DistillationLossInfo(names=["forward_kl_full", "reverse_kl_full", "jsd_full"], use_full=True))  # type: ignore[arg-type]
 @register_distillation_loss(DistillationLossInfo(names="forward_kl_topk", use_teacher_topk=True))  # type: ignore[arg-type]
 @register_distillation_loss(DistillationLossInfo(names="reverse_kl_topk", use_student_topk=True))  # type: ignore[arg-type]
 @register_distillation_loss(DistillationLossInfo(names="jsd_topk", use_student_topk=True, use_teacher_topk=True))  # type: ignore[arg-type]
@@ -241,9 +240,7 @@ def compute_distillation_loss_jsd(
     loss_agg_mode: str = "token-mean",
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
-    Compute the distillation loss and related metrics for KL div wrt the student using top-k log probs.
-
-    TODO: add clamping
+    Compute the distillation loss and related metrics for JSD and variants using top-k/full log probs.
 
     Args:
         teacher_log_probs (torch.Tensor):
@@ -260,8 +257,8 @@ def compute_distillation_loss_jsd(
             Top-k action indices under the student policy, shape (batch_size, response_length, topk).
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
-        config: `(verl.trainer.config.ActorConfig)`:
-            config for the actor.
+        config: `(verl.trainer.config.DistillationConfig)`:
+            distillation config.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
         response_mask (torch.Tensor):
@@ -270,9 +267,9 @@ def compute_distillation_loss_jsd(
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
     """
     assert config is not None
-    distillation_config: DistillationConfig = config.distillation_config
-    loss_mode = distillation_config.loss_mode
+    loss_mode = config.loss_mode
     loss_info = DistillationLossInfo.from_loss_name(loss_mode)
+    distillation_metrics = {}
     if loss_info.use_full:
         # TODO (JacobHelwig)
         raise NotImplementedError
@@ -281,7 +278,7 @@ def compute_distillation_loss_jsd(
             raise ValueError(
                 f"Expected teacher and student topk indices to be the same, but got {teacher_topk_indices} and {student_topk_indices}."
             )
-        topk = distillation_config.topk
+        topk = config.topk
         if loss_info.use_student_topk and loss_info.use_teacher_topk:
             expected_num_logprobs = 2 * topk
         elif loss_info.use_student_topk or loss_info.use_teacher_topk:
@@ -300,21 +297,29 @@ def compute_distillation_loss_jsd(
         teacher_mass = teacher_topk_logprobs.exp().sum(dim=-1)[response_mask]
         distillation_metrics = {
             "distillation/student_mass": student_mass.mean().item(),
-            "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min().item()),
-            "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max().item()),
+            "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
+            "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
             "distillation/teacher_mass": teacher_mass.mean().item(), 
-            "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min().item()),
-            "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max().item()),
+            "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
+            "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
         }
-    match distillation_config.loss_mode:
+    match config.loss_mode:
         case "forward_kl_topk" | "forward_kl_full":
             distillation_losses = kullback_leibler_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward")
         case "reverse_kl_topk" | "reverse_kl_full":
             distillation_losses = kullback_leibler_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse")
         case "jsd_topk" | "jsd_full":
-            distillation_losses = jensen_shannon_divergence(log_q=student_topk_logprobs.clone(), log_p=teacher_topk_logprobs.clone(), beta=distillation_config.jsd_beta)
+            distillation_losses = jensen_shannon_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=config.jsd_beta)
         case _:
-            raise NotImplementedError(f"Unsupported distillation loss mode: {distillation_config.loss_mode}")
+            raise NotImplementedError(f"Unsupported distillation loss mode: {config.loss_mode}")
+    distillation_metrics.update(
+        {
+            "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses.min()),
+            "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses.max()),
+        }
+    )
+    if config.loss_clamp is not None:
+        distillation_losses = distillation_losses.clamp_max(config.loss_clamp)
     distillation_loss = agg_loss(
         loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
@@ -322,3 +327,31 @@ def compute_distillation_loss_jsd(
     return distillation_loss, distillation_metrics
 
 
+@register_distillation_loss(DistillationLossInfo(names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"]))
+def compute_distillation_loss_kl_estimator(
+    teacher_log_probs: torch.Tensor,
+    student_log_probs: torch.Tensor,
+    teacher_topk_logprobs: torch.Tensor,
+    student_topk_logprobs: torch.Tensor,
+    teacher_topk_indices: torch.Tensor,
+    student_topk_indices: torch.Tensor,
+    response_mask: torch.Tensor,
+    config: DistillationConfig,
+    loss_agg_mode: str = "token-mean",
+):
+    """Compute the distillation loss and related metrics using KL estimator"""
+    assert config is not None
+    log_p, log_q = clamp_log_probs(log_p, log_q)
+    distillation_losses = kl_penalty(logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode)
+    distillation_metrics = {
+        "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses.min()),
+        "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses.max()),
+    }
+    if config.loss_clamp is not None:
+        distillation_losses = distillation_losses.clamp_max(config.loss_clamp)
+
+    distillation_loss = agg_loss(
+        loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+    return distillation_loss, distillation_metrics
+    
