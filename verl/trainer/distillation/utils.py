@@ -46,7 +46,7 @@ def get_topk_keys(stage: str | Stage):
 
 
 def topk_logprobs_from_logits(
-    logits: torch.Tensor, k: int, compute_topk: bool, gather_topk: bool, topk_indices: Optional[torch.Tensor] = None
+    logits: torch.Tensor, k: int, compute_topk: bool, topk_indices: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """TODO: Docstring for topk_logprobs_from_logits"""
 
@@ -55,9 +55,7 @@ def topk_logprobs_from_logits(
     topk_logprobs_indices_ls = []
 
     # Gather logits for provided indices.
-    if gather_topk:
-        if topk_indices is None:
-            raise ValueError("Expected topk_indices to be provided when gather_topk is True, but got None.")
+    if topk_indices is not None:
         if topk_indices.is_nested:
             topk_indices = topk_indices.values()
         if topk_indices.shape[-1] not in [k, 2 * k]:
@@ -67,8 +65,6 @@ def topk_logprobs_from_logits(
         topk_logprobs = torch.gather(logprobs, dim=-1, index=topk_indices)
         topk_logprobs_ls.append(topk_logprobs)
         topk_logprobs_indices_ls.append(topk_indices)
-    elif topk_indices is not None:
-        raise ValueError("Expected topk_indices to be None when gather_topk is False, but got provided indices.")
 
     # Compute top-k logprobs.
     if compute_topk:
@@ -146,7 +142,7 @@ def compute_topk_distillation_inputs(
 
     use_student_topk = distillation_settings.use_student_topk
     use_teacher_topk = distillation_settings.use_teacher_topk
-    should_compute_topk = should_gather_topk = False
+    should_compute_topk = False
     topk_indices = None
     match stage:
         case Stage.OLD_LOG_PROB:
@@ -158,7 +154,6 @@ def compute_topk_distillation_inputs(
             if use_teacher_topk:
                 should_compute_topk = True
             if use_student_topk:
-                should_gather_topk = True
                 _, student_topk_indices_key = get_topk_keys(Stage.OLD_LOG_PROB)
                 topk_indices = tu.get(batch, student_topk_indices_key)
                 if topk_indices is None:
@@ -172,7 +167,6 @@ def compute_topk_distillation_inputs(
         case Stage.ACTOR_UPDATE:
             # 3. Second pass with student model
             if use_student_topk or use_teacher_topk:
-                should_gather_topk = True
                 _, teacher_topk_indices_key = get_topk_keys(Stage.REF_LOG_PROB)
                 topk_indices = tu.get(batch, teacher_topk_indices_key)
                 if topk_indices is None:
@@ -194,7 +188,6 @@ def compute_topk_distillation_inputs(
         logits=logits,
         k=topk,
         compute_topk=should_compute_topk,
-        gather_topk=should_gather_topk,
         topk_indices=topk_indices,
     )
     topk_logprobs_key, topk_indices_key = get_topk_keys(stage)
