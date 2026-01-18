@@ -495,8 +495,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
-            ref_config.model_config = model_config
-            distillation_config: DistillationConfig = omega_conf_to_dataclass(ref_config.distillation_config)
+            distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation_config)
+            if distillation_config.enabled:
+                teacher_model_config: HFModelConfig = omega_conf_to_dataclass(distillation_config.teacher_model)
+                ref_config.model_config = teacher_model_config
+            else:
+                ref_config.model_config = model_config
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
@@ -523,7 +527,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 2. build actor model
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
-            distillation_config: DistillationConfig = omega_conf_to_dataclass(actor_config.distillation_config)
+            distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation_config)
             actor_config.model_config = model_config
 
             distillation_config = self.distillation_config

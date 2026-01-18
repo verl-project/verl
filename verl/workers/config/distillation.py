@@ -16,6 +16,8 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Optional
+from .model import HFModelConfig
+
 
 from verl.base_config import BaseConfig
 
