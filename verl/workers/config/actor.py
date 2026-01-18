@@ -371,8 +371,31 @@ class TorchTitanActorConfig(ActorConfig):
         self.engine = self.torchtitan
 @dataclass
 class DistillationConfig(ActorConfig):
-    """Configuration for distillation training.
-    TODO
+    """Configuration for on-policy distillation training.
+
+    Extends ActorConfig with settings for distilling knowledge from a teacher model
+    to a student model during reinforcement learning training.
+
+    Args:
+        enabled (bool):
+            Whether distillation is enabled.
+        loss_mode (str):
+            Distillation loss function to use.
+        topk (int, optional):
+            Number of top tokens to consider for top-k distillation losses.
+        use_policy_loss (bool):
+            Whether to include policy gradient loss alongside distillation loss.
+        distillation_loss_coef (float):
+            Coefficient for distillation loss when combined with policy loss.
+        jsd_beta (float):
+            Interpolation weight for JSD loss. When beta=0, behaves like forward KL.
+            When beta=1, behaves like reverse KL.
+        teacher_model (HFModelConfig):
+            Configuration for the teacher model.
+        loss_clamp (float, optional):
+            Maximum value to clamp distillation loss. If None, no clamping is applied.
+        loss_settings (DistillationLossSettings, optional):
+            Runtime-populated settings based on loss_mode. Not set by user.
     """
 
     enabled: bool = False
@@ -389,14 +412,13 @@ class DistillationConfig(ActorConfig):
     loss_settings: Optional[dict] = None
 
     def __post_init__(self):
-        super().__post_init__()    
+        super().__post_init__()
         self._mutable_fields.add("loss_settings")
 
 
 @dataclass
 class FSDPDistillationConfig(FSDPActorConfig, DistillationConfig):
-    """Configuration for distillation training with FSDP.
-    TODO
-    """
+    """Configuration for on-policy distillation training with FSDP."""
+
     def __post_init__(self):
         super().__post_init__()
