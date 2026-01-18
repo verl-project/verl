@@ -16,8 +16,8 @@
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.trainer.distillation import get_distillation_loss_fn, prepare_distillation_inputs
+from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
@@ -55,7 +55,13 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
-def ppo_loss(config: ActorConfig, distillation_config: DistillationConfig, model_output: dict[str, torch.Tensor], data: TensorDict, dp_group=None):
+def ppo_loss(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict[str, torch.Tensor],
+    data: TensorDict,
+    dp_group=None,
+):
     distillation_enabled = distillation_config.enabled
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
@@ -91,7 +97,6 @@ def ppo_loss(config: ActorConfig, distillation_config: DistillationConfig, model
         old_log_prob = data["old_log_probs"]
         advantages = data["advantages"]
         rollout_is_weights = data.get("rollout_is_weights", None)
-
 
         loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
@@ -143,10 +148,12 @@ def ppo_loss(config: ActorConfig, distillation_config: DistillationConfig, model
         distillation_config.global_batch_info["dp_size"] = data["dp_size"]
         distillation_config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
         distillation_config.global_batch_info["global_batch_size"] = data["global_batch_size"]
-        distillation_config.global_batch_info["loss_scale_factor"] = distillation_config.loss_scale_factor
+        distillation_config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
         teacher_log_probs = data["ref_log_prob"]
         student_log_probs = log_prob
-        distillation_inputs = prepare_distillation_inputs(data=data, model_output=model_output, config=distillation_config)
+        distillation_inputs = prepare_distillation_inputs(
+            data=data, model_output=model_output, config=distillation_config
+        )
         distillation_loss_fn = get_distillation_loss_fn(distillation_config.loss_mode)
         distillation_loss, distillation_metrics = distillation_loss_fn(
             teacher_log_probs=teacher_log_probs,
@@ -157,10 +164,11 @@ def ppo_loss(config: ActorConfig, distillation_config: DistillationConfig, model
             config=distillation_config,
         )
         metrics.update(distillation_metrics)
-        distillation_loss_coef = distillation_config.distillation_loss_coef if distillation_config.use_policy_loss else 1.0
+        distillation_loss_coef = (
+            distillation_config.distillation_loss_coef if distillation_config.use_policy_loss else 1.0
+        )
         policy_loss += distillation_loss * distillation_loss_coef
         metrics["distillation/loss"] = Metric(value=distillation_loss, aggregation=metric_aggregation)
-        
 
     return policy_loss, metrics
 
