@@ -174,7 +174,6 @@ class ActorConfig(BaseConfig):
     use_fused_kernels: bool = False
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     engine: BaseConfig = field(default_factory=BaseConfig)
-    distillation_config: DistillationConfig = field(default_factory=DistillationConfig)
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)

@@ -85,6 +85,11 @@ def need_teacher_policy(
     """Given the config, do we need distillation policy."""
     return is_distillation_enabled(config.get("distillation"))
 
+def need_distillation_policy(
+    config: DictConfig,
+) -> bool:
+    """Given the config, do we need distillation policy."""
+    return config.actor_rollout_ref.distillation_config.enabled
 
 def need_reward_model(
     config: DictConfig,

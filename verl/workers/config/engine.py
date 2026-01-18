@@ -20,7 +20,6 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 
 from ...utils.profiler import ProfilerConfig
-from .distillation import DistillationConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 

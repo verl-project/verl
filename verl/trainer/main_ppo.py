@@ -141,7 +141,7 @@ class TaskRunner:
             ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
             # NOTE: In new model engine, ref policy and actor rollout are in same ActorRolloutRefWorker,
             # while in legacy model engine, ref policy is in a separate ActorRolloutRefWorker.
-            if need_reference_policy(config) and not ref_in_actor:
+            if (need_reference_policy(config) and not ref_in_actor) or need_distillation_policy(config):
                 role = Role.ActorRolloutRef
             else:
                 role = Role.ActorRollout
@@ -287,7 +287,7 @@ class TaskRunner:
         if use_legacy_worker_impl == "disable":
             return
 
-        if need_reference_policy(config):
+        if need_reference_policy(config) or need_distillation_policy(config):
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
 
@@ -325,6 +325,7 @@ class TaskRunner:
         # validate config
         validate_config(
             config=config,
+            use_distillation_policy=need_distillation_policy(config),
             use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )
