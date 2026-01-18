@@ -25,7 +25,6 @@ from verl.utils.qat import QATConfig
 from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig, VeOmniEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
-from .distillation import DistillationConfig
 
 __all__ = [
     "PolicyLossConfig",

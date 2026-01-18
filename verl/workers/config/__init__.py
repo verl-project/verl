@@ -21,7 +21,6 @@ from .model import *  # noqa: F401
 from .optimizer import *  # noqa: F401
 from .reward import *  # noqa: F401
 from .rollout import *  # noqa: F401
-from .distillation import *  # noqa: F401
 
 __all__ = (
     actor.__all__

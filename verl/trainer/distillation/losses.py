@@ -35,6 +35,7 @@ DistillationLossFn = Callable[
 ]
 
 
+
 @dataclass
 class DistillationLossSettings(BaseConfig):
     """
@@ -79,6 +80,7 @@ def register_distillation_loss(
 
     return decorator
 
+
 def use_student_topk_logprobs(loss_name: str) -> bool:
     """Check if the distillation loss function with the given name uses student top-k log probabilities.
 
@@ -90,6 +92,7 @@ def use_student_topk_logprobs(loss_name: str) -> bool:
     """
     return loss_name in USE_STUDENT_TOPK_REGISTRY
 
+
 def use_teacher_topk_logprobs(loss_name: str) -> bool:
     """Check if the distillation loss function with the given name uses teacher top-k log probabilities.
 
@@ -100,6 +103,7 @@ def use_teacher_topk_logprobs(loss_name: str) -> bool:
         bool: True if the distillation loss function uses teacher top-k log probabilities, False otherwise.
     """
     return loss_name in USE_TEACHER_TOPK_REGISTRY
+
 
 def use_full_logprobs(loss_name: str) -> bool:
     """Check if the distillation loss function with the given name uses full log probabilities.
@@ -230,7 +234,7 @@ def distillation_loss(
             "distillation/student_mass": student_mass.mean().item(),
             "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
             "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
-            "distillation/teacher_mass": teacher_mass.mean().item(), 
+            "distillation/teacher_mass": teacher_mass.mean().item(),
             "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
             "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
         }

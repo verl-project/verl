@@ -16,6 +16,9 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Optional
+
+from verl.base_config import BaseConfig
+
 from .model import HFModelConfig
 
 
@@ -27,6 +30,7 @@ __all__ = ["DistillationLossConfig", "DistillationTeacherModelConfig", "Distilla
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
 
 
 @dataclass
