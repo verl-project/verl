@@ -17,17 +17,22 @@ set -xeuo pipefail
 ############################ Quick Config ############################
 
 ROLLOUT_NAME="vllm" # sglang or vllm
-PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
+
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
 TEACHER_MODEL=Qwen2.5-0.5B-Instruct
+
 DISTILLATION_LOSS_MODE="jsd_topk"
+DISTILLATION_LOSS_MODE="k3"
+
+PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
 EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}"
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
 TRAIN_PROMPT_BSZ=128
 MICRO_BATCH_SIZE=1
+MAX_TOKEN_LEN_PER_GPU=$((MAX_PROMPT + MAX_RESPONSE_LENGTH))
 
 DP_SIZE=1
 
@@ -55,6 +60,7 @@ DATA=(
 MODEL=(
     actor_rollout_ref.model.path="${FAMILY}/${STUDENT_MODEL}"
     actor_rollout_ref.model.enable_gradient_checkpointing=True
+    actor_rollout_ref.model.use_remove_padding=True
 )
 
 DISTILLATION=(
@@ -62,15 +68,19 @@ DISTILLATION=(
     actor_rollout_ref.distillation_config.loss_mode=$DISTILLATION_LOSS_MODE
     actor_rollout_ref.distillation_config.jsd_beta=0.5
     actor_rollout_ref.distillation_config.topk=32
-    actor_rollout_ref.distillation_config.teacher_model.path="${FAMILY}/${TEACHER_MODEL}"
+    actor_rollout_ref.distillation_config.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.distillation_config.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE
+    actor_rollout_ref.distillation_config.log_prob_max_token_len_per_gpu=$MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.distillation_config.fsdp_config.param_offload=True
+    actor_rollout_ref.distillation_config.teacher_model.path="${FAMILY}/${TEACHER_MODEL}"
+    actor_rollout_ref.distillation_config.teacher_model.use_remove_padding=True
 )
 
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.actor.ppo_mini_batch_size=$TRAIN_PROMPT_BSZ
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True

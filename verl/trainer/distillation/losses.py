@@ -46,6 +46,7 @@ class DistillationLossSettings(BaseConfig):
     names: Union[str, list[str]] = field(default_factory=list)
     use_student_topk: bool = False
     use_teacher_topk: bool = False
+    use_estimator: bool = False
     use_full: bool = False
 
     _mutable_fields = {"names"}
@@ -53,9 +54,9 @@ class DistillationLossSettings(BaseConfig):
     def __post_init__(self):
         self.names = [self.names] if isinstance(self.names, str) else self.names
         self.use_topk = self.use_student_topk or self.use_teacher_topk
-        if sum([self.use_full, self.use_topk]) > 1:
+        if sum([self.use_full, self.use_topk, self.use_estimator]) > 1:
             raise ValueError(
-                f"Expected only one of use_full, use_student_topk/use_teacher_topk, but got {self.use_full=}, {self.use_student_topk=}, {self.use_teacher_topk=}."
+                f"Expected only one of use_full, use_estimator, use_student_topk/use_teacher_topk, but got {self.use_full=}, {self.use_estimator=}, {self.use_student_topk=}, {self.use_teacher_topk=}."
             )
 
 DISTILLATION_LOSS_REGISTRY: dict[str, DistillationLossFn] = {}
@@ -202,16 +203,11 @@ def compute_distillation_loss_topk(
     response_mask: torch.Tensor,
     config: DistillationConfig,
     loss_agg_mode: str = "token-mean",
-    **kwargs
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics for JSD and variants using top-k/full log probs.
 
     Args:
-        teacher_log_probs (torch.Tensor):
-            Log-probabilities of actions under the teacher policy, shape (batch_size, response_length).
-        student_log_probs (torch.Tensor):
-            Log-probabilities of actions under the student policy, shape (batch_size, response_length).
         teacher_topk_logprobs (torch.Tensor):
             Top-k log-probabilities of actions under the teacher policy, shape (batch_size, response_length, topk).
         student_topk_logprobs (torch.Tensor):
@@ -296,7 +292,7 @@ def compute_distillation_loss_topk(
     return distillation_loss, distillation_metrics
 
 
-@register_distillation_loss(DistillationLossSettings(names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"]))
+@register_distillation_loss(DistillationLossSettings(names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"], use_estimator=True))  # type: ignore[arg-type]
 def compute_distillation_loss_kl_estimator(
     teacher_log_probs: torch.Tensor,
     student_log_probs: torch.Tensor,
@@ -306,6 +302,7 @@ def compute_distillation_loss_kl_estimator(
     **kwargs
 ):
     """Compute the distillation loss and related metrics using KL estimator"""
+    breakpoint()
     assert config is not None
     distillation_losses = kl_penalty(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode
