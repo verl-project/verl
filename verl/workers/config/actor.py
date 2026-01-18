@@ -128,7 +128,6 @@ class ActorConfig(BaseConfig):
         use_fused_kernels (bool): Whether to use custom fused kernels (e.g., FlashAttention, fused MLP).
         data_loader_seed (int): Seed for data loader. If None, uses global seed.
         router_replay (RouterReplayConfig): Configuration for router replay in MoE models.
-        distillation_config (DistillationConfig): Configuration for distillation settings.
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {

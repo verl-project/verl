@@ -164,9 +164,9 @@ def validate_config(
         if use_distillation_policy:
             # distillation: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
             check_mutually_exclusive(
-                config.actor_rollout_ref.distillation_config.log_prob_micro_batch_size,
-                config.actor_rollout_ref.distillation_config.log_prob_micro_batch_size_per_gpu,
-                "actor_rollout_ref.distillation_config",
+                config.actor_rollout_ref.distillation.log_prob_micro_batch_size,
+                config.actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu,
+                "actor_rollout_ref.distillation",
             )
 
         #  The rollout section also has log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
