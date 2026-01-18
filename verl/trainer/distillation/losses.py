@@ -22,7 +22,7 @@ from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import DistillationConfig
 from verl.base_config import BaseConfig
-
+import math 
 
 class DistillationLossFn(Protocol):
     """Protocol for distillation loss functions.
@@ -116,7 +116,7 @@ def get_distillation_loss_settings(loss_name: str):
     return DISTILLATION_SETTINGS_REGISTRY[loss_name]
 
 def clamp_log_probs(log_p: torch.Tensor, log_q: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clamp log probabilities to avoid numerical instability.
+    """Clamp log probabilities to avoid numerical instability and handle inf minus inf for masked top-k probs.
 
     Args:
         log_p (torch.Tensor): Log probabilities of the teacher distribution.
@@ -126,7 +126,7 @@ def clamp_log_probs(log_p: torch.Tensor, log_q: torch.Tensor, eps: float = 1e-8)
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Clamped log probabilities of the teacher and student distributions.
     """
-    min_log_prob = torch.log(torch.tensor(eps)).item()
+    min_log_prob = math.log(eps)
     log_p_clamped = torch.clamp(log_p, min=min_log_prob)
     log_q_clamped = torch.clamp(log_q, min=min_log_prob)
     return log_p_clamped, log_q_clamped
