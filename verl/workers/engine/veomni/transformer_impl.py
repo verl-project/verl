@@ -79,7 +79,7 @@ class VeOmniEngine(FSDPEngine):
         assert self.engine_config.data_parallel_mode == "fsdp2", "VeOmniEngine only supports fsdp2."
         self.distillation_config = distillation_config
         if distillation_config.enabled:
-            raise NotImplementedError("Distillation is not supported yet in VeOmniEngine") # TODO: JacobHelwig
+            raise NotImplementedError("Distillation is not supported yet in VeOmniEngine")  # TODO: JacobHelwig
 
         self.mode = None
 

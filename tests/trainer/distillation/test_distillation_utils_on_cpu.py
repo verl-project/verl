@@ -49,9 +49,7 @@ class TestTopkLogprobsFromLogits:
         for i in range(batch_size * seq_len):
             for j in range(k):
                 idx = topk_indices[i, j]
-                torch.testing.assert_close(
-                    topk_logprobs[i, j], expected_logprobs[i, idx], atol=1e-5, rtol=1e-5
-                )
+                torch.testing.assert_close(topk_logprobs[i, j], expected_logprobs[i, idx], atol=1e-5, rtol=1e-5)
 
     def test_gather_only(self):
         """Test gathering log probs at provided indices (compute_topk=False)."""

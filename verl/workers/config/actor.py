@@ -25,7 +25,15 @@ from .engine import FSDPEngineConfig, McoreEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["PolicyLossConfig", "RouterReplayConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig", "DistillationConfig", "FSDPDistillationConfig"]
+__all__ = [
+    "PolicyLossConfig",
+    "RouterReplayConfig",
+    "ActorConfig",
+    "FSDPActorConfig",
+    "McoreActorConfig",
+    "DistillationConfig",
+    "FSDPDistillationConfig",
+]
 
 
 @dataclass
@@ -306,6 +314,7 @@ class FSDPActorConfig(ActorConfig):
                 raise ValueError(
                     "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
                 )
+
 
 @dataclass
 class DistillationConfig(ActorConfig):
