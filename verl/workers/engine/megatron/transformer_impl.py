@@ -83,7 +83,7 @@ class MegatronEngine(BaseEngine):
         self.checkpoint_config = checkpoint_config
         self.distillation_config = distillation_config
         if distillation_config.enabled:
-            raise NotImplementedError("Distillation is not supported yet in MegatronEngine") # TODO: JacobHelwig
+            raise NotImplementedError("Distillation is not supported yet in MegatronEngine")  # TODO: JacobHelwig
 
         assert self.engine_config.use_mbridge, "use_mbridge must be True"
         self._init_device_mesh()

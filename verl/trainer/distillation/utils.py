@@ -141,6 +141,7 @@ def compute_distillation_inputs(
     else:
         raise ValueError
 
+
 def compute_full_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig
 ) -> dict[str, torch.Tensor]:
@@ -239,7 +240,9 @@ def compute_topk_distillation_inputs(
     }
 
 
-def extract_distillation_inputs(stage: Stage, output: TensorDict, config: DistillationConfig) -> dict[str, torch.Tensor]:
+def extract_distillation_inputs(
+    stage: Stage, output: TensorDict, config: DistillationConfig
+) -> dict[str, torch.Tensor]:
     """Extract distillation loss inputs from model output for a given stage. Used in the trainer to extract distillation inputs from output of stage."""
     distillation_settings = get_distillation_loss_settings(config.loss_mode)
     if distillation_settings.use_full:
@@ -291,7 +294,10 @@ def prepare_distillation_inputs(
 
 
 def unpad_distillation_logprobs(
-    outputs: TensorDict | dict[str, torch.Tensor], data: TensorDict, stage: Stage, distillation_settings: DistillationLossSettings
+    outputs: TensorDict | dict[str, torch.Tensor],
+    data: TensorDict,
+    stage: Stage,
+    distillation_settings: DistillationLossSettings,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Extract and unpad distillation log probabilities from model outputs."""
     if distillation_settings.use_full:
