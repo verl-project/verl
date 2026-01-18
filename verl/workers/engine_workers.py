@@ -494,13 +494,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "log_prob_micro_batch_size_per_gpu", None
                 )
                 distillation_config.use_dynamic_bsz = distillation_config.pop("log_prob_use_dynamic_bsz", False)
-                distillation_config.ppo_max_token_len_per_gpu = distillation_config.pop("log_prob_max_token_len_per_gpu", None)
+                distillation_config.ppo_max_token_len_per_gpu = distillation_config.pop(
+                    "log_prob_max_token_len_per_gpu", None
+                )
                 distillation_config.model_config = distillation_config.pop("teacher_model", None)
             distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
 
         # 1. build reference/distillation teacher model
         if "ref" in self.role:
-
             # TODO: align ref config with actor config
             if distillation_enabled:
                 ref_config = distillation_config
@@ -512,7 +513,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         "log_prob_micro_batch_size_per_gpu", None
                     )
                     self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
-                    self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
+                    self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop(
+                        "log_prob_max_token_len_per_gpu", None
+                    )
                 ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
                 ref_config.model_config = model_config
 
@@ -529,9 +532,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # assign engine configs
             ref_training_config.engine_config.use_dynamic_bsz = ref_config.use_dynamic_bsz
             ref_training_config.engine_config.infer_max_token_len_per_gpu = ref_config.ppo_max_token_len_per_gpu
-            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
-                ref_config.ppo_micro_batch_size_per_gpu
-            )
+            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = ref_config.ppo_micro_batch_size_per_gpu
             ref_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
 
             self.ref = TrainingWorker(config=ref_training_config)
