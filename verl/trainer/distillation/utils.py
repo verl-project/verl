@@ -29,17 +29,15 @@ from verl.workers.utils.padding import _slice_response_from_unpad_output
 
 
 class Stage(Enum):
-    """
-    Stages for PPO training
-    """
+    """Stages for on-policy distillation training."""
 
     OLD_LOG_PROB = "old_log_prob"
     REF_LOG_PROB = "ref_log_prob"
     ACTOR_UPDATE = "actor_update"
 
 
-def get_topk_keys(stage: str | Stage):
-    """TODO: Docstring for get_topk_keys"""
+def get_topk_keys(stage: str | Stage) -> tuple[str, str]:
+    """Get the TensorDict keys for storing top-k log probabilities and indices for a given stage."""
     if isinstance(stage, Stage):
         stage = stage.value
     return f"{stage}_topk_log_probs", f"{stage}_topk_indices"
@@ -48,8 +46,33 @@ def get_topk_keys(stage: str | Stage):
 def topk_logprobs_from_logits(
     logits: torch.Tensor, k: int, compute_topk: bool, topk_indices: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """TODO: Docstring for topk_logprobs_from_logits"""
+    """
+    Compute and/or gather top-k log probabilities from logits.
 
+    This function supports two modes that can be used independently or together:
+    1. Gathering log probabilities at pre-specified indices (topk_indices)
+    2. Computing new top-k log probabilities from logits
+
+    When both modes are active, the results are concatenated and deduplicated
+    to handle overlap between teacher and student top-k sets.
+
+    Args:
+        logits (torch.Tensor):
+            Logits from model forward pass, shape (total_tokens, vocab_size).
+        k (int):
+            Number of top log probabilities to compute or gather.
+        compute_topk (bool):
+            Whether to compute top-k log probabilities from the logits.
+        topk_indices (torch.Tensor, optional):
+            Pre-computed indices for gathering log probabilities, shape (total_tokens, k) or
+            (total_tokens, 2*k). Required when gathering from existing indices.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - topk_logprobs: Top-k log probabilities, shape (total_tokens, k) or (total_tokens, 2*k).
+            - topk_indices: Indices for the top-k log probabilities, same shape as topk_logprobs.
+              Duplicate indices (from merging teacher/student top-k) have their log probs set to -inf.
+    """
     logprobs = F.log_softmax(logits, dim=-1)
     topk_logprobs_ls = []
     topk_logprobs_indices_ls = []
@@ -104,10 +127,8 @@ def topk_logprobs_from_logits(
 
 def compute_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig
-):
-    """
-    Computes the distillation inputs for a given stage of PPO training. Called inside engine.
-    """
+) -> dict[str, torch.Tensor]:
+    """Compute the distillation inputs for a given stage of training."""
     if not config.enabled:
         return {}
     distillation_settings: DistillationLossSettings = config.loss_settings
@@ -122,8 +143,8 @@ def compute_distillation_inputs(
 
 def compute_full_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig
-):
-    """TODO: Docstring"""
+) -> dict[str, torch.Tensor]:
+    """Compute distillation inputs using full vocabulary log probabilities."""
     raise NotImplementedError(
         "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
     )
@@ -131,10 +152,31 @@ def compute_full_distillation_inputs(
 
 def compute_topk_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig
-):
-    """TODO: Docstring"""
+) -> dict[str, torch.Tensor]:
+    """
+    Compute distillation inputs using top-k log probabilities.
+
+    This function handles different stages of distillation training:
+    - OLD_LOG_PROB: Student computes its own top-k indices
+    - REF_LOG_PROB: Teacher gathers log probs at student indices, computes own top-k
+    - ACTOR_UPDATE: Student gathers log probs at teacher indices
+
+    Args:
+        logits (torch.Tensor):
+            Model output logits, shape (total_tokens, vocab_size).
+        batch (TensorDict):
+            Batch data containing "stage" key and potentially previous top-k indices.
+        cu_seqlens (torch.Tensor):
+            Cumulative sequence lengths for creating nested tensors, shape (batch_size + 1,).
+        config (DistillationConfig):
+            Distillation configuration with topk, loss_mode, and loss_settings.
+
+    Returns:
+        dict[str, torch.Tensor]: Dictionary containing:
+            - {stage}_topk_log_probs: Nested tensor of top-k log probabilities.
+            - {stage}_topk_indices: Nested tensor of top-k token indices.
+    """
     # Gather inputs for top-k distillation losses.
-    logits = logits.squeeze(0)
     topk = config.topk
     loss_mode = config.loss_mode
     distillation_settings: DistillationLossSettings = config.loss_settings
@@ -197,11 +239,8 @@ def compute_topk_distillation_inputs(
     }
 
 
-def extract_distillation_inputs(stage: Stage, output: TensorDict, config: DistillationConfig):
-    """
-    TODO: Docstring
-    Used in trainer to extract distillation loss inputs from model output for a given stage.
-    """
+def extract_distillation_inputs(stage: Stage, output: TensorDict, config: DistillationConfig) -> dict[str, torch.Tensor]:
+    """Extract distillation loss inputs from model output for a given stage. Used in the trainer to extract distillation inputs from output of stage."""
     distillation_settings = get_distillation_loss_settings(config.loss_mode)
     if distillation_settings.use_full:
         raise NotImplementedError(
@@ -223,11 +262,10 @@ def extract_distillation_inputs(stage: Stage, output: TensorDict, config: Distil
         raise ValueError
 
 
-def prepare_distillation_inputs(data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig):
-    """
-    TODO: Docstring
-    Used in ppo_loss to prepare distillation loss inputs for distillation loss computation.
-    """
+def prepare_distillation_inputs(
+    data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig
+) -> dict[str, torch.Tensor]:
+    """Prepare distillation loss inputs for loss computation. Called in ppo_loss before computing distillation loss."""
     distillation_settings: DistillationLossSettings = config.loss_settings
     if distillation_settings.use_full:
         raise NotImplementedError(
@@ -254,8 +292,8 @@ def prepare_distillation_inputs(data: TensorDict, model_output: dict[str, torch.
 
 def unpad_distillation_logprobs(
     outputs: TensorDict | dict[str, torch.Tensor], data: TensorDict, stage: Stage, distillation_settings: DistillationLossSettings
-):
-    """TODO: Docstring"""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Extract and unpad distillation log probabilities from model outputs."""
     if distillation_settings.use_full:
         raise NotImplementedError(
             "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
