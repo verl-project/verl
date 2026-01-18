@@ -12,17 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, Union
+from typing import Any, Callable, Protocol
 
 import torch
 import torch.nn.functional as F
 
+from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import DistillationConfig
-from verl.base_config import BaseConfig
-import math 
+
 
 class DistillationLossFn(Protocol):
     """Protocol for distillation loss functions."""
@@ -43,7 +44,7 @@ class DistillationLossFn(Protocol):
 class DistillationLossSettings(BaseConfig):
     """Settings for a distillation loss function to be registered."""
 
-    names: Union[str, list[str]] = field(default_factory=list)
+    names: str | list[str] = field(default_factory=list)
     use_student_topk: bool = False
     use_teacher_topk: bool = False
     use_estimator: bool = False
@@ -59,10 +60,14 @@ class DistillationLossSettings(BaseConfig):
                 f"Expected only one of use_full, use_estimator, use_student_topk/use_teacher_topk, but got {self.use_full=}, {self.use_estimator=}, {self.use_student_topk=}, {self.use_teacher_topk=}."
             )
 
+
 DISTILLATION_LOSS_REGISTRY: dict[str, DistillationLossFn] = {}
 DISTILLATION_SETTINGS_REGISTRY: dict[str, DistillationLossSettings] = {}
 
-def register_distillation_loss(loss_settings: DistillationLossSettings) -> Callable[[DistillationLossFn], DistillationLossFn]:
+
+def register_distillation_loss(
+    loss_settings: DistillationLossSettings,
+) -> Callable[[DistillationLossFn], DistillationLossFn]:
     """Register a distillation loss function with the given name."""
 
     def decorator(func: DistillationLossFn) -> DistillationLossFn:
@@ -75,6 +80,7 @@ def register_distillation_loss(loss_settings: DistillationLossSettings) -> Calla
 
     return decorator
 
+
 def get_distillation_loss_fn(loss_name: str) -> DistillationLossFn:
     """Get the distillation loss function with a given name."""
     if loss_name not in DISTILLATION_LOSS_REGISTRY:
@@ -83,6 +89,7 @@ def get_distillation_loss_fn(loss_name: str) -> DistillationLossFn:
         )
     return DISTILLATION_LOSS_REGISTRY[loss_name]
 
+
 def get_distillation_loss_settings(loss_name: str) -> DistillationLossSettings:
     """Get the distillation loss settings with a given name."""
     if loss_name not in DISTILLATION_SETTINGS_REGISTRY:
@@ -90,6 +97,7 @@ def get_distillation_loss_settings(loss_name: str) -> DistillationLossSettings:
             f"Unsupported loss mode: {loss_name}. Supported modes are: {list(DISTILLATION_SETTINGS_REGISTRY.keys())}"
         )
     return DISTILLATION_SETTINGS_REGISTRY[loss_name]
+
 
 def clamp_log_probs(log_p: torch.Tensor, log_q: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
     """Clamp log probabilities to avoid numerical instability and handle inf minus inf for masked top-k probs."""
@@ -274,7 +282,9 @@ def compute_distillation_loss_topk(
     return distillation_loss, distillation_metrics
 
 
-@register_distillation_loss(DistillationLossSettings(names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"], use_estimator=True))  # type: ignore[arg-type]
+@register_distillation_loss(
+    DistillationLossSettings(names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"], use_estimator=True)
+)  # type: ignore[arg-type]
 def compute_distillation_loss_reverse_kl_estimator(
     *,
     teacher_log_probs: torch.Tensor,
