@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
+from typing import Any, Callable
+
 import torch
 import torch.nn.functional as F
-from typing import Callable, Optional, Any, Union
-from omegaconf import DictConfig
-from verl.workers.config import ActorConfig, DistillationConfig
+
 from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
-from verl.utils.metric import Metric, AggregationType 
-from dataclasses import dataclass
+from verl.utils.metric import AggregationType, Metric
+from verl.workers.config import DistillationConfig
 
 DistillationLossFn = Callable[
     [
@@ -30,8 +31,8 @@ DistillationLossFn = Callable[
         torch.Tensor,  # teacher_topk_indices
         torch.Tensor,  # student_topk_indices
         torch.Tensor,  # response_mask
-        DistillationConfig,   # config
-        str,           # loss_agg_mode
+        DistillationConfig,  # config
+        str,  # loss_agg_mode
     ],
     tuple[torch.Tensor, dict[str, Any]],
 ]
@@ -41,10 +42,12 @@ USE_STUDENT_TOPK_REGISTRY: set[str] = set()
 USE_TEACHER_TOPK_REGISTRY: set[str] = set()
 USE_FULL_REGISTRY: set[str] = set()
 
+
 @dataclass
 class DistillationLossInfo:
     """Information about a distillation loss function to be registered."""
-    names: Union[list[str], str]
+
+    names: list[str] | str
     use_student_topk: bool = False
     use_teacher_topk: bool = False
     use_full: bool = False
@@ -62,7 +65,7 @@ class DistillationLossInfo:
 
         Args:
             loss_name (str): The name of the distillation loss function.
-        
+
         Returns:
             DistillationLossInfo: An object containing information about the distillation loss function.
         """
@@ -70,8 +73,13 @@ class DistillationLossInfo:
             raise ValueError(
                 f"Unsupported loss mode: {loss_name}. Supported modes are: {list(DISTILLATION_LOSS_REGISTRY.keys())}"
             )
-        return cls(names=loss_name, use_student_topk=use_student_topk_logprobs(loss_name), use_teacher_topk=use_teacher_topk_logprobs(loss_name), use_full=use_full_logprobs(loss_name))
-             
+        return cls(
+            names=loss_name,
+            use_student_topk=use_student_topk_logprobs(loss_name),
+            use_teacher_topk=use_teacher_topk_logprobs(loss_name),
+            use_full=use_full_logprobs(loss_name),
+        )
+
 
 def register_distillation_loss(loss_info: DistillationLossInfo) -> Callable[[DistillationLossFn], DistillationLossFn]:
     """Register a distillation loss function with the given name.
@@ -99,6 +107,7 @@ def register_distillation_loss(loss_info: DistillationLossInfo) -> Callable[[Dis
 
     return decorator
 
+
 def use_student_topk_logprobs(loss_name: str) -> bool:
     """Check if the distillation loss function with the given name uses student top-k log probabilities.
 
@@ -109,6 +118,7 @@ def use_student_topk_logprobs(loss_name: str) -> bool:
         bool: True if the distillation loss function uses student top-k log probabilities, False otherwise.
     """
     return loss_name in USE_STUDENT_TOPK_REGISTRY
+
 
 def use_teacher_topk_logprobs(loss_name: str) -> bool:
     """Check if the distillation loss function with the given name uses teacher top-k log probabilities.
@@ -121,6 +131,7 @@ def use_teacher_topk_logprobs(loss_name: str) -> bool:
     """
     return loss_name in USE_TEACHER_TOPK_REGISTRY
 
+
 def use_full_logprobs(loss_name: str) -> bool:
     """Check if the distillation loss function with the given name uses full log probabilities.
 
@@ -131,6 +142,7 @@ def use_full_logprobs(loss_name: str) -> bool:
         bool: True if the distillation loss function uses full log probabilities, False otherwise.
     """
     return loss_name in USE_FULL_REGISTRY
+
 
 def get_distillation_loss_fn(name):
     """Get the distillation loss with a given name.
@@ -149,6 +161,7 @@ def get_distillation_loss_fn(name):
         )
     return DISTILLATION_LOSS_REGISTRY[loss_name]
 
+
 def clamp_log_probs(log_p: torch.Tensor, log_q: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
     """Clamp log probabilities to avoid numerical instability.
 
@@ -165,25 +178,26 @@ def clamp_log_probs(log_p: torch.Tensor, log_q: torch.Tensor, eps: float = 1e-8)
     log_q_clamped = torch.clamp(log_q, min=min_log_prob)
     return log_p_clamped, log_q_clamped
 
+
 def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: float) -> torch.Tensor:
     """
     Computes Jensen-Shannon Divergence between two distributions given their log probabilities.
-    
+
     JSD(β) = β * KL(p || m) + (1 - β) * KL(q || m), where m = beta * p + (1 - beta) * q
-    forward KL: KL(p || q) 
-    reverse KL: KL(q || p) 
+    forward KL: KL(p || q)
+    reverse KL: KL(q || p)
 
     "gradients of JSD(β) behave similarly to forward KL and reverse KL when β is close to 0 and 1 respectively."
     https://arxiv.org/abs/2306.13649
 
     Args:
-        log_q (torch.Tensor): 
+        log_q (torch.Tensor):
             student log probabilities
-        log_p (torch.Tensor): 
+        log_p (torch.Tensor):
             teacher log probabilities
-        beta (float): 
+        beta (float):
             JSD weight
-    
+
     Returns:
         torch.Tensor: JSD loss
     """
@@ -191,11 +205,12 @@ def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: fl
     q = log_q.exp()
     p = log_p.exp()
     m = beta * p + (1 - beta) * q
-    log_m = m.log()    
-    kl1 = F.kl_div(input=log_m, target=log_p, reduction='none', log_target=True).sum(dim=-1)
-    kl2 = F.kl_div(input=log_m, target=log_q, reduction='none', log_target=True).sum(dim=-1)
+    log_m = m.log()
+    kl1 = F.kl_div(input=log_m, target=log_p, reduction="none", log_target=True).sum(dim=-1)
+    kl2 = F.kl_div(input=log_m, target=log_q, reduction="none", log_target=True).sum(dim=-1)
     loss = beta * kl1 + (1 - beta) * kl2
     return loss
+
 
 def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_mode: str = "forward"):
     """
@@ -205,26 +220,29 @@ def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_m
     reverse KL: KL(q || p) = sum(q * (log_q - log_p))
 
     Args:
-        log_q (torch.Tensor): 
+        log_q (torch.Tensor):
             student log probabilities
         log_p (torch.Tensor):
             teacher log probabilities
-        loss_mode (str): 
+        loss_mode (str):
             "forward" or "reverse"
-    
+
     Returns:
         torch.Tensor: KL divergence loss
     """
     log_p, log_q = clamp_log_probs(log_p, log_q)
     match loss_mode:
         case "forward":
-            return F.kl_div(input=log_q, target=log_p, reduction='none', log_target=True).sum(dim=-1)
+            return F.kl_div(input=log_q, target=log_p, reduction="none", log_target=True).sum(dim=-1)
         case "reverse":
-            return F.kl_div(input=log_p, target=log_q, reduction='none', log_target=True).sum(dim=-1)
+            return F.kl_div(input=log_p, target=log_q, reduction="none", log_target=True).sum(dim=-1)
         case _:
             raise ValueError(f"Unsupported loss mode: {loss_mode}. Supported modes are: ['forward', 'reverse']")
 
-@register_distillation_loss(DistillationLossInfo(names=["forward_kl_full", "reverse_kl_full", "jsd_full"], use_full=True))  # type: ignore[arg-type]
+
+@register_distillation_loss(
+    DistillationLossInfo(names=["forward_kl_full", "reverse_kl_full", "jsd_full"], use_full=True)
+)  # type: ignore[arg-type]
 @register_distillation_loss(DistillationLossInfo(names="forward_kl_topk", use_teacher_topk=True))  # type: ignore[arg-type]
 @register_distillation_loss(DistillationLossInfo(names="reverse_kl_topk", use_student_topk=True))  # type: ignore[arg-type]
 @register_distillation_loss(DistillationLossInfo(names="jsd_topk", use_student_topk=True, use_teacher_topk=True))  # type: ignore[arg-type]
@@ -287,7 +305,10 @@ def compute_distillation_loss_jsd(
             raise ValueError(
                 f"Expected at least one of student or teacher topk logprobs to be used, but got {loss_info.use_student_topk} and {loss_info.use_teacher_topk}."
             )
-        if teacher_topk_logprobs.shape[-1] != expected_num_logprobs or student_topk_logprobs.shape[-1] != expected_num_logprobs:
+        if (
+            teacher_topk_logprobs.shape[-1] != expected_num_logprobs
+            or student_topk_logprobs.shape[-1] != expected_num_logprobs
+        ):
             raise ValueError(
                 f"Expected topk logprobs to have shape (batch_size, response_length, {expected_num_logprobs}), but got {teacher_topk_logprobs.shape=} and {student_topk_logprobs.shape=}."
             )
@@ -299,17 +320,23 @@ def compute_distillation_loss_jsd(
             "distillation/student_mass": student_mass.mean().item(),
             "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
             "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
-            "distillation/teacher_mass": teacher_mass.mean().item(), 
+            "distillation/teacher_mass": teacher_mass.mean().item(),
             "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
             "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
         }
     match config.loss_mode:
         case "forward_kl_topk" | "forward_kl_full":
-            distillation_losses = kullback_leibler_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward")
+            distillation_losses = kullback_leibler_divergence(
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward"
+            )
         case "reverse_kl_topk" | "reverse_kl_full":
-            distillation_losses = kullback_leibler_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse")
+            distillation_losses = kullback_leibler_divergence(
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse"
+            )
         case "jsd_topk" | "jsd_full":
-            distillation_losses = jensen_shannon_divergence(log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=config.jsd_beta)
+            distillation_losses = jensen_shannon_divergence(
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=config.jsd_beta
+            )
         case _:
             raise NotImplementedError(f"Unsupported distillation loss mode: {config.loss_mode}")
     distillation_metrics.update(
@@ -342,7 +369,9 @@ def compute_distillation_loss_kl_estimator(
     """Compute the distillation loss and related metrics using KL estimator"""
     assert config is not None
     log_p, log_q = clamp_log_probs(log_p, log_q)
-    distillation_losses = kl_penalty(logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode)
+    distillation_losses = kl_penalty(
+        logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode
+    )
     distillation_metrics = {
         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses.min()),
         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses.max()),
@@ -354,4 +383,3 @@ def compute_distillation_loss_kl_estimator(
         loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
     return distillation_loss, distillation_metrics
-    

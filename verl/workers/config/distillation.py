@@ -12,19 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from verl.base_config import BaseConfig
 from dataclasses import dataclass, field
 from typing import Optional
+
+from verl.base_config import BaseConfig
+
 from .model import HFModelConfig
 
-
 __all__ = ["DistillationConfig"]
+
 
 @dataclass
 class DistillationConfig(BaseConfig):
     """Configuration for distillation training.
     TODO
     """
+
     enabled: bool = False
     loss_mode: str = "k3"
     topk: Optional[int] = 128

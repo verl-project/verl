@@ -31,9 +31,9 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
-from verl.trainer.distillation import compute_distillation_inputs
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
+from verl.trainer.distillation import compute_distillation_inputs
 from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -95,7 +95,7 @@ class FSDPEngine(BaseEngine):
         engine_config: FSDPEngineConfig,
         optimizer_config: FSDPOptimizerConfig,
         checkpoint_config: CheckpointConfig,
-        distillation_config: Optional[DistillationConfig]
+        distillation_config: Optional[DistillationConfig],
     ):
         """
         Initialize the FSDPEngine.
@@ -1003,7 +1003,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         # TODO: test with not use_remove_padding and test with ulysses SP and test with dynamic bsz
         model_output.update(
-            compute_distillation_inputs(logits=output.logits, batch=micro_batch, cu_seqlens=cu_seqlens, config=self.distillation_config)
+            compute_distillation_inputs(
+                logits=output.logits, batch=micro_batch, cu_seqlens=cu_seqlens, config=self.distillation_config
+            )
         )
 
         model_output["log_probs"] = log_probs

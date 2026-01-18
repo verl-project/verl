@@ -503,7 +503,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
-                distillation_config=distillation_config
+                distillation_config=distillation_config,
             )
 
             # assign engine configs
@@ -529,7 +529,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
-                distillation_config=distillation_config
+                distillation_config=distillation_config,
             )
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
