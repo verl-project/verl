@@ -91,10 +91,10 @@ TRAINER=(
     trainer.experiment_name=$exp_name
     trainer.n_gpus_per_node=2
     trainer.nnodes=1
-    trainer.save_freq=20
-    trainer.test_freq=40
+    trainer.save_freq=200
+    trainer.test_freq=10
     trainer.total_epochs=15
-    trainer.val_before_train=False
+    trainer.val_before_train=True
     trainer.use_legacy_worker_impl=disable
 )
 
