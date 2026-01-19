@@ -1015,7 +1015,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
-        # TODO: test with not use_remove_padding and test with ulysses SP and test with dynamic bsz
         model_output.update(
             compute_distillation_inputs(
                 logits=logits_rmpad, batch=micro_batch, cu_seqlens=cu_seqlens, config=self.distillation_config
