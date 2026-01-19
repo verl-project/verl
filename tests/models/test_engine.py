@@ -42,6 +42,7 @@ from verl.utils.torch_functional import logprobs_from_logits_naive
 from verl.workers.config import (
     ActorConfig,
     CriticConfig,
+    DistillationConfig,
     FSDPEngineConfig,
     FSDPOptimizerConfig,
     HFModelConfig,
@@ -205,7 +206,7 @@ def test_actor_engine(strategy):
     actor_config = ActorConfig(strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1)
 
     # construct distillation config
-     distillation_config = DistillationConfig(strategy='fsdp', rollout_n=-1, ppo_micro_batch_size=-1)
+    distillation_config = DistillationConfig(strategy=strategy, rollout_n=-1, ppo_micro_batch_size_per_gpu=-1)
 
     # set ppo loss
     ppo_loss_ = partial(ppo_loss, config=actor_config, distillation_config=distillation_config)
