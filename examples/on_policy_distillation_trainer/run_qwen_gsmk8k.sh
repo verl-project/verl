@@ -11,9 +11,6 @@ export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
 
 set -xeuo pipefail
 
-
-
-
 ############################ Quick Config ############################
 
 ROLLOUT_NAME="vllm" # sglang or vllm
