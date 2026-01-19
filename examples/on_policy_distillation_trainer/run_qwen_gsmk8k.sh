@@ -19,11 +19,11 @@ set -xeuo pipefail
 ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
-STUDENT_MODEL=Qwen2.5-0.5B
+STUDENT_MODEL=Qwen2.5-0.5B-Instruct
 TEACHER_MODEL=Qwen2.5-7B-Instruct
 
-DISTILLATION_LOSS_MODE="jsd_topk"
-DISTILLATION_LOSS_MODE="k3"
+# DISTILLATION_LOSS_MODE="jsd_topk"
+# DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="reverse_kl_topk+"
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
