@@ -204,8 +204,11 @@ def test_actor_engine(strategy):
     # construct actor config
     actor_config = ActorConfig(strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1)
 
+    # construct distillation config
+     distillation_config = DistillationConfig(strategy='fsdp', rollout_n=-1, ppo_micro_batch_size=-1)
+
     # set ppo loss
-    ppo_loss_ = partial(ppo_loss, config=actor_config)
+    ppo_loss_ = partial(ppo_loss, config=actor_config, distillation_config=distillation_config)
     wg.set_loss_fn(ppo_loss_)
 
     # update again
