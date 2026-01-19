@@ -18,6 +18,7 @@ from enum import Enum
 from omegaconf import DictConfig
 
 from verl.single_controller.base import Worker
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.core_algos import AdvantageEstimator
 
 WorkerType = type[Worker]
@@ -79,13 +80,8 @@ def need_reference_policy(
 def need_distillation_policy(
     config: DictConfig,
 ) -> bool:
-    """Given the config, do we need distillation policy.
-    TODO (JacobHelwig): RM logic for missing distillation cfg once integrated w Megatron
-    """
-    distillation_config = config.actor_rollout_ref.get("distillation")
-    if distillation_config and distillation_config.enabled:
-        return True
-    return False
+    """Given the config, do we need distillation policy."""
+    return is_distillation_enabled(config.actor_rollout_ref.get("distillation"))
 
 
 def need_reward_model(
