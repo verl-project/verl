@@ -267,7 +267,7 @@ def extract_distillation_inputs(
 
 
 def prepare_distillation_inputs(
-    log_probs: torch.Tensor, data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig
+    log_prob: torch.Tensor, data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig
 ) -> DistillationLossInputs:
     """Prepare distillation loss inputs for loss computation. Called in ppo_loss before computing distillation loss."""
     distillation_settings: DistillationLossSettings = config.loss_settings
@@ -276,7 +276,7 @@ def prepare_distillation_inputs(
             "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
         )
     elif distillation_settings.use_estimator:
-        return DistillationLossInputs(student_log_probs=log_probs, teacher_log_probs=data["ref_log_prob"])
+        return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data["ref_log_prob"])
     elif distillation_settings.use_topk:
         teacher_topk_logprobs, teacher_topk_indices = unpad_distillation_logprobs(
             outputs=data, data=data, stage=Stage.REF_LOG_PROB, distillation_settings=distillation_settings

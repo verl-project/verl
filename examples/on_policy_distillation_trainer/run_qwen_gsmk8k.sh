@@ -24,7 +24,7 @@ TEACHER_MODEL=Qwen2.5-7B-Instruct
 
 DISTILLATION_LOSS_MODE="jsd_topk"
 DISTILLATION_LOSS_MODE="k3"
-DISTILLATION_LOSS_MODE="reverse_kl_topk"
+DISTILLATION_LOSS_MODE="reverse_kl_topk+"
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
 EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}"
@@ -95,7 +95,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=1
     actor_rollout_ref.rollout.name=$ROLLOUT_NAME
     actor_rollout_ref.rollout.gpu_memory_utilization=0.3
-    actor_rollout_ref.rollout.n=4
+    actor_rollout_ref.rollout.n=1
 )
 
 ALGORITHM=(
