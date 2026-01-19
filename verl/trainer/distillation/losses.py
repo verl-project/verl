@@ -180,12 +180,12 @@ def kullback_leibler_divergence(
 
 
 @register_distillation_loss(
-    DistillationLossSettings(names="forward_kl_topk", use_student_topk=True, use_teacher_topk=True)
+    DistillationLossSettings(
+        names=["jsd_topk", "forward_kl_topk", "reverse_kl_topk", "jsd_topk+", "forward_kl_topk+", "reverse_kl_topk+"],
+        use_student_topk=True,
+        use_teacher_topk=True,
+    )
 )  # type: ignore[arg-type]
-@register_distillation_loss(
-    DistillationLossSettings(names="reverse_kl_topk", use_student_topk=True, use_teacher_topk=True)
-)  # type: ignore[arg-type]
-@register_distillation_loss(DistillationLossSettings(names="jsd_topk", use_student_topk=True, use_teacher_topk=True))  # type: ignore[arg-type]
 def compute_distillation_loss_topk(
     inputs: DistillationLossInputs,
     response_mask: torch.Tensor,
@@ -200,7 +200,7 @@ def compute_distillation_loss_topk(
 
     Args:
         inputs (DistillationLossInputs):
-            Inputs containing top-k log-probabilities and indices of the tokens corresponding to the 
+            Inputs containing top-k log-probabilities and indices of the tokens corresponding to the
             top-k log probabilities for both student and teacher policies.
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
@@ -260,18 +260,22 @@ def compute_distillation_loss_topk(
         "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
     }
+    loss_mode = config.loss_mode
+    if loss_mode.endswith("+"):
+        take_abs = True
+        loss_mode = loss_mode[:-1]
     match config.loss_mode:
         case "forward_kl_topk" | "forward_kl_full":
             distillation_losses = kullback_leibler_divergence(
-                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward", take_abs=config.take_abs
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward", take_abs=take_abs
             )
         case "reverse_kl_topk" | "reverse_kl_full":
             distillation_losses = kullback_leibler_divergence(
-                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse", take_abs=config.take_abs
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse", take_abs=take_abs
             )
         case "jsd_topk" | "jsd_full":
             distillation_losses = jensen_shannon_divergence(
-                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=config.jsd_beta, take_abs=config.take_abs
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=config.jsd_beta, take_abs=take_abs
             )
         case _:
             raise NotImplementedError(f"Unsupported distillation loss mode: {config.loss_mode}")
