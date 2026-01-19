@@ -4,7 +4,7 @@ conda activate verl
 export PATH=$CONDA_PREFIX/bin:$PATH
 export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=2,4
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
 export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
@@ -24,6 +24,7 @@ TEACHER_MODEL=Qwen2.5-7B-Instruct
 
 DISTILLATION_LOSS_MODE="jsd_topk"
 DISTILLATION_LOSS_MODE="k3"
+DISTILLATION_LOSS_MODE="reverse_kl_topk"
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
 EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}"
@@ -31,7 +32,7 @@ EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DIS
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
 TRAIN_PROMPT_BSZ=128
-MICRO_BATCH_SIZE=4
+MICRO_BATCH_SIZE=8
 MAX_TOKEN_LEN_PER_GPU=$(( MICRO_BATCH_SIZE * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
 WORLD_SIZE=2
@@ -68,7 +69,7 @@ DISTILLATION=(
     actor_rollout_ref.distillation.enabled=True
     actor_rollout_ref.distillation.loss_mode=$DISTILLATION_LOSS_MODE
     actor_rollout_ref.distillation.jsd_beta=0.5
-    actor_rollout_ref.distillation.topk=32
+    actor_rollout_ref.distillation.topk=64
     actor_rollout_ref.distillation.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE
     actor_rollout_ref.distillation.log_prob_max_token_len_per_gpu=$MAX_TOKEN_LEN_PER_GPU
@@ -94,7 +95,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=1
     actor_rollout_ref.rollout.name=$ROLLOUT_NAME
     actor_rollout_ref.rollout.gpu_memory_utilization=0.3
-    actor_rollout_ref.rollout.n=1
+    actor_rollout_ref.rollout.n=4
 )
 
 ALGORITHM=(
@@ -109,7 +110,7 @@ TRAINER=(
     trainer.n_gpus_per_node=$WORLD_SIZE
     trainer.nnodes=1
     trainer.save_freq=200
-    trainer.test_freq=10
+    trainer.test_freq=5
     trainer.total_epochs=15
     trainer.val_before_train=True
     trainer.use_legacy_worker_impl=disable
