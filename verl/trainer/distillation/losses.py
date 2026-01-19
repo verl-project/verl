@@ -53,7 +53,8 @@ class DistillationLossSettings(BaseConfig):
         self.use_topk = self.use_student_topk or self.use_teacher_topk
         if sum([self.use_full, self.use_topk, self.use_estimator]) > 1:
             raise ValueError(
-                f"Expected only one of use_full, use_estimator, use_student_topk/use_teacher_topk, but got {self.use_full=}, {self.use_estimator=}, {self.use_student_topk=}, {self.use_teacher_topk=}."
+                f"Expected only one of use_full, use_estimator, use_student_topk/use_teacher_topk, but got "
+                f"{self.use_full=}, {self.use_estimator=}, {self.use_student_topk=}, {self.use_teacher_topk=}."
             )
 
 
@@ -164,7 +165,8 @@ def kullback_leibler_divergence(
         loss_mode (str):
             KL divergence direction: "forward" or "reverse".
         take_abs (bool):
-            Whether to take the absolute value of log_p - log_q before summing. This can help when using the top-k loss, where the distributions may not sum to 1 and can lead to negative divergences.
+            Whether to take the absolute value of log_p - log_q before summing. This can help
+            when using the top-k loss, where distributions may not sum to 1 and can be negative.
 
     Returns:
         torch.Tensor: KL divergence loss per token, shape (batch_size, response_length).
@@ -229,7 +231,8 @@ def compute_distillation_loss_topk(
         raise ValueError("Expected teacher_topk_indices and student_topk_indices to be provided in inputs.")
     if not teacher_topk_indices.equal(student_topk_indices):
         raise ValueError(
-            f"Expected teacher and student topk indices to be the same, but got {teacher_topk_indices} and {student_topk_indices}."
+            "Expected teacher and student topk indices to be the same, "
+            f"but got {teacher_topk_indices} and {student_topk_indices}."
         )
 
     topk = config.topk
@@ -239,14 +242,16 @@ def compute_distillation_loss_topk(
         expected_num_logprobs = topk
     else:
         raise ValueError(
-            f"Expected at least one of student or teacher topk logprobs to be used, but got {loss_settings.use_student_topk} and {loss_settings.use_teacher_topk}."
+            f"Expected at least one of student or teacher topk logprobs to be used, "
+            f"but got {loss_settings.use_student_topk} and {loss_settings.use_teacher_topk}."
         )
     if (
         teacher_topk_logprobs.shape[-1] != expected_num_logprobs
         or student_topk_logprobs.shape[-1] != expected_num_logprobs
     ):
         raise ValueError(
-            f"Expected topk logprobs to have shape (batch_size, response_length, {expected_num_logprobs}), but got {teacher_topk_logprobs.shape=} and {student_topk_logprobs.shape=}."
+            f"Expected topk logprobs to have shape (batch_size, response_length, {expected_num_logprobs}), "
+            f"but got {teacher_topk_logprobs.shape=} and {student_topk_logprobs.shape=}."
         )
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
@@ -315,7 +320,8 @@ def compute_distillation_loss_reverse_kl_estimator(
 
     Args:
         inputs (DistillationLossInputs):
-            Inputs containing log-probabilities of the sampled tokens under the teacher and student policies, shape (batch_size, response_length).
+            Inputs containing log-probabilities of the sampled tokens under the teacher and
+            student policies, shape (batch_size, response_length).
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
         config (DistillationConfig):

@@ -100,14 +100,15 @@ def topk_logprobs_from_logits(
     topk_indices = torch.cat(topk_logprobs_indices_ls, dim=-1)
     if topk_logprobs.shape != topk_indices.shape:
         raise ValueError(
-            f"Expected topk_logprobs and topk_indices to have the same shape, but got {topk_logprobs.shape} and {topk_indices.shape}."
+            f"Expected topk_logprobs and topk_indices to have the same shape, "
+            f"but got {topk_logprobs.shape} and {topk_indices.shape}."
         )
     if topk_logprobs.shape[-1] not in [k, 2 * k]:
         raise ValueError(
             f"Expected topk_logprobs to have shape [-1, {k}] or [-1, {2 * k}], but got {topk_logprobs.shape}."
         )
 
-    # If we have 2 * k logprobs at this point, it means that we are gathering top-k logprobs from both teacher and student.
+    # If we have 2 * k logprobs, we are gathering top-k logprobs from both teacher and student.
     # We need to de-duplicate to handle overlap between teacher and student top-k logprobs.
     if topk_logprobs.shape[-1] == 2 * k:
         # Make sure indices are sorted so that we can identify duplicates.
@@ -202,11 +203,11 @@ def compute_topk_distillation_inputs(
                 topk_indices = tu.get(batch, student_topk_indices_key)
                 if topk_indices is None:
                     raise ValueError(
-                        f"Expected student topk indices to be present for teacher log prob stage, but got None with {loss_mode=}."
+                        f"Expected student topk indices for teacher log prob stage, got None with {loss_mode=}."
                     )
                 if topk_indices.shape[-1] != topk:
                     raise ValueError(
-                        f"Expected student topk indices to have shape [-1, {topk}], but got {topk_indices.shape} with {loss_mode=}."
+                        f"Expected student topk indices shape [-1, {topk}], got {topk_indices.shape} with {loss_mode=}."
                     )
         case Stage.ACTOR_UPDATE:
             # 3. Second pass with student model
@@ -215,16 +216,17 @@ def compute_topk_distillation_inputs(
                 topk_indices = tu.get(batch, teacher_topk_indices_key)
                 if topk_indices is None:
                     raise ValueError(
-                        f"Expected teacher topk indices to be present for student update stage, but got None with {loss_mode=}."
+                        f"Expected teacher topk indices for student update stage, got None with {loss_mode=}."
                     )
                 if use_student_topk and use_teacher_topk:
                     if topk_indices.shape[-1] != 2 * topk:
                         raise ValueError(
-                            f"Expected teacher topk indices to have shape [-1, {2 * topk}], but got {topk_indices.shape} with {loss_mode=}."
+                            f"Expected teacher topk indices shape [-1, {2 * topk}], "
+                            f"got {topk_indices.shape} with {loss_mode=}."
                         )
                 elif topk_indices.shape[-1] != topk:
                     raise ValueError(
-                        f"Expected teacher topk indices to have shape [-1, {topk}], but got {topk_indices.shape} with {loss_mode=}."
+                        f"Expected teacher topk indices shape [-1, {topk}], got {topk_indices.shape} with {loss_mode=}."
                     )
         case _:
             raise ValueError(f"Unexpected stage: {stage}")
@@ -244,7 +246,7 @@ def compute_topk_distillation_inputs(
 def extract_distillation_inputs(
     stage: Stage, output: TensorDict, config: DistillationConfig
 ) -> dict[str, torch.Tensor]:
-    """Extract distillation loss inputs from model output for a given stage. Used in the trainer to extract distillation inputs from output of stage."""
+    """Extract distillation loss inputs from model output for a given stage. Used in trainer"""
     distillation_settings = get_distillation_loss_settings(config.loss_mode)
     if distillation_settings.use_full:
         raise NotImplementedError(
