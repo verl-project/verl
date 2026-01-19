@@ -261,6 +261,7 @@ def compute_distillation_loss_topk(
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
     }
     loss_mode = config.loss_mode
+    take_abs = False
     if loss_mode.endswith("+"):
         take_abs = True
         loss_mode = loss_mode[:-1]
