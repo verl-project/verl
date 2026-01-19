@@ -72,18 +72,16 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
 
 
 def validate_config(
-    config: DictConfig,
-    use_reference_policy: bool,
-    use_critic: bool,
-    use_distillation_policy: bool = False,  # TODO: RM default after integrated with all main_ppo (transfer_queue, async)
+    config: DictConfig, use_reference_policy: bool, use_critic: bool, use_distillation_policy: bool = False
 ) -> None:
     """Validate an OmegaConf DictConfig.
 
     Args:
         config (DictConfig): The OmegaConf DictConfig to validate.
-        use_distillation_policy (bool): is distillation policy needed
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
+        use_distillation_policy (bool): is distillation policy needed
+        TODO (JacobHelwig): RM default after integrated with all main_ppo (transfer_queue, async)
     """
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
