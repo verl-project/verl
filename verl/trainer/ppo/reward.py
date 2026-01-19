@@ -120,7 +120,12 @@ def load_reward_manager(
     reward_manager_cfg: RewardManagerConfig = config.reward_manager
     reward_manager_cls: type[AbstractRewardManager]
     if reward_manager_cfg.source == "register":
-        from verl.workers.reward_manager import get_reward_manager_cls
+        # Check if use_reward_loop is enabled, if so, use the reward_loop registry
+        use_reward_loop = config.reward_model.get("use_reward_loop", False)
+        if use_reward_loop:
+            from verl.experimental.reward_loop.reward_manager import get_reward_manager_cls
+        else:
+            from verl.workers.reward_manager import get_reward_manager_cls
 
         reward_manager_cls = get_reward_manager_cls(reward_manager_cfg.name)
     elif reward_manager_cfg.source == "importlib":
@@ -156,7 +161,8 @@ def load_reward_manager(
     # Instantiate and return the reward manager with the specified parameters
     # RewardManagerBase subclasses (like RateLimitedRewardLoopManager) don't accept num_examine
     # while AbstractRewardManager subclasses (like NaiveRewardManager) do
-    if RewardManagerBase is not None and issubclass(reward_manager_cls, RewardManagerBase):
+    use_reward_loop = config.reward_model.get("use_reward_loop", False)
+    if use_reward_loop or (RewardManagerBase is not None and issubclass(reward_manager_cls, RewardManagerBase)):
         # RewardManagerBase-based managers use a different signature
         return reward_manager_cls(
             config=config,

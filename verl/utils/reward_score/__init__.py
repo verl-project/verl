@@ -50,12 +50,29 @@ def default_compute_score(
 
         res = math_reward.compute_score(solution_str, ground_truth)
         # [Optional] Math-Verify Integration
-        # For enhanced accuracy, consider utilizing Math-Verify (https://github.com/huggingface/Math-Verify).
-        # Note: Math-Verify needs to be manually installed via pip: `pip install math-verify`.
-        # To use it, override the `compute_score` function with the following implementation:
-
-        # from . import math_verify
-        # res = math_verify.compute_score(solution_str, ground_truth)
+        # For enhanced mathematical verification accuracy, consider using Math-Verify
+        # (https://github.com/huggingface/Math-Verify).
+        #
+        # Prerequisites:
+        #   pip install math-verify
+        #
+        # Usage:
+        #   from . import math_verify
+        #   res = math_verify.compute_score(solution_str, ground_truth)
+        #
+        # IMPORTANT: Math-Verify may return incorrect results (always 0) in async+thread mode.
+        # To resolve this, enable RemoteRewardManager which runs reward computation in separate processes.
+        # Add the following configurations to your training script:
+        #
+        #   reward_model.use_reward_loop=True
+        #   reward_model.reward_manager=remote
+        #   reward_model.num_workers=2
+        #   custom_reward_function.path=tests/experimental/reward_loop/reward_fn.py
+        #   custom_reward_function.name=compute_score_math_verify
+        #
+        # References:
+        #   - RemoteRewardManager PR: https://github.com/volcengine/verl/pull/4752
+        #   - Issue discussion: https://github.com/volcengine/verl/issues/3407
     elif data_source in ["math_dapo", "math", "math_dapo_reasoning"] or data_source.startswith("aime"):
         from . import math_dapo
 
