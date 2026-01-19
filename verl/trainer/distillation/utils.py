@@ -127,11 +127,18 @@ def topk_logprobs_from_logits(
     return topk_logprobs, topk_indices
 
 
+def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
+    """Check if distillation is enabled based on the provided configuration."""
+    if config is None:
+        return False
+    return config.enabled
+
+
 def compute_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: Optional[DistillationConfig]
 ) -> dict[str, torch.Tensor]:
     """Compute the distillation inputs for a given stage of training."""
-    if not config or not config.enabled:
+    if not is_distillation_enabled(config):
         return {}
     distillation_settings: DistillationLossSettings = config.loss_settings
     if distillation_settings.use_full:

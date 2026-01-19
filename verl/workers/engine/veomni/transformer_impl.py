@@ -29,6 +29,7 @@ from veomni.optim import build_lr_scheduler, build_optimizer
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
+from verl.trainer.distillation import is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.device import get_device_id, get_device_name
@@ -78,7 +79,8 @@ class VeOmniEngine(FSDPEngine):
         self.checkpoint_config = checkpoint_config
         assert self.engine_config.data_parallel_mode == "fsdp2", "VeOmniEngine only supports fsdp2."
         self.distillation_config = distillation_config
-        if distillation_config and distillation_config.enabled:
+        self.distillation_enabled = is_distillation_enabled(distillation_config)
+        if self.distillation_enabled:
             raise NotImplementedError("Distillation is not supported yet in VeOmniEngine")  # TODO: JacobHelwig
 
         self.mode = None
