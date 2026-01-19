@@ -953,7 +953,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     unpad_dim=0,
                     padding_size=pad_size,
                 )
-                if self.distallation_config and self.distillation_config.enabled:
+                if self.distillation_config and self.distillation_config.enabled:
                     logits_rmpad = gather_outputs_and_unpad(
                         logits_rmpad,
                         gather_dim=0,
