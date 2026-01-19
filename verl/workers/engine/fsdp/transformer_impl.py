@@ -913,7 +913,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             if use_fused_kernels:
                 # temperature is singleton
-                if self.distillation_config.enabled:
+                if self.distillation_config and self.distillation_config.enabled:
                     raise NotImplementedError(
                         "Distillation with fused kernels is not supported yet"
                     )  # TODO: JacobHelwig
@@ -953,7 +953,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     unpad_dim=0,
                     padding_size=pad_size,
                 )
-                if self.distillation_config.enabled:
+                if self.distallation_config and self.distillation_config.enabled:
                     logits_rmpad = gather_outputs_and_unpad(
                         logits_rmpad,
                         gather_dim=0,
@@ -982,7 +982,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if use_fused_kernels:
                 log_probs = output.log_probs[:, -response_length - 1 : -1]
                 entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
-                if self.distillation_config.enabled:
+                if self.distillation_config and self.distillation_config.enabled:
                     raise NotImplementedError(
                         "Distillation with fused kernels is not supported yet"
                     )  # TODO: JacobHelwig
