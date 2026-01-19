@@ -275,6 +275,7 @@ def compute_distillation_loss_topk(
     )
     if config.loss_clamp is not None:
         distillation_losses = distillation_losses.clamp_max(config.loss_clamp)
+    distillation_losses = distillation_losses.clamp_min(0.0)  # Due to use of top-k, divergences can be negative.
     distillation_loss = agg_loss(
         loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
