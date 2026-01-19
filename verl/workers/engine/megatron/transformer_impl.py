@@ -35,6 +35,9 @@ from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
+    merge_router_topk_indices,
+    pp_gather,
+    reorder_and_merge_vpp_layers,
     set_router_replay_data,
 )
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
@@ -52,6 +55,7 @@ from verl.utils.megatron_utils import (
     unwrap_model,
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
+from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
@@ -98,6 +102,7 @@ class MegatronEngine(BaseEngine):
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
         if self.enable_routing_replay:
             apply_router_replay_patch()
+            self.mini_layer_topk_idx_list = []
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
@@ -568,7 +573,11 @@ class MegatronEngine(BaseEngine):
         enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
 
         if enable_routing_replay:
+            # Set to REPLAY mode: for R3 mode or actor update phase in R2 mode
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+            if forward_only and self.engine_config.router_replay.mode == "R2":
+                # In R2 mode, forward_only calls (e.g., compute_log_probs) need to record routing information
+                RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
 
         # batch should be a list of batches inside micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.module))
@@ -585,11 +594,6 @@ class MegatronEngine(BaseEngine):
             forward_only=forward_only,
         )
 
-        if enable_routing_replay:
-            if self.engine_config.router_replay.mode in ["R3"]:
-                RouterReplay.clear_global_indices()
-                RouterReplay.clear_global_router_replay_action()
-
         if self.model_config.mtp.enable and self.is_mp_src_rank_with_outputs():
             # add mtp_losses
             metrics = get_megatron_mtp_loss(n_micro_batch)
@@ -597,11 +601,34 @@ class MegatronEngine(BaseEngine):
                 losses_reduced[0]["metrics"] = {}
             losses_reduced[0]["metrics"].update(metrics)
 
+        if RouterReplayHelper.is_r2_record_action(self.tf_config):
+            if self.tf_config.virtual_pipeline_model_parallel_size is not None:
+                # config = self.actor_module[0].module.module.config
+                vp_size = len(self.module)
+                microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
+                bs = n_micro_batch
+                topk_idx_td = reorder_and_merge_vpp_layers(
+                    self.mini_layer_topk_idx_list, bs, vp_size, microbatch_group_size_per_vp_stage
+                )
+            else:
+                tensors = [tensor for nt in self.mini_layer_topk_idx_list for tensor in nt.unbind()]
+                topk_idx_td = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+            self.mini_layer_topk_idx_list = []
+
+            layers_topk_idx = pp_gather(topk_idx_td.to(torch.uint8), self.tf_config)
+            use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
+            if use_dynamic_bsz and indices is not None:
+                layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)
+
+        output = {}
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
-            return output
-        else:
-            return {}
+            if RouterReplayHelper.is_r2_record_action(self.tf_config):
+                output["model_output"]["routed_experts"] = layers_topk_idx
+        if enable_routing_replay:
+            RouterReplay.clear_global_indices()
+            RouterReplay.clear_global_router_replay_action()
+        return output
 
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
         peft_config = None
@@ -803,6 +830,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 data_format="thd" if self.engine_config.use_remove_padding else "bshd",
                 enable_mtp=self.model_config.mtp.enable_train,
             )
+
+        # Router replay: record routing decisions for R2 mode
+        if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
+            merge_router_topk_indices(None, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank)
 
         # Router replay: switch to backward replay mode for next backward pass
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
