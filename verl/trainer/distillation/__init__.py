@@ -12,5 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .losses import *  # noqa: F401
-from .utils import *  # noqa: F401
+from dataclasses import dataclass
+from typing import Optional
+
+import torch
+
+from verl.base_config import BaseConfig
+
+
+@dataclass
+class DistillationLossInputs(BaseConfig):
+    """Storage class for distillation loss inputs."""
+
+    student_log_probs: Optional[torch.Tensor] = None
+    teacher_log_probs: Optional[torch.Tensor] = None
+    student_topk_logprobs: Optional[torch.Tensor] = None
+    teacher_topk_logprobs: Optional[torch.Tensor] = None
+    student_topk_indices: Optional[torch.Tensor] = None
+    teacher_topk_indices: Optional[torch.Tensor] = None
+
+
+from .losses import *  # noqa: F401, E402
+from .utils import *  # noqa: F401, E402
