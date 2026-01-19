@@ -122,7 +122,7 @@ def ppo_loss(
         policy_loss = 0
 
     # add entropy loss
-    if entropy is not None and not distillation_enabled:
+    if entropy is not None and (not distillation_enabled or distillation_config.use_policy_loss):
         entropy_loss = agg_loss(
             loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
         )
