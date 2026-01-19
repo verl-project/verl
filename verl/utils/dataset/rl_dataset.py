@@ -23,6 +23,7 @@ from collections import defaultdict
 from io import BytesIO
 from typing import Optional
 
+import datasets
 import numpy as np
 import torch
 from omegaconf import DictConfig, ListConfig
@@ -30,7 +31,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-import datasets
 from verl.utils.import_utils import load_extern_object
 
 logger = logging.getLogger(__name__)
