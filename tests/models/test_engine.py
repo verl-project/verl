@@ -101,12 +101,15 @@ def create_training_config(model_type, strategy, device_count, model):
     else:
         raise NotImplementedError(f"strategy {strategy} is not supported")
 
+    distillation_config = DistillationConfig(strategy=strategy, rollout_n=-1, ppo_micro_batch_size_per_gpu=-1)
+
     config = TrainingWorkerConfig(
         model_type=model_type,
         model_config=model_config,
         engine_config=engine_config,
         optimizer_config=optimizer_config,
         checkpoint_config=None,
+        distillation_config=distillation_config,
     )
     return config
 
@@ -399,6 +402,8 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
 
     checkpoint_config = CheckpointConfig()
 
+    distillation_config = DistillationConfig(strategy=strategy, rollout_n=-1, ppo_micro_batch_size_per_gpu=-1)
+
     # build model engine
     engine: BaseEngine = EngineRegistry.new(
         model_type="language_model",
@@ -407,6 +412,7 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
         engine_config=engine_config,
         optimizer_config=optimizer_config,
         checkpoint_config=checkpoint_config,
+        distillation_config=distillation_config,
     )
 
     engine.initialize()
