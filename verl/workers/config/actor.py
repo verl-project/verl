@@ -341,8 +341,6 @@ class DistillationConfig(ActorConfig):
             Configuration for the teacher model.
         loss_clamp (float, optional):
             Maximum value to clamp distillation loss. If None, no clamping is applied.
-        take_abs (bool):
-            Whether to take the absolute value of log p - log q.
         loss_settings (DistillationLossSettings, optional):
             Runtime-populated settings based on loss_mode. Not set by user.
     """
@@ -355,7 +353,6 @@ class DistillationConfig(ActorConfig):
     jsd_beta: float = 0.5
     teacher_model: HFModelConfig = field(default_factory=BaseConfig)
     loss_clamp: Optional[float] = None
-    take_abs: bool = False
 
     # Store distillation loss settings for computing the specified loss_mode
     # Not set by user, populated at runtime
