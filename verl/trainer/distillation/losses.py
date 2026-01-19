@@ -264,16 +264,16 @@ def compute_distillation_loss_topk(
     if loss_mode.endswith("+"):
         take_abs = True
         loss_mode = loss_mode[:-1]
-    match config.loss_mode:
-        case "forward_kl_topk" | "forward_kl_full":
+    match loss_mode:
+        case "forward_kl_topk":
             distillation_losses = kullback_leibler_divergence(
                 log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward", take_abs=take_abs
             )
-        case "reverse_kl_topk" | "reverse_kl_full":
+        case "reverse_kl_topk":
             distillation_losses = kullback_leibler_divergence(
                 log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse", take_abs=take_abs
             )
-        case "jsd_topk" | "jsd_full":
+        case "jsd_topk":
             distillation_losses = jensen_shannon_divergence(
                 log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=config.jsd_beta, take_abs=take_abs
             )
