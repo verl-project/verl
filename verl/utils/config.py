@@ -73,9 +73,9 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
 
 def validate_config(
     config: DictConfig,
-    use_distillation_policy: bool,
     use_reference_policy: bool,
     use_critic: bool,
+    use_distillation_policy: bool = False,  # TODO: RM default after integrated with all main_ppo (transfer_queue, async)
 ) -> None:
     """Validate an OmegaConf DictConfig.
 

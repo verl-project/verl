@@ -79,8 +79,13 @@ def need_reference_policy(
 def need_distillation_policy(
     config: DictConfig,
 ) -> bool:
-    """Given the config, do we need distillation policy."""
-    return config.actor_rollout_ref.distillation.enabled
+    """Given the config, do we need distillation policy.
+    TODO (JacobHelwig): RM logic for missing distillation cfg once integrated w Megatron
+    """
+    distillation_config = config.actor_rollout_ref.get("distillation")
+    if distillation_config and distillation_config.enabled:
+        return True
+    return False
 
 
 def need_reward_model(
