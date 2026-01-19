@@ -29,6 +29,7 @@ from veomni.optim import build_lr_scheduler, build_optimizer
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
+from verl.trainer.distillation import is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.device import get_device_id, get_device_name
