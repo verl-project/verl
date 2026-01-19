@@ -22,6 +22,7 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
+from verl.trainer.distillation import DistillationLossInputs
 from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import DistillationConfig
@@ -266,8 +267,8 @@ def extract_distillation_inputs(
 
 
 def prepare_distillation_inputs(
-    data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig
-) -> dict[str, torch.Tensor]:
+    log_probs: torch.Tensor, data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig
+) -> DistillationLossInputs:
     """Prepare distillation loss inputs for loss computation. Called in ppo_loss before computing distillation loss."""
     distillation_settings: DistillationLossSettings = config.loss_settings
     if distillation_settings.use_full:
@@ -275,7 +276,7 @@ def prepare_distillation_inputs(
             "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
         )
     elif distillation_settings.use_estimator:
-        return {}
+        return DistillationLossInputs(student_log_probs=log_probs, teacher_log_probs=data["ref_log_prob"])
     elif distillation_settings.use_topk:
         teacher_topk_logprobs, teacher_topk_indices = unpad_distillation_logprobs(
             outputs=data, data=data, stage=Stage.REF_LOG_PROB, distillation_settings=distillation_settings
@@ -283,11 +284,11 @@ def prepare_distillation_inputs(
         student_topk_logprobs, student_topk_indices = unpad_distillation_logprobs(
             outputs=model_output, data=data, stage=Stage.ACTOR_UPDATE, distillation_settings=distillation_settings
         )
-        return dict(
-            teacher_topk_logprobs=teacher_topk_logprobs,
-            teacher_topk_indices=teacher_topk_indices,
+        return DistillationLossInputs(
             student_topk_logprobs=student_topk_logprobs,
+            teacher_topk_logprobs=teacher_topk_logprobs,
             student_topk_indices=student_topk_indices,
+            teacher_topk_indices=teacher_topk_indices,
         )
     else:
         raise ValueError
