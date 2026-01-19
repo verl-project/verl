@@ -149,16 +149,12 @@ def ppo_loss(
         distillation_config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
         distillation_config.global_batch_info["global_batch_size"] = data["global_batch_size"]
         distillation_config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
-        teacher_log_probs = data["ref_log_prob"]
-        student_log_probs = log_prob
         distillation_inputs = prepare_distillation_inputs(
-            data=data, model_output=model_output, config=distillation_config
+            log_prob=log_prob, data=data, model_output=model_output, config=distillation_config
         )
         distillation_loss_fn = get_distillation_loss_fn(distillation_config.loss_mode)
         distillation_loss, distillation_metrics = distillation_loss_fn(
-            teacher_log_probs=teacher_log_probs,
-            student_log_probs=student_log_probs,
-            **distillation_inputs,
+            inputs=distillation_inputs,
             response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
             config=distillation_config,
