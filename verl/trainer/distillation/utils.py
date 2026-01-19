@@ -22,8 +22,8 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from verl.trainer.distillation import DistillationLossInputs
 from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
+from verl.trainer.distillation.types import DistillationLossInputs
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import DistillationConfig
 from verl.workers.utils.padding import _slice_response_from_unpad_output
