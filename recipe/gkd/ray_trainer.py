@@ -30,6 +30,8 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from collections import defaultdict
 import uuid
+import random
+from torch.utils.data import Subset
 
 from recipe.gkd.teacher import TeacherClient
 from recipe.gkd.teacher_utils import get_teacher_knowledge
@@ -212,6 +214,13 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
             sampler=train_sampler,
         )
 
+        # Will be used in for GKD scenario for seperate dataloaders
+        self._collate_fn = collate_fn
+        self._num_workers = num_workers
+        self._on_batch_size = self.config.data.get("gen_batch_size", self.config.data.train_batch_size)
+        self._off_batch_size = self.config.data.get("off_policy_batch_size") or self.config.data.train_batch_size
+        self._drop_last = True 
+
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
 
         # Create off-policy dataloader if enabled
@@ -224,6 +233,7 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
                 off_policy_dataset = GKDOffPolicyDataset(
                     self.config.data.off_policy_files, self.tokenizer, self.config.data
                 )
+                self.off_policy_dataset = off_policy_dataset
                 off_policy_batch_size = self.config.data.get("off_policy_batch_size")
                 if off_policy_batch_size is None:
                     off_policy_batch_size = self.config.data.train_batch_size
@@ -373,53 +383,105 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
     def _create_continuous_iterator(self):
         """
         Create a continuous data iterator across epoch.
-        If off-policy is enabled, mixes on-policy and off-policy data according to gkd_lambda.
+        If off-policy is enabled, we do *disjoint partition* of sample indices per epoch:
+        - shuffle all sample indices once
+        - split into on_ids / off_ids by gkd_lambda
+        - build per-epoch dataloaders on Subset(train_dataset) and Subset(off_policy_dataset)
+        - then shuffle the *source sequence* (on vs off) so training sees a mixed stream
+        This guarantees: within an epoch, a sample is used by at most one of {on, off}.
         """
-        import random
+        gkd_lambda = float(self.config.trainer.get("gkd_lambda", 1.0))
+        enable_off_policy = bool(self.config.trainer.get("enable_off_policy", False))
 
-        gkd_lambda = self.config.trainer.get("gkd_lambda", 1.0)
-        enable_off_policy = self.config.trainer.get("enable_off_policy", False)
+        # clamp
+        if gkd_lambda < 0.0:
+            gkd_lambda = 0.0
+        if gkd_lambda > 1.0:
+            gkd_lambda = 1.0
+
+        # If off-policy disabled or lambda==1 -> original pure on-policy behavior
+        if (not enable_off_policy) or (self.off_policy_dataloader is None) or (gkd_lambda >= 1.0 - 1e-12):
+            for epoch in range(self.config.trainer.total_epochs):
+                on_it = iter(self.train_dataloader)
+                for _ in range(len(self.train_dataloader)):
+                    batch_dict = next(on_it)
+                    batch_dict["is_on_policy"] = True
+                    yield epoch, batch_dict
+            return
+
+        # If lambda==0 -> pure off-policy behavior
+        if gkd_lambda <= 1e-12:
+            for epoch in range(self.config.trainer.total_epochs):
+                off_it = iter(self.off_policy_dataloader)
+                for _ in range(len(self.off_policy_dataloader)):
+                    batch_dict = next(off_it)
+                    batch_dict["is_on_policy"] = False
+                    yield epoch, batch_dict
+            return
+
+        # Disjoint partition mode (0<lambda<1)
+        base_seed = int(self.config.trainer.get("data_partition_seed", 12345))
+
+        train_ds = self.train_dataset
+        off_ds = getattr(self, "off_policy_dataset", None) or self.off_policy_dataloader.dataset
+
+        N = len(train_ds)
+        assert len(off_ds) == N, (
+            f"Disjoint partition requires on/off datasets aligned with same length. "
+            f"Got len(train)={len(train_ds)} len(off)={len(off_ds)}"
+        )
 
         for epoch in range(self.config.trainer.total_epochs):
-            on_policy_iterator = iter(self.train_dataloader)
-            off_policy_iterator = iter(self.off_policy_dataloader) if enable_off_policy else None
+            # 1) global shuffle of indices (deterministic per epoch)
+            rng = random.Random(base_seed + epoch)
+            indices = list(range(N))
+            rng.shuffle(indices)
 
-            # Calculate how many batches we need
-            total_batches = len(self.train_dataloader)
+            # 2) split into on/off ids (mutually exclusive)
+            n_on = int(round(gkd_lambda * N))
+            on_ids = indices[:n_on]
+            off_ids = indices[n_on:]
 
-            for _ in range(total_batches):
-                # Decide whether to use on-policy or off-policy data
-                use_on_policy = True
-                if enable_off_policy and off_policy_iterator is not None:
-                    # Sample based on lambda: lambda=1.0 means always on-policy
-                    use_on_policy = random.random() < gkd_lambda
-                if use_on_policy:
-                    try:
-                        batch_dict = next(on_policy_iterator)
-                        batch_dict["is_on_policy"] = True
-                    except StopIteration:
-                        # If on-policy iterator exhausted, fall back to off-policy if available
-                        if off_policy_iterator is not None:
-                            try:
-                                batch_dict = next(off_policy_iterator)
-                                batch_dict["is_on_policy"] = False
-                            except StopIteration:
-                                # Both exhausted, restart off-policy
-                                off_policy_iterator = iter(self.off_policy_dataloader)
-                                batch_dict = next(off_policy_iterator)
-                                batch_dict["is_on_policy"] = False
-                        else:
-                            break
+            # 3) build per-epoch subset dataloaders
+            on_subset = Subset(train_ds, on_ids)
+            off_subset = Subset(off_ds, off_ids)
+
+            on_loader = StatefulDataLoader(
+                dataset=on_subset,
+                batch_size=self._on_batch_size,
+                num_workers=self._num_workers,
+                drop_last=self._drop_last,
+                collate_fn=self._collate_fn,
+                shuffle=False,  # order is defined by on_ids
+            )
+
+            off_loader = StatefulDataLoader(
+                dataset=off_subset,
+                batch_size=self._off_batch_size,
+                num_workers=self._num_workers,
+                drop_last=self._drop_last,
+                collate_fn=self._collate_fn,
+                shuffle=False,  # order is defined by off_ids
+            )
+
+            on_steps = len(on_loader)
+            off_steps = len(off_loader)
+
+            # 4) shuffle the source schedule so batches are mixed
+            #    (This shuffles only whether next batch comes from on or off; samples remain disjoint.)
+            schedule = [True] * on_steps + [False] * off_steps
+            rng.shuffle(schedule)
+
+            on_it = iter(on_loader)
+            off_it = iter(off_loader)
+
+            for use_on in schedule:
+                if use_on:
+                    batch_dict = next(on_it)
+                    batch_dict["is_on_policy"] = True
                 else:
-                    try:
-                        batch_dict = next(off_policy_iterator)
-                        batch_dict["is_on_policy"] = False
-                    except StopIteration:
-                        # If off-policy iterator exhausted, restart it
-                        off_policy_iterator = iter(self.off_policy_dataloader)
-                        batch_dict = next(off_policy_iterator)
-                        batch_dict["is_on_policy"] = False
-
+                    batch_dict = next(off_it)
+                    batch_dict["is_on_policy"] = False
                 yield epoch, batch_dict
 
     def _async_gen_next_batch(self, epoch, batch_dict, sync_before_generation=True):

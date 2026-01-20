@@ -1,5 +1,8 @@
+ulimit -u 65535
 export TOKENIZERS_PARALLELISM=false
 export TORCH_CUDA_ARCH_LIST="9.0"
+export RAY_TMPDIR=/workspace/ray_tmp
+mkdir -p $RAY_TMPDIR
 ray stop -f || true
 rm run*
 rm -r outputs
@@ -12,8 +15,8 @@ args=(
   actor_rollout_ref.rollout.name=vllm
   actor_rollout_ref.rollout.mode=sync # default is sync and not in _ROLLOUT_REGISTRY in verl/verl/workers/rollout/base.py
   ++actor_rollout_ref.rollout.n=1
-  ++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
-  ++actor_rollout_ref.actor.ppo_mini_batch_size=2
+  ++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2
+  ++actor_rollout_ref.actor.ppo_mini_batch_size=4
   ++actor_rollout_ref.model.enable_gradient_checkpointing=true
   actor_rollout_ref.teacher.server_ip=127.0.0.1
   actor_rollout_ref.teacher.server_port=15555
@@ -23,19 +26,19 @@ args=(
   data.off_policy_files=local_parquet_dir/train.parquet
   ++data.max_prompt_length=512
   ++data.max_response_length=512
-  ++data.train_batch_size=4
+  ++data.train_batch_size=8
   ++data.dataloader_num_workers=1 # keep this value small, otherwise sometimes it will make terminal unresponsive
   # ++data.val_batch_size=16
 
   trainer.total_epochs=1
-  trainer.n_gpus_per_node=1
+  trainer.n_gpus_per_node=2
   trainer.scheduler=one_step_off
   trainer.test_freq=5
   trainer.logger='["console","wandb"]'
   trainer.project_name=mw_verl_reproduce
-  trainer.experiment_name=gsm8k-gkd-qwen2p5_1p5b_to_0p5b_lambda0p1_test
+  trainer.experiment_name=gsm8k-gkd-qwen2p5_14b_to_0p5b_lambda0p7
   trainer.total_training_steps=null # null
-  trainer.gkd_lambda=0.1
+  trainer.gkd_lambda=0.7 # 0.0 for pure off policy and 1.0 for pure on policy
   trainer.enable_off_policy=True
 
 
@@ -61,7 +64,7 @@ PIDFILE="run.pid"
 nohup \
 env \
 HYDRA_FULL_ERROR=1 \
-CUDA_VISIBLE_DEVICES=1,2 \
+CUDA_VISIBLE_DEVICES=1,2,5 \
   python3 -u -m recipe.gkd.main_gkd "${args[@]}" \
   > "$LOG" 2>&1 < /dev/null &
 
@@ -73,7 +76,7 @@ echo "View logs: tail -f $LOG"
 
 
 # Before you run this, start the teacher server
-# cd /workspace/mlf2/verl/recipe/gkd/teacher/ && bash start_server.sh
+# bash /workspace/mlf2/verl/recipe/gkd/teacher/start_server.sh
 
 
 
