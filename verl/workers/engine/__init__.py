@@ -13,12 +13,15 @@
 # limitations under the License.
 from .base import BaseEngine, EngineRegistry
 from .fsdp import FSDPEngine, FSDPEngineWithLMHead
+from .deepspeed import DeepSpeedEngineWithLMHead, DeepSpeedEngineWithValueHead
 
 __all__ = [
     "BaseEngine",
     "EngineRegistry",
     "FSDPEngine",
     "FSDPEngineWithLMHead",
+    "DeepSpeedEngineWithLMHead",
+    "DeepSpeedEngineWithValueHead",
 ]
 
 try:

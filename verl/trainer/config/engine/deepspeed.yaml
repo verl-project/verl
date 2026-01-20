@@ -1,0 +1,41 @@
+# Target class for this configuration
+_target_: verl.workers.config.DeepSpeedEngineConfig
+
+# Strategy for the engine
+strategy: deepspeed
+
+# ZeRO optimization stage (0, 1, 2, or 3)
+zero_stage: 2
+
+# Offload target: one of [none, cpu, nvme, auto]
+offload: none
+
+# NVMe offload directory (used when offload is nvme/auto)
+offload_dir: null
+
+# Initial model dtype
+model_dtype: fp32
+
+# Mixed precision training dtype
+dtype: bfloat16
+
+# Optional explicit mixed precision policy
+mixed_precision: null
+
+# Default DeepSpeed gradient accumulation steps
+gradient_accumulation_steps: 1
+
+# Enable activation checkpointing
+activation_checkpointing: ${oc.select:actor_rollout_ref.model.enable_gradient_checkpointing,false}
+
+# Whether to use dynamic batch sizing
+use_dynamic_bsz: true
+
+# Training token budget per GPU (overridden by recipes)
+max_token_len_per_gpu: null
+
+# Per-GPU micro batch size (overridden by recipes)
+micro_batch_size_per_gpu: null
+
+# Whether to remove padding when supported by the model
+use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}

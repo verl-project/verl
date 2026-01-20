@@ -22,11 +22,11 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig
+from .engine import DeepSpeedEngineConfig, FSDPEngineConfig, McoreEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["CriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "FSDPCriticModelCfg"]
+__all__ = ["CriticConfig", "DeepSpeedCriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "FSDPCriticModelCfg"]
 
 
 @dataclass
@@ -222,6 +222,29 @@ class FSDPCriticConfig(CriticConfig):
                         f"critic.ppo_micro_batch_size ({self.ppo_micro_batch_size}) * "
                         f"ulysses_sequence_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
                     )
+            else:
+                if self.ppo_micro_batch_size_per_gpu * sp_size < n_gpus:
+                    raise ValueError(
+                        f"critic.ppo_micro_batch_size_per_gpu ({self.ppo_micro_batch_size_per_gpu}) * "
+                        f"ulysses_sequence_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
+                    )
+
+
+@dataclass
+class DeepSpeedCriticConfig(CriticConfig):
+    """Configuration for DeepSpeed-based critic."""
+
+    strategy: str = "deepspeed"
+    grad_clip: float = 1.0
+    deepspeed_config: DeepSpeedEngineConfig = field(default_factory=DeepSpeedEngineConfig)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.engine = self.deepspeed_config
+        offload_enabled = self.deepspeed_config.offload in {"cpu", "nvme", "auto"}
+        if offload_enabled:
+            self.deepspeed_config.param_offload = True
+            self.deepspeed_config.optimizer_offload = self.deepspeed_config.zero_stage >= 2
 
 
 @dataclass

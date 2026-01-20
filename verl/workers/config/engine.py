@@ -24,6 +24,7 @@ from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
+    "DeepSpeedEngineConfig",
     "FSDPEngineConfig",
     "McoreEngineConfig",
     "TrainingWorkerConfig",
@@ -221,6 +222,43 @@ class FSDPEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["fsdp", "fsdp2"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class DeepSpeedEngineConfig(EngineConfig):
+    """Configuration for DeepSpeed engine.
+
+    Args:
+        zero_stage (int): ZeRO optimization stage. One of {0, 1, 2, 3}. Default: 2.
+        offload (str): Offload target. One of {"none", "cpu", "nvme", "auto"}. Default: "none".
+        offload_dir (Optional[str]): Offload directory when ``offload`` is "nvme" or "auto".
+        model_dtype (str): Initial model dtype. Default: "fp32".
+        mixed_precision (Optional[dict[str, Any]]): Mixed precision policy. Example::
+
+            mixed_precision:
+              param_dtype: bf16
+              reduce_dtype: fp32
+              buffer_dtype: fp32
+
+        gradient_accumulation_steps (int): Default GA steps used for DeepSpeed engine init.
+        activation_checkpointing (bool): Whether to enable activation checkpointing on the model.
+    """
+
+    zero_stage: int = 2
+    offload: Literal["none", "cpu", "nvme", "auto"] = "none"
+    offload_dir: Optional[str] = None
+
+    model_dtype: str = "fp32"
+    mixed_precision: Optional[dict[str, Any]] = None
+    gradient_accumulation_steps: int = 1
+    activation_checkpointing: bool = False
+
+    strategy: str = "deepspeed"
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.zero_stage in {0, 1, 2, 3}, f"Unsupported zero_stage={self.zero_stage}"
+        assert self.offload in {"none", "cpu", "nvme", "auto"}, f"Unsupported offload={self.offload}"
 
 
 @dataclass
