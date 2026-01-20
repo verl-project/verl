@@ -27,7 +27,7 @@ import torch
 from checkpoint_engine.ps import H2DBucket, ParameterMeta, ParameterServer, _gen_h2d_buckets, _to_named_tensor
 
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry
-from verl.utils.device import get_nccl_backend, get_torch_device
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.net_utils import get_free_port
 
 logger = logging.getLogger(__name__)
@@ -273,9 +273,11 @@ class KIMICheckpointEngine(CheckpointEngine):
             world_size (int): The total number of processes.
         """
         self.rank = rank
-        if not self.initialized:
+        # unregister_memory in transfer engine is not supported on NPU, so we have to initialize ParameterServer each time
+        if get_device_name() == "npu" or not self.initialized:
             self.parameter_server = ParameterServer(rank=rank, world_size=world_size, auto_pg=False, custom_dist=True)
             self.parameter_server.receive_tensor = types.MethodType(receive_tensor, self.parameter_server)
+        if not self.initialized:
             dist.init_process_group(
                 host=master_metadata.ip,
                 port=master_metadata.port,
@@ -287,8 +289,6 @@ class KIMICheckpointEngine(CheckpointEngine):
             self.rollout_ranks = list(range(self.train_world_size, world_size))
             self.rollout_group = dist.new_group(self.rollout_ranks)
             self.initialized = True
-
-        dist.barrier()
 
     @torch.no_grad()
     async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):

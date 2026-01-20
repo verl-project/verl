@@ -43,6 +43,8 @@ def test_kimi_checkpoint_engine(
                 "UCX_MAX_RNDV_RAILS": "4",
                 "UCX_LOG_LEVEL": "INFO",
                 "VERL_LOGGING_LEVEL": "DEBUG",
+                "NCCL_IB_HCA": "mlx5",
+                "ASCEND_USE_SHORT_CONNECTION": "1",
             }
         }
     )
@@ -60,7 +62,7 @@ def test_kimi_checkpoint_engine(
     trainer = create_trainer_worker_group(model_path, trainer_pool, "kimi_ckpt_engine", checkpoint_kwargs)
     trainer.reset()
     rollout = create_rollout_worker_group(
-        model_path, rollout_pool, "kimi_ckpt_engine", checkpoint_kwargs, check_allclose=check_allclose
+        model_path, rollout_pool, "kimi_ckpt_engine", checkpoint_kwargs, device=get_device_name(), check_allclose=check_allclose
     )
 
     world_size = trainer.world_size + rollout.world_size
@@ -106,8 +108,8 @@ def test_kimi_checkpoint_engine(
 if __name__ == "__main__":
     test_kimi_checkpoint_engine(
         rebuild_group=False,
-        num_trainer=2,
-        num_rollout=30,
+        num_trainer=4,
+        num_rollout=28,
         num_nodes=2,
         num_gpus_per_node=16,
         check_allclose=False,
