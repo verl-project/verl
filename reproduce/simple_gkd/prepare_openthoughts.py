@@ -147,6 +147,8 @@ def stats(
 ):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
 
+    cot_out = gzip.open("math_examples_complete_cot.jsonl.gz", "wt", encoding="utf-8")
+
     # Counters (all rows, including discarded)
     stats = {
         "total_seen": 0,
@@ -178,6 +180,9 @@ def stats(
             continue  # ✅ discard from final df
 
         stats["kept_complete_think"] += 1
+
+        json.dump(ex, cot_out, ensure_ascii=False)
+        cot_out.write("\n")
 
         think_text, answer_text = split_think_answer_complete(assistant_text)
 
@@ -228,7 +233,7 @@ def stats(
 
     print("\n=== Token stats (on kept df only) ===")
     print(df[["think_tokens", "answer_tokens"]].describe(percentiles=[0.5, 0.9, 0.95, 0.99]))
-
+    cot_out.close()
     return df
 
 

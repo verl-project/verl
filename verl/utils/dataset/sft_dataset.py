@@ -49,6 +49,17 @@ class SFTDataset(Dataset):
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
+        self.ground_truth_key = config.get("ground_truth_key", None)
+        # Normalize Hydra/OmegaConf types early (ListConfig/DictConfig -> plain Python)
+        try:
+            from omegaconf import OmegaConf
+            if OmegaConf.is_config(self.ground_truth_key):
+                self.ground_truth_key = OmegaConf.to_container(self.ground_truth_key, resolve=True)
+        except Exception:
+            pass
+
+        # Auto-enable return_metadata if ground_truth_key is set
+        self.return_metadata = config.get("return_metadata", self.ground_truth_key is not None)
 
         assert truncation in ["error", "left", "right"]
         self.truncation = truncation
@@ -134,6 +145,104 @@ class SFTDataset(Dataset):
         return len(self.prompts)
 
     def __getitem__(self, item):
+        def series_to_item(x):
+            # unwrap singleton Series/ndarray
+            while isinstance(x, (pd.Series, np.ndarray)) and len(x) == 1:
+                x = x[0]
+
+            # pyarrow Scalar -> python
+            try:
+                import pyarrow as pa
+                if isinstance(x, pa.Scalar):
+                    x = x.as_py()
+            except Exception:
+                pass
+
+            return x
+
+        def normalize_key(k):
+            """
+            Turn weird config/list-like keys into a plain Python str key.
+            Handles:
+            - OmegaConf ListConfig(['ground_truth'])
+            - ['ground_truth']
+            - np.ndarray(['ground_truth'])
+            - np.str_('ground_truth')
+            - other non-str objects
+            """
+            # OmegaConf ListConfig behaves like list
+            try:
+                from omegaconf import ListConfig
+                if isinstance(k, ListConfig):
+                    k = list(k)
+            except Exception:
+                pass
+
+            # unwrap singleton list/tuple
+            if isinstance(k, (list, tuple)) and len(k) == 1:
+                k = k[0]
+
+            # unwrap singleton numpy array
+            if isinstance(k, np.ndarray):
+                if k.size == 1:
+                    k = k.item()
+                else:
+                    # if someone passed a multi-element array as key, make it a python list
+                    k = k.tolist()
+
+            # numpy scalar -> python
+            if isinstance(k, (np.generic,)):
+                k = k.item()
+
+            # finally make sure it's a str
+            if not isinstance(k, str):
+                k = str(k)
+
+            return k
+
+        def extract_ground_truth(row, ground_truth_key):
+            """
+            row: pandas Series (self.dataframe.iloc[item])
+            ground_truth_key:
+            - list-like path: ['reward_model','ground_truth'] (maybe with weird element types)
+            - string: 'reward_model.ground_truth' or 'reward_model' etc.
+            """
+            row = series_to_item(row)
+
+            if ground_truth_key is None:
+                return None
+
+            # Case 1: list-like path
+            if isinstance(ground_truth_key, (list, tuple)):
+                cur = row
+                for raw_k in ground_truth_key:
+                    cur = series_to_item(cur)
+                    k = normalize_key(raw_k)
+
+                    # If current object is a pandas Series, cur[k] expects a column name (string)
+                    # If current object is a dict, cur[k] is dict access.
+                    cur = cur[k]
+                return series_to_item(cur)
+
+            # Case 2: string key
+            k = normalize_key(ground_truth_key)
+
+            # Support dotted flattened keys if present as a column
+            if k in self.dataframe.columns:
+                return series_to_item(row[k])
+
+            # If dotted path but stored as nested dict in a cell, navigate it
+            if "." in k and k.split(".", 1)[0] in row.index:
+                parts = k.split(".")
+                cur = row[parts[0]]
+                for p in parts[1:]:
+                    cur = series_to_item(cur)
+                    cur = cur[normalize_key(p)]
+                return series_to_item(cur)
+
+            # Fallback: direct access
+            return series_to_item(row[k])
+
         tokenizer = self.tokenizer
 
         prompt = self.prompts[item]
@@ -176,7 +285,6 @@ class SFTDataset(Dataset):
             attention_mask = torch.cat((attention_mask, padded_attention_mask))
         elif sequence_length > self.max_length:
             if self.truncation == "left":
-                # actually, left truncation may not be reasonable
                 input_ids = input_ids[-self.max_length :]
                 attention_mask = attention_mask[-self.max_length :]
             elif self.truncation == "right":
@@ -191,14 +299,43 @@ class SFTDataset(Dataset):
 
         loss_mask = attention_mask.clone()
         if prompt_length > 1:
-            # mask out prompt for SFT.
             loss_mask[: min(prompt_length, loss_mask.size(0)) - 1] = 0
-        # mask out the last token in response
         loss_mask[min(prompt_length + response_length, loss_mask.size(0)) - 1] = 0
 
-        return {
+        result = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "position_ids": position_ids,
             "loss_mask": loss_mask,
         }
+
+        # Add metadata if requested
+        if self.return_metadata:
+            result["prompt"] = prompt
+            result["response"] = response
+            from omegaconf import OmegaConf
+            if self.ground_truth_key is not None:
+                
+                try:
+                    row = self.dataframe.iloc[item]
+                    result["ground_truth"] = extract_ground_truth(row, self.ground_truth_key)
+                except Exception as e:
+                    # Keep debug concise; avoid log explosion
+                    if item < 5:
+                        row = self.dataframe.iloc[item]
+                        rm = row.get("reward_model", None) if hasattr(row, "get") else (row["reward_model"] if "reward_model" in row else None)
+                        print(f"\n[GT DEBUG] item={item} error={repr(e)}", flush=True)
+                        print("[GT DEBUG] ground_truth_key:", self.ground_truth_key, flush=True)
+                        try:
+                            print("[GT DEBUG] ground_truth_key element types:",
+                                [type(k) for k in self.ground_truth_key] if isinstance(self.ground_truth_key, (list, tuple)) else type(self.ground_truth_key),
+                                flush=True)
+                        except Exception:
+                            pass
+                        print("[GT DEBUG] columns:", list(self.dataframe.columns), flush=True)
+                        print("[GT DEBUG] type(reward_model):", type(rm), flush=True)
+                        print("[GT DEBUG] reward_model:", rm, flush=True)
+                    result["ground_truth"] = None
+
+        return result
+            
