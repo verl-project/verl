@@ -62,7 +62,12 @@ def test_kimi_checkpoint_engine(
     trainer = create_trainer_worker_group(model_path, trainer_pool, "kimi_ckpt_engine", checkpoint_kwargs)
     trainer.reset()
     rollout = create_rollout_worker_group(
-        model_path, rollout_pool, "kimi_ckpt_engine", checkpoint_kwargs, device=get_device_name(), check_allclose=check_allclose
+        model_path,
+        rollout_pool,
+        "kimi_ckpt_engine",
+        checkpoint_kwargs,
+        device=get_device_name(),
+        check_allclose=check_allclose,
     )
 
     world_size = trainer.world_size + rollout.world_size
