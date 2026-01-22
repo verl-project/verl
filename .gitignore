@@ -119,7 +119,8 @@ ENV/
 
 # data
 *.parquet
-
+*.gz
+*.jsonl
 
 # local logs
 logs
