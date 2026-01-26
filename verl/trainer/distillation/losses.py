@@ -112,7 +112,9 @@ def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor, take_abs: bool) -> t
     return kld.sum(dim=-1)
 
 
-def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: float, take_abs: bool) -> torch.Tensor:
+def jensen_shannon_divergence(
+    log_q: torch.Tensor, log_p: torch.Tensor, beta: float, take_abs: bool = False
+) -> torch.Tensor:
     """
     Compute Jensen-Shannon Divergence between two distributions given their log probabilities.
 
@@ -148,7 +150,7 @@ def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: fl
 
 
 def kullback_leibler_divergence(
-    log_q: torch.Tensor, log_p: torch.Tensor, take_abs: bool, loss_mode: str
+    log_q: torch.Tensor, log_p: torch.Tensor, loss_mode: str, take_abs: bool = False
 ) -> torch.Tensor:
     """
     Compute forward or reverse KL divergence between two distributions given their log probabilities.
@@ -183,7 +185,7 @@ def kullback_leibler_divergence(
 
 @register_distillation_loss(
     DistillationLossSettings(
-        names=["jsd_topk", "forward_kl_topk", "reverse_kl_topk", "jsd_topk+", "forward_kl_topk+", "reverse_kl_topk+"],
+        names=["jsd_topk", "forward_kl_topk", "reverse_kl_topk"],
         use_student_topk=True,
         use_teacher_topk=True,
     )
@@ -266,22 +268,18 @@ def compute_distillation_loss_topk(
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
     }
     loss_mode = config.loss_mode
-    take_abs = False
-    if loss_mode.endswith("+"):
-        take_abs = True
-        loss_mode = loss_mode[:-1]
     match loss_mode:
         case "forward_kl_topk":
             distillation_losses = kullback_leibler_divergence(
-                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward", take_abs=take_abs
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward"
             )
         case "reverse_kl_topk":
             distillation_losses = kullback_leibler_divergence(
-                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse", take_abs=take_abs
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="reverse"
             )
         case "jsd_topk":
             distillation_losses = jensen_shannon_divergence(
-                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=config.jsd_beta, take_abs=take_abs
+                log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, beta=config.jsd_beta
             )
         case _:
             raise NotImplementedError(f"Unsupported distillation loss mode: {config.loss_mode}")
