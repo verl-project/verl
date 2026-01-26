@@ -405,8 +405,8 @@ actor_rollout_ref:
           discrete: false
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
-          step_start: 0
-          step_end: null
+          contents: []
+          discrete: false
         torch_memory:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
