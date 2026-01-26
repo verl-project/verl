@@ -20,7 +20,7 @@ import gc
 import logging
 import os
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Callable, Optional
 
 import torch
@@ -36,10 +36,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.device import (
-    get_device_id,
-    get_device_name,
-)
+from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import (
     CPUOffloadPolicy,
     FSDPModule,
@@ -753,3 +750,11 @@ class DiffusersFSDPEngine(BaseEngine):
                 for name, param in params.items()
             )
         return per_tensor_param, peft_config
+
+    @contextmanager
+    def disable_adapter(self):
+        try:
+            self.module.disable_adapters()
+            yield
+        finally:
+            self.module.enable_adapters()
