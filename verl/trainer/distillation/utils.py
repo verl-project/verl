@@ -15,7 +15,6 @@
 Contains utilities/classes for on-policy distillation
 """
 
-from enum import Enum
 from typing import Optional
 
 import torch
@@ -23,17 +22,9 @@ from tensordict import TensorDict
 
 from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 from verl.trainer.distillation.types import DistillationLossInputs
+from verl.utils.stages import Stage
 from verl.workers.config import DistillationConfig
 from verl.workers.utils.padding import _slice_response_from_unpad_output
-
-
-class Stage(Enum):
-    """Stages for on-policy distillation training."""
-
-    OLD_LOG_PROB = "old_log_prob"
-    REF_LOG_PROB = "ref_log_prob"
-    ACTOR_UPDATE = "actor_update"
-
 
 TEACHER_TOPK_LOGITS_KEY = "teacher_topk_logits"
 TEACHER_TOPK_INDICES_KEY = "teacher_topk_indices"

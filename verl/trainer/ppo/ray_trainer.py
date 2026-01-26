@@ -40,7 +40,7 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
-from verl.trainer.distillation import Stage, extract_distillation_inputs
+from verl.trainer.distillation import extract_distillation_inputs
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -61,6 +61,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.stages import Stage
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
@@ -1143,9 +1144,6 @@ class RayPPOTrainer:
             # gather output
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
-            distillation_inputs = extract_distillation_inputs(
-                stage=Stage.OLD_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation
-            )
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
             entropy = no_padding_2_padding(entropy, batch_td)
