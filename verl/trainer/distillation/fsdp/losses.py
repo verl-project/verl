@@ -15,10 +15,18 @@
 
 import torch
 import torch.nn.functional as F
+import math
 
+def clamp_log_probs(log_p: torch.Tensor, log_q: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
+    """Clamp log probabilities to avoid numerical instability and handle inf minus inf for masked top-k probs."""
+    min_log_prob = math.log(eps)
+    log_p_clamped = torch.clamp(log_p, min=min_log_prob)
+    log_q_clamped = torch.clamp(log_q, min=min_log_prob)
+    return log_p_clamped, log_q_clamped
 
 def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
     """Compute KL divergence between two distributions given their log probabilities."""
+    log_q, log_p = clamp_log_probs(log_q, log_p)
     return F.kl_div(input=log_q, target=log_p, reduction="none", log_target=True).sum(dim=-1)
 
 
