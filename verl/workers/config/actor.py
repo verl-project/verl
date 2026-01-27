@@ -405,7 +405,7 @@ class DistillationConfig(ActorConfig):
     distillation_loss_coef: float = 1.0
     jsd_beta: float = 0.5
     teacher_model: HFModelConfig = field(default_factory=BaseConfig)
-    loss_clamp: Optional[float] = None
+    loss_clamp: Optional[float] = 10.0
 
     # Store distillation loss settings for computing the specified loss_mode
     # Not set by user, populated at runtime

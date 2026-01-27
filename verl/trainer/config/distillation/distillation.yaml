@@ -34,4 +34,4 @@ distillation_loss_coef: 1.0
 jsd_beta: 0.5
 
 # Optional clamp value for distillation loss. If null, no clamping is applied.
-loss_clamp: null
+loss_clamp: 10.0

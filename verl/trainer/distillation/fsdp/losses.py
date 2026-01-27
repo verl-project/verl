@@ -73,6 +73,8 @@ def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_m
     Returns:
         torch.Tensor: KL divergence loss per token, shape (batch_size, response_length).
     """
+    log_q = log_q.float()
+    log_p = log_p.float()
     match loss_mode:
         case "forward":
             return kl_divergence(log_q=log_q, log_p=log_p)
