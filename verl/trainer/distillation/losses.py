@@ -165,9 +165,8 @@ def compute_forward_kl_topk(
         "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
     }
-    distillation_losses_masked = distillation_losses[response_mask]
     distillation_metrics.update(
-        compute_distillation_loss_range(distillation_losses=distillation_losses_masked, response_mask=response_mask)
+        compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
     )
     if config.loss_clamp is not None:
         distillation_losses = distillation_losses.clamp_max(config.loss_clamp)
