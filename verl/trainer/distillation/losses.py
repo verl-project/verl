@@ -101,14 +101,12 @@ def compute_forward_kl_topk(
     loss_agg_mode: str = "token-mean",
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
-    Compute the distillation loss and related metrics using top-k log probabilities.
-
-    Supports forward KL loss mode. The teacher and student top-k indices must match (i.e., loss is computed over the same vocabulary subset).
+    Compute forward KL distillation loss and related metrics using top-k log probabilities.
 
     Args:
         inputs (DistillationLossInputs):
-            Inputs containing top-k log-probabilities and indices of the tokens corresponding to the
-            top-k log probabilities for both student and teacher policies.
+            Inputs containing top-k log probabilities and indices of the tokens corresponding to the
+            top-k log probabilities for teacher policy and logits for the student policy.
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
         config (DistillationConfig):
@@ -124,12 +122,14 @@ def compute_forward_kl_topk(
     assert config is not None
     distillation_metrics = {}
 
-    teacher_topk_logits = inputs.teacher_logits
+    teacher_topk_log_probs = inputs.teacher_log_probs
     teacher_topk_indices = inputs.teacher_topk_indices
     student_logits = inputs.student_logits
-    if teacher_topk_logits is None or teacher_topk_indices is None or student_logits is None:
+    if teacher_topk_log_probs is None or teacher_topk_indices is None or student_logits is None:
         raise ValueError(
-            f"Expected teacher_topk_logits ({teacher_topk_logits is None}), teacher_topk_indices {(teacher_topk_indices is None)}, and student_logits {(student_logits is None)} to be provided in inputs."
+            f"Expected teacher_topk_log_probs ({teacher_topk_log_probs is None}), "
+            f"teacher_topk_indices {(teacher_topk_indices is None)}, "
+            f"and student_logits {(student_logits is None)} to be provided in inputs."
         )
 
     match config.strategy:
@@ -139,7 +139,7 @@ def compute_forward_kl_topk(
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
     distillation_losses, student_mass, teacher_mass = distillation_loss_fn(
         student_logits=student_logits,
-        teacher_topk_logits=teacher_topk_logits,
+        teacher_topk_log_probs=teacher_topk_log_probs,
         teacher_topk_indices=teacher_topk_indices,
     )
 

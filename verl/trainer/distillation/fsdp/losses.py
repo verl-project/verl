@@ -84,12 +84,11 @@ def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_m
 
 def compute_forward_kl_topk(
     student_logits: torch.Tensor,
-    teacher_topk_logits: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
     teacher_topk_indices: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """TODO"""
     student_log_probs = F.log_softmax(student_logits, dim=-1)
-    teacher_topk_log_probs = F.log_softmax(teacher_topk_logits, dim=-1)
     student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_indices)
     distillation_losses = kullback_leibler_divergence(
         log_q=student_topk_log_probs, log_p=teacher_topk_log_probs, loss_mode="forward"
