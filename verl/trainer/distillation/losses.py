@@ -144,6 +144,8 @@ def compute_forward_kl_topk(
     )
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
+    student_mass = student_mass[response_mask]
+    teacher_mass = teacher_mass[response_mask]
     distillation_metrics = {
         "distillation/student_mass": student_mass.mean().item(),
         "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
@@ -209,9 +211,10 @@ def compute_distillation_loss_reverse_kl_estimator(
     distillation_losses = kl_penalty(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode
     )
+    distillation_losses_response = distillation_losses[response_mask]
     distillation_metrics = {
-        "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses.min()),
-        "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses.max()),
+        "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
+        "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
     }
     if config.loss_clamp is not None:
         distillation_losses = distillation_losses.clamp_max(config.loss_clamp)

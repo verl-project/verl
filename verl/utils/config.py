@@ -81,7 +81,7 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
         use_distillation_policy (bool): is distillation policy needed
-        TODO (JacobHelwig): RM default after integrated with all main_ppo (transfer_queue, async)
+        TODO: RM default False for use_distillation_policy after integration with all main_ppo (transfer_queue, async)
     """
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
