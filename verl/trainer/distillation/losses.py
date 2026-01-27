@@ -93,6 +93,17 @@ def get_distillation_loss_settings(loss_name: str) -> DistillationLossSettings:
     return DISTILLATION_SETTINGS_REGISTRY[loss_name]
 
 
+def compute_distillation_loss_range(
+    distillation_losses: torch.Tensor, response_mask: torch.Tensor
+) -> dict[str, Metric]:
+    """Compute min and max distillation loss over valid response tokens."""
+    distillation_losses_response = distillation_losses[response_mask]
+    return {
+        "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
+        "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
+    }
+
+
 @register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
 def compute_forward_kl_topk(
     inputs: DistillationLossInputs,
@@ -154,11 +165,9 @@ def compute_forward_kl_topk(
         "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
     }
+    distillation_losses_masked = distillation_losses[response_mask]
     distillation_metrics.update(
-        {
-            "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses.min()),
-            "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses.max()),
-        }
+        compute_distillation_loss_range(distillation_losses=distillation_losses_masked, response_mask=response_mask)
     )
     if config.loss_clamp is not None:
         distillation_losses = distillation_losses.clamp_max(config.loss_clamp)
@@ -212,10 +221,9 @@ def compute_distillation_loss_reverse_kl_estimator(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode
     )
     distillation_losses_response = distillation_losses[response_mask]
-    distillation_metrics = {
-        "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
-        "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
-    }
+    distillation_metrics = compute_distillation_loss_range(
+        distillation_losses=distillation_losses_response, response_mask=response_mask
+    )
     if config.loss_clamp is not None:
         distillation_losses = distillation_losses.clamp_max(config.loss_clamp)
 
