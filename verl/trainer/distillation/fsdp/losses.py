@@ -87,7 +87,7 @@ def compute_forward_kl_topk(
     teacher_topk_log_probs: torch.Tensor,
     teacher_topk_indices: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """TODO"""
+    """Compute forward KL distillation loss using top-k log probabilities."""
     student_log_probs = F.log_softmax(student_logits, dim=-1)
     student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_indices)
     distillation_losses = kullback_leibler_divergence(
