@@ -17,7 +17,7 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
-TEACHER_MODEL=Qwen2.5-3B-Instruct
+TEACHER_MODEL=Qwen2.5-7B-Instruct
 
 # DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="forward_kl_topk"
