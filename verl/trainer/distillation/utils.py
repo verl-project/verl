@@ -85,6 +85,8 @@ def extract_distillation_inputs(
 ) -> dict[str, torch.Tensor]:
     """Extract distillation loss inputs from model output for a given stage. Used in trainer."""
     distillation_settings = get_distillation_loss_settings(config.loss_mode)
+    if isinstance(stage, Stage):
+        stage = stage.value
     if distillation_settings.use_full:
         raise NotImplementedError(
             "Full logprobs are not currently supported for distillation loss. Please use top-k logprobs instead."
@@ -92,8 +94,6 @@ def extract_distillation_inputs(
     elif distillation_settings.use_estimator:
         return {}
     elif distillation_settings.use_topk:
-        if isinstance(stage, Stage):
-            stage = stage.value
         if stage == Stage.REF_LOG_PROB.value:
             return {
                 TEACHER_TOPK_INDICES_KEY: output[TEACHER_TOPK_INDICES_KEY],
