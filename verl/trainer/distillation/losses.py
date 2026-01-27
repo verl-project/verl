@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import torch
-import torch.nn.functional as F
 
+import verl.trainer.distillation.fsdp.losses as fsdp_losses
 from verl.base_config import BaseConfig
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
@@ -94,84 +93,6 @@ def get_distillation_loss_settings(loss_name: str) -> DistillationLossSettings:
     return DISTILLATION_SETTINGS_REGISTRY[loss_name]
 
 
-def clamp_log_probs(log_p: torch.Tensor, log_q: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clamp log probabilities to avoid numerical instability and handle inf minus inf for masked top-k probs."""
-    min_log_prob = math.log(eps)
-    log_p_clamped = torch.clamp(log_p, min=min_log_prob)
-    log_q_clamped = torch.clamp(log_q, min=min_log_prob)
-    return log_p_clamped, log_q_clamped
-
-
-def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
-    """Compute KL divergence between two distributions given their log probabilities."""
-    return F.kl_div(input=log_q, target=log_p, reduction="none", log_target=True).sum(dim=-1)
-
-
-def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: float) -> torch.Tensor:
-    """
-    Compute Jensen-Shannon Divergence between two distributions given their log probabilities.
-
-    JSD(β) = β * KL(p || m) + (1 - β) * KL(q || m), where m = beta * p + (1 - beta) * q
-
-    The gradients of JSD(β) behave similarly to forward KL and reverse KL when β is close
-    to 0 and 1 respectively. See https://arxiv.org/abs/2306.13649
-
-    Args:
-        log_q (torch.Tensor):
-            Student log probabilities, shape (batch_size, response_length, vocab_size) or
-            (batch_size, response_length, topk).
-        log_p (torch.Tensor):
-            Teacher log probabilities, same shape as log_q.
-        beta (float):
-            JSD interpolation weight. When beta=0, behaves like forward KL.
-            When beta=1, behaves like reverse KL.
-
-    Returns:
-        torch.Tensor: JSD loss per token, shape (batch_size, response_length).
-    """
-    log_p, log_q = clamp_log_probs(log_p, log_q)
-    q = log_q.exp()
-    p = log_p.exp()
-    m = beta * p + (1 - beta) * q
-    log_m = m.log()
-    kl1 = kl_divergence(log_q=log_m, log_p=log_p)
-    kl2 = kl_divergence(log_q=log_m, log_p=log_q)
-    loss = beta * kl1 + (1 - beta) * kl2
-    return loss
-
-
-def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_mode: str) -> torch.Tensor:
-    """
-    Compute forward or reverse KL divergence between two distributions given their log probabilities.
-
-    forward KL: KL(p || q) = sum(p * (log_p - log_q))
-    reverse KL: KL(q || p) = sum(q * (log_q - log_p))
-
-    Args:
-        log_q (torch.Tensor):
-            Student log probabilities, shape (batch_size, response_length, vocab_size) or
-            (batch_size, response_length, topk).
-        log_p (torch.Tensor):
-            Teacher log probabilities, same shape as log_q.
-        loss_mode (str):
-            KL divergence direction: "forward" or "reverse".
-        take_abs (bool):
-            Whether to take the absolute value of log_p - log_q before summing. This can help
-            when using the top-k loss, where distributions may not sum to 1 and can be negative.
-
-    Returns:
-        torch.Tensor: KL divergence loss per token, shape (batch_size, response_length).
-    """
-    log_p, log_q = clamp_log_probs(log_p, log_q)
-    match loss_mode:
-        case "forward":
-            return kl_divergence(log_q=log_q, log_p=log_p)
-        case "reverse":
-            return kl_divergence(log_q=log_p, log_p=log_q)
-        case _:
-            raise ValueError(f"Unsupported loss mode: {loss_mode}. Supported modes are: ['forward', 'reverse']")
-
-
 @register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
 def compute_forward_kl_topk(
     inputs: DistillationLossInputs,
@@ -201,17 +122,28 @@ def compute_forward_kl_topk(
             - distillation_metrics: Dictionary of metrics.
     """
     assert config is not None
-    loss_settings: DistillationLossSettings = config.loss_settings
     distillation_metrics = {}
 
-    teacher_topk_logprobs = inputs.teacher_topk_logprobs
-    student_topk_logprobs = inputs.student_topk_logprobs
-    if teacher_topk_logprobs is None or student_topk_logprobs is None:
-        raise ValueError("Expected teacher_topk_logprobs and student_topk_logprobs to be provided in inputs.")
+    teacher_topk_logits = inputs.teacher_logits
+    teacher_topk_indices = inputs.teacher_topk_indices
+    student_logits = inputs.student_logits
+    if teacher_topk_logits is None or teacher_topk_indices is None or student_logits is None:
+        raise ValueError(
+            f"Expected teacher_topk_logits ({teacher_topk_logits is None}), teacher_topk_indices {(teacher_topk_indices is None)}, and student_logits {(student_logits is None)} to be provided in inputs."
+        )
+
+    match config.strategy:
+        case "fsdp":
+            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+        case _:
+            raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
+    distillation_losses, student_mass, teacher_mass = distillation_loss_fn(
+        student_logits=student_logits,
+        teacher_topk_logits=teacher_topk_logits,
+        teacher_topk_indices=teacher_topk_indices,
+    )
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
-    student_mass = student_topk_logprobs.exp().sum(dim=-1)[response_mask]
-    teacher_mass = teacher_topk_logprobs.exp().sum(dim=-1)[response_mask]
     distillation_metrics = {
         "distillation/student_mass": student_mass.mean().item(),
         "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
@@ -220,9 +152,6 @@ def compute_forward_kl_topk(
         "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
     }
-    distillation_losses = kullback_leibler_divergence(
-        log_q=student_topk_logprobs, log_p=teacher_topk_logprobs, loss_mode="forward"
-    )
     distillation_metrics.update(
         {
             "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses.min()),
