@@ -27,5 +27,4 @@ class DistillationLossInputs(BaseConfig):
     student_log_probs: Optional[torch.Tensor] = None
     teacher_log_probs: Optional[torch.Tensor] = None
     student_logits: Optional[torch.Tensor] = None
-    teacher_logits: Optional[torch.Tensor] = None
     teacher_topk_indices: Optional[torch.Tensor] = None

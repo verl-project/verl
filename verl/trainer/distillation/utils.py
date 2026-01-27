@@ -27,7 +27,7 @@ from verl.utils.stages import Stage
 from verl.workers.config import DistillationConfig
 from verl.workers.utils.padding import _slice_response_from_unpad_output
 
-TEACHER_TOPK_LOGITS_KEY = "teacher_topk_logits"
+TEACHER_TOPK_LOGPROBS_KEY = "teacher_topk_logprobs"
 TEACHER_TOPK_INDICES_KEY = "teacher_topk_indices"
 STUDENT_LOGITS_KEY = "student_logits"
 
@@ -46,17 +46,17 @@ def compute_topk_distillation_inputs(
             # Teacher model
             match config.strategy:
                 case "fsdp":
-                    compute_topk_logits = fsdp_utils.compute_topk_logits
+                    compute_topk_logprobs = fsdp_utils.compute_topk_logprobs
                 case _:
                     raise ValueError(f"Unsupported strategy: {config.strategy}")
-            teacher_topk_logits, teacher_topk_indices = compute_topk_logits(logits=logits, config=config)
-            nested_logits = torch.nested.nested_tensor_from_jagged(teacher_topk_logits, cu_seqlens)
+            teacher_topk_logprobs, teacher_topk_indices = compute_topk_logprobs(logits=logits, config=config)
+            nested_logprobs = torch.nested.nested_tensor_from_jagged(teacher_topk_logprobs, cu_seqlens)
             nested_indices = torch.nested.nested_tensor_from_jagged(teacher_topk_indices, cu_seqlens)
-            return {TEACHER_TOPK_LOGITS_KEY: nested_logits, TEACHER_TOPK_INDICES_KEY: nested_indices}
+            return {TEACHER_TOPK_LOGPROBS_KEY: nested_logprobs, TEACHER_TOPK_INDICES_KEY: nested_indices}
         case Stage.ACTOR_UPDATE:
             # Student model
-            nested_logits = torch.nested.nested_tensor_from_jagged(logits, cu_seqlens)
-            return {STUDENT_LOGITS_KEY: nested_logits}
+            nested_logprobs = torch.nested.nested_tensor_from_jagged(logits, cu_seqlens)
+            return {STUDENT_LOGITS_KEY: nested_logprobs}
         case _:
             raise ValueError(f"Unexpected stage: {stage}")
 
@@ -102,7 +102,7 @@ def extract_distillation_inputs(
         if stage == Stage.REF_LOG_PROB.value:
             return {
                 TEACHER_TOPK_INDICES_KEY: output[TEACHER_TOPK_INDICES_KEY],
-                TEACHER_TOPK_LOGITS_KEY: output[TEACHER_TOPK_LOGITS_KEY],
+                TEACHER_TOPK_LOGPROBS_KEY: output[TEACHER_TOPK_LOGPROBS_KEY],
             }
         else:
             raise ValueError(f"Unexpected stage: {stage}")
@@ -122,11 +122,13 @@ def prepare_distillation_inputs(
     elif distillation_settings.use_estimator:
         return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data["ref_log_prob"])
     elif distillation_settings.use_topk:
-        teacher_topk_logits = _slice_response_from_unpad_output(data[TEACHER_TOPK_LOGITS_KEY], data)
+        teacher_topk_logprobs = _slice_response_from_unpad_output(data[TEACHER_TOPK_LOGPROBS_KEY], data)
         teacher_topk_indices = _slice_response_from_unpad_output(data[TEACHER_TOPK_INDICES_KEY], data)
         student_logits = _slice_response_from_unpad_output(model_output[STUDENT_LOGITS_KEY], data)
         return DistillationLossInputs(
-            student_logits=student_logits, teacher_logits=teacher_topk_logits, teacher_topk_indices=teacher_topk_indices
+            student_logits=student_logits,
+            teacher_log_probs=teacher_topk_logprobs,
+            teacher_topk_indices=teacher_topk_indices,
         )
     else:
         raise ValueError

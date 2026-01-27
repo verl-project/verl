@@ -17,6 +17,7 @@ import torch
 from verl.workers.config import DistillationConfig
 
 
-def compute_topk_logits(logits: torch.Tensor, config: DistillationConfig) -> dict[str, torch.Tensor]:
-    """Compute top-k logits."""
-    return logits.topk(k=config.topk, dim=-1)
+def compute_topk_logprobs(logits: torch.Tensor, config: DistillationConfig) -> dict[str, torch.Tensor]:
+    """Compute top-k log probabilities."""
+    logprobs = torch.log_softmax(logits, dim=-1)
+    return logprobs.topk(k=config.topk, dim=-1)
