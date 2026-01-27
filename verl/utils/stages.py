@@ -14,10 +14,6 @@
 
 from enum import Enum
 
-from verl.single_controller.base import Worker
-
-WorkerType = type[Worker]
-
 
 class Stage(Enum):
     """Stages for training."""
