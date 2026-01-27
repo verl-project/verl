@@ -20,6 +20,7 @@ from typing import Optional
 import torch
 from tensordict import TensorDict
 
+from verl.trainer.distillation.fsdp import utils as fsdp_utils
 from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.utils.stages import Stage
@@ -36,7 +37,6 @@ def compute_topk_distillation_inputs(
 ) -> dict[str, torch.Tensor]:
     """Compute distillation inputs using top-k log probabilities of teacher."""
     # Gather inputs for top-k distillation losses.
-    topk = config.topk
     stage = batch["stage"]
 
     match stage:
@@ -44,7 +44,12 @@ def compute_topk_distillation_inputs(
             return {}
         case Stage.REF_LOG_PROB:
             # Teacher model
-            teacher_topk_logits, teacher_topk_indices = logits.topk(k=topk, dim=-1)
+            match config.strategy:
+                case "fsdp":
+                    compute_topk_logits = fsdp_utils.compute_topk_logits
+                case _:
+                    raise ValueError(f"Unsupported strategy: {config.strategy}")
+            teacher_topk_logits, teacher_topk_indices = compute_topk_logits(logits=logits, config=config)
             nested_logits = torch.nested.nested_tensor_from_jagged(teacher_topk_logits, cu_seqlens)
             nested_indices = torch.nested.nested_tensor_from_jagged(teacher_topk_indices, cu_seqlens)
             return {TEACHER_TOPK_LOGITS_KEY: nested_logits, TEACHER_TOPK_INDICES_KEY: nested_indices}
