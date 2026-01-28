@@ -152,6 +152,7 @@ def compute_forward_kl_topk(
         student_logits=student_logits,
         teacher_topk_log_probs=teacher_topk_log_probs,
         teacher_topk_indices=teacher_topk_indices,
+        config=config,
     )
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
