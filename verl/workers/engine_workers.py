@@ -436,6 +436,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
 
         # 0. Setup distillation config for both actor and ref
+        # The below batch sizes are for the teacher
         distillation_config = self.config.get("distillation")
         distillation_enabled = distillation_config is not None and distillation_config.enabled
         if distillation_enabled:

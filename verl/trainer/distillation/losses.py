@@ -169,8 +169,8 @@ def compute_forward_kl_topk(
     distillation_metrics.update(
         compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
     )
-    if config.loss_clamp is not None:
-        distillation_losses = distillation_losses.clamp_max(config.loss_clamp)
+    if config.loss_max_clamp is not None:
+        distillation_losses = distillation_losses.clamp_max(config.loss_max_clamp)
 
     # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
     distillation_losses = distillation_losses.clamp_min(0.0)
