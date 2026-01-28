@@ -2,7 +2,7 @@
 eval "$(conda shell.bash hook)"
 conda activate verl
 export PATH=$CONDA_PREFIX/bin:$PATH
-# export NCCL_P2P_DISABLE=1
+export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=6,7
 export DATA_PATH=$PWD/../verlData
@@ -17,21 +17,24 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
-TEACHER_MODEL=Qwen2.5-7B-Instruct
+TEACHER_MODEL=Qwen2.5-3B-Instruct
 
 # DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="forward_kl_topk"
 
+DISTILLATION_LOSS_MAX_CLAMP=null
+DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
+
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
-EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}"
+EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
 TRAIN_PROMPT_BSZ=128
-STUDENT_MICRO_BATCH_SIZE=16
-STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
-TEACHER_MICRO_BATCH_SIZE=8
-TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
+STUDENT_MICRO_BATCH_SIZE_PER_GPU=2
+STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
+TEACHER_MICRO_BATCH_SIZE_PER_GPU=2
+TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
 WORLD_SIZE=2
 SP_SIZE=1
@@ -68,8 +71,10 @@ DISTILLATION=(
     actor_rollout_ref.distillation.loss_mode=$DISTILLATION_LOSS_MODE
     actor_rollout_ref.distillation.jsd_beta=0.5
     actor_rollout_ref.distillation.topk=64
+    actor_rollout_ref.distillation.loss_max_clamp=$DISTILLATION_LOSS_MAX_CLAMP
+    actor_rollout_ref.distillation.log_prob_min_clamp=$DISTILLATION_LOG_PROB_MIN_CLAMP
     actor_rollout_ref.distillation.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$TEACHER_MICRO_BATCH_SIZE
+    actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$TEACHER_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.distillation.log_prob_max_token_len_per_gpu=$TEACHER_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.distillation.fsdp_config.param_offload=True
     actor_rollout_ref.distillation.teacher_model.path="${FAMILY}/${TEACHER_MODEL}"
@@ -80,7 +85,7 @@ DISTILLATION=(
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.actor.ppo_mini_batch_size=$TRAIN_PROMPT_BSZ
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.fsdp_config.param_offload=True
@@ -89,7 +94,7 @@ ACTOR=(
 )
 
 ROLLOUT=(
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.tensor_model_parallel_size=1
