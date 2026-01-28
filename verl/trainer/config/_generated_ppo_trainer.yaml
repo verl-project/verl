@@ -439,7 +439,8 @@ actor_rollout_ref:
     use_policy_loss: false
     distillation_loss_coef: 1.0
     jsd_beta: 0.5
-    loss_clamp: 10.0
+    loss_max_clamp: null
+    log_prob_min_clamp: null
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
       wrap_policy:
