@@ -19,6 +19,7 @@ from torch.distributed.device_mesh import init_device_mesh
 
 from verl.trainer.fsdp_sft_trainer import FSDPSFTTrainer
 from verl.utils.distributed import initialize_global_process_group
+from verl.workers.engine.utils import enable_full_determinism
 
 
 def test_trainer_forward_consistency(trainer: FSDPSFTTrainer, total_steps: int = 4):
@@ -34,7 +35,6 @@ def test_trainer_forward_consistency(trainer: FSDPSFTTrainer, total_steps: int =
         print(f"Remove padding: {trainer.use_remove_padding}\n")
 
     steps_remaining = total_steps
-
     for epoch in range(1):  # Just one epoch for testing
         trainer.train_sampler.set_epoch(epoch=epoch)
         for data in trainer.train_dataloader:
@@ -66,6 +66,9 @@ def test_trainer_forward_consistency(trainer: FSDPSFTTrainer, total_steps: int =
 
                 # Calculate relative difference of averaged losses
                 rel_diff = torch.abs(loss_ref_all - loss_sp_all) / (torch.abs(loss_ref_all) + 1e-8)
+                torch.testing.assert_close(
+                    loss_ref_all, loss_sp_all, rtol=0.0, atol=0.0, msg="Losses from the two methods do not match!"
+                )
 
                 if trainer.device_mesh.get_rank() == 0:
                     print("\nComparison Results (Averaged across ranks):")
@@ -85,6 +88,62 @@ def test_trainer_forward_consistency(trainer: FSDPSFTTrainer, total_steps: int =
 
     if trainer.device_mesh.get_rank() == 0:
         print("\nDebug comparison completed successfully.")
+        
+def _check_backward_determinism(trainer: FSDPSFTTrainer, micro_batch: TensorDict, mode_label: str):
+    if trainer.device_mesh.get_rank() == 0:
+        print(f"\nChecking backward determinism ({mode_label})...")
+
+    cpu_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all()
+
+    trainer.fsdp_model.zero_grad(set_to_none=True)
+    trainer._compute_loss_and_backward(micro_batch.copy(), do_backward=True)
+    grads_1 = {}
+    for name, param in trainer.fsdp_model.named_parameters():
+        grads_1[name] = None if param.grad is None else param.grad.detach().clone()
+
+    trainer.fsdp_model.zero_grad(set_to_none=True)
+    torch.random.set_rng_state(cpu_state)
+    torch.cuda.set_rng_state_all(cuda_states)
+    trainer._compute_loss_and_backward(micro_batch.copy(), do_backward=True)
+    grads_2 = {}
+    for name, param in trainer.fsdp_model.named_parameters():
+        grads_2[name] = None if param.grad is None else param.grad.detach().clone()
+
+    for name in grads_1:
+        g1 = grads_1[name]
+        g2 = grads_2[name]
+        assert g1 is not None, f"Grad missing for {name} in first backward"
+        assert g2 is not None, f"Grad missing for {name} in second backward"
+        torch.testing.assert_close(g1, g2, rtol=0.0, atol=0.0, msg=f"Grad mismatch for {name}")
+
+
+def test_trainer_backward_determinism(trainer: FSDPSFTTrainer):
+    """Test backward determinism for both ref and SP+rmpad modes on one micro-batch."""
+    if trainer.device_mesh.get_rank() == 0:
+        print("\nStarting backward determinism check...")
+
+    trainer.train_sampler.set_epoch(epoch=0)
+    for data in trainer.train_dataloader:
+        data = TensorDict(data, batch_size=trainer.config.data.train_batch_size).cuda()
+        trainer.fsdp_model.train()
+        micro_batch = data.split(trainer.config.data.micro_batch_size_per_gpu)[0]
+
+        old_sp = trainer.config.ulysses_sequence_parallel_size
+
+        # Ref path: no SP, no rmpad
+        trainer.use_remove_padding = False
+        trainer.config.ulysses_sequence_parallel_size = 1
+        _check_backward_determinism(trainer, micro_batch, mode_label="ref (no SP, no rmpad)")
+
+        # SP + rmpad path
+        trainer.config.ulysses_sequence_parallel_size = old_sp
+        trainer.use_remove_padding = True
+        _check_backward_determinism(trainer, micro_batch, mode_label="SP + rmpad")
+        break
+
+    if trainer.device_mesh.get_rank() == 0:
+        print("\nBackward determinism check completed successfully.")
 
 
 def create_trainer(config):
@@ -97,6 +156,9 @@ def create_trainer(config):
         FSDPSFTTrainer: Initialized trainer instance
     """
     local_rank, rank, world_size = initialize_global_process_group()
+
+    seed = 42
+    enable_full_determinism(seed=seed)
 
     device_mesh = init_device_mesh(device_type="cuda", mesh_shape=(world_size,), mesh_dim_names=("fsdp",))
 
@@ -137,6 +199,7 @@ def main(config):
     """
     trainer = create_trainer(config)
     test_trainer_forward_consistency(trainer)
+    test_trainer_backward_determinism(trainer)
 
 
 if __name__ == "__main__":
