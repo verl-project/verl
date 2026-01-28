@@ -392,8 +392,11 @@ class DistillationConfig(ActorConfig):
             When beta=1, behaves like reverse KL.
         teacher_model (HFModelConfig):
             Configuration for the teacher model.
-        loss_clamp (float, optional):
+        loss_max_clamp (float, optional):
             Maximum value to clamp distillation loss. If None, no clamping is applied.
+        log_prob_min_clamp (float, optional):
+            Minimum value to clamp log probabilities for stability, e.g., log q - log p where p or q are 
+            very close to zero. If None, no clamping is applied.
         loss_settings (DistillationLossSettings, optional):
             Runtime-populated settings based on loss_mode. Not set by user.
     """
@@ -405,7 +408,8 @@ class DistillationConfig(ActorConfig):
     distillation_loss_coef: float = 1.0
     jsd_beta: float = 0.5
     teacher_model: HFModelConfig = field(default_factory=BaseConfig)
-    loss_clamp: Optional[float] = 10.0
+    loss_max_clamp: Optional[float] = 10.0
+    log_prob_min_clamp: Optional[float] = -10.0
 
     # Store distillation loss settings for computing the specified loss_mode
     # Not set by user, populated at runtime
