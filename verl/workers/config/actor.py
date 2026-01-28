@@ -342,7 +342,7 @@ class DistillationConfig(ActorConfig):
         loss_max_clamp (float, optional):
             Maximum value to clamp distillation loss. If None, no clamping is applied.
         log_prob_min_clamp (float, optional):
-            Minimum value to clamp log probabilities for stability, e.g., log q - log p where p or q are 
+            Minimum value to clamp log probabilities for stability, e.g., log q - log p where p or q are
             very close to zero. If None, no clamping is applied.
         loss_settings (DistillationLossSettings, optional):
             Runtime-populated settings based on loss_mode. Not set by user.

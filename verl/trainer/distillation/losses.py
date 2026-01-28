@@ -220,12 +220,11 @@ def compute_distillation_loss_reverse_kl_estimator(
     distillation_losses = kl_penalty(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode
     )
-    distillation_losses_response = distillation_losses[response_mask]
     distillation_metrics = compute_distillation_loss_range(
-        distillation_losses=distillation_losses_response, response_mask=response_mask
+        distillation_losses=distillation_losses, response_mask=response_mask
     )
-    if config.loss_clamp is not None:
-        distillation_losses = distillation_losses.clamp_max(config.loss_clamp)
+    if config.loss_max_clamp is not None:
+        distillation_losses = distillation_losses.clamp_max(config.loss_max_clamp)
 
     distillation_loss = agg_loss(
         loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
