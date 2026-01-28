@@ -34,7 +34,7 @@ distillation_loss_coef: 1.0
 jsd_beta: 0.5
 
 # Optional max clamp value for distillation loss. If null, no clamping is applied.
-loss_max_clamp: 10.0
+loss_max_clamp: null
 
 # Optional min clamp value for log probabilities for stability, e.g., log q - log p where p or q are very close to zero.
-log_prob_min_clamp: -10.0
+log_prob_min_clamp: null
