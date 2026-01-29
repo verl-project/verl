@@ -20,13 +20,11 @@ from collections.abc import Callable
 from dataclasses import asdict
 
 import numpy as np
-import ray
 import torch
 import torch.distributed
 from megatron.core import mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.transformer.enums import AttnBackend
-from ray.util.state import api
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
@@ -641,35 +639,17 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     hdfs_io.copy(src=hf_config_tokenizer_path, dst=hdfs_path, dirs_exist_ok=True)
 
             # update latest_checkpointed_iteration.txt when async_save is True
-            if self.checkpoint_config.async_save:
-                head_node = None
-                nodes = api.list_nodes()
-                for node in nodes:
-                    if node.is_head_node:
-                        head_node = node
-                        break
-
-                current_node_id = ray.get_runtime_context().get_node_id()
-                ray_local_world_size = int(os.getenv("RAY_LOCAL_WORLD_SIZE", -1))
-                if ray_local_world_size == -1:
-                    nnodes = int(os.getenv("NNODES", 1))
-                    ray_local_world_size = torch.distributed.get_world_size() / nnodes
-
-                if (
-                    head_node is not None
-                    and head_node.node_id == current_node_id
-                    and self.rank % ray_local_world_size == 0
-                ):
-                    log_with_rank(
-                        f"Update latest_checkpointed_iteration.txt to step {global_step}",
-                        rank=self.rank,
-                        logger=logger,
-                    )
-                    local_latest_checkpointed_iteration = os.path.join(
-                        os.path.dirname(os.path.dirname(local_path)), "latest_checkpointed_iteration.txt"
-                    )
-                    with open(local_latest_checkpointed_iteration, "w") as f:
-                        f.write(str(global_step))
+            if self.checkpoint_config.async_save and self.rank == 0:
+                log_with_rank(
+                    f"Update latest_checkpointed_iteration.txt to step {global_step}",
+                    rank=self.rank,
+                    logger=logger,
+                )
+                local_latest_checkpointed_iteration = os.path.join(
+                    os.path.dirname(os.path.dirname(local_path)), "latest_checkpointed_iteration.txt"
+                )
+                with open(local_latest_checkpointed_iteration, "w") as f:
+                    f.write(str(global_step))
 
             self.register_checkpoint(local_path, max_ckpt_to_keep)
 
