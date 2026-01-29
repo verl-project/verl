@@ -78,7 +78,7 @@ override_mcore_model_config: {}
 use_mbridge: True
 
 # oc.select: default val for ref.megatron.vanilla_mbridge
-vanilla_mbridge: True
+vanilla_mbridge: False
 
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
 use_remove_padding: True

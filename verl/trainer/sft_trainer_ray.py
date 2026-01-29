@@ -110,8 +110,12 @@ class SFTTrainer:
 
         self.loss_fn = partial(sft_loss, config=None)
 
+        # Check if speculator config is present
+        speculator_config = getattr(self.model_config, "speculator", None)
+        model_type = "language_model_with_speculator" if speculator_config is not None else "language_model"
+
         config = TrainingWorkerConfig(
-            model_type="language_model",
+            model_type=model_type,
             model_config=self.model_config,
             engine_config=self.engine_config,
             optimizer_config=self.optimizer_config,

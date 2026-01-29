@@ -17,7 +17,7 @@ import logging
 import os
 import warnings
 from dataclasses import asdict, dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed
@@ -38,6 +38,139 @@ from .checkpoint_manager import BaseCheckpointManager
 # Setup logging
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def _get_rank(device_mesh=None) -> int:
+    if device_mesh is not None:
+        return device_mesh.get_rank()
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+
+
+def save_speculator_checkpoint(
+    fsdp_model,
+    speculator_module,
+    speculator_dir: str,
+    config_obj=None,
+):
+    if speculator_module is None:
+        return
+
+    os.makedirs(speculator_dir, exist_ok=True)
+    state_dict_path = os.path.join(speculator_dir, "pytorch_model.bin")
+
+    fsdp_ver = fsdp_version(fsdp_model)
+    if fsdp_ver == 1:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        from torch.distributed.fsdp.api import FullStateDictConfig, StateDictType
+
+        if hasattr(speculator_module, "_fsdp_wrapped_module"):
+            FSDP.set_state_dict_type(
+                speculator_module,
+                state_dict_type=StateDictType.FULL_STATE_DICT,
+                state_dict_config=FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+            )
+            state_dict = speculator_module.state_dict()
+            if torch.distributed.get_rank() == 0:
+                torch.save(state_dict, state_dict_path)
+            FSDP.set_state_dict_type(
+                speculator_module,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(offload_to_cpu=False),
+            )
+        else:
+            with FSDP.summon_full_params(speculator_module, writeback=False):
+                state_dict = speculator_module.state_dict()
+            if torch.distributed.get_rank() == 0:
+                torch.save(state_dict, state_dict_path)
+    elif fsdp_ver == 2:
+        from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+
+        options = StateDictOptions(full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False)
+        state_dict = get_model_state_dict(fsdp_model, submodules={speculator_module}, options=options)
+        if torch.distributed.get_rank() == 0:
+            torch.save(state_dict, state_dict_path)
+    else:
+        state_dict = speculator_module.state_dict()
+        if torch.distributed.get_rank() == 0:
+            torch.save(state_dict, state_dict_path)
+
+    if torch.distributed.get_rank() == 0 and config_obj is not None and hasattr(config_obj, "save"):
+        config_obj.save(speculator_dir)
+
+
+def load_speculator_checkpoint(
+    fsdp_model,
+    speculator_module,
+    checkpoint_path: str,
+    logger,
+    device_mesh=None,
+):
+    if speculator_module is None:
+        return
+
+    speculator_dir = os.path.join(checkpoint_path, "speculator")
+    state_dict_path = os.path.join(speculator_dir, "pytorch_model.bin")
+    if not os.path.exists(state_dict_path):
+        log_with_rank(
+            f"Warning: No speculator checkpoint found at {state_dict_path}, starting from scratch",
+            logger=logger,
+            rank=_get_rank(device_mesh),
+            level=logging.WARNING,
+            log_only_rank_0=True,
+        )
+        return
+
+    fsdp_ver = fsdp_version(fsdp_model)
+    if fsdp_ver == 1:
+        state_dict = torch.load(state_dict_path, map_location="cpu")
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        from torch.distributed.fsdp.api import FullStateDictConfig, StateDictType
+
+        if hasattr(speculator_module, "_fsdp_wrapped_module"):
+            FSDP.set_state_dict_type(
+                speculator_module,
+                state_dict_type=StateDictType.FULL_STATE_DICT,
+                state_dict_config=FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+            )
+            speculator_module.load_state_dict(state_dict)
+            FSDP.set_state_dict_type(
+                speculator_module,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(offload_to_cpu=False),
+            )
+        else:
+            with FSDP.summon_full_params(speculator_module, writeback=True):
+                speculator_module.load_state_dict(state_dict)
+    elif fsdp_ver == 2:
+        state_dict = torch.load(state_dict_path, map_location="cpu") if torch.distributed.get_rank() == 0 else {}
+        try:
+            from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+        except Exception:
+            from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+
+        options = StateDictOptions(
+            full_state_dict=True,
+            cpu_offload=False,
+            broadcast_from_rank0=True,
+            strict=False,
+        )
+        set_model_state_dict(
+            fsdp_model,
+            model_state_dict={speculator_module: state_dict},
+            options=options,
+        )
+    else:
+        state_dict = torch.load(state_dict_path, map_location="cpu")
+        speculator_module.load_state_dict(state_dict)
+
+    log_with_rank(
+        f"Successfully loaded speculator checkpoint from {state_dict_path}",
+        logger=logger,
+        rank=_get_rank(device_mesh),
+        log_only_rank_0=True,
+    )
 
 
 @dataclass
@@ -94,6 +227,36 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             processing_class=processing_class,
             checkpoint_config=checkpoint_config,
         )
+        self.speculator_module = kwargs.pop("speculator_module", None)
+        self.speculator_config_obj = kwargs.pop("speculator_config_obj", None)
+        self.speculator_builder = kwargs.pop("speculator_builder", None)
+
+    def set_speculator(
+        self,
+        speculator_module: Optional[Any] = None,
+        speculator_config_obj: Optional[Any] = None,
+    ) -> None:
+        if speculator_module is not None:
+            self.speculator_module = speculator_module
+        if speculator_config_obj is not None:
+            self.speculator_config_obj = speculator_config_obj
+
+    def save_speculator_checkpoint(self, local_path: str) -> None:
+        speculator_module = self.speculator_module
+        if speculator_module is None:
+            return
+        save_speculator_checkpoint(
+            self.model,
+            speculator_module,
+            os.path.join(local_path, "speculator"),
+            config_obj=self.speculator_config_obj,
+        )
+
+    def load_speculator_checkpoint(self, local_path: str, logger) -> None:
+        speculator_module = self.speculator_module
+        if speculator_module is None:
+            return
+        load_speculator_checkpoint(self.model, speculator_module, local_path, logger)
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
@@ -135,7 +298,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
-                self.model.load_state_dict(model_state_dict)
+                target_model = getattr(self.model, "_fsdp_wrapped_module", self.model)
+                strict = not hasattr(target_model, "speculator")
+                self.model.load_state_dict(model_state_dict, strict=strict)
                 log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
 
             if self.should_load_optimizer:
@@ -227,6 +392,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 if self.should_save_model:
                     model_state_dict = self.model.state_dict()
+                    # Speculator weights are saved separately via adapter, skip them here.
+                    if any(k.startswith("speculator.") for k in model_state_dict.keys()):
+                        model_state_dict = {k: v for k, v in model_state_dict.items() if not k.startswith("speculator.")}
                     torch.save(model_state_dict, model_path)
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
 

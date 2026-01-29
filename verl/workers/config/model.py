@@ -115,6 +115,12 @@ class HFModelConfig(BaseConfig):
 
     use_remove_padding: bool = True
 
+    # speculator config for speculative decoding training
+    speculator: Optional[dict[str, Any]] = None
+
+    # custom speculator adapter config
+    speculator_adapter: Optional[dict[str, Any]] = None
+
     # TODO: unify fsdp and megatron lora config
     # fsdp lora related. We may setup a separate config later
     lora_rank: int = 0

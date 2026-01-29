@@ -96,6 +96,13 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
     fsdp_transformer_layer_cls_to_wrap = _get_attr(
         "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
     )
+    speculator_cls_names = {"ArcticLSTMSpeculator", "MLPSpeculator"}
+    if fsdp_transformer_layer_cls_to_wrap is not None:
+        if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
+            fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+        for cls_name in speculator_cls_names:
+            if cls_name not in fsdp_transformer_layer_cls_to_wrap:
+                fsdp_transformer_layer_cls_to_wrap.append(cls_name)
     min_num_params = _get_attr("min_num_params", 0)
     auto_wrap_policy = None
 
@@ -124,6 +131,8 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
+                if layer_class in speculator_cls_names:
+                    continue
                 raise Exception("Could not find the transformer layer class to wrap in the model.")
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
@@ -472,7 +481,12 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         model = model.to_empty(device=get_device_id())
 
     cpu_offload = cpu_offload is not None
-    options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=cpu_offload,
+        broadcast_from_rank0=True,
+        strict=False,
+    )
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually

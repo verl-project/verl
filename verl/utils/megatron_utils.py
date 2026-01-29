@@ -21,6 +21,7 @@ import inspect
 import os
 import warnings
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -180,9 +181,47 @@ def make_megatron_module(
     override_ddp_config: dict[str, Any] = None,
     peft_cls: Any = None,
     peft_config: Any = None,
+    full_model_config: Any = None,
 ):
     if override_model_config is None:
         override_model_config = {}
+
+    speculator_adapter = None
+    def _has_speculator_config() -> bool:
+        return (
+            full_model_config is not None
+            and (
+                getattr(full_model_config, "speculator", None) is not None
+                or getattr(full_model_config, "speculator_adapter", None) is not None
+            )
+        )
+
+    def _get_speculator_adapter(params_dtype):
+        nonlocal speculator_adapter
+        if speculator_adapter is None:
+            from verl.trainer.speculators.interface import build_speculator_adapter
+
+            device_mesh = SimpleNamespace(get_rank=lambda: torch.distributed.get_rank())
+            speculator_adapter = build_speculator_adapter(
+                config=None,
+                model_config=full_model_config,
+                device_name=get_device_name(),
+                device_mesh=device_mesh,
+                torch_dtype=params_dtype,
+            )
+        return speculator_adapter
+
+    def _maybe_attach_speculator(target, model_ref, params_dtype):
+        if not _has_speculator_config():
+            return
+        if getattr(target, "speculator", None) is not None:
+            return
+        adapter = _get_speculator_adapter(params_dtype)
+        speculator_module = adapter.build_speculator_module(target)
+        if speculator_module is not None:
+            setattr(target, "speculator", speculator_module)
+            if model_ref is not None and model_ref is not target:
+                setattr(model_ref, "speculator", speculator_module)
 
     if bridge is not None:
         if provider is None:
@@ -203,6 +242,22 @@ def make_megatron_module(
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
             post_model_creation_callbacks.append(freeze_moe_router)
         if provider is not None:
+            if _has_speculator_config():
+                def speculator_pre_wrap_hook(model):
+                    if isinstance(model, list):
+                        for item in model:
+                            speculator_pre_wrap_hook(item)
+                        return model
+                    if not getattr(model, "post_process", False):
+                        return model
+                    params_dtype = getattr(tf_config, "params_dtype", None)
+                    if params_dtype is None:
+                        params_dtype = getattr(provider, "params_dtype", torch.bfloat16)
+                    _maybe_attach_speculator(model, None, params_dtype)
+                    return model
+
+                provider.register_pre_wrap_hook(speculator_pre_wrap_hook)
+
             # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
             # BEFORE wrapping the model in DDP. This is required because:
             # 1. PEFT freezes base model parameters (requires_grad=False)
@@ -267,6 +322,10 @@ def make_megatron_module(
             # Extract TransformerConfig from the created model
             tf_config = get_model_config(model[0] if isinstance(model, list) else model)
         else:
+            # Speculator injection is handled via provider pre-wrap hook only.
+            # Keep post_model_creation_callbacks for value-model and MoE router hooks.
+            pass
+
             model = bridge.get_model(
                 post_model_creation_callbacks=post_model_creation_callbacks,
                 wrap_with_ddp=wrap_config.wrap_with_ddp,
@@ -295,6 +354,7 @@ def make_megatron_module(
                 freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False),
                 vp_stage=vp_stage,
             )
+            # Speculator injection is handled via provider pre-wrap hook only.
             parallel_model.to(get_device_name())
             return parallel_model
 

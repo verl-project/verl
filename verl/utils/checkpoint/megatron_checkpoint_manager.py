@@ -17,6 +17,7 @@ import logging
 import os
 import random
 from collections.abc import Callable
+from typing import Any, Optional
 from dataclasses import asdict
 
 import numpy as np
@@ -34,6 +35,7 @@ from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.fs import is_non_local, local_mkdir_safe
 from verl.utils.logger import log_with_rank
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
+from verl.utils.checkpoint.fsdp_checkpoint_manager import load_speculator_checkpoint, save_speculator_checkpoint
 from verl.utils.megatron_utils import (
     get_dist_checkpoint_path,
     get_hf_model_checkpoint_path,
@@ -122,6 +124,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         bridge=None,
         provider=None,
         peft_cls=None,
+        speculator_module: Optional[Any] = None,
+        speculator_config_obj: Optional[Any] = None,
+        speculator_host_model: Optional[Any] = None,
         **kwargs,
     ):
         super().__init__(
@@ -155,10 +160,45 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             use_dist_checkpointing or not self.bridge or (self.vanilla_bridge and self.is_value_model)
         )
         self.use_hf_checkpoint = not self.use_dist_checkpointing
+        self.speculator_module = speculator_module
+        self.speculator_config_obj = speculator_config_obj
+        self.speculator_host_model = speculator_host_model
 
         self.weight_saver = None
         if self.bridge is None:
             self.weight_saver = get_weight_saver(self.arch)
+
+    def set_speculator(
+        self,
+        speculator_module: Optional[Any] = None,
+        speculator_config_obj: Optional[Any] = None,
+        speculator_host_model: Optional[Any] = None,
+    ) -> None:
+        if speculator_module is not None:
+            self.speculator_module = speculator_module
+        if speculator_config_obj is not None:
+            self.speculator_config_obj = speculator_config_obj
+        if speculator_host_model is not None:
+            self.speculator_host_model = speculator_host_model
+
+    def save_speculator_checkpoint(self, local_path: str) -> None:
+        speculator_module = self.speculator_module
+        if speculator_module is None:
+            return
+        host_model = self.speculator_host_model or speculator_module
+        save_speculator_checkpoint(
+            host_model,
+            speculator_module,
+            os.path.join(local_path, "speculator"),
+            config_obj=self.speculator_config_obj,
+        )
+
+    def load_speculator_checkpoint(self, local_path: str, logger) -> None:
+        speculator_module = self.speculator_module
+        if speculator_module is None:
+            return
+        host_model = self.speculator_host_model or speculator_module
+        load_speculator_checkpoint(host_model, speculator_module, local_path, logger)
 
     def get_rng_state(self, use_dist_ckpt: bool = True, data_parallel_random_init: bool = False):
         """collect rng state across data parallel ranks"""
@@ -261,7 +301,17 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 key = "model"
             if hasattr(model, "module"):
                 model = model.module
-            state_dict[key] = model.sharded_state_dict()
+            try:
+                state_dict[key] = model.sharded_state_dict(keep_vars=True)
+            except TypeError:
+                state_dict[key] = model.sharded_state_dict()
+            if self.speculator_module is not None and vpp_rank == len(self.model) - 1:
+                if "speculator" not in state_dict[key]:
+                    try:
+                        spec_state = self.speculator_module.state_dict(keep_vars=True)
+                    except TypeError:
+                        spec_state = self.speculator_module.state_dict()
+                    state_dict[key]["speculator"] = spec_state
 
         # Optimizer State Dict
         if generate_optimizer:
@@ -352,7 +402,20 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             if self.vanilla_bridge:
                 self.bridge.load_weights(self.model, hf_model_path)
             else:
-                self.bridge.load_hf_weights(self.model, hf_model_path)
+                from verl.utils.bridge_utils import (
+                    filter_none_tasks,
+                    patch_bridge_adapter_filter,
+                    patch_bridge_build_tasks,
+                )
+
+                model_bridge = getattr(self.bridge, "_model_bridge", None)
+                def _is_speculator_param(name: str) -> bool:
+                    return name.startswith("speculator.") or ".speculator." in name
+
+                with patch_bridge_adapter_filter(model_bridge, _is_speculator_param), patch_bridge_build_tasks(
+                    model_bridge, filter_none_tasks
+                ):
+                    self.bridge.load_hf_weights(self.model, hf_model_path)
             log_with_rank(f"Loaded HF model checkpoint from {hf_model_path} with bridge", rank=self.rank, logger=logger)
         # Load PEFT adapter checkpoint if available
         if self.should_load_model and self.peft_cls is not None:
@@ -500,7 +563,34 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                         self.model, hf_ckpt_path, distributed_filesystem=True, memory_efficient=True
                     )
                 else:
-                    self.bridge.save_hf_weights(self.model, hf_ckpt_path)
+                    from verl.utils.bridge_utils import (
+                        filter_none_tasks,
+                        patch_bridge_adapter_filter,
+                        patch_bridge_build_tasks,
+                    )
+
+                    model_bridge = getattr(self.bridge, "_model_bridge", None)
+
+                    def _has_speculator(modules) -> bool:
+                        modules = modules if isinstance(modules, (list, tuple)) else [modules]
+                        for mod in modules:
+                            target = mod
+                            while hasattr(target, "module"):
+                                target = target.module
+                            if getattr(target, "speculator", None) is not None:
+                                return True
+                        return False
+
+                    if _has_speculator(self.model):
+                        def _is_speculator_param(name: str) -> bool:
+                            return name.startswith("speculator.") or ".speculator." in name
+                    else:
+                        _is_speculator_param = lambda _name: False
+
+                    with patch_bridge_adapter_filter(model_bridge, _is_speculator_param), patch_bridge_build_tasks(
+                        model_bridge, filter_none_tasks
+                    ):
+                        self.bridge.save_hf_weights(self.model, hf_ckpt_path)
 
                 log_with_rank(f"Saved bridge checkpoint to {hf_ckpt_path}", rank=self.rank, logger=logger)
 

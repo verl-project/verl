@@ -15,6 +15,8 @@
 # limitations under the License.
 
 import torch
+from contextlib import contextmanager
+import os
 
 from verl.utils.megatron_utils import unwrap_model
 from verl.workers.config import MtpConfig
@@ -127,7 +129,7 @@ def model_forward_gen(vision_model: bool = False):
 
             batch_size, sequence_length = attention_mask.shape[:2]
             new_input_ids, new_attention_mask, new_position_ids = preprocess_bshd(
-                input_ids, attention_mask, position_ids, sequence_parallel=sp, pre_process=pre_process
+                input_ids, attention_mask, position_ids, sequence_parallel=False, pre_process=pre_process
             )
             output_orig = model(
                 input_ids=new_input_ids,
@@ -158,6 +160,17 @@ def model_forward_gen(vision_model: bool = False):
     return model_forward
 
 
+@contextmanager
+def _disable_post_process(model):
+    unwrapped_model = unwrap_model(model)
+    restore_post_process = unwrapped_model.post_process
+    unwrapped_model.post_process = False
+    try:
+        yield
+    finally:
+        unwrapped_model.post_process = restore_post_process
+
+
 def gptmodel_forward_no_padding(
     model,
     input_ids,
@@ -168,6 +181,7 @@ def gptmodel_forward_no_padding(
     vision_model=False,
     pad_token_id=None,
     data_format: str = "thd",
+    return_packed_seq_params: bool = False,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -186,6 +200,7 @@ def gptmodel_forward_no_padding(
         model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
 
     batch_size = input_ids.shape[0]
+    packed_seq_params = None
     if data_format == "thd":
         input_ids_rmpad, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=pre_process)
         input_ids_rmpad = input_ids_rmpad.contiguous()
@@ -259,4 +274,113 @@ def gptmodel_forward_no_padding(
         # so we use `squeeze` to remove the last dimension
         output = output.squeeze(-1)
 
+    if return_packed_seq_params:
+        return output, packed_seq_params
     return output
+
+
+def gptmodel_forward_no_padding_with_hidden(
+    model,
+    input_ids,
+    multi_modal_inputs: dict,
+    vision_model=False,
+    pad_token_id=None,
+    data_format: str = "thd",
+):
+    """Forward pass that returns hidden states without running post_process/logits."""
+    assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
+    with _disable_post_process(model):
+        output, packed_seq_params = gptmodel_forward_no_padding(
+            model,
+            input_ids,
+            multi_modal_inputs,
+            logits_processor=None,
+            logits_processor_args=None,
+            value_model=False,
+            vision_model=vision_model,
+            pad_token_id=pad_token_id,
+            data_format=data_format,
+            return_packed_seq_params=True,
+        )
+    if data_format == "thd" and isinstance(output, torch.Tensor):
+        if output.dim() == 2:
+            output = output.unsqueeze(0)
+        elif output.dim() == 3 and output.size(1) == 1 and output.size(0) != 1:
+            output = output.transpose(0, 1)
+    if data_format == "thd" and isinstance(output, torch.Tensor) and not output.is_nested:
+        from verl.models.mcore.util import postprocess_thd_no_padding
+
+        output = postprocess_thd_no_padding(output, packed_seq_params, input_ids, input_ids.shape[0], post_process=True)
+    return {
+        "hidden_states": output,
+        "packed_seq_params": packed_seq_params,
+    }
+
+
+def model_forward_with_hidden(
+    model,
+    input_ids,
+    attention_mask,
+    position_ids,
+    multi_modal_inputs: dict,
+    vision_model=False,
+    data_format: str = "thd",
+):
+    """Forward pass that returns hidden states with padding inputs."""
+    assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
+    pre_process = unwrap_model(model).pre_process if not vision_model else False
+    sp = unwrap_model(model).config.sequence_parallel
+    fp8 = unwrap_model(model).config.fp8
+    use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+
+    model_kwargs = {}
+    if "pixel_values" in multi_modal_inputs:
+        model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
+    if "image_grid_thw" in multi_modal_inputs:
+        model_kwargs["image_grid_thw"] = multi_modal_inputs["image_grid_thw"].to(input_ids.device)
+    if "pixel_values_videos" in multi_modal_inputs:
+        model_kwargs["pixel_values_videos"] = multi_modal_inputs["pixel_values_videos"].to(input_ids.device)
+    if "video_grid_thw" in multi_modal_inputs:
+        model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
+
+    batch_size, seq_len = attention_mask.shape[:2]
+    with _disable_post_process(model):
+        if data_format == "thd":
+            input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(
+                input_ids, attention_mask, pre_process=pre_process, use_fp8_padding=use_fp8_padding
+            )
+            input_ids_rmpad = input_ids_rmpad.contiguous()
+            input_args = dict(
+                input_ids=input_ids_rmpad,
+                attention_mask=None,
+                position_ids=position_ids if not vision_model else None,
+                packed_seq_params=packed_seq_params,
+                **model_kwargs,
+            )
+            if vision_model:
+                input_args["input_ids"] = input_ids
+                input_args["attention_mask"] = attention_mask
+            output_orig = model(**input_args)
+            output = postprocess_packed_seqs(
+                output_orig, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
+            )
+        else:
+            assert not vision_model, "vision model does not support bshd format"
+            assert fp8 is None, "fp8 is not supported for bshd format yet"
+            new_input_ids, new_attention_mask, new_position_ids = preprocess_bshd(
+                input_ids, attention_mask, position_ids, sequence_parallel=sp, pre_process=pre_process
+            )
+            output_orig = model(
+                input_ids=new_input_ids,
+                attention_mask=new_attention_mask,
+                position_ids=new_position_ids,
+                **model_kwargs,
+            )
+            output = postprocess_bshd(
+                output_orig, new_attention_mask, attention_mask, seq_len, post_process=True
+            )
+    return {
+        "hidden_states": output,
+        "packed_seq_params": packed_seq_params if data_format == "thd" else None,
+        "attention_mask": attention_mask,
+    }

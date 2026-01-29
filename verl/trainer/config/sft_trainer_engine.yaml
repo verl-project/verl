@@ -13,6 +13,41 @@ defaults:
   - profiler@profiler: profiler
   - _self_
 
+model:
+  # whether to use remove padding. Speculator training requires False
+  use_remove_padding: False
+
+
+  # speculator adapter class
+  speculator_adapter:
+    fqn: verl.trainer.speculators.lstm_adapter.LSTMSpeculatorAdapter
+
+  # speculator settings for speculative decoding training
+  speculator:
+    # number of tokens to predict
+    n_predict: 5
+
+    # inner hidden dim for speculator, set to match base model hidden size
+    inner_dim: 4096
+
+    # embedding dim for speculator, set to match base model hidden size
+    emb_dim: 4096
+
+    # projection dim for speculator, set to match base model hidden size
+    proj_dim: 4096
+
+    # whether to scale input
+    scale_input: False
+
+    # whether to tie input and output weights
+    tie_weights: False
+
+    # whether to tie LSTM embeddings
+    tie_lstm_embs: False
+
+    # speculator method
+    method: sum_lstm
+
 data:
   train_batch_size: 256 # global batch size
   micro_batch_size_per_gpu: 4  # this is also val batch size
