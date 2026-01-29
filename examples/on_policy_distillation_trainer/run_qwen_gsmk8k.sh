@@ -19,8 +19,8 @@ FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
 TEACHER_MODEL=Qwen2.5-7B-Instruct
 
-DISTILLATION_LOSS_MODE="forward_kl_topk"
 DISTILLATION_LOSS_MODE="k3"
+DISTILLATION_LOSS_MODE="forward_kl_topk"
 
 DISTILLATION_LOSS_MAX_CLAMP=10.0
 DISTILLATION_LOG_PROB_MIN_CLAMP=null
@@ -71,6 +71,7 @@ DISTILLATION=(
     actor_rollout_ref.distillation.loss_mode=$DISTILLATION_LOSS_MODE
     actor_rollout_ref.distillation.jsd_beta=0.5
     actor_rollout_ref.distillation.topk=64
+    actor_rollout_ref.distillation.use_policy_loss=False
     actor_rollout_ref.distillation.loss_max_clamp=$DISTILLATION_LOSS_MAX_CLAMP
     actor_rollout_ref.distillation.log_prob_min_clamp=$DISTILLATION_LOG_PROB_MIN_CLAMP
     actor_rollout_ref.distillation.log_prob_use_dynamic_bsz=True

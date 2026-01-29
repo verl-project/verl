@@ -25,7 +25,7 @@ loss_mode: k3
 topk: 32
 
 # Whether the loss should just be the distillation loss or a combination of the distillation loss and the policy loss
-use_policy_loss: false
+use_policy_loss: true
 
 # The coef of the distillation loss when use_policy_loss is true
 distillation_loss_coef: 1.0
