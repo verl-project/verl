@@ -12,6 +12,10 @@ set -xeuo pipefail
 # 3. remove the `quantization_config` in the DeepSeek-V3's `config.json` and 
 # set `num_nextn_predict_layers=0` to disable MTP, which is not currently supported
 
+# Note: For DeepSeek V3.1/R1 and similar models, the `tokenizer_config.json` does not
+# enable thinking mode by default. If you need to enable thinking mode when using vLLM,
+# add `+data.apply_chat_template_kwargs.thinking=True` to the command line arguments.
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "${SCRIPT_DIR}/env.sh" ] && source "${SCRIPT_DIR}/env.sh"
 
@@ -153,6 +157,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=flex \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
+    actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend='fused' \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True \
