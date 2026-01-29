@@ -25,7 +25,7 @@ NPU 相关的工作流主要包括：
 .. code-block:: yaml
    :linenos:
 
-   name: your_workflow_name  # 工作流唯一标识
+   name: your_yml_ascend  # 工作流唯一标识
    # 触发条件配置
    on:
      push:
@@ -36,14 +36,17 @@ NPU 相关的工作流主要包括：
        branches:
          - main
        paths:
-         - ".github/workflows/your_workflow.yml"  # 必须包含此工作流文件路径
+         - ".github/workflows/your_yml_ascend.yml"  # 必须包含此工作流文件路径
          - "path/to/affected_files"               # 需监控的相关代码路径
+
    # 并发控制策略
    concurrency:
      group: ${{ github.workflow }}-${{ github.ref }}
      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}  # 仅非main分支取消进行中的任务
+
    permissions:
      contents: read  # 最小权限原则
+
    jobs:
      your_job_name:  # 任务唯一标识
        if: github.repository_owner == 'verl-project'  # 仅在主仓库运行
@@ -66,8 +69,8 @@ NPU 相关的工作流主要包括：
          - name: Checkout repository
            uses: actions/checkout@v4
            with:
-             fetch-depth: 0  # 获取完整历史
-             clean: true     # 清理工作区
+             fetch-depth: 0 
+             clean: true 
          - name: Install dependencies
            run: |
              pip install -r requirements-npu.txt
@@ -79,12 +82,12 @@ NPU 相关的工作流主要包括：
            run: python examples/data_preprocess/your_script.py --local_dataset_path ${HOME}/.cache/datasets/your_dataset
          - name: Execute NPU test
            run: |
-             ray stop --force  # 确保清理残留进程
+             ray stop --force 
              bash tests/special_npu/your_test_script.sh
 
 .. note::
 
-   若使用 Megatron-LM，可在对应 step 中添加 ``export PYTHONPATH=$PYTHONPATH:/Megatron-LM``。
+   若使用 Megatron-LM，请添加 ``export PYTHONPATH=$PYTHONPATH:/Megatron-LM``。
 
 
 2. 添加单元测试
