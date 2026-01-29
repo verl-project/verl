@@ -485,6 +485,7 @@ def run_sglang(prompt_ids_list, model, batch_size, max_new_tokens, dtype=torch.b
 
 def run_hf(prompt_ids_list, model, tokenizer, batch_size, max_new_tokens, seed=0, dtype=torch.bfloat16):
     prompt_ids, gen_ids, gen_logp, texts = [], [], [], []
+    print(f"Running HF generation with batch size {batch_size}, num prompts {len(prompt_ids_list)}...")
 
     for start in tqdm(range(0, len(prompt_ids_list), batch_size), desc="HF generation"):
         batch_prompts = prompt_ids_list[start : start + batch_size]
@@ -548,7 +549,7 @@ def build_hf_model(model_name, device, dtype=torch.bfloat16, attention_impl="fla
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=dtype,
+        dtype=dtype,
         attn_implementation=attention_impl,
         trust_remote_code=True,
     )
@@ -703,19 +704,28 @@ def main():
 
     if args.engine == "vllm":
         # device defaults to CUDA_VISIBLE_DEVICES if available
-        llm_model = LLM(
-            model=args.model,
-            dtype=dtype,
-            tensor_parallel_size=args.vllm_tp,
-            trust_remote_code=True,
-            enforce_eager=args.vllm_enforce_eager,
-            # max_seq_len_to_capture=args.max_new_tokens,
-            gpu_memory_utilization=args.vllm_gpu_util,
-            max_model_len=args.max_new_tokens + 1 + max(len(p) for p in chat_prompt_ids) if chat_prompt_ids else 0,
-            compilation_config={
-                "use_inductor": args.vllm_use_inductor,
-            },
-        )
+        llm_kwargs = {
+            "model": args.model,
+            "dtype": dtype,
+            "tensor_parallel_size": args.vllm_tp,
+            "trust_remote_code": True,
+            "enforce_eager": args.vllm_enforce_eager,
+            # "max_seq_len_to_capture": args.max_new_tokens,
+            "gpu_memory_utilization": args.vllm_gpu_util,
+            "max_model_len": args.max_new_tokens + 1 + max(len(p) for p in chat_prompt_ids) if chat_prompt_ids else 0,
+        }
+        if args.vllm_use_inductor:
+            llm_kwargs["compilation_config"] = {"use_inductor": True}
+
+        try:
+            llm_model = LLM(**llm_kwargs)
+        except StopIteration:
+            # Older vLLM versions don't support compilation_config
+            if "compilation_config" in llm_kwargs:
+                llm_kwargs.pop("compilation_config", None)
+                llm_model = LLM(**llm_kwargs)
+            else:
+                raise
 
     if args.engine == "hf":
         hf_model = build_hf_model(args.model, dtype=dtype, device=device, attention_impl=args.hf_attention_impl)
