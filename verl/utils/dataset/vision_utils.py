@@ -31,7 +31,7 @@ def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Imag
 
     try:
         ans = fetch_image(image, image_patch_size=image_patch_size)
-    except Exception as e:
+    except Exception:
         ans = fetch_image(image)
     return ans
 
