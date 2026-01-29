@@ -259,7 +259,7 @@ class vLLMHttpServer(BaseRolloutServer):
             hf_overrides["quantization_config"] = fp8_block_quant_kwargs
         compilation_config = engine_kwargs.get("compilation_config", None)
         if compilation_config is None:
-            compilation_config = json.dumps({"cudagraph_mode": "FULL_DECODE_ONLY"})
+            compilation_config = json.dumps({"cudagraph_mode": "FULL_AND_PIECEWISE"})
         else:
             cudagraph_mode = compilation_config.get("cudagraph_mode", "FULL_DECODE_ONLY")
             compilation_config = json.dumps({"cudagraph_mode": cudagraph_mode})
