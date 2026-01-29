@@ -328,7 +328,8 @@ class TRTLLMReplica(RolloutReplica):
             if not self.is_reward_model
             else f"trtllm_server_reward_{self.replica_rank}"
         )
-        tllm_numa_aware_worker_affinity = os.getenv("TLLM_NUMA_AWARE_WORKER_AFFINITY")
+        # Check if TLLM_NUMA_AWARE_WORKER_AFFINITY environment variable exists first
+        tllm_numa_aware_worker_affinity = os.getenv("TLLM_NUMA_AWARE_WORKER_AFFINITY", "1")
         if tllm_numa_aware_worker_affinity == "0":
             runtime_env_vars = {
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
@@ -343,7 +344,7 @@ class TRTLLMReplica(RolloutReplica):
                 node_id=node_id,
                 soft=False,
             ),
-            runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
+            runtime_env={"env_vars": runtime_env_vars},
             name=name,
         ).remote(
             config=self.config,
