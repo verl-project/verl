@@ -32,7 +32,7 @@ def get_ocr_data():
 
 
 def test_qwen_dataset():
-    tokenizer = hf_tokenizer(os.path.expanduser("~/models/Qwen/Qwen-Image"), trust_remote_code=True)
+    tokenizer = hf_tokenizer(os.path.expanduser("~/models/Qwen/Qwen-Image/tokenizer"), trust_remote_code=True)
     local_path = get_ocr_data()
     config = OmegaConf.create(
         {
@@ -58,12 +58,12 @@ def test_qwen_dataset():
 
     data_proto = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
     assert len(data_proto) == 16
-    assert "input_ids" in data_proto.batch
-    assert "attention_mask" in data_proto.batch
+    assert "raw_prompt" in data_proto.non_tensor_batch
+    assert "reward_model" in data_proto.non_tensor_batch
 
 
 def test_qwen_dataset_with_max_samples():
-    tokenizer = hf_tokenizer(os.path.expanduser("~/models/Qwen/Qwen-Image"), trust_remote_code=True)
+    tokenizer = hf_tokenizer(os.path.expanduser("~/models/Qwen/Qwen-Image/tokenizer"), trust_remote_code=True)
     local_path = get_ocr_data()
     config = OmegaConf.create(
         {

@@ -48,7 +48,7 @@ class QwenDataset(Dataset):
         tokenizer: PreTrainedTokenizer,
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
-        template: str = None,
+        system_prompt: str = None,
         max_samples: int = -1,
         **kwargs,
     ):
@@ -96,13 +96,13 @@ class QwenDataset(Dataset):
 
         # NOTE: hard code for Qwen-Image
         self.tokenizer_max_length = 1024
-        DEFAULT_TEMPLATE = (
-            "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, "
+        DEFAULT_SYSTEM_PROMPT = (
+            "Describe the image by detailing the color, shape, size, texture, quantity, text, "
             "spatial relationships of the objects and background:"
-            "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         )
-        self.prompt_template_encode = template or DEFAULT_TEMPLATE
-        self.prompt_template_encode_start_idx = 34
+        self.system_message_template = [
+            {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+        ]
 
         self._download()
         self._read_files_and_tokenize()
@@ -127,7 +127,16 @@ class QwenDataset(Dataset):
                 dataframe = datasets.load_dataset("json", data_files=parquet_file)["train"]
             elif parquet_file.endswith(".txt"):
                 dataframe = datasets.load_dataset("text", data_files=parquet_file)["train"]
-                dataframe = dataframe.rename_column("text", self.prompt_key)
+                # for caption only data, convert caption to messages
+                if isinstance(dataframe["text"][0], str):
+                    new_column = []
+                    for caption in dataframe["text"]:
+                        user_message = [{"role": "user", "content": caption}]
+                        new_column.append(self.system_message_template + user_message)
+                    dataframe = dataframe.add_column(self.prompt_key, new_column)
+                    dataframe = dataframe.remove_columns("text")
+                else:
+                    dataframe = dataframe.rename_column("text", self.prompt_key)
             else:
                 raise ValueError(f"Unsupported file format: {parquet_file}")
             dataframes.append(dataframe)
@@ -149,20 +158,6 @@ class QwenDataset(Dataset):
 
         # filter out too long prompts
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
-
-        # apply chat template
-        self.prompts = [self.prompt_template_encode.format(e) for e in self.dataframe[self.prompt_key]]
-
-        # tokenize prompts
-        txt_tokens = self.tokenizer(
-            self.prompts,
-            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
-            padding=True,
-            truncation=True if not self.filter_overlong_prompts else False,
-            return_tensors="pt",
-        )
-        self.input_ids = txt_tokens.input_ids
-        self.attention_masks = txt_tokens.attention_mask
 
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts
@@ -265,8 +260,10 @@ class QwenDataset(Dataset):
 
         return self.__dict__.copy()
 
-    @staticmethod
-    def get_ground_truth(prompt: str, data_source: str):
+    def get_ground_truth(self, messages: list, data_source: str):
+        # apply chat template
+        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False)
+
         if data_source == "ocr":
             ground_truth = prompt.split('"')[1]
             return ground_truth
@@ -345,12 +342,8 @@ class QwenDataset(Dataset):
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
 
-        # add model tensor inputs
-        row_dict["input_ids"] = self.input_ids[idx]
-        row_dict["attention_mask"] = self.attention_masks[idx]
-
         # add reward related non-tensor inputs
-        row_dict["raw_prompt"] = self.prompts[idx]
+        row_dict["raw_prompt"] = self._build_messages(row_dict)
         row_dict["reward_model"] = {"style": "model"}
         row_dict["data_source"] = self.data_source
         ground_truth = self.get_ground_truth(row_dict["raw_prompt"], row_dict["data_source"])

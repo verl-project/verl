@@ -533,10 +533,7 @@ class RayFlowGRPOTrainer:
         reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
 
         # pop those keys for generation
-        batch_keys_to_pop = [
-            "input_ids",
-            "attention_mask",
-        ]  # TODO: (susan) not sure if they are required as rollout input
+        batch_keys_to_pop = []
         non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_model_keys
         gen_batch = batch.pop(
             batch_keys=batch_keys_to_pop,

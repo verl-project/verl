@@ -183,7 +183,6 @@ class DiffusionRewardLoopWorker:
         chat: list = list(data_item.non_tensor_batch["raw_prompt"])
 
         # extract response
-        prompt_str = self.input_tokenizer.decode(data_item.batch["input_ids"], skip_special_tokens=True)
         response_image = data_item.batch["responses"]
 
         # convert to PIL Image
@@ -194,7 +193,7 @@ class DiffusionRewardLoopWorker:
         response_image = Image.fromarray(response_image)
 
         image_base64 = await self.pil_image_to_base64(response_image)
-        query = self.prepare_query(prompt_str, image_base64)
+        query = self.prepare_query(image_base64)
 
         chat.append({"role": "assistant", "content": query})
 
@@ -261,9 +260,8 @@ class DiffusionRewardLoopWorker:
         base64_image = f"data:image;base64,{encoded_image_text}"
         return base64_image
 
-    def prepare_query(self, prompt, image_base64: str) -> list:
+    def prepare_query(self, image_base64: str) -> list:
         query = [
-            {"type": "text", "text": prompt},
             {
                 "type": "image_url",
                 "image_url": {"url": image_base64},
