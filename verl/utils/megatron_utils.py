@@ -499,6 +499,7 @@ def offload_megatron_copy_params(optimizers):
                 if isinstance(param_group, list):
                     for param in param_group:
                         offload_tensor_to_cpu(param)
+                        param.grad = None
                 else:
                     offload_tensor_to_cpu(param_group)
         else:
