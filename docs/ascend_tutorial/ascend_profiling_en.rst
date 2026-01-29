@@ -129,19 +129,16 @@ Discrete Mode Collection
 When Rollout runs in `Agent Loop <../advance/agent_loop.rst>`_ mode, performance data for the Rollout phase **must be collected using discrete mode**. At this time, the Profiler is triggered by the inference engine backend.
 
 1. **Rank Meaning**: ``ranks`` in the Rollout config refers to the **Replica Rank** (instance index), not the global rank.
-2. **Inference Engine Setup**:
+2. **Inference Engine Description**:
+
+   Both vLLM and SGLang engines automatically read profiler configuration from the configuration file. No additional setup is required.
 
    - **vLLM Engine**
-      - **Must be configured via environment variables**:
-         - ``VLLM_TORCH_PROFILER_DIR``: Directory to save traces (**Required**).
-         - ``VLLM_TORCH_PROFILER_WITH_STACK``: Control stack tracing (1: on, 0: off, default: on).
-         - ``VLLM_TORCH_PROFILER_RECORD_SHAPES``: Set to 1 to record shapes of operator inputs.
-         - ``VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY``: Set to 1 to track tensor memory allocation/free.
-         - ``VLLM_TORCH_PROFILER_WITH_FLOPS``: Set to 1 to estimate FLOPS.
-      - *Note: vLLM ignores the save_path and contents in yaml.*
+      - Automatically collects profiler data including Python call stacks from ``AsyncLLM`` and inference process.
 
    - **SGLang Engine**
-      - **Zero Configuration**. Automatically reads configuration from ``ppo_trainer.yaml``.
+      - Automatically uses the settings from the configuration file.
+      - Note: SGLang currently does not support ``memory`` in the ``contents`` configuration.
 
 
 Visualization
