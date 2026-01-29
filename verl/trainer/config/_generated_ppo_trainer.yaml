@@ -436,7 +436,7 @@ actor_rollout_ref:
     enabled: false
     loss_mode: k3
     topk: 32
-    use_policy_loss: false
+    use_policy_loss: true
     distillation_loss_coef: 1.0
     jsd_beta: 0.5
     loss_max_clamp: null
