@@ -16,6 +16,7 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 """
 
 import os
+from pathlib import Path
 import socket
 
 import hydra
@@ -30,6 +31,7 @@ from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
+from verl.utils import io_utils
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
@@ -278,6 +280,13 @@ class TaskRunner:
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
+
+        train_dir = Path(config.trainer.default_local_dir)
+        print(f"Saving config file to {train_dir}")
+        train_dir.mkdir(exist_ok=True, parents=True)
+        
+        cfg_text = OmegaConf.to_yaml(config)
+        io_utils.save_text(cfg_text, train_dir.joinpath("training_config.yaml"))
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
