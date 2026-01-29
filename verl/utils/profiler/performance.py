@@ -60,7 +60,7 @@ def _get_current_mem_info(unit: str = "GB", precision: int = 2) -> tuple[str]:
     return mem_allocated, mem_reserved, mem_used, mem_total
 
 
-def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging.DEBUG, rank: int = 0):
+def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging.WARNING, rank: int = 0):
     """Log GPU memory usage information.
 
     Args:

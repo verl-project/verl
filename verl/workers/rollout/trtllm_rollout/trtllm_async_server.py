@@ -112,6 +112,8 @@ class TRTLLMHttpServer:
         from tensorrt_llm import AsyncLLM
         from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
         from tensorrt_llm.serve import OpenAIServer
+        from tensorrt_llm.quantization.mode import QuantAlgo
+        from tensorrt_llm.models.modeling_utils import QuantConfig
 
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
 
@@ -122,6 +124,21 @@ class TRTLLMHttpServer:
         )
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
+
+        quantization = self.config.quantization
+        quant_config = None
+        if quantization is not None:
+            if quantization == "fp8":
+                quant_config = QuantConfig(
+                    quant_algo=QuantAlgo.FP8_BLOCK_SCALES,
+                )
+                if self.config.load_format != "dummy":
+                    raise ValueError("FP8 quantization is only supported for dummy load format")
+            else:
+                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+        if quant_config is not None:
+            engine_kwargs["quant_config"] = quant_config
+        self.config.quantization_config = quant_config
 
         llm_kwargs = {
             "model": self.model_config.local_path,
@@ -138,6 +155,7 @@ class TRTLLMHttpServer:
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "pipeline_parallel_size": self.config.pipeline_model_parallel_size,
             "moe_expert_parallel_size": self.config.expert_parallel_size,
+            "load_format": self.config.load_format,
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
