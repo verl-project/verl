@@ -37,7 +37,15 @@ DistillationLossFn = Callable[
 
 @dataclass
 class DistillationLossSettings(BaseConfig):
-    """Settings for a distillation loss function to be registered."""
+    """
+    Settings for a distillation loss function to be registered.
+
+    Args:
+        names (str | list[str]): Name(s) to register the distillation loss function under.
+        use_topk (bool): Whether the loss function uses top-k log probabilities.
+        use_estimator (bool): Whether the loss function uses single-sample KL estimators.
+        use_full (bool): Whether the loss function uses full log probabilities.
+    """
 
     names: str | list[str] = field(default_factory=list)
     use_topk: bool = False
