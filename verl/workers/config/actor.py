@@ -404,7 +404,7 @@ class DistillationConfig(ActorConfig):
     enabled: bool = False
     loss_mode: str = "k3"
     topk: Optional[int] = 128
-    use_policy_loss: bool = False
+    use_policy_loss: bool = True
     distillation_loss_coef: float = 1.0
     jsd_beta: float = 0.5
     teacher_model: HFModelConfig = field(default_factory=BaseConfig)
