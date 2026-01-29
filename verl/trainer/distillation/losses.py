@@ -141,7 +141,7 @@ def compute_forward_kl_topk(
     assert config is not None
     distillation_metrics = {}
 
-    teacher_topk_log_probs = inputs.teacher_log_probs
+    teacher_topk_log_probs = inputs.teacher_topk_log_probs
     teacher_topk_indices = inputs.teacher_topk_indices
     student_logits = inputs.student_logits
     if teacher_topk_log_probs is None or teacher_topk_indices is None or student_logits is None:
