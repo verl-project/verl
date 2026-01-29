@@ -131,7 +131,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     extra_npu_args=()
     
     if [ "$device_name" == "npu" ]; then
-        echo "Detect NPU device, enabling FlashAttention..."
+        echo "Detect NPU device, enabling FULL_AND_PIECEWISE..."
         extra_npu_args+=(
             +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE"
         )

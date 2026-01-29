@@ -121,6 +121,13 @@ common_params=(
     trainer.val_before_train=True
 )
 
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
 if [ "${ACTOR_STRATEGY}" == "fsdp" ]; then
     echo "Running TransferQueue training with FSDP strategy..."
     # FSDP specific parameters; fsdp_size need to be -1
@@ -129,6 +136,15 @@ if [ "${ACTOR_STRATEGY}" == "fsdp" ]; then
     fsdp_size=-1
     ref_offload=True
     actor_offload=False
+
+    extra_npu_args=()
+    
+    if [ "$device_name" == "npu" ]; then
+        echo "Detect NPU device, enabling FULL_AND_PIECEWISE..."
+        extra_npu_args+=(
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE"
+        )
+    fi
 
     python3 -m verl.experimental.transfer_queue.main_ppo \
         --config-path=config \
@@ -149,6 +165,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp" ]; then
         actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
         actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
         actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
+        "${extra_npu_args[@]}" \
         2>&1 | tee "$log_file" $@
 
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
@@ -172,6 +189,7 @@ EOF
     if [ "$device_name" == "npu" ]; then
         echo "Detect NPU device, enabling FlashAttention..."
         extra_flash_args+=(
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
             ++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
         )
     fi

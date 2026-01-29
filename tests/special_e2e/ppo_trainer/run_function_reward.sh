@@ -87,6 +87,22 @@ fi
 
 exp_name="${VERL_EXP_NAME:-$(basename "${MODEL_ID,,}")-function-reward-minimal}"
 
+# Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
+    extra_npu_args=()
+
+    if [ "$device_name" == "npu" ]; then
+        echo "Detect NPU device, enabling FULL_AND_PIECEWISE..."
+        extra_npu_args+=(
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE"
+        )
+    fi
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     data.train_files="${TRAIN_FILES}" \
@@ -151,6 +167,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=2 \
     trainer.device=cuda \
     trainer.total_training_steps="${TOTAL_TRAIN_STEPS}" $@ \
+    "${extra_flash_args[@]}" \
     | tee "${output_file}"
 
 if [ "${CUSTOM_REWARD_FN}" = "True" ]; then
