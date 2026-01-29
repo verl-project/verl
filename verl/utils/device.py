@@ -247,23 +247,32 @@ def is_support_ipc() -> bool:
 
             # Compare versions
             # Software Version should be >= 25.3.rc1
-            # CANN version should be >= 8.3.RC1
+            # CANN version should be >= 8.3.rc1
 
-            # For software_version like "25.3.rc1.2", we need to extract the base version "25.3.rc1"
-            # Use regex to extract version up to RC level
+            # For software_version like "25.3.rc1.2", "25.5.0", or "25.5.t3.B001",
+            # we need to extract the base version
+            # Use regex to extract version with the following rules:
+            # - Standard version: 25.5.0 -> 25.5.0
+            # - RC version: 25.3.rc1.2 -> 25.3.rc1
+            # - t suffix version: 25.5.t3.b001 -> 25.5 (only first 2 parts if third part is lowercase t)
+            # - RC version: 25.3.rc1 -> 25.3.rc1
+            # For versions with more than 3 parts (e.g., 25.3.rc1.2), only match the first 3 parts
             import re
 
-            software_match = re.match(r"(\d+\.\d+\.rc\d+)", software_version)
+            ascend_version_pattern = r"(\d+\.\d+(?=\.t))|(\d+\.\d+(?:\.(?:rc\d+|\d+))?)"
+            software_match = re.match(ascend_version_pattern, software_version)
             if not software_match:
                 raise RuntimeError(f"Invalid software version format: {software_version}")
 
-            software_base = software_match.group(1)
+            # Select the matched group (either first 2 parts or up to 3 parts)
+            software_base = software_match.group(1) if software_match.group(1) else software_match.group(2)
 
-            cann_match = re.match(r"(\d+\.\d+\.rc\d+)", cann_version)
+            cann_match = re.match(ascend_version_pattern, cann_version)
             if not cann_match:
                 raise RuntimeError(f"Invalid CANN version format: {cann_version}")
             else:
-                cann_base = cann_match.group(1)
+                # Select the matched group (either first 2 parts or up to 3 parts)
+                cann_base = cann_match.group(1) if cann_match.group(1) else cann_match.group(2)
 
             if version.parse(software_base) >= version.parse("25.3.rc1"):
                 if version.parse(cann_base) >= version.parse("8.3.rc1"):
