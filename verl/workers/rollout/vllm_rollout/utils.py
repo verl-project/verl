@@ -24,6 +24,7 @@ from typing import Any, Callable, TypedDict, get_args
 
 import torch
 import zmq
+from vllm_omni.diffusion.worker.gpu_worker import CustomPipelineWorkerExtension
 
 from verl.utils.device import get_torch_device, is_npu_available
 from verl.utils.vllm import OmniTensorLoRARequest, TensorLoRARequest, VLLMHijack
@@ -232,7 +233,7 @@ class vLLMColocateWorkerExtension:
         return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
 
-class vLLMOmniColocateWorkerExtension:
+class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
     By defining an extension class, the code can work no matter what is
