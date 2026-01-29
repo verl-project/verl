@@ -31,7 +31,6 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.multiprocessing.reductions import reduce_tensor
 
-from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -425,4 +424,3 @@ class ServerAdapter(BaseRollout):
             # Finalize update weights
             await self._adapter.update_weights(None)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
-        aggressive_empty_cache(force_sync=False)

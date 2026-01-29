@@ -329,13 +329,12 @@ class TRTLLMReplica(RolloutReplica):
             else f"trtllm_server_reward_{self.replica_rank}"
         )
 
-        runtime_env_vars = {"TLLM_NUMA_AWARE_WORKER_AFFINITY": "0"}
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,
                 soft=False,
             ),
-            runtime_env={"env_vars": runtime_env_vars},
+            runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
             name=name,
         ).remote(
             config=self.config,
