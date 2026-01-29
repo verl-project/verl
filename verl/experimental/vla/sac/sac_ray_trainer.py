@@ -366,8 +366,10 @@ class RobRaySACTrainer(RayPPOTrainer):
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
-
                     batch.batch["rewards"] = reward_tensor
+                    average_reward = reward_tensor.any(-1).mean(dtype=torch.float32).item()
+                    metrics["data/trajectory_avg_reward"] = average_reward
+
                     batch = add_transition_prefixes(batch)
                     batch = flatten_trajectories(batch)
 
@@ -396,7 +398,7 @@ class RobRaySACTrainer(RayPPOTrainer):
 
                             if "request_id" in batch.non_tensor_batch:
                                 reward_extra_infos_dict.setdefault(
-                                    "request_id",
+                                "request_id",
                                     batch.non_tensor_batch["request_id"].tolist(),
                                 )
 
