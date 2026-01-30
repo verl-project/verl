@@ -2,7 +2,7 @@
 
 **Author**: `https://github.com/meituan-search`
 
-Last updated: 01/21/2026
+Last updated: 01/30/2026
 
 # 1. Scope of Support
 
@@ -17,6 +17,8 @@ Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek s
     - mbridge: Use the specified branch: [https://github.com/ArronHZG/mbridge/tree/feature/verl_mtp](https://github.com/ArronHZG/mbridge/tree/feature/verl_mtp) (will be merged into the main branch in the future);
 
     - megatron: Use the latest dev version (commit: [23e092f41ec8bc659020e401ddac9576c1cfed7e](https://github.com/NVIDIA/Megatron-LM/tree/23e092f41ec8bc659020e401ddac9576c1cfed7e)), which supports MTP + CP training methods.
+    
+    - sglang: Use the specified branch: [https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor](https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor), [PR](https://github.com/sgl-project/sglang/pull/17870) , which fix the MTP update weights from tensor OOM issue.
 
 # 2. MTP Training Configuration (Core Parameters)
 

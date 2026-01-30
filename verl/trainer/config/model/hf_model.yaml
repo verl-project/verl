@@ -89,8 +89,8 @@ mtp:
   mtp_loss_scaling_factor: 0.1
 
   speculative_algorithm: EAGLE
-  speculative_num_steps: 2
-  speculative_eagle_topk: 2
+  speculative_num_steps: 3
+  speculative_eagle_topk: 1
   speculative_num_draft_tokens: 4
 
   method: mtp
