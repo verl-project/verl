@@ -45,8 +45,7 @@ from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler.profile import DistProfiler
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.base import BaseRolloutServer, TokenOutput, resume_on_abort
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import ServerAdapter, _set_envs_and_config
 from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
 
@@ -137,7 +136,7 @@ class SGLangProfilerArgsBuilder:
         }, self.auto_stop_profiling
 
 
-class SGLangHttpServer(BaseRolloutServer):
+class SGLangHttpServer:
     """SGLang http server in single node, this is equivalent to launch server with command line:
     ```
     python -m sglang.launch_server --node-rank 0 --nnode 1 ...
@@ -164,7 +163,6 @@ class SGLangHttpServer(BaseRolloutServer):
         cuda_visible_devices: str,
         base_gpu_id: int,
     ):
-        super().__init__()
         print(f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, {nnodes=}, {cuda_visible_devices=}")
         os.environ[visible_devices_keyword] = cuda_visible_devices
 
@@ -307,21 +305,17 @@ class SGLangHttpServer(BaseRolloutServer):
 
         # mtp
         if self.config.mtp.enable and self.config.mtp.enable_rollout:
+            # Enable weights CPU backup for sglang >= 0.5.6
+            if sglang.__version__ < "0.5.6":
+                raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
+
             args["speculative_algorithm"] = self.config.mtp.speculative_algorithm
             args["speculative_num_steps"] = self.config.mtp.speculative_num_steps
             args["speculative_eagle_topk"] = self.config.mtp.speculative_eagle_topk
             args["speculative_num_draft_tokens"] = self.config.mtp.speculative_num_draft_tokens
 
-            args["log_level"] = "info"
-            args["load_format"] = "auto"
-
-            # Enable weights CPU backup for sglang >= 0.5.6
-            if sglang.__version__ >= "0.5.6":
-                args["enable_weights_cpu_backup"] = True
-                args["enable_draft_weights_cpu_backup"] = True
-
-            # args['enable_memory_saver'] = False
-            # enable_memory_saver = False MTP success but memory can't be release
+            args["enable_weights_cpu_backup"] = True
+            args["enable_draft_weights_cpu_backup"] = True
 
         # NOTE: We can't directly call SGLang's launch_server since it's not an async function.
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
@@ -400,7 +394,6 @@ class SGLangHttpServer(BaseRolloutServer):
         obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.release_memory_occupation(obj, None)
 
-    @resume_on_abort
     async def generate(
         self,
         prompt_ids: torch.Tensor,
@@ -452,8 +445,6 @@ class SGLangHttpServer(BaseRolloutServer):
         generate_request = GenerateReqInput(**request)
 
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
-        finish_reason = output["meta_info"]["finish_reason"]
-        finish_reason = finish_reason["type"] if finish_reason else None
         if return_logprob:
             output_token_logprobs = output["meta_info"]["output_token_logprobs"]
             log_probs, token_ids = zip(
@@ -481,9 +472,7 @@ class SGLangHttpServer(BaseRolloutServer):
                     -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
                 )
 
-        return TokenOutput(
-            token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts, stop_reason=finish_reason
-        )
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts)
 
     async def start_profile(self, **kwargs):
         if (
@@ -504,17 +493,6 @@ class SGLangHttpServer(BaseRolloutServer):
             and not self._auto_stop_profiling
         ):
             await self.tokenizer_manager.stop_profile()
-
-    async def abort_all_requests(self):
-        """Abort all requests with partial rollout."""
-        self.resume_event.clear()
-
-        while True:
-            self.tokenizer_manager.abort_request(abort_all=True)
-            is_locked = await self.tokenizer_manager.model_update_lock.is_locked()
-            if not is_locked:
-                break
-            await asyncio.sleep(1.0)
 
 
 _rollout_worker_actor_cls = ray.remote(ServerAdapter)

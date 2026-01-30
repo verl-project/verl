@@ -75,10 +75,8 @@ def test_agent_reward_loop_standalone():
     config.custom_reward_function.name = "compute_score_gsm8k"
 
     # 1. init reward model manager
-    reward_loop_manager = RewardLoopManager.create(config)
-    agent_loop_manager = AgentLoopManager.create(
-        config=config, reward_loop_worker_handles=reward_loop_manager.reward_loop_workers
-    )
+    reward_loop_manager = RewardLoopManager(config)
+    agent_loop_manager = AgentLoopManager(config)
 
     # 2. init test data
     local_folder = os.path.expanduser("~/data/gsm8k/")

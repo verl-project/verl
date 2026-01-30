@@ -12,7 +12,7 @@
 # - `special_sanity`: a suite of quick sanity tests
 # - `special_standalone`: a set of test that are designed to run in dedicated environments
 
-# Accelerators for tests
+# Accelerators for tests 
 # - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
 # - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
 
@@ -25,12 +25,12 @@
 # 4. Unit tests
 #   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
 #   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
-#   - `npu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix on ascend device.
-#   - Since cpu/gpu/npu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
+#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
+# name: Check PR Title
 
-name: NPU unit tests
+name: model_ascend
 
 on:
   # Trigger the workflow on push or pull request,
@@ -39,39 +39,29 @@ on:
     branches:
       - main
       - v0.*
-    paths:
-      - "**/*.py"
-      - .github/workflows/npu_unit_tests.yml
   pull_request:
     branches:
       - main
+      - v0.*
     paths:
-      # The order that you define paths patterns matters:
-      # A matching negative pattern (prefixed with !) after a positive match will exclude the path.
-      # A matching positive pattern after a negative match will include the path again.
-      - "**/*.py"
-      # Other entrypoints
-      - "!examples/**"
-      - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py"
-      - "!recipe/**"
+      - "verl/**/*.py"
       # Entrypoints
-      - .github/workflows/npu_unit_tests.yml
-      - "tests/**test_*.py"
-      # Ignore CPU tests
-      - "!tests/*_on_cpu.py"
+      - ".github/workflows/model_ascend.yml"
+      - "tests/special_distributed/test_fsdp_ckpt.py"
+      - "tests/special_distributed/test_tensor_dict.py"
+      - "tests/models/**"
+      - "tests/special_distributed/run_all.sh"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Declare permissions just read content.
 permissions:
   contents: read
 
 jobs:
-  npu_unit_tests:
+  model_rmpad_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2-8
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -90,7 +80,7 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
-      - name: Checkout volcengine/verl repo
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -99,23 +89,49 @@ jobs:
         run: |
           pip install -r requirements-npu.txt
           pip install --no-deps -e .[test]
-          pip install mlflow pytest-asyncio
       - name: Check final pip list
         run: |
           pip list
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
-      - name: Run all NPU unit tests
+      - name: Running rmpad model tests on 8 NPUs
         run: |
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          pytest -s -x --ignore-glob="*test_special_*.py" --ignore-glob="*on_cpu.py" --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob="tests/special*" --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_rvdz*" --ignore-glob="*test_ray_collectives*" --ignore-glob="*test_nvtx_profile*" --ignore-glob="tests/checkpoint_engine" --ignore-glob="*test_shared_memory*" tests/
-      - name: Testing FSDP2 actor functionality
+          pytest -s tests/models/test_transformer.py
+      - name: Running FSDP rmpad model tests on 8 NPUs
         run: |
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/actor/test_special_dp_actor.py
-      - name: Testing FSDP2 critic functionality
+          STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+      - name: Running transformers ulysses tests on 8 NPUs
         run: |
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/critic/test_special_dp_critic.py
-      - name: Running NPU profiling unit tests
+          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      - name: Run distributed test
         run: |
-          pytest -s -x tests/utils/test_special_mstx_profile.py
+          bash tests/special_distributed/run_all.sh
+
+  # TODO: Move this back to model_rmpad once FSDP2 is stable.
+  # NOTE: List as an independent job to make rerun easier.
+  model_rmpad_fsdp2_unstable_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2-8
+    timeout-minutes: 60
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip install -r requirements-npu.txt
+          pip install --no-deps -e .[test]
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Running FSDP2 rmpad model tests on 8 NPUs
+        run: |
+          STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py

@@ -16,16 +16,31 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable, Optional
 
 from omegaconf import DictConfig
+from pydantic import BaseModel
 from ray.actor import ActorHandle
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import is_torch_npu_available
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
+
+
+class TokenOutput(BaseModel):
+    token_ids: list[int]
+    """response token ids"""
+    log_probs: Optional[list[float]] = None
+    """logprobs of response token ids"""
+    routed_experts: Optional[Any] = None
+    """routed experts of response token ids"""
+    stop_reason: Optional[str] = None
+    """stop reason: 'completed', 'aborted', or None for unknown"""
+    num_preempted: Optional[int] = None
+    """number of preempted times for metric calculation"""
 
 
 class RolloutMode(Enum):
@@ -149,6 +164,7 @@ class RolloutReplica(ABC):
             if not self.is_reward_model
             else f"rollout_reward_colocate_{self.replica_rank}",
             use_gpu=use_gpu,
+            device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
         await self.launch_servers()
@@ -179,6 +195,7 @@ class RolloutReplica(ABC):
             if not self.is_reward_model
             else f"rollout_reward_standalone_{self.replica_rank}",
             use_gpu=use_gpu,
+            device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
         await self.launch_servers()
@@ -216,11 +233,15 @@ class RolloutReplica(ABC):
 
     async def abort_all_requests(self):
         """Partial rollout: abort and save all unfinished requests in each rollout server."""
-        await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        # TODO(wuxibin)
+        # await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        print(f"abort all requests in rollout replica {self.replica_rank}")
 
     async def resume_all_requests(self):
         """Partial rollout: resume all unfinished requests in each rollout server."""
-        await asyncio.gather(*[server.resume_all_requests.remote() for server in self.servers])
+        # TODO(wuxibin)
+        # await asyncio.gather(*[server.resume_all_requests.remote() for server in self.servers])
+        print(f"resume all requests in rollout replica {self.replica_rank}")
 
     async def clear_kv_cache(self):
         """reset kv cache in each rollout server."""

@@ -85,7 +85,8 @@ MEGATRON_ENGINE_CONFIG="\
     engine.tensor_model_parallel_size=${TP_SIZE} \
     engine.pipeline_model_parallel_size=${PP_SIZE} \
     engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
-    engine.context_parallel_size=${CP_SIZE}
+    engine.context_parallel_size=${CP_SIZE} \
+    +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
     engine.use_mbridge=True"
 
 if [ "$backend" = "fsdp" ]; then

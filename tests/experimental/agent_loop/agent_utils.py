@@ -79,7 +79,7 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
         raise ValueError("Agent loop tests require async rollout mode. Please set rollout.mode=async.")
 
     # =========================== 2. Create AgentLoopManager ===========================
-    agent_loop_manager = AgentLoopManager.create(
+    agent_loop_manager = AgentLoopManager(
         config=config,
         worker_group=actor_rollout_wg,
     )

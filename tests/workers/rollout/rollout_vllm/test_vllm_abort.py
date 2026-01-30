@@ -156,7 +156,6 @@ def test_vllm_abort():
         print("   Calling abort_all_requests...")
         abort_start = time.perf_counter()
         abort_result = ray.get(server_handle.abort_all_requests.remote())
-        ray.get(server_handle.resume_all_requests.remote())
         abort_time = time.perf_counter() - abort_start
 
         print(f"   Abort took: {abort_time * 1000:.2f}ms")
@@ -186,7 +185,7 @@ def test_vllm_abort():
             if output is None:
                 timeout_count += 1
                 print(f"[{i}] {request_id}: TIMEOUT")
-            elif output.stop_reason == "abort":
+            elif output.stop_reason == "aborted":
                 aborted_count += 1
                 print(f"[{i}] {request_id}: ABORTED ({len(output.token_ids)} tokens)")
                 print(f"Partial Output: {tokenizer.decode(output.token_ids)}")
