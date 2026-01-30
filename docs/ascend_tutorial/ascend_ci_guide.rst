@@ -53,6 +53,7 @@ NPU 相关的工作流主要包括：
        runs-on: linux-aarch64-a2-4  # 硬件规格：a2实例，4卡NPU
        timeout-minutes: 60          # 任务超时阈值（分钟）
        container:
+         #运行镜像 该示例为vllm的镜像
          image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
          options: >-
            --shm-size 16g  # 共享内存配置
@@ -120,6 +121,5 @@ NPU 相关的工作流主要包括：
 * **单元测试**：覆盖核心函数、类与方法，确保逻辑正确。
 * **集成/端到端测试**：覆盖典型训练、推理 pipeline，验证多模块协同与硬件适配。
 * **资源管理**：合理设置超时时间，避免任务长时间挂起，请控制单个 workflow 的运行时间在 40min 以内。
-* **并发控制**：利用 ``concurrency`` 避免同一分支上的冗余运行（main 分支除外）。
 
 通过以上步骤，可系统化地为 verl 仓库添加 NPU 相关的自动化测试，确保代码变更在合并前经过充分验证。
