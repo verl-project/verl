@@ -799,35 +799,6 @@ class RayPPOTrainer:
         if self.use_rm and not self.use_reward_loop:
             raise RuntimeError("Reward model worker group is not supported, please set use_reward_loop=True")
 
-        if not self.use_reward_loop:
-            # legacy reward model only handle reward-model based scenario
-            if self.use_rm:
-                # we create a RM here
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-                rm_cls = RayClassWithInitArgs(
-                    self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model
-                )
-                self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
-        else:
-            # reward loop handle hybrid reward scenario (rule, disrm, genrm, ...)
-            # Note: mode is always "async" since sync mode is deprecated
-            can_reward_loop_parallelize = not self.use_rm or self.config.reward_model.enable_resource_pool
-            # judge if we can asynchronously parallelize reward model with actor rollout
-            # two condition that we can parallelize reward model with actor rollout:
-            # 1. reward model is not enabled (rule-based reward can parallelize)
-            # 2. reward model is enabled but extra resource pool is enabled
-            # If we cannot parallelize, we should enable synchronous mode here, and launch a reward loop manager here
-            # else for parallelize mode, we launch a reward worker for each rollout worker (in agent loop, not here)
-            if not can_reward_loop_parallelize:
-                from verl.experimental.reward_loop import RewardLoopManager
-
-                self.config.reward_model.n_gpus_per_node = self.config.trainer.n_gpus_per_node
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-                self.reward_loop_manager = RewardLoopManager.create(
-                    config=self.config,
-                    rm_resource_pool=resource_pool,
-                )
-
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -898,6 +869,8 @@ class RayPPOTrainer:
 
         # create reward loop manager
         if self.use_reward_loop:
+            from verl.experimental.reward_loop import RewardLoopManager
+
             # initalize reward loop manager
             # reward model (colocate or standalone): get resource_pool
             # no reward model: resource_pool = None
@@ -906,7 +879,6 @@ class RayPPOTrainer:
                 config=self.config,
                 rm_resource_pool=resource_pool,
             )
-            reward_loop_workers = self.reward_loop_manager.reward_loop_workers
 
         # create async rollout manager and request scheduler
         # Note: mode is always "async" since sync mode is deprecated
@@ -922,7 +894,9 @@ class RayPPOTrainer:
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-        enable_agent_reward_loop = self.use_reward_loop and (not self.use_rm or self.config.reward_model.enable_resource_pool)
+        enable_agent_reward_loop = self.use_reward_loop and (
+            not self.use_rm or self.config.reward_model.enable_resource_pool
+        )
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
 

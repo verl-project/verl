@@ -535,7 +535,7 @@ reward_model:
     tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
   ulysses_sequence_parallel_size: 1
   use_reward_loop: true
-  num_workers: 1
+  num_workers: 8
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???

@@ -839,7 +839,7 @@ class AgentLoopManager:
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        reward_loop_worker_handles: List[ray.actor.ActorHandle] = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
 
@@ -865,7 +865,7 @@ class AgentLoopManager:
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        reward_loop_worker_handles: List[ray.actor.ActorHandle] = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Create agent loop manager."""
 
