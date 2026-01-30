@@ -9,9 +9,9 @@
 # This source code is licensed under the BSD-style license in https://github.com/pytorch/torchtune/blob/main/LICENSE
 
 import logging
+import os
 import platform
 import subprocess
-from pathlib import Path
 
 import torch
 from packaging import version
@@ -215,13 +215,13 @@ def get_npu_versions() -> tuple[str, str]:
         raise RuntimeError(f"Unsupported architecture: {arch}")
 
     # NOTE: if user install CANN toolkit in custom path, this check may fail
-    cann_path = Path(f"/usr/local/Ascend/ascend-toolkit/latest/{arch}-linux")
+    cann_path = os.path.join("/usr/local/Ascend/ascend-toolkit/latest", f"{arch}-linux")
 
-    if not cann_path.exists():
+    if not os.path.exists(cann_path):
         raise RuntimeError(f"CANN toolkit path does not exist: {cann_path}")
 
-    info_file = cann_path / "ascend_toolkit_install.info"
-    if not info_file.exists():
+    info_file = os.path.join(cann_path, "ascend_toolkit_install.info")
+    if not os.path.exists(info_file):
         raise RuntimeError(f"CANN toolkit info file does not exist: {info_file}")
 
     # Parse version from info file

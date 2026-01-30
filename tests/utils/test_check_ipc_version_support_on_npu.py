@@ -132,7 +132,7 @@ class TestGetNPUVersions(unittest.TestCase):
 
     @patch("subprocess.run")
     @patch("platform.machine")
-    @patch("pathlib.Path.exists")
+    @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
     def test_get_npu_versions_success(self, mock_file, mock_exists, mock_machine, mock_run):
         """Test successful retrieval of versions."""
@@ -162,7 +162,7 @@ class TestGetNPUVersions(unittest.TestCase):
 
     @patch("subprocess.run")
     @patch("platform.machine")
-    @patch("pathlib.Path.exists")
+    @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
     def test_get_npu_versions_unsupported_architecture(self, mock_file, mock_exists, mock_machine, mock_run):
         """Test error with unsupported architecture."""
@@ -178,7 +178,7 @@ class TestGetNPUVersions(unittest.TestCase):
 
     @patch("subprocess.run")
     @patch("platform.machine")
-    @patch("pathlib.Path.exists")
+    @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
     def test_get_npu_versions_cann_path_not_exists(self, mock_file, mock_exists, mock_machine, mock_run):
         """Test error when CANN path doesn't exist."""
@@ -194,20 +194,16 @@ class TestGetNPUVersions(unittest.TestCase):
 
     @patch("subprocess.run")
     @patch("platform.machine")
-    @patch("pathlib.Path.exists")
-    @patch("pathlib.Path")
+    @patch("os.path.exists")
     @patch("builtins.open")
-    def test_get_npu_versions_info_file_not_exists(self, mock_file, mock_path, mock_exists, mock_machine, mock_run):
+    def test_get_npu_versions_info_file_not_exists(self, mock_file, mock_exists, mock_machine, mock_run):
         """Test error when CANN info file doesn't exist."""
         mock_run.return_value = Mock(stdout="Software Version : 25.5.0\n", check=True)
 
         mock_machine.return_value = "x86_64"
-        mock_exists.return_value = True
 
-        # Create a mock Path instance that returns False for info file exists
-        mock_path_instance = Mock()
-        mock_path_instance.__truediv__ = Mock(return_value=Mock(exists=Mock(return_value=False)))
-        mock_path.return_value = mock_path_instance
+        # First call is for CANN path exists, second call is for info file exists
+        mock_exists.side_effect = [True, False]
 
         with self.assertRaises(RuntimeError) as context:
             get_npu_versions()
@@ -216,7 +212,7 @@ class TestGetNPUVersions(unittest.TestCase):
 
     @patch("subprocess.run")
     @patch("platform.machine")
-    @patch("pathlib.Path.exists")
+    @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open, read_data="other_info=no_version\n")
     def test_get_npu_versions_missing_cann_version(self, mock_file, mock_exists, mock_machine, mock_run):
         """Test error when CANN version is missing from info file."""
