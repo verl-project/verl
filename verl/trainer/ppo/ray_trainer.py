@@ -875,7 +875,7 @@ class RayPPOTrainer:
             # reward model (colocate or standalone): get resource_pool
             # no reward model: resource_pool = None
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-            self.reward_loop_manager = RewardLoopManager.create(
+            self.reward_loop_manager = RewardLoopManager(
                 config=self.config,
                 rm_resource_pool=resource_pool,
             )
