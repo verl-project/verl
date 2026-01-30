@@ -16,6 +16,7 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import hashlib
 import json
 import os
 from enum import Enum
@@ -24,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import orjson
-import hashlib
 
 
 class Tracking:
@@ -81,7 +81,7 @@ class Tracking:
             # If set, attach to the existing run instead of creating a new one
             run_id = os.environ.get("MLFLOW_RUN_ID")
             if run_id is None:
-                run_id = _MlflowLoggingAdapter.get_run_id_by_name(experiment.name, experiment_name)
+                run_id = _MlflowLoggingAdapter.get_run_id_by_name(project_name, experiment_name)
             if run_id:
                 print(f"[MLflow] Resuming run with ID: {run_id}")
                 mlflow.start_run(run_id=run_id)
@@ -303,21 +303,21 @@ class _MlflowLoggingAdapter:
     @staticmethod
     def get_run_id_by_name(experiment_name, run_name):
         """
-        Search for a run within a specific experiment by its name 
+        Search for a run within a specific experiment by its name
         and return the run_id.
         """
         import mlflow
-        
+
         runs = mlflow.search_runs(
             experiment_names=[experiment_name],
             filter_string=f"tags.mlflow.runName = '{run_name}'",
             max_results=1,
-            order_by=["attribute.start_time DESC"] # Get the most recent if duplicates exist
+            order_by=["attribute.start_time DESC"],  # Get the most recent if duplicates exist
         )
-        
+
         if runs.empty:
             return None
-        
+
         return runs.iloc[0].run_id
 
 
@@ -325,6 +325,7 @@ class _WandbLoggingAdapter:
     METRIC_STEP = "training/global_step"
 
     """Adapter to log metrics to Weights & Biases (wandb) so that one can log out-of-order."""
+
     def __init__(self, project_name, experiment_name, config):
         import os
 
@@ -334,11 +335,18 @@ class _WandbLoggingAdapter:
         if config and config["trainer"].get("wandb_proxy", None):
             settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
         entity = os.environ.get("WANDB_ENTITY", None)
-        wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings, id=self.hash_name(f"{project_name}_{experiment_name}"), resume="allow")
+        wandb.init(
+            project=project_name,
+            name=experiment_name,
+            entity=entity,
+            config=config,
+            settings=settings,
+            id=self.hash_name(f"{project_name}_{experiment_name}"),
+            resume="allow",
+        )
         wandb.define_metric(self.METRIC_STEP, hidden=True)
         wandb.define_metric("*", step_metric=self.METRIC_STEP)
         self.wandb = wandb
-
 
     def log(self, data, step):
         if step is not None:
@@ -357,13 +365,10 @@ class _WandbLoggingAdapter:
 
 class _TrackioLoggingAdapter:
     def __init__(self, project_name, experiment_name, config):
-        import os
-
         import trackio
 
         trackio.init(project=project_name, name=experiment_name, config=config)
         self.trackio = trackio
-
 
     def log(self, data, step):
         self.trackio.log(self._sanitize(data), step=step)
