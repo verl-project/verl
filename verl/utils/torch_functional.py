@@ -653,7 +653,10 @@ def log_probs_from_logits_all_rmpad(input_ids_rmpad, logits_rmpad, indices, batc
         seqlen: int
         response_length: int
     """
-    from flash_attn.bert_padding import pad_input
+    if get_device_name() == "cuda":
+        from flash_attn.bert_padding import pad_input
+    elif get_device_name() == "npu":
+        from verl.utils.attention_utils import pad_input
 
     input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # transpose back to [total_nnz, 1]
     input_ids_rmpad = input_ids_rmpad.squeeze(-1)
