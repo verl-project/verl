@@ -885,7 +885,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         with adapter_ctx:
             output, entropys, layers_topk_idx = self.actor.compute_log_prob(data=data, calculate_entropy=not is_lora)
         tensors = {"ref_log_prob": output} if is_lora else {"old_log_probs": output}
-        if not is_lora:
+        if not is_lora and entropys is not None:
             tensors["entropys"] = entropys
         output = DataProto.from_dict(
             tensors=tensors,

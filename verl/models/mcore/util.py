@@ -261,12 +261,18 @@ def postprocess_packed_seqs_for_dict_output(
         CausalLMOutputForPPO: _description_
     """
     ret = {}
-    output.entropy = output.entropy.view(1, -1)
     output.log_probs = output.log_probs.view(1, -1)
     output.log_probs = output.log_probs.masked_fill(~labels_mask, 0.0)
-    ret["entropy"] = postprocess_packed_seqs(
-        output.entropy, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
-    )
+    
+    # Handle entropy: Megatron's fused kernel (Blackwell) doesn't return entropy
+    if output.entropy is not None:
+        output.entropy = output.entropy.view(1, -1)
+        ret["entropy"] = postprocess_packed_seqs(
+            output.entropy, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
+        )
+    else:
+        ret["entropy"] = None
+    
     ret["log_probs"] = postprocess_packed_seqs(
         output.log_probs, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
     )

@@ -139,17 +139,28 @@ class MegatronPPOActor(BasePPOActor):
             assert self.mtp_config.enable, "MTP requires mtp_config.enable to be True"
 
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
+        
         if self.use_fused_kernels and not getattr(self.config, "overlap_moe_expert_parallel_comm", False):
             # do not patch if overlap_moe_expert_parallel_comm is enabled
-            logger.warning_once(
-                "Recommend to disable use_fused_kernels since the fused kernel's performance is broken for triton>=3.3"
-                "Unless you are using a very old version of triton < 3.3"
-            )
-            from verl.models.mcore.model_forward_fused import patch_fused_forward
+            from verl.models.mcore.model_forward_fused import _is_mcore_fused_lce_available, patch_fused_forward
+
+            # Auto-detect: use Megatron's fused kernel on Blackwell GPU, otherwise use verl's kernel
+            self.use_mcore_fused_kernel = _is_mcore_fused_lce_available()
+            if self.use_mcore_fused_kernel:
+                logger.warning_once(
+                    "Detected Blackwell GPU (CC 10.x). Using Megatron's fused linear cross entropy kernel. "
+                    "Note: This kernel does NOT return entropy."
+                )
+            else:
+                logger.warning_once(
+                    "Using verl's fused linear cross entropy kernel. "
+                    "Note: Performance may be degraded for triton>=3.3."
+                )
 
             for model in self.actor_module:
                 patch_fused_forward(model)
         else:
+            self.use_mcore_fused_kernel = False
             from verl.models.mcore.mtp_patch import patch_postprocess
 
             for model in self.actor_module:
@@ -288,28 +299,35 @@ class MegatronPPOActor(BasePPOActor):
                 log_probs = log_probs.to("cpu")
                 if calculate_entropy:
                     # Note that o[0] is metrics, o[1] is entropy
+                    # entropy can be None when using Megatron's Blackwell kernel
                     if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                        entropys = torch.cat([o[1] for o in output["output"]], dim=0)
-                        entropys = entropys.to(torch.float32)
-                        if use_dynamic_bsz:
-                            indices = output["indices"]
-                            indices = list(itertools.chain.from_iterable(indices))
-                            assert len(indices) == entropys.size(0), f"{len(indices)} vs. {entropys.size()}"
-                            revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
-                            entropys = entropys[revert_indices]
+                        entropy_list = [o[1] for o in output["output"]]
+                        # Check if any entropy is available (not all None)
+                        if all(e is None for e in entropy_list):
+                            entropys = None
+                        else:
+                            entropys = torch.cat(entropy_list, dim=0)
+                            entropys = entropys.to(torch.float32)
+                            if use_dynamic_bsz:
+                                indices = output["indices"]
+                                indices = list(itertools.chain.from_iterable(indices))
+                                assert len(indices) == entropys.size(0), f"{len(indices)} vs. {entropys.size()}"
+                                revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+                                entropys = entropys[revert_indices]
                     else:
                         entropys = torch.empty(
                             size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
                         )
-                    # broadcast across pp ranks
-                    entropys = entropys.to(get_device_id())
-                    torch.distributed.broadcast(
-                        tensor=entropys,
-                        src=mpu.get_pipeline_model_parallel_last_rank(),
-                        group=mpu.get_pipeline_model_parallel_group(),
-                        async_op=False,
-                    )
-                    entropys = entropys.to("cpu")
+                    # broadcast across pp ranks (only if entropy is available)
+                    if entropys is not None:
+                        entropys = entropys.to(get_device_id())
+                        torch.distributed.broadcast(
+                            tensor=entropys,
+                            src=mpu.get_pipeline_model_parallel_last_rank(),
+                            group=mpu.get_pipeline_model_parallel_group(),
+                            async_op=False,
+                        )
+                        entropys = entropys.to("cpu")
                 layers_topk_idx = None
 
                 if RouterReplayHelper.is_r2_record_action(self.tf_config):
@@ -537,13 +555,23 @@ class MegatronPPOActor(BasePPOActor):
                 policy_loss = pg_loss
 
             if calculate_entropy:
-                entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
-                if not forward_only:
-                    entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-                    entropy_coeff = meta_info["entropy_coeff"]
-                    policy_loss = pg_loss - entropy_coeff * entropy_loss
+                # Handle case where entropy is None (e.g., Megatron's Blackwell kernel doesn't return entropy)
+                entropy_tensor = output.get("entropy", None) if isinstance(output, dict) else None
+                if entropy_tensor is not None:
+                    entropy = entropy_tensor[:, -response_length - 1 : -1].contiguous()
+                    if not forward_only:
+                        entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        entropy_coeff = meta_info["entropy_coeff"]
+                        policy_loss = pg_loss - entropy_coeff * entropy_loss
+                    else:
+                        ret_entropy = entropy
                 else:
-                    ret_entropy = entropy
+                    # Entropy not available from kernel, skip entropy loss computation
+                    if not forward_only and meta_info.get("entropy_coeff", 0) != 0:
+                        logger.warning_once(
+                            "Entropy requested but not available from kernel (e.g., Megatron's Blackwell kernel). "
+                            "Entropy loss will be skipped. Set entropy_coeff=0 to suppress this warning."
+                        )
 
             if forward_only:
                 policy_loss = torch.tensor(1.0, device=device)
@@ -627,6 +655,7 @@ class MegatronPPOActor(BasePPOActor):
                 if return_schedule_plan:
                     forward_fn = gptmodel_forward_1f1b_overlap
                 # return dict of [logits, entropy]
+                # Note: if use_mcore_fused_kernel=True, entropy will be None
                 output = forward_fn(
                     model=model,
                     input_ids=input_ids,
@@ -636,6 +665,7 @@ class MegatronPPOActor(BasePPOActor):
                     labels_mask=label_mask,
                     temperature=temperature,
                     multi_modal_inputs=multi_modal_inputs,
+                    use_mcore_fused_kernel=getattr(self, "use_mcore_fused_kernel", False),
                 )
             else:
                 forward_fn = get_mcore_forward_fn(self.hf_config)

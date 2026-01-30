@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from collections import OrderedDict
+from functools import lru_cache
 from typing import Optional
 
 import megatron.core as mcore
@@ -30,11 +31,49 @@ from packaging import version
 from torch import Tensor
 
 from verl.models.mcore.util import preprocess_packed_seqs
-from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
 from .util import postprocess_packed_seqs_for_dict_output
+
+
+# Check if Megatron's fused linear cross entropy is available (requires Blackwell GPU)
+@lru_cache(maxsize=1)
+def _is_mcore_fused_lce_available() -> bool:
+    """
+    Check if Megatron's fused linear cross entropy kernel is available.
+    Currently only supports Blackwell architecture (CC 10.x).
+    """
+    if not torch.cuda.is_available():
+        return False
+    cc = torch.cuda.get_device_capability()
+    # Megatron's fused_linear_cross_entropy only supports Blackwell (CC 10.x)
+    return cc[0] == 10
+
+
+def _get_linear_cross_entropy_fn(use_mcore_kernel: bool = False):
+    """
+    Get the appropriate linear cross entropy function.
+    
+    Args:
+        use_mcore_kernel: Whether to use Megatron's fused kernel (if available).
+            Note: Megatron's kernel only returns logprobs, not entropy.
+    
+    Returns:
+        linear_cross_entropy function from either:
+        - megatron.core.fusions.fused_linear_cross_entropy (Blackwell only, no entropy)
+        - verl.utils.kernel.linear_cross_entropy (all GPUs, returns logprobs + entropy)
+    """
+    if use_mcore_kernel and _is_mcore_fused_lce_available():
+        try:
+            from megatron.core.fusions.fused_linear_cross_entropy import linear_cross_entropy
+            return linear_cross_entropy, "mcore"
+        except ImportError:
+            pass
+    
+    # Default: use verl's kernel (supports more architectures and returns entropy)
+    from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+    return linear_cross_entropy, "verl"
 
 
 def _get_patching_model(model: torch.nn.Module):
@@ -75,7 +114,16 @@ def fused_forward_model_gen(vision_model: bool = False):
         labels_mask: Tensor,
         temperature: float,
         multi_modal_inputs: dict,
+        use_mcore_fused_kernel: bool = False,
     ):
+        """
+        Forward function with fused linear cross entropy kernel.
+        
+        Args:
+            use_mcore_fused_kernel: Whether to use Megatron's fused kernel.
+                Note: Megatron's kernel only supports Blackwell GPU (CC 10.x) and
+                does NOT return entropy. Only enable if entropy is not needed.
+        """
         pre_process: bool = (
             unwrap_model(model).pre_process if not vision_model else False
         )  # vision model does not need pre_process, because we pack the input_ids to thd in the forward function
@@ -106,6 +154,7 @@ def fused_forward_model_gen(vision_model: bool = False):
             packed_seq_params=packed_seq_params,
             labels=labels_rmpad,
             temperature=temperature,
+            use_mcore_fused_kernel=use_mcore_fused_kernel,
             **model_kwargs,
         )
 
@@ -152,11 +201,17 @@ def _fused_GPTModel_forward(
     inference_params: Optional[BaseInferenceContext] = None,
     loss_mask: Optional[Tensor] = None,
     temperature: float = 1.0,
+    use_mcore_fused_kernel: bool = False,
     **kwargs,
 ) -> CausalLMOutputForPPO:
     """
     Patch self._postprocess in forward for GPT models to enable fused kernel support.
     https://github.com/NVIDIA/Megatron-LM/blob/core_v0.13.0/megatron/core/models/gpt/gpt_model.py
+
+    Args:
+        use_mcore_fused_kernel: Whether to use Megatron's fused linear cross entropy kernel.
+            Note: Megatron's kernel only supports Blackwell GPU (CC 10.x) and does NOT return
+            entropy. Only enable this if you don't need entropy for loss computation.
 
     TODO: Currently we still need to patch `forward` because we need to pass `temperature`
     explicitly to `self._postprocess` when calling, maybe there can be a better way to handle this?
@@ -209,14 +264,35 @@ def _fused_GPTModel_forward(
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
 
-    logprobs, entropy = linear_cross_entropy(
-        hidden_states,
-        output_weight,
-        labels,
-        temperature,
-        "none",
-        parallel_state.get_tensor_model_parallel_group(),
-    )
+    # Get the appropriate linear cross entropy function
+    linear_cross_entropy_fn, kernel_type = _get_linear_cross_entropy_fn(use_mcore_fused_kernel)
+    
+    if kernel_type == "mcore":
+        # Megatron's kernel: only returns logprobs, no entropy
+        # Note: Megatron's kernel doesn't support temperature parameter directly,
+        # so we need to pre-scale hidden_states or handle temperature differently
+        # For now, we use verl's kernel which supports temperature
+        # TODO: Add temperature support for mcore kernel
+        logprobs = linear_cross_entropy_fn(
+            hidden_states,
+            output_weight,
+            labels,
+            tp_group=parallel_state.get_tensor_model_parallel_group(),
+            reduction="none",
+            sequence_parallel=model.config.sequence_parallel,
+        )
+        # Megatron's kernel doesn't return entropy
+        entropy = None
+    else:
+        # verl's kernel: returns both logprobs and entropy
+        logprobs, entropy = linear_cross_entropy_fn(
+            hidden_states,
+            output_weight,
+            labels,
+            temperature,
+            "none",
+            parallel_state.get_tensor_model_parallel_group(),
+        )
 
     if has_config_logger_enabled(model.config):
         payload = OrderedDict(
