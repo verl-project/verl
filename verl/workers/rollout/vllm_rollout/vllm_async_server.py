@@ -69,7 +69,7 @@ if _VLLM_VERSION > version.parse("0.11.0"):
     else:
         get_encoding = None
 
-    if get_encoding is not None and os.getenv('VERL_USE_GPT_OSS', "0") == "1":
+    if get_encoding is not None and os.getenv("VERL_USE_GPT_OSS", "0") == "1":
         get_encoding()
 else:
     from vllm.utils import FlexibleArgumentParser
