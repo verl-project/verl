@@ -1,4 +1,4 @@
-# Copyright 2025 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Amazon.com Inc and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,29 +13,29 @@
 # limitations under the License.
 
 import os
+
 import pytest
 import torch
 import torch.distributed
 import torch.multiprocessing as mp
+from peft import LoraConfig, get_peft_model
 from torch.distributed import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
-from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, Qwen2Config, GptOssConfig
+from transformers import AutoModelForCausalLM, GptOssConfig, Qwen2Config
 
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.fsdp_utils import (
-    backup_base_model_weights,
-    restore_base_model_weights,
-    merged_lora_context,
-    _merge_or_unmerge_lora_,
     MixedPrecisionPolicy,
     apply_fsdp2,
     get_fsdp_wrap_policy,
+    merged_lora_context,
 )
 
 
-def _test_merged_lora_context_worker(rank, world_size, rendezvous_file, strategy, model_config, lora_config_dict, backup_adapters):
+def _test_merged_lora_context_worker(
+    rank, world_size, rendezvous_file, strategy, model_config, lora_config_dict, backup_adapters
+):
     """Worker function for testing merged_lora_context with FSDP.
 
     Args:
@@ -69,6 +69,7 @@ def _test_merged_lora_context_worker(rank, world_size, rendezvous_file, strategy
 
     # Initialize LoRA adapter weights to non-zero values for testing
     from peft.tuners.lora import LoraLayer
+
     with torch.no_grad():
         for name, module in model.named_modules():
             if isinstance(module, LoraLayer):
@@ -106,6 +107,7 @@ def _test_merged_lora_context_worker(rank, world_size, rendezvous_file, strategy
 
     # Test: backup adapter weights, merge, restore
     from peft.tuners.lora import LoraLayer
+
     lora_layers = [m for m in model.modules() if isinstance(m, LoraLayer)]
 
     # Verify LoRA layers exist
@@ -117,6 +119,7 @@ def _test_merged_lora_context_worker(rank, world_size, rendezvous_file, strategy
 
     # Backup adapter weights before merge
     from peft.utils.save_and_load import get_peft_model_state_dict
+
     original_adapter_weights = get_peft_model_state_dict(model)
 
     # Use merged_lora_context with the specified backup_adapters flag
@@ -129,9 +132,9 @@ def _test_merged_lora_context_worker(rank, world_size, rendezvous_file, strategy
     # After context, check the state based on backup_adapters flag
     for layer in lora_layers:
         assert not getattr(layer, "merged", False), "LoRA should be unmerged after context"
-    
+
     restored_adapter_weights = get_peft_model_state_dict(model)
-    
+
     # Verify adapter weights are restored exactly
     for key in original_adapter_weights.keys():
         assert key in restored_adapter_weights, f"Key {key} should be in restored weights"
@@ -140,7 +143,7 @@ def _test_merged_lora_context_worker(rank, world_size, rendezvous_file, strategy
             restored_adapter_weights[key].cpu(),
             rtol=1e-5,
             atol=1e-6,
-            msg=f"Adapter weight {key} should be restored to original value"
+            msg=f"Adapter weight {key} should be restored to original value",
         )
 
     if rank == 0:
@@ -170,7 +173,7 @@ def test_merged_lora_context_qwen2(world_size, strategy, backup_adapters, tmp_pa
         "target_modules": ["q_proj", "v_proj"],
         "lora_dropout": 0.0,
         "bias": "none",
-        "task_type": "CAUSAL_LM"
+        "task_type": "CAUSAL_LM",
     }
 
     mp.spawn(
@@ -207,7 +210,7 @@ def test_merged_lora_context_gptoss(world_size, strategy, backup_adapters, tmp_p
         "exclude_modules": ["mlp.router"],
         "lora_dropout": 0.0,
         "bias": "none",
-        "task_type": "CAUSAL_LM"
+        "task_type": "CAUSAL_LM",
     }
 
     mp.spawn(
