@@ -471,15 +471,18 @@ class DataProto:
                     print(f"meta_info: {key}: {len(val)=}, {val[:10]=}")
                 else:
                     print(f"meta_info: {key}: {val}")
-                    
+
         if self.batch is not None:
             for key, tensor in self.batch.items():
                 print(f"batch field(tensor): {key=}, tensor_size: {tensor.size()}, dtype: {tensor.dtype}")
 
         if self.non_tensor_batch is not None:
             for key, numpy_array in self.non_tensor_batch.items():
-                print(f"non_tensor_batch field (numpy array): {key=}, array (size: {numpy_array.shape}), type: {type(numpy_array[0])}")
-        
+                print(
+                    f"non_tensor_batch field (numpy array): {key=}, array (size: {numpy_array.shape}), "
+                    f"type: {type(numpy_array[0])}"
+                )
+
         print(f"--- end of {desc} ---")
 
     def check_consistency(self):

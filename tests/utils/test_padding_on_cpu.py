@@ -1,4 +1,4 @@
-# Copyright 2025 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Amazon.com Inc and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,8 +15,6 @@
 import torch
 from tensordict import TensorDict
 
-from verl.utils import tensordict_utils as tu
-from verl.utils.attention_utils import pad_input, unpad_input
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -56,16 +54,18 @@ def test_padding_conversion_with_log_probs():
     advantages = torch.randn(batch_size, max_response_len)
     rollout_log_probs = torch.randn(batch_size, max_seq_len)
 
-    data = TensorDict({
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "response_mask": response_mask,
-        "position_ids": position_ids,
-        "old_log_probs": old_log_probs,
-        "ref_log_prob": ref_log_prob,
-        "advantages": advantages,
-        "rollout_log_probs": rollout_log_probs,
-    })
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": position_ids,
+            "old_log_probs": old_log_probs,
+            "ref_log_prob": ref_log_prob,
+            "advantages": advantages,
+            "rollout_log_probs": rollout_log_probs,
+        }
+    )
 
     # Convert to no-padding format
     data_converted = left_right_2_no_padding(data)
@@ -91,8 +91,9 @@ def test_padding_conversion_with_log_probs():
 
     # Verify that nested tensors (input_ids, position_ids) have correct number of elements per batch item
     for i, vlen in enumerate(valid_lens):
-        assert data_converted["input_ids"][i].numel() == vlen, \
+        assert data_converted["input_ids"][i].numel() == vlen, (
             f"Batch {i}: input_ids should have {vlen} elements, got {data_converted['input_ids'][i].numel()}"
+        )
 
 
 def test_padding_conversion_without_log_probs():
@@ -107,12 +108,14 @@ def test_padding_conversion_without_log_probs():
     response_mask = torch.ones(batch_size, max_response_len)
     position_ids = torch.arange(max_seq_len).unsqueeze(0).expand(batch_size, -1)
 
-    data = TensorDict({
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "response_mask": response_mask,
-        "position_ids": position_ids,
-    })
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": position_ids,
+        }
+    )
 
     # Convert to no-padding format
     data_converted = left_right_2_no_padding(data)
@@ -143,14 +146,16 @@ def test_padding_roundtrip():
     prompts_nested = torch.nested.as_nested_tensor(prompt_list, layout=torch.jagged)
     responses_nested = torch.nested.as_nested_tensor(response_list, layout=torch.jagged)
 
-    data = TensorDict({
-        "input_ids": input_ids,
-        "prompts": prompts_nested,
-        "responses": responses_nested,
-        "attention_mask": attention_mask,
-        "response_mask": response_mask,
-        "position_ids": position_ids,
-    })
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "prompts": prompts_nested,
+            "responses": responses_nested,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": position_ids,
+        }
+    )
 
     # Convert to nested format
     data_nested = left_right_2_no_padding(data)
@@ -186,35 +191,35 @@ def test_no_padding_2_padding_varying_lengths():
 
     attention_mask = torch.zeros(batch_size, max_seq_len)
     for i in range(batch_size):
-        attention_mask[i, :prompt_lens[i] + response_lens[i]] = 1
+        attention_mask[i, : prompt_lens[i] + response_lens[i]] = 1
 
     response_mask = torch.zeros(batch_size, max_response_len)
     for i in range(batch_size):
-        response_mask[i, :response_lens[i]] = 1
+        response_mask[i, : response_lens[i]] = 1
 
     position_ids = torch.arange(max_seq_len).unsqueeze(0).expand(batch_size, -1).clone()
 
-    prompt_list = [input_ids[i, :prompt_lens[i]] for i in range(batch_size)]
-    response_list = [input_ids[i, prompt_lens[i]:prompt_lens[i]+response_lens[i]] for i in range(batch_size)]
+    prompt_list = [input_ids[i, : prompt_lens[i]] for i in range(batch_size)]
+    response_list = [input_ids[i, prompt_lens[i] : prompt_lens[i] + response_lens[i]] for i in range(batch_size)]
 
     prompts_nested = torch.nested.as_nested_tensor(prompt_list, layout=torch.jagged)
     responses_nested = torch.nested.as_nested_tensor(response_list, layout=torch.jagged)
 
-    data = TensorDict({
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "response_mask": response_mask,
-        "position_ids": position_ids,
-        "prompts": prompts_nested,
-        "responses": responses_nested,
-    })
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": position_ids,
+            "prompts": prompts_nested,
+            "responses": responses_nested,
+        }
+    )
 
     data_nested = left_right_2_no_padding(data)
     input_ids_nested = data_nested["input_ids"]
     log_probs_values = input_ids_nested.values().float()
-    log_probs_nested = torch.nested.nested_tensor_from_jagged(
-        log_probs_values, offsets=input_ids_nested.offsets()
-    )
+    log_probs_nested = torch.nested.nested_tensor_from_jagged(log_probs_values, offsets=input_ids_nested.offsets())
 
     result_slice_response = no_padding_2_padding(log_probs_nested, data_nested)
 
@@ -228,7 +233,7 @@ def test_no_padding_2_padding_varying_lengths():
             expected_values,
             rtol=1e-5,
             atol=1e-6,
-            msg=f"Batch {i} (prompt_len={prompt_lens[i]}, resp_len={resp_len}): values incorrect"
+            msg=f"Batch {i} (prompt_len={prompt_lens[i]}, resp_len={resp_len}): values incorrect",
         )
     print("All varied length tests passed")
 

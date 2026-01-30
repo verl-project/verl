@@ -1,4 +1,4 @@
-# Copyright 2025 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Amazon.com Inc and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,22 +13,23 @@
 # limitations under the License.
 
 import os
+
 import pytest
 import torch
 import torch.distributed
 import torch.multiprocessing as mp
+from peft import LoraConfig, get_peft_model
 from torch.distributed import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy, StateDictType
-from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, Qwen3Config
 
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.fsdp_utils import (
-    normalize_peft_param_name,
     MixedPrecisionPolicy,
     apply_fsdp2,
     get_fsdp_wrap_policy,
+    normalize_peft_param_name,
 )
 from verl.utils.model import convert_weight_keys
 
@@ -69,12 +70,7 @@ def _test_normalize_peft_with_fsdp_worker(rank, world_size, rendezvous_file, str
 
     # Create PEFT model with LoRA
     lora_config = LoraConfig(
-        r=8,
-        lora_alpha=16,
-        target_modules="all-linear",
-        lora_dropout=0.0,
-        bias="none",
-        task_type="CAUSAL_LM"
+        r=8, lora_alpha=16, target_modules="all-linear", lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"
     )
     peft_model = get_peft_model(base_model, lora_config)
 
@@ -145,8 +141,12 @@ def _test_normalize_peft_with_fsdp_worker(rank, world_size, rendezvous_file, str
     # Normalize PEFT model state dict
     normalized_peft_state_dict = normalize_peft_param_name(peft_state_dict)
 
-    base_state_dict = convert_weight_keys(base_state_dict, getattr(fsdp_base_model, "_fsdp_wrapped_module", fsdp_base_model))
-    normalized_peft_state_dict = convert_weight_keys(normalized_peft_state_dict, getattr(fsdp_peft_model, "_fsdp_wrapped_module", fsdp_peft_model))
+    base_state_dict = convert_weight_keys(
+        base_state_dict, getattr(fsdp_base_model, "_fsdp_wrapped_module", fsdp_base_model)
+    )
+    normalized_peft_state_dict = convert_weight_keys(
+        normalized_peft_state_dict, getattr(fsdp_peft_model, "_fsdp_wrapped_module", fsdp_peft_model)
+    )
 
     # Get key sets
     base_keys = set(base_state_dict.keys())

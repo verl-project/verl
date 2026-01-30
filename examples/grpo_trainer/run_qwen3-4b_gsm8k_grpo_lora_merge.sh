@@ -1,5 +1,10 @@
 set -x
 
+# initial "val-core/openai/gsm8k/acc/mean@1":0.378316906747536
+# after training: "val-core/openai/gsm8k/acc/mean@1":0.9264594389689158
+# when removing +actor_rollout_ref.model.lora.merge=True
+# after training: "val-core/openai/gsm8k/acc/mean@1":0.9264594389689158
+
 TIMESTAMP=$(date +%Y%m%d.%H%M%S)
 project_name=verl_grpo_example_gsm8k
 experiment_name=qwen3_4b_grpo-lora-merged-${TIMESTAMP}

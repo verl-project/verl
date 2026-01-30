@@ -54,10 +54,10 @@ from verl.utils.fsdp_utils import (
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
     merged_lora_context,
+    normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
     replace_lora_wrapper,
-    normalize_peft_param_name,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
@@ -656,7 +656,7 @@ class FSDPEngine(BaseEngine):
                 )
                 if not base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
-            else: # merge lora
+            else:  # merge lora
                 with merged_lora_context(self.module, backup_adapters=True):
                     params = self.module.state_dict()
                     params = normalize_peft_param_name(params)
@@ -671,7 +671,7 @@ class FSDPEngine(BaseEngine):
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
         if peft_config is not None and base_sync_done:
-            per_tensor_param = params
+            per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
             # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
@@ -684,7 +684,10 @@ class FSDPEngine(BaseEngine):
                 )
                 for name, param in params.items()
             )
-        return per_tensor_param, peft_config
+        # return per_tensor_param, peft_config
+        # Convert peft_config to dict for vLLM compatibility (PEFTHelper.from_dict expects dict)
+        peft_config_dict = peft_config.to_dict() if peft_config is not None else None
+        return per_tensor_param, peft_config_dict
 
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()

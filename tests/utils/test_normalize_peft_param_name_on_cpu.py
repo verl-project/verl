@@ -1,4 +1,4 @@
-# Copyright 2025 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Amazon.com Inc and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, Qwen2Config, Qwen3Config
+from transformers import AutoModelForCausalLM, Qwen3Config
 
 from verl.utils.fsdp_utils import normalize_peft_param_name
 
@@ -35,12 +35,7 @@ def create_base_model():
 
 def create_peft_model():
     lora_config = LoraConfig(
-        r=8,
-        lora_alpha=16,
-        target_modules="all-linear",
-        lora_dropout=0.0,
-        bias="none",
-        task_type="CAUSAL_LM"
+        r=8, lora_alpha=16, target_modules="all-linear", lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"
     )
     model = create_base_model()
     model = get_peft_model(model, lora_config)
@@ -51,6 +46,7 @@ def create_peft_model():
 def base_model():
     """Create a simple base model for testing."""
     return create_base_model()
+
 
 @pytest.fixture
 def peft_model():
@@ -98,7 +94,9 @@ def test_normalize_peft_param_name_removes_lora_keys(peft_model):
     # After normalization, should not have any lora keys
     normalized_state_dict = normalize_peft_param_name(peft_state_dict)
     lora_keys_after = [k for k in normalized_state_dict.keys() if "lora_" in k]
-    assert len(lora_keys_after) == 0, f"Normalized state dict should not contain LoRA keys, but found: {lora_keys_after}"
+    assert len(lora_keys_after) == 0, (
+        f"Normalized state dict should not contain LoRA keys, but found: {lora_keys_after}"
+    )
 
 
 def test_normalize_peft_param_name_removes_base_model_prefix(peft_model):
@@ -112,7 +110,9 @@ def test_normalize_peft_param_name_removes_base_model_prefix(peft_model):
     # After normalization, should not have base_model prefix
     normalized_state_dict = normalize_peft_param_name(peft_state_dict)
     base_model_keys_after = [k for k in normalized_state_dict.keys() if "base_model" in k]
-    assert len(base_model_keys_after) == 0, f"Normalized keys should not contain base_model prefix, but found: {base_model_keys_after}"
+    assert len(base_model_keys_after) == 0, (
+        f"Normalized keys should not contain base_model prefix, but found: {base_model_keys_after}"
+    )
 
 
 def test_normalize_peft_param_name_removes_base_layer_suffix(peft_model):
@@ -126,7 +126,9 @@ def test_normalize_peft_param_name_removes_base_layer_suffix(peft_model):
     # After normalization, should not have .base_layer suffix
     normalized_state_dict = normalize_peft_param_name(peft_state_dict)
     base_layer_keys_after = [k for k in normalized_state_dict.keys() if ".base_layer" in k]
-    assert len(base_layer_keys_after) == 0, f"Normalized keys should not contain .base_layer suffix, but found: {base_layer_keys_after}"
+    assert len(base_layer_keys_after) == 0, (
+        f"Normalized keys should not contain .base_layer suffix, but found: {base_layer_keys_after}"
+    )
 
 
 def test_normalize_peft_param_name_tensor_shapes_match(base_model, peft_model):
@@ -151,12 +153,15 @@ def test_normalize_peft_param_name_empty_dict():
     assert result == {}, "Empty dict should return empty dict"
 
 
-@pytest.mark.parametrize("lora_key_pattern", [
-    "model.layers.0.self_attn.q_proj.lora_A.default.weight",
-    "model.layers.0.self_attn.q_proj.lora_B.default.weight",
-    "model.layers.0.adapter_layer.weight",
-    "base_model.model.layers.0.lora_embedding_A",
-])
+@pytest.mark.parametrize(
+    "lora_key_pattern",
+    [
+        "model.layers.0.self_attn.q_proj.lora_A.default.weight",
+        "model.layers.0.self_attn.q_proj.lora_B.default.weight",
+        "model.layers.0.adapter_layer.weight",
+        "base_model.model.layers.0.lora_embedding_A",
+    ],
+)
 def test_normalize_peft_param_name_filters_lora_patterns(lora_key_pattern):
     """Test that various LoRA key patterns are filtered out."""
     test_dict = {

@@ -16,8 +16,8 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 """
 
 import os
-from pathlib import Path
 import socket
+from pathlib import Path
 
 import hydra
 import ray
@@ -28,10 +28,10 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
+from verl.utils import io_utils
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
-from verl.utils import io_utils
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
@@ -284,7 +284,7 @@ class TaskRunner:
         train_dir = Path(config.trainer.default_local_dir)
         print(f"Saving config file to {train_dir}")
         train_dir.mkdir(exist_ok=True, parents=True)
-        
+
         cfg_text = OmegaConf.to_yaml(config)
         io_utils.save_text(cfg_text, train_dir.joinpath("training_config.yaml"))
 

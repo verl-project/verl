@@ -506,8 +506,9 @@ class vLLMHttpServer:
 
         # Add lora request
         lora_request = None
-        if ((self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0) 
-            and not self.model_config.lora.get("merge", False)):
+        if (
+            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
+        ) and not self.model_config.lora.get("merge", False):
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:

@@ -733,17 +733,15 @@ def set_reshard_after_forward(module: FSDPModule, reshard_after_forward: bool, r
 def normalize_peft_param_name(params: dict) -> dict:
     """
     Converts peft model parameter name to base parameter name
-    For example, 
+    For example,
         base_model.model.model.embed_tokens.weight -> model.embed_tokens.weight
         base_model.model.model.layers.0.self_attn.q_proj.base_layer.weight -> model.layers.0.self_attn.q_proj.weight
     and remove params such as base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight,
     base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight
     """
+
     def _normalize_peft_name(name: str) -> str:
-        return (name
-                .replace("base_model.model.", "")
-                .replace("base_model.", "")
-                .replace(".base_layer", ""))
+        return name.replace("base_model.model.", "").replace("base_model.", "").replace(".base_layer", "")
 
     def _is_lora_key(name: str) -> bool:
         # catch typical PEFT keys
@@ -773,6 +771,7 @@ def _merge_or_unmerge_lora_(module, merge: bool):
                 elif (not merge) and is_merged:
                     m.unmerge()
 
+
 # merged_adapters
 def _clean_merged_lora_(module):
     """Cleans the merged lora adapters"""
@@ -784,6 +783,7 @@ def _clean_merged_lora_(module):
                 merged_adapters = getattr(m, "merged_adapters", False)
                 if merged_adapters:
                     m.merged_adapters = []
+
 
 def fsdp_merge_unmerge(module: nn.Module, do_merge: bool):
     """Merge or unmerge LoRA adapters in FSDP module.
