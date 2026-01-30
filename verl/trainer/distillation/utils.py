@@ -70,13 +70,22 @@ def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
         return False
     return config.enabled
 
+def distillation_requires_logits(config: DistillationConfig) -> bool:
+    """Check if distillation loss requires logits based on the provided configuration."""
+    distillation_settings: DistillationLossSettings = config.loss_settings
+    return distillation_settings.use_topk or distillation_settings.use_full
 
 def compute_distillation_inputs(
-    logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: Optional[DistillationConfig]
+    logits: torch.Tensor, batch: TensorDict, cu_seqlens: Optional[torch.Tensor], config: Optional[DistillationConfig]
 ) -> dict[str, torch.Tensor]:
     """Compute the distillation inputs for a given stage of training."""
     if not is_distillation_enabled(config):
         return {}
+    if cu_seqlens is None:
+        if not logits.is_nested:
+            raise ValueError("cu_seqlens must be provided if logits is not a nested tensor.")
+        cu_seqlens = logits.offsets()
+        logits = logits.values()
     distillation_settings: DistillationLossSettings = config.loss_settings
     if distillation_settings.use_full:
         return NotImplementedError  # TODO: JacobHelwig
