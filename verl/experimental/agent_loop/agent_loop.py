@@ -33,7 +33,6 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
-from verl.experimental.reward_loop import RewardLoopWorker
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import hf_processor, hf_tokenizer
@@ -350,13 +349,13 @@ class AgentLoopWorker:
         self,
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
-        reward_router_address: str = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            reward_router_address (str): reward router address.
+            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
         """
         self.config = config
 
@@ -365,7 +364,7 @@ class AgentLoopWorker:
             self.server_manager = AsyncLLMServerManager(config, server_handles)
 
         self.dataset_cls = get_dataset_class(config.data)
-        self.reward_router_address = reward_router_address
+        self.reward_loop_worker_handles = reward_loop_worker_handles
 
         model_path = config.actor_rollout_ref.model.path
         self.model_name = "/".join(model_path.split("/")[-2:])
@@ -383,16 +382,6 @@ class AgentLoopWorker:
             if self.processor is not None:
                 self.processor.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
             self.tokenizer.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
-
-        use_reward_loop = True if self.config.reward_model.use_reward_loop else None
-        self.use_reward_loop = use_reward_loop
-        if use_reward_loop and not hasattr(self, "reward_loop_worker"):
-            self.reward_loop_worker = RewardLoopWorker.options(
-                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                    node_id=ray.get_runtime_context().get_node_id(),
-                    soft=False,
-                ),
-            ).remote(self.config, self.reward_router_address)
 
         trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
         RolloutTraceConfig.init(
@@ -701,11 +690,9 @@ class AgentLoopWorker:
 
     async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, position_ids, kwargs):
         """Compute reward score for single sample."""
-        enable_async_reward = (
-            self.reward_router_address is not None and self.config.reward_model.enable_resource_pool
-        ) or not self.config.reward_model.enable
+        enable_async_reward = self.reward_loop_worker_handles is not None
 
-        if output.reward_score is None and enable_async_reward and self.use_reward_loop:
+        if output.reward_score is None and enable_async_reward:
             batch = TensorDict(
                 {
                     "prompts": prompts,  # [1, prompt_length]
@@ -726,7 +713,8 @@ class AgentLoopWorker:
                 batch=batch,
                 non_tensor_batch=non_tensor_batch,
             )
-            result = await self.reward_loop_worker.compute_score.remote(data)
+            selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
+            result = await selected_reward_loop_worker_handle.compute_score.remote(data)
             output.reward_score = result["reward_score"]
             output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
@@ -851,7 +839,7 @@ class AgentLoopManager:
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        rm_resource_pool: RayResourcePool = None,
+        reward_loop_worker_handles: List[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
 
@@ -859,12 +847,10 @@ class AgentLoopManager:
             config (DictConfig): trainer config.
             worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
             rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
-            rm_resource_pool (RayResourcePool): Resource pool for reward model (Standalone mode).
+            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
         """
         self.config = config
         self.worker_group = worker_group
-        self.reward_model_manager = None
-        self.reward_router_address = None
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
@@ -879,17 +865,11 @@ class AgentLoopManager:
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        rm_resource_pool: RayResourcePool = None,
+        reward_loop_worker_handles: List[ray.actor.ActorHandle] = None,
     ):
         """Create agent loop manager."""
 
-        instance = cls(config, worker_group, rollout_resource_pool, rm_resource_pool)
-
-        if config.reward_model.enable and config.reward_model.enable_resource_pool:
-            from verl.experimental.reward_loop import RewardModelManager
-
-            instance.reward_model_manager = await RewardModelManager.create(config.reward_model, rm_resource_pool)
-            instance.reward_router_address = instance.reward_model_manager.get_router_address()
+        instance = cls(config, worker_group, rollout_resource_pool, reward_loop_worker_handles)
 
         await instance._initialize_llm_servers(rollout_resource_pool)
         instance._init_agent_loop_workers()
@@ -971,10 +951,6 @@ class AgentLoopManager:
             DataProto: Output batch.
         """
 
-        # TODO: move reward_model_manager out of agent_loop manager
-        if self.reward_model_manager:
-            self.reward_model_manager.wake_up()
-
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[
@@ -983,8 +959,6 @@ class AgentLoopManager:
             ]
         )
         output = DataProto.concat(outputs)
-        if self.reward_model_manager:
-            self.reward_model_manager.sleep()
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
