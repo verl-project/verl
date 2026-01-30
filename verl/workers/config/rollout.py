@@ -236,6 +236,9 @@ class RolloutConfig(BaseConfig):
 
     enable_sleep_mode: bool = True
 
+    # whether cast the model parameters to the rollout dtype in update_weights
+    cast_to_rollout_dtype: bool = False
+
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     def __post_init__(self):

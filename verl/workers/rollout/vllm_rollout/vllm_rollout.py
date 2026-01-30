@@ -192,8 +192,11 @@ class ServerAdapter(BaseRollout):
         bucket_meta: dict[str, TensorMetadata] = {}
         dtype = PrecisionType.to_dtype(self.config.dtype)
         async for name, weight in ensure_async_iterator(weights):
-            # model parameters are in fp32 full precision
-            weight = weight.to(dtype, non_blocking=True)
+            # FSDP model parameters are in fp32 full precision
+            # Megatron model parameters are in BFloat16 precision
+            # some model parameters need to keep original dtype so add a flag to control this
+            if self.config.cast_to_rollout_dtype:
+                weight = weight.to(dtype, non_blocking=True)
 
             # fill the tensor bucket
             if offset + weight.nbytes > bucket_size:
