@@ -232,8 +232,8 @@ class LiberoEnv(gym.Env):
 
     def _extract_image_and_state(self, obs):
         return {
-            "full_image": get_libero_image(obs, 224),
-            "wrist_image": get_libero_wrist_image(obs, 224),
+            "full_image": get_libero_image(obs),
+            "wrist_image": get_libero_wrist_image(obs),
             "state": np.concatenate(
                 [
                     obs["robot0_eef_pos"],

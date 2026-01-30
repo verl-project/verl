@@ -60,6 +60,7 @@ if echo "$gpu_name" | grep "NVIDIA H"; then
     export MUJOCO_GL=osmesa
 fi
 
+export VERL_LOGGING_LEVEL=INFO
 
 $PYTHON -m verl.experimental.vla.main_sac \
     data.train_files="$train_files" \
@@ -123,5 +124,4 @@ $PYTHON -m verl.experimental.vla.main_sac \
     trainer.test_freq=-1 \
     trainer.total_epochs=100 \
     trainer.val_only=False \
-    algorithm.adv_estimator=reinforce_plus_plus \
     trainer.val_before_train=False

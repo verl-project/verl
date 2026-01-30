@@ -156,6 +156,16 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             tokenizer: The tokenizer used for prompt tokenization.
 
         Returns:
+            A tuple of (pi0_output, s, a):
+                - pi0_output: The Pi0Output containing the predicted actions.
+                - s: Dictionary of tensors representing the states, with keys
+                    - "images": torch.Tensor of shape (B, n_images, C, H, W)
+                    - "image_masks": torch.Tensor of shape (B, n_images)
+                    - "lang_tokens": torch.Tensor of shape (B, L)
+                    - "lang_masks": torch.Tensor of shape (B, L)
+                    - "states": torch.Tensor of shape (B, state_dim)
+                - a: Dictionary of tensors representing actions, with key:
+                    - "full_action": torch.Tensor of shape (B, action_steps, action_dim)
         """
 
         from .policy.libero_policy import LiberoPi0Input
@@ -259,6 +269,11 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         t: torch.Tensor | None = None,  # (B,)
         step_idx: torch.Tensor | None = None,  # (B,)
     ) -> torch.Tensor:
+        """
+        Compute log-probability of x_{t+1} given (x_t, v_t) under the Flow-SDE formulation.
+        See https://arxiv.org/abs/2510.25889
+        """
+
         prefix_embs, prefix_pad_masks, _ = prefix_features
         states = s["states"]
         B = prefix_embs.shape[0]

@@ -278,7 +278,7 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
 
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
-            if self.config.get("algorithm", "grpo") == "sac":
+            if self.config.get("algorithm") == "sac":
                 from verl.experimental.vla.sac.sac_actor import RobDataParallelSACActor
 
                 self.actor = RobDataParallelSACActor(

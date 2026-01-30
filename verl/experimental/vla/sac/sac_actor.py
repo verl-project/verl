@@ -16,6 +16,7 @@ Single Process Actor
 """
 
 import logging
+import os
 
 import numpy as np
 import torch
@@ -24,13 +25,14 @@ from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from typing_extensions import override
 
+from verl.experimental.vla.sac.replay_pool import SACReplayPool
 from verl.protocol import DataProto
 from verl.utils.device import get_device_id, get_device_name
-from verl.utils.replay_pool import SACReplayPool
 
 from .base import BaseSACActor, SupportSACTraining
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def get_dict_from_prefix(tensordict: TensorDict, prefix: str) -> dict:
@@ -321,7 +323,7 @@ class RobDataParallelSACActor(BaseSACActor):
         # Training critic
         self.actor_optimizer.zero_grad()
         for batch_idx, micro_batch in enumerate(micro_batches):
-            print(f"[{batch_idx + 1}/{len(micro_batches)}] critic micro batch ")
+            logger.info(f"[{batch_idx + 1}/{len(micro_batches)}] critic micro batch ")
 
             micro_batch = micro_batch.to(get_device_id())
             raw_critic_loss = self._forward_critic(micro_batch)
@@ -333,7 +335,7 @@ class RobDataParallelSACActor(BaseSACActor):
             # Training actor
             self.actor_optimizer.zero_grad()
             for batch_idx, micro_batch in enumerate(micro_batches):
-                print(f"[{batch_idx + 1}/{len(micro_batches)}] actor micro batch ")
+                logger.info(f"[{batch_idx + 1}/{len(micro_batches)}] actor micro batch ")
 
                 micro_batch = micro_batch.to(get_device_id())
                 raw_actor_loss, log_probs = self._forward_actor(micro_batch)

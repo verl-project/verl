@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 
 import torch
 from tensordict import TensorDict
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class SACReplayPool:
@@ -93,9 +97,9 @@ class SACReplayPool:
                 "sample_device": self.sample_device,
             }
             torch.save((self.pool.cpu(), meta_info), filepath)
-            print(f"[Rank {self.rank}] Replay pool saved to {filepath} with size: {self.size}")
+            logger.info(f"[Rank {self.rank}] Replay pool saved to {filepath} with size: {self.size}")
         else:
-            print("Replay pool is empty. Nothing to save.")
+            logger.info("Replay pool is empty. Nothing to save.")
 
     def load(self, directory: str):
         """Load the replay pool from a directory."""
@@ -107,7 +111,7 @@ class SACReplayPool:
         try:
             pool, meta_info = torch.load(filepath, weights_only=False)
         except (RuntimeError, EOFError, ValueError) as exc:
-            print(
+            logger.warning(
                 f"[Rank {self.rank}] Failed to load replay pool from {filepath}: {exc}. "
                 "Starting with an empty replay pool."
             )
@@ -116,7 +120,7 @@ class SACReplayPool:
 
         if meta_info["capacity"] != self.capacity:
             if meta_info["capacity"] > self.capacity:
-                print(
+                logger.warning(
                     f"Loaded replay pool capacity {meta_info['capacity']} is greater than "
                     f"the current capacity {self.capacity}. Truncating the loaded pool."
                 )
@@ -128,7 +132,7 @@ class SACReplayPool:
                 self.size = min(self.size, self.capacity)
                 self.position = self.position % self.capacity
             else:
-                print(
+                logger.warning(
                     f"Loaded replay pool capacity {meta_info['capacity']} is less than "
                     f"the current capacity {self.capacity}. Keeping the current capacity."
                 )
@@ -155,7 +159,7 @@ class SACReplayPool:
         self.size = min(meta_info["size"], self.capacity)
         self.position = meta_info["position"] % self.capacity
 
-        print(f"[Rank {self.rank}] Replay pool loaded from {filepath} with size: {self.size}")
+        logger.info(f"[Rank {self.rank}] Replay pool loaded from {filepath} with size: {self.size}")
 
         return True
 
@@ -184,7 +188,7 @@ class SACReplayPool:
         replay_pool.rank = rank
         replay_pool.size = meta_info["size"]
         replay_pool.position = meta_info["position"]
-        print(f"[Rank {rank}] Replay pool loaded from {filepath} with size: {replay_pool.size}")
+        logger.info(f"[Rank {rank}] Replay pool loaded from {filepath} with size: {replay_pool.size}")
         return replay_pool
 
     def _insert_block_to_pool(
@@ -204,7 +208,7 @@ class SACReplayPool:
     def _lazy_init_pool(self, sample: TensorDict):
         """Lazily initialize the replay pool based on the sample structure."""
 
-        print(f"Initializing replay pool with capacity: {self.capacity}")
+        logger.info(f"Initializing replay pool with capacity: {self.capacity}")
 
         self.pool = TensorDict(
             {
