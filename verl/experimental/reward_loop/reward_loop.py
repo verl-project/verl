@@ -28,7 +28,6 @@ from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import get_custom_reward_fn
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
-from verl.utils.ray_utils import auto_await
 
 from .reward_manager import get_reward_manager_cls
 from .reward_model import RewardModelManager
@@ -251,24 +250,14 @@ class RewardLoopManager:
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
         self.config = config
-        self.reward_model_manager = None
-        self.reward_router_address = None
+        if self.config.reward_model.enable:
+            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
+            self.reward_router_address = self.reward_model_manager.get_router_address()
+        else:
+            self.reward_model_manager = None
+            self.reward_router_address = None
 
-    @classmethod
-    @auto_await
-    async def create(
-        cls,
-        config: DictConfig,
-        rm_resource_pool: RayResourcePool = None,
-    ):
-        instance = cls(config, rm_resource_pool)
-
-        if config.reward_model.enable:
-            instance.reward_model_manager = await RewardModelManager.create(config.reward_model, rm_resource_pool)
-            instance.reward_router_address = instance.reward_model_manager.get_router_address()
-
-        instance._init_reward_loop_workers()
-        return instance
+        self._init_reward_loop_workers()
 
     def _init_reward_loop_workers(self):
         self.reward_loop_workers = []
@@ -324,3 +313,9 @@ class RewardLoopManager:
         return DataProto(
             batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"reward_extra_keys": reward_extra_keys}
         )
+
+    def _run_all(self, tasks: list[asyncio.Task]):
+        async def run_all():
+            return await asyncio.gather(*tasks)
+
+        return asyncio.run(run_all())

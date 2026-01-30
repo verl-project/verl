@@ -42,8 +42,7 @@ from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler.profile import DistProfiler
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.base import BaseRolloutServer, TokenOutput, resume_on_abort
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
 from verl.workers.rollout.vllm_rollout import ServerAdapter
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -76,7 +75,7 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
-class vLLMHttpServer(BaseRolloutServer):
+class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
     vllm serve --tensor-parallel-size=8 ...
@@ -106,7 +105,6 @@ class vLLMHttpServer(BaseRolloutServer):
             nnodes (int): number of nodes.
             cuda_visible_devices (str): cuda visible devices.
         """
-        super().__init__()
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
@@ -444,7 +442,6 @@ class vLLMHttpServer(BaseRolloutServer):
         self.task = asyncio.create_task(asyncio.to_thread(run_headless_wrapper))
         self.task.add_done_callback(on_run_headless_done)
 
-    @resume_on_abort
     async def generate(
         self,
         prompt_ids: list[int],
@@ -528,9 +525,16 @@ class vLLMHttpServer(BaseRolloutServer):
             routed_experts = final_res.outputs[0].routed_experts
 
         # Determine stop reason from finish_reason
-        stop_reason = final_res.outputs[0].finish_reason
+        finish_reason = final_res.outputs[0].finish_reason
+        if finish_reason == "abort":
+            stop_reason = "aborted"
+        elif finish_reason in ("stop", "length"):
+            stop_reason = "completed"
+        else:
+            stop_reason = finish_reason  # for more stop reason in the future
 
         num_preempted = None
+
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
 
@@ -603,37 +607,39 @@ class vLLMHttpServer(BaseRolloutServer):
                 - aborted_count: Number of requests aborted
                 - request_ids: List of aborted request IDs
         """
-        self.resume_event.clear()
+        try:
+            # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
+            request_states_snapshot = list(self.engine.output_processor.request_states.items())
+            request_ids = [req_id for req_id, _ in request_states_snapshot]
 
-        # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
-        request_states_snapshot = list(self.engine.output_processor.request_states.items())
-        request_ids = [req_id for req_id, _ in request_states_snapshot]
+            if not request_ids:
+                return {"aborted_count": 0, "request_ids": []}
 
-        if not request_ids:
-            return {"aborted_count": 0, "request_ids": []}
+            # For each request, create an abort output and put it to its queue
+            # This allows the generator to receive the aborted result
+            from vllm.v1.engine import FinishReason
 
-        # For each request, create an abort output and put it to its queue
-        # This allows the generator to receive the aborted result
-        from vllm.v1.engine import FinishReason
+            for _, req_state in request_states_snapshot:
+                request_output = req_state.make_request_output(
+                    [], pooling_output=None, finish_reason=FinishReason.ABORT, stop_reason=None
+                )
+                req_state.queue.put(request_output)
 
-        for _, req_state in request_states_snapshot:
-            request_output = req_state.make_request_output(
-                [], pooling_output=None, finish_reason=FinishReason.ABORT, stop_reason=None
-            )
-            req_state.queue.put(request_output)
+            # Abort requests in the output processor and engine core
+            self.engine.output_processor.abort_requests(request_ids)
+            await self.engine.engine_core.abort_requests_async(request_ids)
 
-        # Abort requests in the output processor and engine core
-        self.engine.output_processor.abort_requests(request_ids)
-        await self.engine.engine_core.abort_requests_async(request_ids)
-        await self.engine.wait_for_requests_to_drain()
+            # Try to reset prefix cache to ensure clean state
+            if reset_prefix_cache:
+                await self.clear_kv_cache()
+                logger.info("Prefix cache reset after abort")
 
-        # Try to reset prefix cache to ensure clean state
-        if reset_prefix_cache:
-            await self.clear_kv_cache()
-            logger.info("Prefix cache reset after abort")
+            logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
+            return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
-        logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
-        return {"aborted_count": len(request_ids), "request_ids": request_ids}
+        except Exception as e:
+            logger.error(f"Error aborting requests: {e}")
+            return {"aborted_count": 0, "request_ids": [], "error": str(e)}
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.

@@ -240,14 +240,6 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
 
-        # update start_model_version and finish_model_version for staleness control
-        agent_data.extra_fields["start_model_version"] = min(
-            agent_data.extra_fields.get("start_model_version", 0), output.start_model_version
-        )
-        agent_data.extra_fields["finish_model_version"] = max(
-            agent_data.extra_fields.get("finish_model_version", 0), output.finish_model_version
-        )
-
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
         agent_data.prompt_ids += agent_data.response_ids

@@ -63,7 +63,7 @@ def test_agent_loop_reward_manager():
     config.custom_reward_function.name = "compute_score_math_verify"
 
     # 1. init reward model manager
-    agent_loop_manager = AgentLoopManager.create(config)
+    agent_loop_manager = AgentLoopManager(config)
 
     # 2. init test data
     local_folder = os.path.expanduser("~/data/math/")

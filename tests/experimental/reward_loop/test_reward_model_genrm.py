@@ -138,7 +138,7 @@ def test_reward_model_manager():
     config.reward_model.rollout.response_length = 4096
 
     # 1. init reward model manager
-    reward_loop_manager = RewardLoopManager.create(config)
+    reward_loop_manager = RewardLoopManager(config)
 
     # 2. init test data
     rollout_tokenizer = hf_tokenizer(rollout_model_name)

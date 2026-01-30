@@ -17,7 +17,6 @@ import logging
 import os
 
 from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
-from verl.utils.ray_utils import auto_await
 from verl.workers.config import HFModelConfig, RewardModelConfig
 from verl.workers.rollout.replica import get_rollout_replica_class
 
@@ -42,23 +41,13 @@ class RewardModelManager:
         """
         self.config = config
         self.resource_pool = resource_pool
+        self._initialize_llm_servers()
+        self._initialize_router()
+        assert self.config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
+        if self.config.rollout.free_cache_engine:
+            self.sleep()
 
-    @classmethod
-    @auto_await
-    async def create(
-        cls,
-        config: RewardModelConfig,
-        resource_pool: RayResourcePool = None,
-    ):
-        instance = cls(config, resource_pool)
-        await instance._initialize_llm_servers()
-        instance._initialize_router()
-        assert config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
-        if config.rollout.free_cache_engine:
-            await instance.sleep()
-        return instance
-
-    async def _initialize_llm_servers(self):
+    def _initialize_llm_servers(self):
         rollout_world_size = self.config.rollout.tensor_model_parallel_size
         world_size = (
             self.resource_pool.world_size
@@ -88,14 +77,14 @@ class RewardModelManager:
         if self.resource_pool:
             split_resource_pools = split_resource_pool(self.resource_pool, split_size=rollout_world_size)
             assert len(split_resource_pools) == len(self.rollout_replicas)
-            await asyncio.gather(
-                *[
+            self._run_all(
+                [
                     server.init_colocated(resource_pool)
                     for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
                 ]
             )
         else:
-            await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
+            self._run_all([server.init_standalone() for server in self.rollout_replicas])
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
@@ -115,12 +104,16 @@ class RewardModelManager:
     def get_router_address(self):
         return self.router_address
 
-    @auto_await
-    async def wake_up(self):
+    def wake_up(self):
         """Wake up all rollout replica instances."""
-        await asyncio.gather(*[replica.wake_up() for replica in self.rollout_replicas])
+        self._run_all([replica.wake_up() for replica in self.rollout_replicas])
 
-    @auto_await
-    async def sleep(self):
+    def sleep(self):
         """Sleep all rollout replica instances."""
-        await asyncio.gather(*[replica.sleep() for replica in self.rollout_replicas])
+        self._run_all([replica.sleep() for replica in self.rollout_replicas])
+
+    def _run_all(self, tasks: list[asyncio.Task]):
+        async def run_all():
+            await asyncio.gather(*tasks)
+
+        asyncio.run(run_all())
