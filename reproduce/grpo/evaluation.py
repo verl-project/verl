@@ -913,6 +913,66 @@ class EvalResult:
     acc: float
 
 
+
+# ---------------------------
+# Incremental progress writing / resume helpers
+# ---------------------------
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text to `path` atomically (best-effort) to avoid partial files on crash."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+def _build_out_obj(args: argparse.Namespace, results: List["EvalResult"]) -> Dict[str, Any]:
+    return {
+        "pass_k": args.pass_k,
+        "args": {k: v for k, v in vars(args).items() if not k.startswith("_")},
+        "env": {
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "VLLM_GPU_MEMORY_UTILIZATION": os.environ.get("VLLM_GPU_MEMORY_UTILIZATION"),
+        },
+        "results": [asdict(r) for r in results],
+        "last_update_unix": time.time(),
+    }
+
+
+def _flush_progress(args: argparse.Namespace, results: List["EvalResult"]) -> None:
+    out_path = Path(args.output_json)
+    out_obj = _build_out_obj(args, results)
+    _atomic_write_text(out_path, json.dumps(out_obj, indent=2, ensure_ascii=False))
+    print(f"[progress] wrote: {out_path.resolve()}")
+
+
+def _load_existing_results(args: argparse.Namespace) -> Tuple[List["EvalResult"], set]:
+    """Load existing output_json (if present) so reruns can skip completed checkpoints."""
+    out_path = Path(args.output_json)
+    if not out_path.exists():
+        return [], set()
+
+    try:
+        obj = json.loads(out_path.read_text())
+        prev: List[EvalResult] = []
+        done = set()
+        for r in obj.get("results", []):
+            er = EvalResult(
+                label=r["label"],
+                step=r.get("step", None),
+                model=r["model"],
+                n=int(r["n"]),
+                acc=float(r["acc"]),
+            )
+            prev.append(er)
+            done.add(er.label)
+        print(f"[resume] loaded {len(prev)} results from {out_path}")
+        return prev, done
+    except Exception as e:
+        print(f"[resume] warning: failed to read existing {out_path}: {e}")
+        return [], set()
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
 
@@ -1129,20 +1189,94 @@ def main() -> None:
 
     script_path = Path(__file__).resolve()
 
-    results: List[EvalResult] = []
+    # Resume support: if output_json already exists, load it and skip completed checkpoints.
+    results, done_labels = _load_existing_results(args)
 
-    print("\n=== Evaluating step0 model ===")
-    r0 = _run_one_model_subprocess(
-        script_path=script_path,
-        base_args=base_args,
-        label="step0",
-        model=args.step0_model,
-    )
-    results.append(EvalResult(label="step0", step=None, model=args.step0_model, n=r0["n"], acc=r0["acc"]))
+    # Initialize W&B early so we can log per-checkpoint progress (and resume if run_id is fixed).
+    wandb_run = None
+    if args.wandb_project:
+        try:
+            import wandb  # type: ignore
+
+            wandb_kwargs = {"project": args.wandb_project}
+            if args.wandb_run_name:
+                wandb_kwargs["name"] = args.wandb_run_name
+            if args.wandb_run_id:
+                wandb_kwargs["id"] = args.wandb_run_id
+                wandb_kwargs["resume"] = "allow"
+
+            wandb_run = wandb.init(**wandb_kwargs)
+
+            # Create a *new* eval namespace that uses our own step axis.
+            # This preserves any historical charts that use W&B's default internal Step.
+            # New eval metrics will live under `eval/*` and use `eval/global_step` as X.
+            # We log with `step=<global_step>` below so W&B's internal Step matches training steps.
+            # Keeping this define lets you select `eval/global_step` as X-axis, but we
+            # intentionally do NOT force all metrics to use it (forcing breaks old history).
+            wandb.define_metric("eval/global_step")
+
+            wandb.config.update({
+                "pass_k": args.pass_k,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "max_tokens": args.max_tokens,
+                "batch_size": args.batch_size,
+                "num_samples": args.num_samples,
+                "seed": args.seed,
+                "step0_model": args.step0_model,
+            })
+        except ImportError:
+            print("\nWarning: wandb not installed, skipping W&B logging")
+            wandb_run = None
+        except Exception as e:
+            print(f"\nWarning: W&B init failed: {e}")
+            wandb_run = None
+
+    # Best-effort: flush progress on Ctrl+C / SIGTERM so we can resume.
+    def _on_signal(signum, frame):
+        print(f"\n[signal] got {signum}, flushing progress then exiting...")
+        try:
+            _flush_progress(args, results)
+        finally:
+            raise SystemExit(128 + int(signum))
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
+    if "step0" in done_labels:
+        print("\n=== Evaluating step0 model ===")
+        print("[resume] skip step0 (already done)")
+    else:
+        print("\n=== Evaluating step0 model ===")
+        r0 = _run_one_model_subprocess(
+            script_path=script_path,
+            base_args=base_args,
+            label="step0",
+            model=args.step0_model,
+        )
+        r0_er = EvalResult(label="step0", step=None, model=args.step0_model, n=r0["n"], acc=r0["acc"])
+        results.append(r0_er)
+        _flush_progress(args, results)
+
+        if wandb_run is not None:
+            import wandb  # type: ignore
+            wandb.log({
+                f"eval/pass@{args.pass_k}/accuracy": r0_er.acc,
+                f"eval/pass@{args.pass_k}/n_samples": r0_er.n,
+                "eval/global_step": 0,
+                "global_step": 0,
+                "eval/label": r0_er.label,
+                "eval/model": r0_er.model,
+            }, step=0)
 
     print("\n=== Evaluating checkpoints ===")
     for c in ckpts:
         label = f"global_step_{c.step}"
+        if label in done_labels:
+            print(f"\n--- {label} ---")
+            print(f"[resume] skip {label} (already done)")
+            continue
+
         print(f"\n--- {label} ---")
         r = _run_one_model_subprocess(
             script_path=script_path,
@@ -1150,7 +1284,21 @@ def main() -> None:
             label=label,
             model=str(merged_dirs[c.step]),
         )
-        results.append(EvalResult(label=label, step=c.step, model=str(merged_dirs[c.step]), n=r["n"], acc=r["acc"]))
+        er = EvalResult(label=label, step=c.step, model=str(merged_dirs[c.step]), n=r["n"], acc=r["acc"])
+        results.append(er)
+        _flush_progress(args, results)
+
+        if wandb_run is not None:
+            import wandb  # type: ignore
+            gs = int(c.step)
+            wandb.log({
+                f"eval/pass@{args.pass_k}/accuracy": er.acc,
+                f"eval/pass@{args.pass_k}/n_samples": er.n,
+                "eval/global_step": gs,
+                "global_step": gs,
+                "eval/label": er.label,
+                "eval/model": er.model,
+            }, step=gs)
 
     # Print compact summary
     print("\n=== Summary (accuracy) ===")
@@ -1162,72 +1310,36 @@ def main() -> None:
         step_str = "step0" if r.step is None else str(r.step)
         print(f"{step_str:>6}  acc={r.acc:.6f}  n={r.n}  model={r.model}")
 
-    # Log to W&B if requested
-    if args.wandb_project:
+
+    # Finalize W&B logging (table + finish) if requested.
+    if wandb_run is not None:
         try:
-            import wandb
-            
-            wandb_kwargs = {"project": args.wandb_project}
-            if args.wandb_run_name:
-                wandb_kwargs["name"] = args.wandb_run_name
-            if args.wandb_run_id:
-                wandb_kwargs["id"] = args.wandb_run_id
-                wandb_kwargs["resume"] = "allow"
-            
-            run = wandb.init(**wandb_kwargs)
-            
-            # Log config
-            wandb.config.update({
-                "pass_k": args.pass_k,
-                "temperature": args.temperature,
-                "top_p": args.top_p,
-                "max_tokens": args.max_tokens,
-                "batch_size": args.batch_size,
-                "num_samples": args.num_samples,
-                "seed": args.seed,
-                "step0_model": args.step0_model,
-            })
-            
-            # Log results as metrics
-            for r in results:
-                step = r.step if r.step is not None else 0
-                wandb.log({
-                    f"pass@{args.pass_k}/accuracy": r.acc,
-                    f"pass@{args.pass_k}/n_samples": r.n,
-                    "global_step": step,
-                })
-            
-            # Create summary table
+            import wandb  # type: ignore
+
+            def _key(x: EvalResult):
+                return (-1 if x.step is None else x.step)
+
             table_data = []
             for r in sorted(results, key=_key):
                 step_str = "step0" if r.step is None else f"step_{r.step}"
                 table_data.append([step_str, r.acc, r.n, r.model])
-            
+
             table = wandb.Table(
                 columns=["checkpoint", f"pass@{args.pass_k}_acc", "n_samples", "model_path"],
-                data=table_data
+                data=table_data,
             )
             wandb.log({f"pass@{args.pass_k}_results": table})
-            
-            wandb.finish()
-            print(f"\nLogged results to W&B project: {args.wandb_project}")
-        except ImportError:
-            print("\nWarning: wandb not installed, skipping W&B logging")
         except Exception as e:
-            print(f"\nWarning: W&B logging failed: {e}")
-
-    out_path = Path(args.output_json)
-    out_obj = {
-        "pass_k": args.pass_k,
-        "args": {k: v for k, v in vars(args).items() if not k.startswith("_")},
-        "env": {
-            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
-            "VLLM_GPU_MEMORY_UTILIZATION": os.environ.get("VLLM_GPU_MEMORY_UTILIZATION"),
-        },
-        "results": [asdict(r) for r in results],
-    }
-    out_path.write_text(json.dumps(out_obj, indent=2, ensure_ascii=False))
-    print(f"\nWrote: {out_path.resolve()}")
+            print(f"\nWarning: W&B final table logging failed: {e}")
+        finally:
+            try:
+                import wandb  # type: ignore
+                wandb.finish()
+            except Exception:
+                pass
+            print(f"\nLogged results to W&B project: {args.wandb_project}")
+    # Final flush (we also flush after each checkpoint).
+    _flush_progress(args, results)
 
 
 if __name__ == "__main__":
