@@ -851,6 +851,7 @@ class AgentLoopManager:
         """
         self.config = config
         self.worker_group = worker_group
+        self.reward_loop_worker_handles = reward_loop_worker_handles
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
@@ -937,7 +938,7 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.reward_router_address)
+                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
             )
 
     @auto_await

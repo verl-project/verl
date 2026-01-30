@@ -24,7 +24,7 @@ from verl.trainer.main_ppo import create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 
 
-def test_agent_loop_reward_manager():
+def test_agent_reward_loop_standalone():
     ray.init(
         runtime_env={
             "env_vars": {

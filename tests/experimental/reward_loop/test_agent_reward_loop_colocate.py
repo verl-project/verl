@@ -29,7 +29,7 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
 
-def test_agent_loop_reward_manager():
+def test_agent_reward_loop_standalone():
     ray.init(
         runtime_env={
             "env_vars": {
