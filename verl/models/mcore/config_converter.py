@@ -384,6 +384,38 @@ def hf_to_mcore_config_qwen2_5_vl(
     return TransformerConfig(**args)
 
 
+def hf_to_mcore_config_qwen2_5_omni(
+    hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
+) -> TransformerConfig:
+    """Convert Qwen2_5OmniForConditionalGeneration config to Megatron TransformerConfig.
+
+    Qwen2_5_Omni has a nested config structure:
+    - Qwen2_5OmniConfig -> thinker_config -> Qwen2_5OmniThinkerConfig -> text_config -> Qwen2_5OmniTextConfig
+    """
+    # Qwen2_5OmniForConditionalGeneration
+    text_config = hf_config.thinker_config.text_config
+
+    mrope_section = None
+    if hasattr(text_config, "rope_parameters") and text_config.rope_parameters is not None:
+        if isinstance(text_config.rope_parameters, dict):
+            # If rope_parameters is a dict, check for mrope_section
+            mrope_section = text_config.rope_parameters.get("mrope_section", None)
+        elif hasattr(text_config.rope_parameters, "mrope_section"):
+            mrope_section = text_config.rope_parameters.mrope_section
+
+    args = _get_base_transformer_config(
+        hf_config=text_config,
+        dtype=dtype,
+        add_bias_linear=False,
+        add_qkv_bias=True,
+        mrope_section=mrope_section,
+    )
+
+    args.update(override_transformer_config_kwargs)
+    args = mapping_string_to_attn_backend(args)
+    return TransformerConfig(**args)
+
+
 def hf_to_mcore_config_llama4(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
