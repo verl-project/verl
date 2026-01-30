@@ -33,20 +33,20 @@ EXP_NAME="megatron/${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/l
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
 TRAIN_PROMPT_BSZ=128
-STUDENT_MICRO_BATCH_SIZE_PER_GPU=16
+STUDENT_MICRO_BATCH_SIZE_PER_GPU=32
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
-TEACHER_MICRO_BATCH_SIZE_PER_GPU=64
+TEACHER_MICRO_BATCH_SIZE_PER_GPU=32
 TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
 WORLD_SIZE=4
 TP=2
-PP=2
+PP=1
 CP=1
 EP=1
 ETP=1
 
-PARAM_OFFLOAD=False                                                                                                                                                                                                                                                                                                                                                         
-OPTIMIZER_OFFLOAD=False                                                                                                                                                                                                                                                                                                                                                          
+PARAM_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                         
+OPTIMIZER_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                          
 GRAD_OFFLOAD=False
 
 
@@ -140,7 +140,7 @@ ALGORITHM=(
 )
 
 TRAINER=(
-    trainer.logger='["console"]'
+    trainer.logger='["console","wandb"]'
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXP_NAME
     trainer.n_gpus_per_node=$WORLD_SIZE
