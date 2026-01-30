@@ -234,6 +234,15 @@ class FSDPActorConfig(ActorConfig):
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     use_rollout_log_probs: bool = False
 
+    # ====== GKD / teacher-KL knobs ======
+    use_teacher_kl_loss: bool = False
+    gkd_only_mode: bool = False
+    teacher_kl_coef: float = 1.0
+    teacher_kl_temperature: float = 1.0
+
+    gkd_select_strategy: str = "all" # all, random, best, worst
+    gkd_select_k: int = 1
+
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()

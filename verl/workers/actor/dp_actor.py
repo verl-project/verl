@@ -84,12 +84,25 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self, micro_batch, temperature, calculate_entropy=False, return_logits=False
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
+        Forward pass for a micro batch.
+
+        Args:
+            micro_batch: Dictionary containing input_ids, attention_mask, position_ids, responses
+            temperature: Temperature for logits scaling
+            calculate_entropy: Whether to calculate entropy
+            return_logits: Whether to return logits (for teacher KL loss in GKD)
+
         Returns:
-            entropy: # (bs, response_len)
-            log_probs: # (bs, response_len)
+            If return_logits=False:
+                entropy: # (bs, response_len) or None
+                log_probs: # (bs, response_len)
+            If return_logits=True:
+                entropy: # (bs, response_len) or None
+                log_probs: # (bs, response_len)
+                logits: # (bs, response_len, vocab_size)
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -239,6 +252,10 @@ class DataParallelPPOActor(BasePPOActor):
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
+                # For return_logits: remove_padding path doesn't easily support returning logits
+                # because logits are in rmpad format. Set to None and let caller handle it.
+                logits_for_return = None
+
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
                 if self.use_fused_kernels:
@@ -257,6 +274,7 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.use_fused_kernels:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+                    logits_for_return = None  # fused kernels don't return raw logits
 
                 else:
                     logits = output.logits
@@ -264,12 +282,15 @@ class DataParallelPPOActor(BasePPOActor):
                     logits.div_(temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                    logits_for_return = logits  # save for potential return
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
                         else:
                             entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
 
+            if return_logits:
+                return entropy, log_probs, logits_for_return
             return entropy, log_probs
 
     def _optimizer_step(self):
@@ -362,21 +383,33 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
 
+        # Check if we're in GKD-only mode (no policy gradient, only teacher KL loss)
+        use_teacher_kl_loss = getattr(self.config, "use_teacher_kl_loss", False)
+        gkd_only_mode = getattr(self.config, "gkd_only_mode", False)
+
         select_keys = [
             "responses",
             "response_mask",
             "input_ids",
             "attention_mask",
             "position_ids",
-            "old_log_probs",
-            "advantages",
         ]
+        # Only need old_log_probs and advantages if not in GKD-only mode
+        if not gkd_only_mode:
+            select_keys.extend(["old_log_probs", "advantages"])
+
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
             select_keys.append("rollout_is_weights")
+        # Include teacher knowledge if using teacher KL loss (GKD)
+        if use_teacher_kl_loss:
+            select_keys.extend(["teacher_topk_logps", "teacher_topk_indices"])
+            # Include GKD selection mask if present (for GRPO + GKD mode)
+            if "gkd_select_mask" in data.batch.keys():
+                select_keys.append("gkd_select_mask")
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -408,8 +441,8 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
-                    old_log_prob = model_inputs["old_log_probs"]
-                    advantages = model_inputs["advantages"]
+                    # old_log_prob = model_inputs["old_log_probs"]
+                    # advantages = model_inputs["advantages"]
 
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
@@ -423,81 +456,134 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(
-                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
-                    )
 
-                    # for fully_async_policy recipe
-                    if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
+                    # Determine if we need logits (for teacher KL loss)
+                    need_logits = use_teacher_kl_loss
+
+                    if need_logits:
+                        forward_result = self._forward_micro_batch(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
+                            return_logits=True
+                        )
+                        entropy, log_prob, logits = forward_result
+                    else:
+                        entropy, log_prob = self._forward_micro_batch(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                        )
+                        logits = None
+
+                    # Initialize total loss
+                    total_loss = torch.tensor(0.0, device=log_prob.device)
+
+                    # ========== Policy Gradient Loss (skip in GKD-only mode) ==========
+                    if not gkd_only_mode:
                         old_log_prob = model_inputs["old_log_probs"]
-                    else:
-                        if on_policy:
-                            old_log_prob = log_prob.detach()
-                        else:
+                        advantages = model_inputs["advantages"]
+
+                        # for fully_async_policy recipe
+                        if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
                             old_log_prob = model_inputs["old_log_probs"]
+                        else:
+                            if on_policy:
+                                old_log_prob = log_prob.detach()
+                            else:
+                                old_log_prob = model_inputs["old_log_probs"]
 
-                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-                    # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
+                        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
-                    # Extract pre-computed rollout correction weights if present
-                    # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
-                    rollout_is_weights = model_inputs.get("rollout_is_weights", None)
+                        # Extract pre-computed rollout correction weights if present
+                        rollout_is_weights = model_inputs.get("rollout_is_weights", None)
 
-                    # NOTE: Both mismatch diagnostic metrics (PPL, KL, etc.) and IS weight metrics
-                    # are computed centrally in ray_trainer.py for consistency and efficiency.
-                    # This ensures metrics are computed uniformly across all batches at the trainer level
-                    # and avoids redundant computation across workers and micro-batches.
+                        policy_loss_fn = get_policy_loss_fn(loss_mode)
 
-                    # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
-                    # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
-                    policy_loss_fn = get_policy_loss_fn(loss_mode)
+                        # Compute policy loss (all functions return 4 values)
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_is_weights=rollout_is_weights,
+                        )
 
-                    # Compute policy loss (all functions return 4 values)
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        loss_agg_mode=loss_agg_mode,
-                        config=self.config,
-                        rollout_is_weights=rollout_is_weights,
-                    )
+                        if entropy_coeff != 0:
+                            entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                            policy_loss = pg_loss - entropy_loss * entropy_coeff
+                        else:
+                            policy_loss = pg_loss
 
-                    if entropy_coeff != 0:
-                        entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        total_loss = total_loss + policy_loss
 
-                        # compute policy loss
-                        policy_loss = pg_loss - entropy_loss * entropy_coeff
-                    else:
-                        policy_loss = pg_loss
+                        micro_batch_metrics.update(
+                            {
+                                "actor/pg_loss": pg_loss.detach().item() * loss_scale_factor,
+                                "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                                "actor/ppo_kl": ppo_kl.detach().item(),
+                                "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                            }
+                        )
 
+                    # ========== Reference KL Loss (existing PPO KL regularization) ==========
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]
-                        # compute kl loss
                         kld = kl_penalty(
                             logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
                         )
                         kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-                        policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
+                        total_loss = total_loss + kl_loss * self.config.kl_loss_coef
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
+                    # ========== Teacher KL Loss (GKD) ==========
+                    if use_teacher_kl_loss:
+                        from verl.trainer.ppo.core_algos import compute_teacher_kl_loss
+
+                        teacher_topk_logps = model_inputs["teacher_topk_logps"]
+                        teacher_topk_indices = model_inputs["teacher_topk_indices"]
+
+                        if logits is None:
+                            raise ValueError(
+                                "Teacher KL loss requires logits, but logits are not available. "
+                                "This can happen when using remove_padding=True or fused_kernels=True. "
+                                "Please set use_remove_padding=False in model config for GKD."
+                            )
+
+                        teacher_kl = compute_teacher_kl_loss(
+                            student_logits=logits,
+                            teacher_topk_logps=teacher_topk_logps,
+                            teacher_topk_indices=teacher_topk_indices,
+                            response_mask=response_mask,
+                            temperature=getattr(self.config, "teacher_kl_temperature", 1.0),
+                        )
+
+                        # Apply GKD selection mask if present (for GRPO + GKD mode)
+                        # This allows selective teacher KL on best/worst/random responses
+                        gkd_kl_mask = response_mask
+                        if "gkd_select_mask" in model_inputs:
+                            gkd_select_mask = model_inputs["gkd_select_mask"]  # (batch_size,)
+                            # Expand mask to match response_mask shape: (batch_size, seq_len)
+                            gkd_select_mask_expanded = gkd_select_mask.unsqueeze(-1).expand_as(response_mask)
+                            gkd_kl_mask = response_mask * gkd_select_mask_expanded
+
+                        teacher_kl_loss = agg_loss(
+                            loss_mat=teacher_kl, loss_mask=gkd_kl_mask, loss_agg_mode=loss_agg_mode
+                        )
+
+                        teacher_kl_coef = getattr(self.config, "teacher_kl_coef", 1.0)
+                        total_loss = total_loss + teacher_kl_loss * teacher_kl_coef
+
+                        micro_batch_metrics["actor/teacher_kl_loss"] = teacher_kl_loss.detach().item() * loss_scale_factor
+                        micro_batch_metrics["actor/teacher_kl_coef"] = teacher_kl_coef
+
+                    # ========== Backward ==========
                     if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = policy_loss * loss_scale_factor
+                        loss = total_loss * loss_scale_factor
                     else:
-                        loss = policy_loss * loss_scale_factor
+                        loss = total_loss * loss_scale_factor
                     loss.backward()
 
-                    micro_batch_metrics.update(
-                        {
-                            "actor/pg_loss": pg_loss.detach().item() * loss_scale_factor,
-                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                            "actor/ppo_kl": ppo_kl.detach().item(),
-                            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                        }
-                    )
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()

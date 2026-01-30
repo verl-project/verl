@@ -1744,3 +1744,103 @@ def compute_policy_loss_rollout_correction_wrapper(
         rollout_rs_threshold_lower=rollout_rs_threshold_lower,
         rollout_token_veto_threshold=rollout_token_veto_threshold,
     )
+
+
+# =============================================================================
+# Teacher KL Loss for GKD (Generalized Knowledge Distillation)
+# =============================================================================
+
+
+def compute_teacher_kl_loss(
+    student_logits: torch.Tensor,
+    teacher_topk_logps: torch.Tensor,
+    teacher_topk_indices: torch.Tensor,
+    response_mask: torch.Tensor,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """
+    Compute KL divergence loss between student and teacher distributions for GKD.
+
+    This computes KL(P_teacher || Q_student), which encourages the student to cover
+    all modes of the teacher distribution (mode-covering behavior).
+
+    Args:
+        student_logits: Student model logits, shape [batch, seq_len, vocab_size]
+        teacher_topk_logps: Teacher's top-k log probabilities, shape [batch, seq_len, top_k]
+        teacher_topk_indices: Indices of teacher's top-k tokens, shape [batch, seq_len, top_k]
+        response_mask: Mask for response tokens, shape [batch, seq_len]
+        temperature: Temperature for softmax, default 1.0
+
+    Returns:
+        per_token_kl_loss: KL loss for each token position, shape [batch, seq_len]
+    """
+    import torch.nn.functional as F
+
+    # Apply temperature scaling
+    if temperature != 1.0:
+        student_logits = student_logits / temperature
+
+    # Compute student log probabilities over full vocabulary
+    student_log_probs = F.log_softmax(student_logits, dim=-1)  # [batch, seq_len, vocab_size]
+
+    # Gather student log probs at teacher's top-k indices
+    # teacher_topk_indices: [batch, seq_len, topk]
+    student_topk_log_probs = torch.gather(
+        student_log_probs, dim=-1, index=teacher_topk_indices
+    )  # [batch, seq_len, topk]
+
+    # Teacher probabilities from log probs
+    teacher_topk_probs = torch.exp(teacher_topk_logps)  # [batch, seq_len, topk]
+
+    # KL(P||Q) = sum_i P(i) * (log P(i) - log Q(i))
+    # where P = teacher, Q = student
+    per_token_kl = torch.sum(
+        teacher_topk_probs * (teacher_topk_logps - student_topk_log_probs),
+        dim=-1,
+    )  # [batch, seq_len]
+
+    # Zero out non-response positions
+    per_token_kl = per_token_kl * response_mask.float()
+
+    return per_token_kl
+
+
+def compute_teacher_kl_loss_from_logprobs(
+    student_log_probs: torch.Tensor,
+    teacher_topk_logps: torch.Tensor,
+    teacher_topk_indices: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute KL divergence loss when student log_probs are already computed.
+
+    This is useful when we have pre-computed log_probs from the forward pass
+    and want to avoid recomputing them.
+
+    Args:
+        student_log_probs: Student model log probabilities, shape [batch, seq_len, vocab_size]
+        teacher_topk_logps: Teacher's top-k log probabilities, shape [batch, seq_len, top_k]
+        teacher_topk_indices: Indices of teacher's top-k tokens, shape [batch, seq_len, top_k]
+        response_mask: Mask for response tokens, shape [batch, seq_len]
+
+    Returns:
+        per_token_kl_loss: KL loss for each token position, shape [batch, seq_len]
+    """
+    # Gather student log probs at teacher's top-k indices
+    student_topk_log_probs = torch.gather(
+        student_log_probs, dim=-1, index=teacher_topk_indices
+    )  # [batch, seq_len, topk]
+
+    # Teacher probabilities from log probs
+    teacher_topk_probs = torch.exp(teacher_topk_logps)  # [batch, seq_len, topk]
+
+    # KL(P||Q) = sum_i P(i) * (log P(i) - log Q(i))
+    per_token_kl = torch.sum(
+        teacher_topk_probs * (teacher_topk_logps - student_topk_log_probs),
+        dim=-1,
+    )  # [batch, seq_len]
+
+    # Zero out non-response positions
+    per_token_kl = per_token_kl * response_mask.float()
+
+    return per_token_kl
