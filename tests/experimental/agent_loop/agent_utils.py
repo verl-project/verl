@@ -15,9 +15,9 @@
 import ray
 from omegaconf import DictConfig
 
+from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
-from verl.checkpoint_engine import CheckpointEngineManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
@@ -83,7 +83,8 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     # =========================== 2. Create AgentLoopManager ===========================
     rm_resource_pool = resource_pool_manager.get_resource_pool(Role.RewardModel) if config.reward_model.enable else None
     reward_loop_manager = RewardLoopManager(
-        config=config, rm_resource_pool=rm_resource_pool,
+        config=config,
+        rm_resource_pool=rm_resource_pool,
     )
     agent_loop_manager = AgentLoopManager(
         config=config,
