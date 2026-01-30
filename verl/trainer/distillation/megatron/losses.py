@@ -17,10 +17,15 @@ import torch
 import torch.nn.functional as F
 
 from verl.workers.config import DistillationConfig
+from verl.trainer.distillation.megatron.utils import vocab_parallel_softmax
 
 class _VocabParallelKLDivergence(torch.autograd.Function):
     """
     Source: https://github.com/verl-project/verl-recipe/blob/ccdb8d140dfc540761a9b209b854dbd2c0011e7e/gkd/megatron/megatron_kl_loss.py
+    
+    TODO:
+    (WorkerDict pid=3705745) /data/jacob/anaconda3/envs/verlMega/lib/python3.12/site-packages/torch/autograd/graph.py:829: UserWarning: c10d::broadcast_: an autograd kernel was not registered to the Autograd key(s) but we are trying to backprop through it. This may lead to silently incorrect behavior. This behavior is deprecated and will be removed in a future version of PyTorch. If your operator is differentiable, please ensure you have registered an autograd kernel to the correct Autograd key (e.g. DispatchKey::Autograd, DispatchKey::CompositeImplicitAutograd). If your operator is not differentiable, or to squash this warning and use the previous behavior, please register torch::CppFunction::makeFallthrough() to DispatchKey::Autograd. (Triggered internally at /pytorch/torch/csrc/autograd/autograd_not_implemented_fallback.cpp:62.)
+    
     """
     @staticmethod
     def forward(ctx, vocab_parallel_logits, target_topk_logps, target_topk_indices):
@@ -35,23 +40,8 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
 
 
         # seq_len, batch_size, top_k = target_topk_logps.size()
-        vocab_parallel_logits, logits_max = calculate_logits_max(vocab_parallel_logits)
         partition_vocab_size = vocab_parallel_logits.size(-1)
-
-        torch.distributed.all_reduce(
-            logits_max, op=torch.distributed.ReduceOp.MAX, group=get_tensor_model_parallel_group()
-        )
-
-        vocab_parallel_logits -= logits_max.unsqueeze(dim=-1)
-        vocab_parallel_logits.exp_()
-        exp_logits = vocab_parallel_logits
-        sum_exp_logits = exp_logits.sum(dim=-1)
-
-        torch.distributed.all_reduce(
-            sum_exp_logits,
-            op=torch.distributed.ReduceOp.SUM,
-            group=get_tensor_model_parallel_group(),
-        )
+        exp_logits, sum_exp_logits = vocab_parallel_softmax(vocab_parallel_logits)
 
         # Get the partition's vocab indices
         rank = get_tensor_model_parallel_rank()
