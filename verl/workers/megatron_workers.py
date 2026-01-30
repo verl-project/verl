@@ -523,6 +523,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             get_device_name(), mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
         )
 
+        self.rollout_device_mesh = rollout_device_mesh
+
         is_collect = (
             rollout_device_mesh["infer_tp"].get_local_rank() == 0
             and rollout_device_mesh["infer_pp"].get_local_rank() == 0

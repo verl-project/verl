@@ -26,6 +26,7 @@ data:
   messages_key: messages  # Key for messages list in multi-turn mode
   tools_key: tools  # Key for tools list in multi-turn mode
   enable_thinking_key: enable_thinking  # Whether to enable thinking in multi-turn mode
+  enable_thinking_default: none         # The default value when enable_thinking_key is not present in the dataset
   pad_mode: no_padding
   # for right padding
   max_length: 1024
@@ -36,6 +37,7 @@ data:
     name: null
   use_shm: False
   apply_chat_template_kwargs: {}
+  num_workers: 8
 
   # MultiTurnSFTDataset apply_chat_template to each turn separately and concat `input_ids`
   # as a whole sequence, which may not equal to apply_chat_template to whole messages at once. 

@@ -47,9 +47,9 @@ class MtpConfig(BaseConfig):
 
     SGLang rollout parameters:
         speculative-algorithm: EAGLE
-        speculative-num-steps: 2
-        speculative-eagle-topk: 2
-        speculative-num-draft-tokens: [value]
+        speculative-num-steps: 3
+        speculative-eagle-topk: 1
+        speculative-num-draft-tokens: 4
     """
 
     enable: bool = False
@@ -60,8 +60,8 @@ class MtpConfig(BaseConfig):
     mtp_loss_scaling_factor: float = 0.1
 
     speculative_algorithm: str = "EAGLE"
-    speculative_num_steps: int = 2
-    speculative_eagle_topk: int = 2
+    speculative_num_steps: int = 3
+    speculative_eagle_topk: int = 1
     speculative_num_draft_tokens: int = 4
 
     method: str = "mtp"

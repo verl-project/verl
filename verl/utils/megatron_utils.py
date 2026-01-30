@@ -18,6 +18,7 @@
 
 import gc
 import inspect
+import logging
 import os
 import warnings
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from megatron.core.enums import ModelType
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
 
@@ -40,6 +42,10 @@ from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
+from verl.workers.config import HFModelConfig, McoreEngineConfig
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def get_model_config(model):
@@ -1261,6 +1267,29 @@ def mapping_string_to_attn_backend(args: dict) -> dict:
     return args
 
 
+def get_megatron_mtp_loss(n_micro_batch):
+    # Calculate MTP loss scale similar to Megatron-LM implementation
+    mtp_loss_scale = 1.0 / n_micro_batch
+
+    # Create a dummy total_loss_dict to collect MTP metrics
+    total_loss_dict = {}
+
+    # Track MTP metrics - this will populate total_loss_dict with MTP losses
+    MTPLossLoggingHelper.track_mtp_metrics(
+        loss_scale=mtp_loss_scale, iteration=0, writer=None, wandb_writer=None, total_loss_dict=total_loss_dict
+    )
+    # Add MTP metrics to losses_reduced if any were collected
+    # total_loss_dict: {'mtp_1 loss': tensor(value, device='cuda:0')}
+    output = {}
+    if total_loss_dict:
+        for key, value in total_loss_dict.items():
+            # Convert key to have proper prefix and format
+            formatted_key = f"mtp_losses/{key.replace(' ', '_')}"
+            # only added to the 0th batch, the MTP loss obtained is a global value, and will be the same for every batch
+            output[formatted_key] = value.cpu().item()
+    return output
+
+
 def get_megatron_module_device(models: list[Any]) -> str:
     if not models:
         return "cpu"
@@ -1277,3 +1306,43 @@ def get_megatron_module_device(models: list[Any]) -> str:
         return "cpu"
     else:
         return get_device_name()
+
+
+def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConfig):
+    has_mtp = (
+        model_config.hf_config.num_nextn_predict_layers > 0
+        if hasattr(model_config.hf_config, "num_nextn_predict_layers")
+        else False
+    )
+    enable_mtp = model_config.mtp.enable
+
+    if "mtp_loss_scaling_factor" not in engine_config.override_transformer_config:
+        engine_config.override_transformer_config["mtp_loss_scaling_factor"] = model_config.mtp.mtp_loss_scaling_factor
+
+    if enable_mtp and not model_config.mtp.enable_train:
+        # disable parameter update by configure the loss scale to 0
+        engine_config.override_transformer_config["mtp_loss_scaling_factor"] = 0
+
+    # Modify the hf_config before initialization, and apply patch after innitialization
+    if enable_mtp and not has_mtp:
+        logger.error("enable mtp while model has no mtp layer, ignore model.mtp.enable")
+        model_config.mtp.enable = False
+        model_config.mtp.enable_train = False
+    elif has_mtp and not enable_mtp:
+        model_config.hf_config.num_nextn_predict_layers = 0
+
+
+def patch_engine_mtp(module, model_config):
+    logger.warning("Applying mtp patch...")
+    from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings, patch_postprocess
+
+    print(module)
+    if isinstance(module, list):
+        for m in module:
+            patch_postprocess(m)
+            if model_config.mtp.detach_encoder:
+                patch_mtp_layer_get_embeddings(m)
+    else:
+        patch_postprocess(module)
+        if model_config.mtp.detach_encoder:
+            patch_mtp_layer_get_embeddings(module)

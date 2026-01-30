@@ -1,8 +1,8 @@
-# Guide to Using MTP in RL Training and Inference
+# Guide to Using MTP in SFT/RL Training and Inference
 
 **Author**: `https://github.com/meituan-search`
 
-Last updated: 01/16/2026
+Last updated: 01/30/2026
 
 # 1. Scope of Support
 
@@ -17,6 +17,8 @@ Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek s
     - mbridge: Use the specified branch: [https://github.com/ArronHZG/mbridge/tree/feature/verl_mtp](https://github.com/ArronHZG/mbridge/tree/feature/verl_mtp) (will be merged into the main branch in the future);
 
     - megatron: Use the latest dev version (commit: [23e092f41ec8bc659020e401ddac9576c1cfed7e](https://github.com/NVIDIA/Megatron-LM/tree/23e092f41ec8bc659020e401ddac9576c1cfed7e)), which supports MTP + CP training methods.
+    
+    - sglang: Use the specified branch: [https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor](https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor), [PR](https://github.com/sgl-project/sglang/pull/17870) , which fix the MTP update weights from tensor OOM issue.
 
 # 2. MTP Training Configuration (Core Parameters)
 
@@ -40,6 +42,8 @@ Experiment chart:
 
 ![fully_async_policy_revenue](
 https://github.com/ArronHZG/verl-community/blob/main/docs/mimo-7b-mtp.png?raw=true)
+
+The wandb link for the graph: [wandb](https://wandb.ai/hou-zg-meituan/mimo-7b-sft-mtp?nw=nwuserhouzg)
 
 **Scenarios with No Significant Effect**
 
@@ -82,3 +86,20 @@ Taking the mimo-7B model deployed separately on H20 hardware using SGLang as an 
 - Current priority recommendation: Do not enable MTP acceleration during the inference phase for now;
 
 - Future planning: Further optimization of the speculative logic in the Rollout phase will be conducted to improve throughput performance.
+
+# 5. SFT training
+
+The SFT training with MTP is supported, using the same MTP training configuration as RL training.
+
+An example configuration for running SFT can be found in `examples/sft/gsm8k/run_mimo_megatron_mtp.sh`
+
+**SFT result**
+
+The experiment was conducted using following data:
+- model = mimo-7B-math
+- dataset = gsm8k
+
+The result: [wandb link](https://wandb.ai/hou-zg-meituan/mimo-7b-sft-mtp?nw=nwuserhouzg)
+
+The presence of mtp layer has limited effect on main loss. However, when MTP layer is detached, the mtp_loss converges to a higher value.
+
