@@ -21,7 +21,9 @@ from verl.workers.config import DistillationConfig
 
 def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
     """Compute KL divergence between two distributions given their log probabilities."""
-    return F.kl_div(input=log_q, target=log_p, reduction="none", log_target=True).sum(dim=-1)
+    p = log_p.exp()
+    kld = p * (log_p - log_q)
+    return kld.sum(dim=-1)
 
 
 def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: float) -> torch.Tensor:
