@@ -77,7 +77,7 @@ def test_single_turn(init_config):
         }
     )
 
-    agent_loop_manager = AgentLoopManager.create(init_config)
+    agent_loop_manager = AgentLoopManager(init_config)
     tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
     reward_fn = load_reward_manager(
         init_config, tokenizer, num_examine=0, **init_config.reward_model.get("reward_kwargs", {})
@@ -226,7 +226,7 @@ def test_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
     init_config.actor_rollout_ref.rollout.calculate_log_probs = True
-    agent_loop_manager = AgentLoopManager.create(init_config)
+    agent_loop_manager = AgentLoopManager(init_config)
 
     # =========================== 2. Generate sequences  ===========================
     raw_prompts = [

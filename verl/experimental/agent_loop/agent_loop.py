@@ -41,15 +41,14 @@ from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.ray_utils import auto_await, get_event_loop
+from verl.utils.ray_utils import get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
     rollout_trace_op,
 )
 from verl.utils.transferqueue_utils import tqbridge
-from verl.workers.rollout.base import TokenOutput
-from verl.workers.rollout.replica import get_rollout_replica_class
+from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -865,6 +864,11 @@ class AgentLoopManager:
         self.worker_group = worker_group
         self.reward_model_manager = None
         self.reward_router_address = None
+        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
+            from verl.experimental.reward_loop import RewardModelManager
+
+            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
+            self.reward_router_address = self.reward_model_manager.get_router_address()
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
@@ -872,30 +876,10 @@ class AgentLoopManager:
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
-    @classmethod
-    @auto_await
-    async def create(
-        cls,
-        config: DictConfig,
-        worker_group: RayWorkerGroup = None,
-        rollout_resource_pool: RayResourcePool = None,
-        rm_resource_pool: RayResourcePool = None,
-    ):
-        """Create agent loop manager."""
+        self._initialize_llm_servers(rollout_resource_pool)
+        self._init_agent_loop_workers()
 
-        instance = cls(config, worker_group, rollout_resource_pool, rm_resource_pool)
-
-        if config.reward_model.enable and config.reward_model.enable_resource_pool:
-            from verl.experimental.reward_loop import RewardModelManager
-
-            instance.reward_model_manager = await RewardModelManager.create(config.reward_model, rm_resource_pool)
-            instance.reward_router_address = instance.reward_model_manager.get_router_address()
-
-        await instance._initialize_llm_servers(rollout_resource_pool)
-        instance._init_agent_loop_workers()
-        return instance
-
-    async def _initialize_llm_servers(self, rollout_resource_pool: RayResourcePool):
+    def _initialize_llm_servers(self, rollout_resource_pool: RayResourcePool):
         rollout_world_size = (
             self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
             * self.config.actor_rollout_ref.rollout.data_parallel_size
@@ -921,16 +905,16 @@ class AgentLoopManager:
         ]
 
         if self.worker_group and rollout_config.name != "trtllm":
-            await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
+            self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
         elif self.worker_group and rollout_config.name == "trtllm":
-            await asyncio.gather(
-                *[
+            self._run_all(
+                [
                     server.init_hybrid_colocated(self.worker_group, rollout_resource_pool)
                     for server in self.rollout_replicas
                 ]
             )
         else:
-            await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
+            self._run_all([server.init_standalone() for server in self.rollout_replicas])
 
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
@@ -960,8 +944,7 @@ class AgentLoopManager:
                 ).remote(self.config, self.server_handles, self.reward_router_address)
             )
 
-    @auto_await
-    async def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 
         Args:
@@ -976,8 +959,8 @@ class AgentLoopManager:
             self.reward_model_manager.wake_up()
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
-        outputs = await asyncio.gather(
-            *[
+        outputs = ray.get(
+            [
                 worker.generate_sequences.remote(chunk)
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
@@ -1020,17 +1003,20 @@ class AgentLoopManager:
 
         return timing
 
-    @auto_await
-    async def clear_kv_cache(self):
+    def clear_kv_cache(self):
         """Clear all rollout kv cache, but don`t sleep."""
-        await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
+        self._run_all([replica.clear_kv_cache() for replica in self.rollout_replicas])
 
-    @auto_await
-    async def start_profile(self, **kwargs):
+    def start_profile(self, **kwargs):
         """Start profiling on all rollout replicas."""
-        await asyncio.gather(*[replica.start_profile(**kwargs) for replica in self.rollout_replicas])
+        self._run_all([replica.start_profile(**kwargs) for replica in self.rollout_replicas])
 
-    @auto_await
-    async def stop_profile(self):
+    def stop_profile(self):
         """Stop profiling on all rollout replicas."""
-        await asyncio.gather(*[replica.stop_profile() for replica in self.rollout_replicas])
+        self._run_all([replica.stop_profile() for replica in self.rollout_replicas])
+
+    def _run_all(self, tasks: list[asyncio.Task]):
+        async def run_all():
+            await asyncio.gather(*tasks)
+
+        asyncio.run(run_all())

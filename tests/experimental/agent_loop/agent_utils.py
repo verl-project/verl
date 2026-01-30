@@ -83,7 +83,7 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     else:
         rm_resource_pool = None
     # =========================== 2. Create AgentLoopManager ===========================
-    agent_loop_manager = AgentLoopManager.create(
+    agent_loop_manager = AgentLoopManager(
         config=config,
         worker_group=actor_rollout_wg,
         rm_resource_pool=rm_resource_pool,

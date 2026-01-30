@@ -97,7 +97,7 @@ def test_agent_loop_reward_manager():
     )
     actor_rollout_wg.init_model()
 
-    agent_loop_manager = AgentLoopManager.create(config, worker_group=actor_rollout_wg)
+    agent_loop_manager = AgentLoopManager(config, worker_group=actor_rollout_wg)
     # sleep rollout replicas
     checkpoint_manager = CheckpointEngineManager(
         backend=config.actor_rollout_ref.rollout.checkpoint_engine.backend,
@@ -105,7 +105,7 @@ def test_agent_loop_reward_manager():
         replicas=agent_loop_manager.rollout_replicas,
     )
     checkpoint_manager.sleep_replicas()
-    reward_loop_manager = RewardLoopManager.create(config, rm_resource_pool=resource_pool)
+    reward_loop_manager = RewardLoopManager(config, rm_resource_pool=resource_pool)
 
     # 2. init test data
     local_folder = os.path.expanduser("~/data/gsm8k/")
