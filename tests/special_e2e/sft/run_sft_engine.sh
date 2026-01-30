@@ -140,7 +140,7 @@ $COMMAND \
     ${ENGINE_CONFIG} \
     trainer.test_freq=after_each_epoch \
     trainer.save_freq=-1 \
-    trainer.logger=['console','file'] \
+    trainer.logger=['console','file','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.total_epochs=2 \

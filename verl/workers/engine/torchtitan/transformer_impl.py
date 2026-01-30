@@ -216,8 +216,7 @@ class TorchTitanEngine(BaseEngine):
         Applies device, dtype, and precision configurations, including mixed precision.
         Sets up checkpoint manager.
         """
-        # TODO(jessicazhong): what is model parts have >1 parts 
-        self.module = self.trainer.model_parts[0]
+        self.module = self.trainer.model_parts
         self.checkpointer = self.trainer.checkpointer
         if not self.engine_config.forward_only:
             self.optimizer = self.trainer.optimizers
@@ -281,7 +280,6 @@ class TorchTitanEngine(BaseEngine):
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         """Perform forward and optionally backward pass on a batch."""
-        print(f"jessica: coming into forward_backward_batch with {data.keys()=}")
         tu.assign_non_tensor(data, sp_size=self.engine_config.tensor_parallel_size)
 
         # Compute num_tokens in global batch for loss normalization
@@ -317,7 +315,7 @@ class TorchTitanEngine(BaseEngine):
     def optimizer_zero_grad(self):
         """Zero gradients."""
         dist_utils.clip_grad_norm_(
-            [p for p in self.module.parameters()],
+            [p for m in self.module for p in m.parameters()],
             self.config.training.max_norm,
             foreach=True,
             pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
@@ -343,7 +341,6 @@ class TorchTitanEngine(BaseEngine):
             return
 
         device_name = get_device_name()
-
         assert device in (device_name, "cpu")
         if device == device_name:
             if model:
@@ -369,33 +366,40 @@ class TorchTitanEngine(BaseEngine):
     ) -> None:
         """Save checkpoint."""
         if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.module)
+            for module in self.module:
+                load_fsdp_model_to_gpu(module)
 
-        self.checkpoint_manager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
-        )
+        # self.checkpoint_manager.save_checkpoint(
+        #     local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+        # )
         # Torchtitan's checkpoint save
-        self.checkpointer.save(global_step)
+        self.checkpointer.save(curr_step=global_step)
 
+        # TODO(jessicazhong): figure out if this is still needed
         torch.distributed.barrier()
         if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.module)
+            for module in self.module:
+                offload_fsdp_model_to_cpu(module)
 
     def load_checkpoint(
         self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: int = True, **kwargs
     ) -> None:
         """Load checkpoint."""
         if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.module)
+            for module in self.module:
+                load_fsdp_model_to_gpu(module)
 
-        self.checkpoint_manager.load_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
-        )
-
+        # self.checkpoint_manager.load_checkpoint(
+        #     local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
+        # )
         # Torchtitan's checkpoint load
+        self.checkpointer.load()
+
+        # TODO(jessicazhong): figure out if this is still needed
         torch.distributed.barrier()
         if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.module)
+            for module in self.module:
+                offload_fsdp_model_to_cpu(module)
 
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
@@ -408,15 +412,17 @@ class EngineEvalModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, TorchTitanEngine)
         super().__enter__()
-        self.engine.module.eval()
+        for module in self.engine.module:
+            module.eval()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, TorchTitanEngine)
 
         # Reshard the root FSDP module
-        if self.engine.engine_config.fsdp_size > 1:
-            # TODO: figure out FSDP reshard
-            self.engine.module.reshard()
+        if self.engine.engine_config.data_parallel_shard_size > 1:
+            # TODO(jessicazhong): figure out FSDP reshard correctly
+            for module in self.engine.module:
+                module.reshard()
 
         super().__exit__(exc_type, exc_value, traceback)
 
@@ -428,7 +434,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, TorchTitanEngine)
         super().__enter__()
-        self.engine.module.train()
+        for module in self.engine.module:
+            module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, TorchTitanEngine)
@@ -509,7 +516,6 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
         model_inputs.update(multi_modal_inputs)
-
         return model_inputs, output_args
 
     def prepare_model_outputs(self, logits, output_args, micro_batch: TensorDict):
@@ -606,8 +612,6 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
         with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-            print(f"Torchtitan model inputs: {model_inputs.keys()=}")
-
             # shifted_input shape torch.Size([1, 1912]), labels shape torch.Size([1, 1912])
             input_dict = {
                 "input": model_inputs["input_ids"],
