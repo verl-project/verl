@@ -22,6 +22,7 @@ from verl.experimental.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 
 
 def test_agent_reward_loop_standalone():
@@ -38,7 +39,7 @@ def test_agent_reward_loop_standalone():
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
         config = compose(config_name="ppo_trainer")
 
-    rollout_model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-3B-Instruct")
+    rollout_model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
 
     # actor_rollout_ref config
     config.data.return_raw_chat = True
@@ -63,7 +64,7 @@ def test_agent_reward_loop_standalone():
     config.custom_reward_function.name = "compute_score_math_verify"
 
     # 1. init reward model manager
-    agent_loop_manager = AgentLoopManager(config)
+    agent_loop_manager = init_agent_loop_manager(config)
 
     # 2. init test data
     local_folder = os.path.expanduser("~/data/math/")
