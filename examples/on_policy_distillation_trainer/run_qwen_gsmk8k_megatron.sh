@@ -22,19 +22,21 @@ TEACHER_MODEL=Qwen2.5-0.5B-Instruct
 DISTILLATION_LOSS_MODE="reverse_kl_topk+"
 DISTILLATION_LOSS_MODE="jsd_topk"
 DISTILLATION_LOSS_MODE="k3"
+DISTILLATION_LOSS_MODE="forward_kl_topk"
+
+DISTILLATION_LOSS_MAX_CLAMP=10.0
+DISTILLATION_LOG_PROB_MIN_CLAMP=null
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
-EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}"
+EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
 TRAIN_PROMPT_BSZ=4
-
-STUDENT_MICRO_BATCH_SIZE=4
-STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
-
-TEACHER_MICRO_BATCH_SIZE=4
-TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
+STUDENT_MICRO_BATCH_SIZE_PER_GPU=32
+STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
+TEACHER_MICRO_BATCH_SIZE_PER_GPU=32
+TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
 WORLD_SIZE=1
 TP=1
@@ -80,9 +82,12 @@ DISTILLATION=(
     actor_rollout_ref.distillation.enabled=True
     actor_rollout_ref.distillation.loss_mode=$DISTILLATION_LOSS_MODE
     actor_rollout_ref.distillation.jsd_beta=0.5
-    actor_rollout_ref.distillation.topk=128
+    actor_rollout_ref.distillation.topk=64
+    actor_rollout_ref.distillation.use_policy_loss=False
+    actor_rollout_ref.distillation.loss_max_clamp=$DISTILLATION_LOSS_MAX_CLAMP
+    actor_rollout_ref.distillation.log_prob_min_clamp=$DISTILLATION_LOG_PROB_MIN_CLAMP
     actor_rollout_ref.distillation.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$TEACHER_MICRO_BATCH_SIZE
+    actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$TEACHER_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.distillation.log_prob_max_token_len_per_gpu=$TEACHER_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.distillation.teacher_model.path="${FAMILY}/${TEACHER_MODEL}"
     actor_rollout_ref.distillation.teacher_model.use_remove_padding=True
@@ -99,9 +104,12 @@ DISTILLATION_DEBUG=(
     actor_rollout_ref.distillation.enabled=True
     actor_rollout_ref.distillation.loss_mode=$DISTILLATION_LOSS_MODE
     actor_rollout_ref.distillation.jsd_beta=0.5
-    actor_rollout_ref.distillation.topk=128
+    actor_rollout_ref.distillation.topk=64
+    actor_rollout_ref.distillation.use_policy_loss=False
+    actor_rollout_ref.distillation.loss_max_clamp=$DISTILLATION_LOSS_MAX_CLAMP
+    actor_rollout_ref.distillation.log_prob_min_clamp=$DISTILLATION_LOG_PROB_MIN_CLAMP
     actor_rollout_ref.distillation.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$TEACHER_MICRO_BATCH_SIZE
+    actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$TEACHER_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.distillation.log_prob_max_token_len_per_gpu=$TEACHER_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.distillation.teacher_model.path="${FAMILY}/${TEACHER_MODEL}"
     actor_rollout_ref.distillation.teacher_model.use_remove_padding=True
@@ -116,9 +124,9 @@ DISTILLATION_DEBUG=(
 )
 
 ACTOR=(
-    actor_rollout_ref.actor.optim.lr=4e-6
+    actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.actor.ppo_mini_batch_size=$TRAIN_PROMPT_BSZ
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
@@ -138,14 +146,14 @@ ACTOR=(
 )
 
 ACTOR_DEBUG=(
-    actor_rollout_ref.actor.optim.lr=4e-6
+    actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.actor.ppo_mini_batch_size=$TRAIN_PROMPT_BSZ
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.actor.use_dynamic_bsz=True
-    actor_rollout_ref.actor.megatron.use_remove_padding=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.vanilla_mbridge=False
+    actor_rollout_ref.actor.megatron.use_remove_padding=True
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${EP}
@@ -161,8 +169,9 @@ ACTOR_DEBUG=(
 )
 
 ROLLOUT=(
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.tensor_model_parallel_size=1
     actor_rollout_ref.rollout.name=$ROLLOUT_NAME
     actor_rollout_ref.rollout.gpu_memory_utilization=0.3
