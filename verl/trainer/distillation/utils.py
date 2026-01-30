@@ -21,6 +21,7 @@ import torch
 from tensordict import TensorDict
 
 from verl.trainer.distillation.fsdp import utils as fsdp_utils
+from verl.trainer.distillation.megatron import utils as megatron_utils
 from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.utils.stages import Stage
@@ -47,6 +48,8 @@ def compute_topk_distillation_inputs(
             match config.strategy:
                 case "fsdp":
                     compute_topk_log_probs = fsdp_utils.compute_topk_log_probs
+                case "megatron":
+                    compute_topk_log_probs = megatron_utils.compute_topk_log_probs
                 case _:
                     raise ValueError(f"Unsupported strategy: {config.strategy}")
             teacher_topk_log_probs, teacher_topk_indices = compute_topk_log_probs(logits=logits, config=config)

@@ -18,10 +18,9 @@ from typing import Any, Callable
 import torch
 
 import verl.trainer.distillation.fsdp.losses as fsdp_losses
+from verl.trainer.distillation.megatron import losses as megatron_losses
 from verl.base_config import BaseConfig
 from verl.trainer.distillation.types import DistillationLossInputs
-from verl.trainer.distillation.fsdp import losses as fsdp_losses
-from verl.trainer.distillation.megatron import losses as megatron_losses
 from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import DistillationConfig
@@ -156,6 +155,8 @@ def compute_forward_kl_topk(
     match config.strategy:
         case "fsdp":
             distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+        case "megatron":
+            distillation_loss_fn = megatron_losses.compute_forward_kl_topk
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
     distillation_losses, student_mass, teacher_mass = distillation_loss_fn(
