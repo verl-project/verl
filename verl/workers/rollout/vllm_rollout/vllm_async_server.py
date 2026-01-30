@@ -504,13 +504,18 @@ class vLLMHttpServer(BaseRolloutServer):
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        generator = self.engine.generate(
-            prompt=prompt,
-            sampling_params=sampling_params,
-            request_id=request_id,
-            lora_request=lora_request,
-            priority=priority,
-        )
+        try:
+            generator = self.engine.generate(
+                prompt=prompt,
+                sampling_params=sampling_params,
+                request_id=request_id,
+                lora_request=lora_request,
+                priority=priority,
+            )
+        except Exception as e:
+            logger.exception(f"Error in generate with request_id {request_id}: {e}")
+            # Re-raise the exception to ensure it propagates to the caller
+            raise
 
         # Get final response
         final_res: Optional[RequestOutput] = None

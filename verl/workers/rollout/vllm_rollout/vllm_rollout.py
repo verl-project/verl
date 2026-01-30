@@ -134,84 +134,119 @@ class ServerAdapter(BaseRollout):
         Args:
             tags: weights or kv_cache.
         """
-        if self.config.free_cache_engine:
-            await self._execute_method("wake_up", kwargs={"tags": tags})
+        try:
+            if self.config.free_cache_engine:
+                await self._execute_method("wake_up", kwargs={"tags": tags})
+        except Exception as e:
+            logger.exception(f"Error in resume with tags {tags}: {e}")
+            raise
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
-        if self.config.free_cache_engine:
-            await self._execute_method("sleep", kwargs={"level": self.sleep_level})
+        try:
+            if self.config.free_cache_engine:
+                await self._execute_method("sleep", kwargs={"level": self.sleep_level})
+        except Exception as e:
+            logger.exception(f"Error in release: {e}")
+            raise
 
     @torch.no_grad()
     async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
         """Update model weights via CUDA IPC to inference workers."""
         start_time = time.time()
-        future = await self._execute_method(
-            "update_weights_from_ipc",
-            non_block=True,
-            kwargs=kwargs,
-        )
-
-        # build cuda ipc buffer
-        bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
-        bucket_size = int(bucket_size_mb) << 20
-        buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:0")
-        handle = reduce_tensor(buffer)
-        s = self.zmq_context.socket(zmq.REQ)
-        s.bind(self.zmq_handle)
-        s.send_pyobj(handle)
-        s.recv()
-
-        # send bucket weights
-        offset = 0
-        bucket_meta: dict[str, TensorMetadata] = {}
-        dtype = PrecisionType.to_dtype(self.config.dtype)
-        async for name, weight in ensure_async_iterator(weights):
-            # model parameters are in fp32 full precision
-            weight = weight.to(dtype, non_blocking=True)
-
-            # fill the tensor bucket
-            if offset + weight.nbytes > bucket_size:
-                get_torch_device().synchronize()
-                s.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                s.recv()
-                bucket_meta = {}
-                offset = 0
-
-            # TODO: slice embedding layer weight into chunks
-            assert offset + weight.nbytes <= bucket_size, (
-                f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-                f"Please increase rollout.update_weights_bucket_megabytes({bucket_size_mb} MB)."
+        future = None
+        buffer = None
+        s = None
+        try:
+            future = await self._execute_method(
+                "update_weights_from_ipc",
+                non_block=True,
+                kwargs=kwargs,
             )
-            bucket_meta[name] = {
-                "name": name,
-                "shape": weight.shape,
-                "dtype": weight.dtype,
-                "offset": offset,
-            }
-            buffer[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
-            offset += weight.nbytes
 
-        # send the last bucket
-        get_torch_device().synchronize()
-        s.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
-        s.recv()
+            # build cuda ipc buffer
+            bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
+            bucket_size = int(bucket_size_mb) << 20
+            buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:0")
+            handle = reduce_tensor(buffer)
+            s = self.zmq_context.socket(zmq.REQ)
+            s.bind(self.zmq_handle)
+            s.send_pyobj(handle)
+            s.recv()
 
-        # clean up
-        s.close()
-        del buffer
-        gc.collect()
-        get_torch_device().ipc_collect()
-        get_torch_device().empty_cache()
-        if future is not None:
-            await future
+            # send bucket weights
+            offset = 0
+            bucket_meta: dict[str, TensorMetadata] = {}
+            dtype = PrecisionType.to_dtype(self.config.dtype)
+            async for name, weight in ensure_async_iterator(weights):
+                # model parameters are in fp32 full precision
+                weight = weight.to(dtype, non_blocking=True)
 
-        # reset prefix cache after updating weights
-        if self.rollout_rank == 0:
-            await self.server_handle.clear_kv_cache.remote()
+                # fill the tensor bucket
+                if offset + weight.nbytes > bucket_size:
+                    get_torch_device().synchronize()
+                    s.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+                    s.recv()
+                    bucket_meta = {}
+                    offset = 0
 
-        if self.replica_rank == 0 and self.rollout_rank == 0:
-            logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
+                # TODO: slice embedding layer weight into chunks
+                assert offset + weight.nbytes <= bucket_size, (
+                    f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
+                    f"Please increase rollout.update_weights_bucket_megabytes({bucket_size_mb} MB)."
+                )
+                bucket_meta[name] = {
+                    "name": name,
+                    "shape": weight.shape,
+                    "dtype": weight.dtype,
+                    "offset": offset,
+                }
+                buffer[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
+                offset += weight.nbytes
+
+            # send the last bucket
+            get_torch_device().synchronize()
+            s.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
+            s.recv()
+
+            # clean up
+            if s is not None:
+                s.close()
+            if buffer is not None:
+                del buffer
+            gc.collect()
+            get_torch_device().ipc_collect()
+            get_torch_device().empty_cache()
+            if future is not None:
+                await future
+
+            # reset prefix cache after updating weights
+            if self.rollout_rank == 0:
+                await self.server_handle.clear_kv_cache.remote()
+
+            if self.replica_rank == 0 and self.rollout_rank == 0:
+                logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
+        except Exception as e:
+            logger.exception(f"Error in update_weights: {e}")
+            # Ensure cleanup even on error
+            try:
+                if s is not None:
+                    s.close()
+            except Exception as cleanup_error:
+                logger.warning(f"Error during socket cleanup: {cleanup_error}")
+            try:
+                if buffer is not None:
+                    del buffer
+            except Exception as cleanup_error:
+                logger.warning(f"Error during buffer cleanup: {cleanup_error}")
+            try:
+                gc.collect()
+                get_torch_device().ipc_collect()
+                get_torch_device().empty_cache()
+            except Exception as cleanup_error:
+                logger.warning(f"Error during memory cleanup: {cleanup_error}")
+            # Re-raise the exception to ensure it propagates to the caller
+            raise
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Batch generate sequences in sync mode.
