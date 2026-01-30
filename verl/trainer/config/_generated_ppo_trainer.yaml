@@ -195,6 +195,7 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    sampling_kwargs: null
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
@@ -233,6 +234,7 @@ actor_rollout_ref:
       top_k: -1
       top_p: 1.0
       temperature: 0
+      sampling_kwargs: null
       'n': 1
       do_sample: false
     multi_turn:

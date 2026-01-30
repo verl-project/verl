@@ -16,6 +16,9 @@ top_k: -1
 # Top-p sampling parameter. Default 1.0.
 top_p: 1
 
+# Custom sampling kwargs: Default null (no kwargs)
+sampling_kwargs: null
+
 # typically the same as data max prompt length
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}
@@ -143,6 +146,9 @@ val_kwargs:
 
   # Sampling temperature for rollout.
   temperature: 0
+
+  # Custom sampling kwargs: Default null (no kwargs)
+  sampling_kwargs: null
 
   # whether to repeat n times for validation
   n: 1
