@@ -699,7 +699,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         cu_seqlens = logits.offsets() # TODO
         model_output.update(
             compute_distillation_inputs(
-                logits=logits, batch=data, cu_seqlens=cu_seqlens, config=self.distillation_config
+                logits=logits.values(), batch=data, cu_seqlens=cu_seqlens, config=self.distillation_config
             )
         )
         return model_output
