@@ -149,25 +149,21 @@ jobs:
         run: |
           ray stop --force
           CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      # - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm (ReMax)
+      # vllm0.11.0 not support them, will be opened until vllm0.13.0 ok
+      # - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
       #   run: |
       #     ray stop --force
-      #     ADV_ESTIMATOR=remax USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      # LoRA tests
-      - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
-        run: |
-          ray stop --force
-          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      - name: Test GRPO LoRA checkpoints merging function
-        run: |
-          export EXP_NAME="qwen2.5-0.5b-function-reward-minimal"
-          ls checkpoints/verl-test/${EXP_NAME}/global_step_1/actor
-          cat checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface/config.json
-          python3 -m verl.model_merger merge --backend fsdp --local_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/ --target_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface
-      - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon with fsdp2
-        run: |
-          ray stop --force
-          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+      #     ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+      # - name: Test GRPO LoRA checkpoints merging function
+      #   run: |
+      #     export EXP_NAME="qwen2.5-0.5b-function-reward-minimal"
+      #     ls checkpoints/verl-test/${EXP_NAME}/global_step_1/actor
+      #     cat checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface/config.json
+      #     python3 -m verl.model_merger merge --backend fsdp --local_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/ --target_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface
+      # - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon with fsdp2
+      #   run: |
+      #     ray stop --force
+      #     ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
   e2e_ppo_trainer_fsdp-qwen2_5vl-3b_ascend:
     if: github.repository_owner == 'verl-project'
