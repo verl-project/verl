@@ -31,6 +31,7 @@ from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_group,
     get_ulysses_sequence_parallel_world_size,
     slice_input_tensor,
+    get_ulysses_sequence_parallel_rank
 )
 
 _PREFIX_GROUPER_PATCHED = False
@@ -140,6 +141,17 @@ def _ulysses_flash_attention_forward(
         position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
         torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
         position_ids = torch.concat(position_ids_list, dim=-1)
+
+        # ============ Slice per-head parameters, for example attention sink used in gpt-oss ============
+        sp_rank = get_ulysses_sequence_parallel_rank()
+        num_heads_per_gpu = query_states.size(2)  # num_heads // sp_size
+        head_start = sp_rank * num_heads_per_gpu
+        head_end = (sp_rank + 1) * num_heads_per_gpu
+        
+        # Slice s_aux (attention sink per-head parameter)
+        if 's_aux' in kwargs and kwargs['s_aux'] is not None:
+            s_aux = kwargs['s_aux']  # Shape: [n_head]
+            kwargs['s_aux'] = s_aux[head_start:head_end]  # Shape: [n_head/n]
 
     # (bsz, seq_len, n_head/n, head_dim)
     query_length = query_states.size(1)
