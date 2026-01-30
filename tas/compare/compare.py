@@ -318,6 +318,208 @@ def infer_log_probs_batch_vllm(model: LLM, sequences, batch_size: int = 64):
     return lp, lens
 
 
+def _init_single_process_dist():
+    """
+    Initialize a 1-rank torch.distributed group if not already initialized.
+    Megatron-Core expects process groups, even for single-node inference.
+    """
+    import torch.distributed as dist
+
+    if not dist.is_available() or dist.is_initialized():
+        return
+
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29500")
+    dist.init_process_group(backend=backend, rank=0, world_size=1)
+
+
+def build_megatron_prefill_model(model_name: str, dtype: torch.dtype, seed: int | None = None):
+    """
+    Build a Megatron-LM module (via Megatron-Bridge) for prefill/scoring.
+    Returns a dict with the model, HF config, forward fn, and bridge/provider.
+    """
+    _init_single_process_dist()
+
+    try:
+        from megatron.core import parallel_state as mpu
+        from megatron.core import tensor_parallel
+        from transformers import AutoConfig
+
+        # Prefer Megatron-Bridge; fall back to vanilla mbridge if provider API is missing.
+        try:
+            from verl.models.mcore.bridge import AutoBridge
+
+            _has_provider = True
+        except Exception:
+            from verl.models.mcore.mbridge import AutoBridge
+
+            _has_provider = False
+
+        from verl.models.mcore.registry import get_mcore_forward_no_padding_fn
+        from verl.utils.megatron_utils import (
+            McoreModuleWrapperConfig,
+            load_megatron_model_to_gpu,
+            make_megatron_module,
+        )
+    except Exception as exc:  # pragma: no cover - dependency guard
+        raise ImportError(
+            "Megatron-Bridge/mbridge and Megatron-Core are required for --prefill-engine megatron"
+        ) from exc
+
+    if dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("Megatron prefill supports only float16/bfloat16 dtype")
+
+    if not mpu.is_initialized():
+        mpu.initialize_model_parallel(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+            virtual_pipeline_model_parallel_size=None,
+            context_parallel_size=1,
+            expert_model_parallel_size=1,
+            expert_tensor_parallel_size=1,
+            nccl_communicator_config_path=None,
+        )
+        # Megatron requires model-parallel RNG to be initialized before module creation.
+        tensor_parallel.random.model_parallel_cuda_manual_seed(seed or 1234)
+
+    hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+
+    if hasattr(AutoBridge, "from_hf_pretrained"):
+        bridge = AutoBridge.from_hf_pretrained(
+            model_name,
+            trust_remote_code=True)
+    elif hasattr(AutoBridge, "from_pretrained"):
+        bridge = AutoBridge.from_pretrained(
+            model_name,
+            trust_remote_code=True)
+    else:
+        bridge = AutoBridge.from_config(hf_config, dtype=dtype)
+
+    provider = None
+    tf_config = None
+    if _has_provider and hasattr(bridge, "to_megatron_provider"):
+        from megatron.core.transformer.enums import AttnBackend
+
+        provider = bridge.to_megatron_provider(load_weights=False)
+        provider.params_dtype = dtype
+        provider.tensor_model_parallel_size = 4
+        provider.pipeline_model_parallel_size = 1
+        provider.expert_model_parallel_size = 1
+        provider.expert_tensor_parallel_size = 1
+        provider.virtual_pipeline_model_parallel_size = None
+        provider.context_parallel_size = 1
+        provider.sequence_parallel = False
+        provider.variable_seq_lengths = True
+        try:
+            provider.attention_backend = AttnBackend.flash
+        except Exception:
+            pass
+        provider.finalize()
+    else:
+        tf_config = getattr(bridge, "config", None)
+
+    wrap_config = McoreModuleWrapperConfig(
+        is_value_model=False,
+        share_embeddings_and_output_weights=getattr(hf_config, "tie_word_embeddings", False),
+        wrap_with_ddp=False,
+        use_distributed_optimizer=False,
+    )
+
+    module, _ = make_megatron_module(
+        wrap_config=wrap_config,
+        tf_config=tf_config,
+        hf_config=hf_config,
+        bridge=bridge,
+        provider=provider,
+        override_model_config={},
+        override_ddp_config=None,
+        peft_cls=None,
+        peft_config=None,
+    )
+
+    if hasattr(bridge, "load_hf_weights"):
+        bridge.load_hf_weights(module, model_name, allowed_mismatched_params=[])
+    elif hasattr(bridge, "load_weights"):
+        bridge.load_weights(module, model_name)
+    else:  # pragma: no cover
+        raise RuntimeError("Bridge object lacks weight loading APIs")
+    load_megatron_model_to_gpu(module, load_grad=False)
+
+    forward_fn = get_mcore_forward_no_padding_fn(hf_config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return {
+        "module": module,
+        "hf_config": hf_config,
+        "forward_fn": forward_fn,
+        "bridge": bridge,
+        "provider": provider,
+        "device": device,
+    }
+
+
+def infer_log_probs_batch_megatron(state: dict, sequences, pad_id: int):
+    """
+    Compute logprobs with Megatron-LM using Megatron-Bridge.
+    Returns padded logprobs tensor and per-sequence lengths.
+    """
+    from verl.utils.megatron.tensor_parallel import vocab_parallel_log_probs_from_logits
+
+    if not sequences:
+        return torch.empty((0, 0), dtype=torch.float32), []
+
+    module = state["module"]
+    if isinstance(module, list):
+        module = module[0]
+    forward_fn = state["forward_fn"]
+    device = state["device"]
+
+    nested_ids = sequences if hasattr(sequences, "offsets") else torch.nested.nested_tensor(
+        [torch.tensor(seq, dtype=torch.long, device=device) for seq in sequences],
+        layout=torch.jagged,
+    )
+    # Per-token temperature to match expected nested layout
+    temperature = torch.nested.nested_tensor(
+        [torch.ones(len(seq), device=device, dtype=torch.float32) for seq in sequences],
+        layout=torch.jagged,
+    )
+
+    def logits_processor(logits, label, temperature):
+        temp = temperature.to(logits.dtype)
+        temp = torch.clamp(temp, min=1e-8)
+        logits = logits.float()
+        logits.div_(temp.unsqueeze(dim=-1))
+        log_probs = vocab_parallel_log_probs_from_logits(logits, label)
+        return {"log_probs": log_probs}
+
+    outputs = forward_fn(
+        model=module,
+        input_ids=nested_ids,
+        multi_modal_inputs={},
+        logits_processor=logits_processor,
+        logits_processor_args={"label": nested_ids, "temperature": temperature},
+        pad_token_id=pad_id,
+        data_format="bshd",
+    )
+
+    log_probs = outputs["log_probs"]
+    lens = log_probs.offsets().diff().tolist()
+    lp_padded = log_probs.to_padded_tensor(float("nan"))
+    return lp_padded, lens
+
+
+def cleanup_megatron_prefill(state: dict | None):
+    if not state:
+        return
+    try:
+        del state["module"]
+    except Exception:
+        pass
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 # ------------------------- plotting -------------------------
 
 
@@ -641,12 +843,12 @@ def main():
     ap.add_argument("--dtype", type=str, default="bfloat16")
     ap.add_argument(
         "--profile-trace",
-        action="store_true",
+        action="store_false",
         help="Enable torch.profiler tracing; trace saved alongside other outputs.",
     )
     ap.add_argument(
         "--prefill-engine",
-        choices=["hf", "vllm"],
+        choices=["hf", "vllm", "megatron"],
         default="hf",
         help="Engine to use for prefill/scoring forward pass (default: hf)",
     )
@@ -697,6 +899,7 @@ def main():
 
     llm_model = None
     hf_model = None
+    megatron_prefill_state = None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
@@ -789,6 +992,10 @@ def main():
 
     # ---------- Prefill/scoring (length-bucket to cut padding) ----------
 
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+
     # initialize hf prefill model if needed
     if args.prefill_engine == "hf" and hf_model is None:
         hf_model = build_hf_model(model_name=args.model, dtype=dtype, device=device)
@@ -808,6 +1015,8 @@ def main():
                 "use_inductor": args.vllm_use_inductor,
             },
         )
+    if args.prefill_engine == "megatron" and megatron_prefill_state is None:
+        megatron_prefill_state = build_megatron_prefill_model(model_name=args.model, dtype=dtype, seed=args.seed)
 
     # Sanity checks for consistency between engines
     if args.prefill_engine == "hf":
@@ -850,11 +1059,6 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        # Clean up vLLM instance (whether reused or newly created)
-        del llm_model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
     elif args.prefill_engine == "hf":
         # Use HF for prefill/scoring (default)
         for start in tqdm(range(0, len(sequences), args.prefill_batch_size), desc="HF prefill/scoring"):
@@ -868,8 +1072,31 @@ def main():
                 prefill_rows[i_orig] = lp_batch[j, : L - 1].detach().cpu()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+    elif args.prefill_engine == "megatron":
+        for start in tqdm(range(0, len(sequences), args.prefill_batch_size), desc="Megatron prefill/scoring"):
+            batch_idx = idxs[start : start + args.prefill_batch_size]
+            seq_batch = [sequences[i] for i in batch_idx]
+
+            lp_batch, lens_batch = infer_log_probs_batch_megatron(
+                megatron_prefill_state, sequences=seq_batch, pad_id=pad_id
+            )
+            for j, (i_orig, L) in enumerate(zip(batch_idx, lens_batch, strict=False)):
+                prefill_rows[i_orig] = lp_batch[j, : L - 1].detach().cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     else:
         raise ValueError(f"Invalid prefill engine: {args.prefill_engine}")
+
+    # Clean up reused engines
+    if args.prefill_engine == "vllm":
+        del llm_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    if args.prefill_engine == "hf" and args.engine != "hf":
+        del hf_model
+    if args.prefill_engine == "megatron":
+        cleanup_megatron_prefill(megatron_prefill_state)
 
     # End prefill/scoring timer
     time_end_prefill = time.perf_counter()
