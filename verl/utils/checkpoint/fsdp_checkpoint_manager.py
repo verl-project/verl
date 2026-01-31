@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import warnings
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from typing import Optional
 
@@ -94,6 +95,79 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             processing_class=processing_class,
             checkpoint_config=checkpoint_config,
         )
+
+    @staticmethod
+    def _save_lora_adapter(state_dict: dict[str, torch.Tensor], target_dir: str) -> Optional[str]:
+        """
+        Save LoRA adapter weights separately and normalize base parameter names for HuggingFace consumers.
+
+        When training with LoRA/PEFT, the state_dict contains keys with prefixes like "base_model.model."
+        and separate lora_A/lora_B weights. This method:
+        1. Extracts LoRA weights and saves them as a PEFT-compatible adapter
+        2. Normalizes remaining keys to standard HuggingFace format
+
+        Args:
+            state_dict: The model state dict (modified in-place)
+            target_dir: Directory to save the LoRA adapter
+
+        Returns:
+            Path to the LoRA adapter directory, or None if no LoRA params are present.
+
+        Note:
+            This function modifies state_dict in place.
+        """
+        lora_params_names = [name for name in state_dict.keys() if "lora_" in name]
+        if len(lora_params_names) == 0:
+            return None
+
+        import peft
+        from safetensors.torch import save_file
+
+        lora_params = OrderedDict()
+        target_modules = set()
+        lora_key = None
+
+        for name in lora_params_names:
+            lora_key = name.replace(".default.weight", ".weight")
+            target_modules.add(lora_key.split(".")[-3])
+            lora_params[lora_key] = state_dict.pop(name)
+
+        lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
+        peft_dict = {
+            "r": lora_rank,
+            "lora_alpha": 0,  # lora_alpha is not available; user should set manually if needed
+            "target_modules": list(target_modules),
+        }
+        peft_config = peft.LoraConfig(**peft_dict).to_dict()
+        peft_config["task_type"] = peft_config["task_type"].value if peft_config["task_type"] else None
+        peft_config["peft_type"] = peft_config["peft_type"].value if peft_config["peft_type"] else None
+        peft_config["target_modules"] = list(peft_config["target_modules"])
+
+        lora_path = os.path.join(target_dir, "lora_adapter")
+        os.makedirs(lora_path, exist_ok=True)
+        with open(os.path.join(lora_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+            json.dump(peft_config, f, ensure_ascii=False, indent=4)
+        save_file(lora_params, os.path.join(lora_path, "adapter_model.safetensors"))
+
+        # Normalize remaining keys to standard HuggingFace format
+        # Use explicit prefix/suffix checks instead of replace() to avoid
+        # unintended substitutions if patterns appear in middle of key names
+        prefix = "base_model.model."
+        for name in list(state_dict.keys()):
+            key = name
+            # Remove "base_model.model." prefix if present at start
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+            # Replace ".base_layer.weight" suffix with ".weight"
+            if key.endswith(".base_layer.weight"):
+                key = key[: -len(".base_layer.weight")] + ".weight"
+            # Replace ".base_layer.bias" suffix with ".bias"
+            elif key.endswith(".base_layer.bias"):
+                key = key[: -len(".base_layer.bias")] + ".bias"
+            if key != name:
+                state_dict[key] = state_dict.pop(name)
+
+        return lora_path
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
@@ -306,6 +380,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 hf_local_path = os.path.join(local_path, "huggingface")
                 os.makedirs(hf_local_path, exist_ok=True)
 
+                # Handle LoRA/PEFT models: extract adapter weights and normalize state_dict keys
+                lora_adapter_path = self._save_lora_adapter(state_dict, hf_local_path)
+
                 if "ForTokenClassification" in model_config.architectures[0]:
                     from transformers import AutoModelForTokenClassification
 
@@ -352,6 +429,13 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     logger=logger,
                     log_only_rank_0=True,
                 )
+                if lora_adapter_path:
+                    log_with_rank(
+                        f"Saved LoRA adapter to {os.path.abspath(lora_adapter_path)}",
+                        rank=self.rank,
+                        logger=logger,
+                        log_only_rank_0=True,
+                    )
                 del state_dict
                 del save_model
 
