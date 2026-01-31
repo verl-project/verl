@@ -604,7 +604,7 @@ reward_model:
     dtype: bfloat16
   load_weight: true
   use_reward_loop: true
-  num_workers: 1
+  num_workers: 8
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???

@@ -9,7 +9,7 @@ enable: False
 # Whether to deploy the model to a separate resource pool.
 enable_resource_pool: False
 n_gpus_per_node: 8
-num_workers: 1
+num_workers: 8
 nnodes: 0
 
 model:

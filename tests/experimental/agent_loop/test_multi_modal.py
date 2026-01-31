@@ -22,7 +22,7 @@ from omegaconf import DictConfig
 from PIL import Image
 from transformers.utils import get_json_schema
 
-from verl.experimental.agent_loop import AgentLoopManager
+from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
@@ -164,7 +164,7 @@ def test_multimodal_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
-    agent_loop_manager = AgentLoopManager(init_config)
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences with multimodal prompts ===========================
     raw_prompts = [
@@ -309,7 +309,7 @@ def test_multimodal_single_turn_agent(init_config):
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
-    agent_loop_manager = AgentLoopManager(init_config)
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences with multimodal prompts ===========================
     # Create a simple test image

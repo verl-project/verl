@@ -36,7 +36,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-@ray.remote
 class RewardLoopWorker:
     def __init__(self, config: DictConfig, reward_router_address: str = None):
         """
@@ -257,6 +256,7 @@ class RewardLoopManager:
             self.reward_model_manager = None
             self.reward_router_address = None
 
+        self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self._init_reward_loop_workers()
 
     def _init_reward_loop_workers(self):
@@ -268,7 +268,7 @@ class RewardLoopManager:
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
             self.reward_loop_workers.append(
-                RewardLoopWorker.options(
+                self.reward_loop_workers_class.options(
                     name=f"reward_loop_worker_{i}",
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id,
@@ -277,7 +277,6 @@ class RewardLoopManager:
                 ).remote(self.config, self.reward_router_address)
             )
 
-    # this func is used to replace the legacy fsdp/megatron RewardModelWorker.compute_rm_score
     def compute_rm_score(self, data: DataProto) -> DataProto:
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()
