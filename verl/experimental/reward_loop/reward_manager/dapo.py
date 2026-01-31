@@ -30,15 +30,16 @@ class DAPORewardManager(RewardManagerBase):
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
 
         # DAPO Reward Config
-        overlong_buffer_cfg = config.reward_model.get("reward_kwargs", {}).get("overlong_buffer_cfg", None)
-        self.overlong_buffer_cfg = overlong_buffer_cfg
-        self.max_resp_len = config.reward_model.get("reward_kwargs", {}).get("max_resp_len", None)
+        reward_kwargs = config.reward_model.get("reward_kwargs", {})
+        self.overlong_buffer_cfg = reward_kwargs.get("overlong_buffer_cfg")
+        self.max_resp_len = reward_kwargs.get("max_resp_len")
+        self.strict_box_verify = reward_kwargs.get("strict_box_verify", False)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
 
         if self.overlong_buffer_cfg is not None:
             assert self.max_resp_len is not None, (
-                f"max_resp_len must be provided if {overlong_buffer_cfg=}, but got None"
+                f"max_resp_len must be provided if {self.overlong_buffer_cfg}, but got None"
             )
             assert self.max_resp_len >= self.overlong_buffer_cfg.len, (
                 "max_resp_len must be larger than overlong_buffer.len"
@@ -73,6 +74,7 @@ class DAPORewardManager(RewardManagerBase):
                 solution_str=response_str,
                 ground_truth=ground_truth,
                 extra_info=extra_info,
+                strict_box_verify=self.strict_box_verify,
                 **extra_reward_kwargs,
             )
         else:
@@ -83,6 +85,7 @@ class DAPORewardManager(RewardManagerBase):
                     solution_str=response_str,
                     ground_truth=ground_truth,
                     extra_info=extra_info,
+                    strict_box_verify=self.strict_box_verify,
                     **extra_reward_kwargs,
                 ),
             )
