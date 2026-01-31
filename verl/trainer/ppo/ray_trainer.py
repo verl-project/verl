@@ -43,6 +43,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.group_filter import filter_zero_variance_groups
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -1086,7 +1087,34 @@ class RayPPOTrainer:
 
         When use_prefix_grouper is enabled, uses group-level balancing to keep samples with
         the same uid together on the same rank for prefix sharing optimization.
+
+        Also handles NCCL padding when filter_groups is enabled, as direct sample removal
+        may result in batch sizes not divisible by world_size.
         """
+        world_size = self.actor_rollout_wg.world_size
+
+        # Check if batch needs padding for NCCL divisibility
+        # This can happen when filter_groups is enabled, as direct sample removal changes batch size
+        # We MUST pad to divisible size to ensure each rank gets equal number of samples,
+        # otherwise NCCL operations will hang due to different mini-batch counts across ranks.
+        filter_groups_config = self.config.algorithm.get("filter_groups", None)
+        filter_groups_enabled = filter_groups_config is not None and filter_groups_config.get("enable", False)
+        needs_padding = filter_groups_enabled and len(batch) % world_size != 0
+
+        if needs_padding:
+            batch, pad_size = pad_dataproto_to_divisor(batch, world_size)
+            batch.meta_info["_filter_groups_pad_size"] = pad_size
+
+            # Track which samples are padding for later removal
+            is_padding = np.zeros(len(batch), dtype=bool)
+            is_padding[-pad_size:] = True
+            batch.non_tensor_batch["_is_padding_sample"] = is_padding
+
+            # Assign unique IDs to padded samples to isolate them from real GRPO groups
+            if "uid" in batch.non_tensor_batch:
+                batch.non_tensor_batch["uid"][-pad_size:] = "__PAD__"
+            print(f"[_balance_batch] Padded {pad_size} samples with uid=__PAD__ for NCCL divisibility")
+
         attention_mask = batch.batch["attention_mask"]
         batch_size = attention_mask.shape[0]
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1)  # (train_batch_size,)
@@ -1431,6 +1459,18 @@ class RayPPOTrainer:
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
+
+                    # Filter zero-variance groups (DAPO-style) early, right after union
+                    # Groups where all rollouts have the same reward provide no contrastive signal for GRPO
+                    # This uses rm_scores which is available from reward model's score
+                    filter_groups_config = self.config.algorithm.get("filter_groups", None)
+                    if filter_groups_config is not None and filter_groups_config.get("enable", False):
+                        batch, filter_metrics = filter_zero_variance_groups(
+                            batch,
+                            use_rm_scores=True,  # Use rm_scores since token_level_rewards not yet computed
+                        )
+                        metrics.update(filter_metrics)
+
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
