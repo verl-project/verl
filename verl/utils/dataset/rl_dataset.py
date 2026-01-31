@@ -321,7 +321,7 @@ class RLHFDataset(Dataset):
                         content_list.append({"type": "image", "image": image})
                     elif isinstance(image, dict):
                         if "bytes" in image:
-                            image["image"] = Image.open(BytesIO(image["bytes"]))
+                            image = Image.open(BytesIO(image["bytes"]))
                         content_list.append({"type": "image", **image})
                     else:
                         raise TypeError(f"image must be dict or PIL.Image, unsupported image type: {type(image)}")
