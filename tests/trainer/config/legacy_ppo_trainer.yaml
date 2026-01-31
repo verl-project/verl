@@ -466,7 +466,7 @@ actor_rollout_ref:
     max_model_len: null
 
     # max length of sequences
-    max_num_seqs: 256
+    max_num_seqs: 1024
 
     # [Will be deprecated, use log_prob_micro_batch_size_per_gpu] The batch size for one forward pass in the computation of log_prob. Global batch size.
     log_prob_micro_batch_size: null
