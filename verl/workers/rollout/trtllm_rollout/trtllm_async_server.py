@@ -161,6 +161,7 @@ class TRTLLMHttpServer:
 
         if self.is_vlm_model:
             from tensorrt_llm.inputs.multimodal import MultimodalServerConfig
+
             multimodal_config = MultimodalServerConfig(
                 media_io_kwargs={
                     "image": {
@@ -193,11 +194,10 @@ class TRTLLMHttpServer:
                 server_role=None,
                 metadata_server_cfg=None,
             )
-        
+
         app = trtllm_server.app
         self._server_port, self._server_task = await run_unvicorn(app, None, self._server_address)
 
-    @resume_on_abort
     async def generate(
         self,
         prompt_ids: list[int],
@@ -207,6 +207,7 @@ class TRTLLMHttpServer:
         video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
         from tensorrt_llm.llmapi import SamplingParams
+
         max_tokens = min(self.config.response_length, self.config.max_model_len - len(prompt_ids))
         sampling_params["max_tokens"] = max_tokens
         sampling_params["logprobs"] = 1 if sampling_params.pop("logprobs", False) else None

@@ -281,7 +281,7 @@ class ServerAdapter(BaseRollout):
         self.is_leader_rank = None
         self.replica_rank = None
         self.is_dp_rank = None
-        self._supports_partial_loading = None  
+        self._supports_partial_loading = None
 
         # hybrid mode
         if self.device_mesh is not None:
@@ -421,7 +421,7 @@ class ServerAdapter(BaseRollout):
             await self.update_weights_from_ipc_handles(serialized_device_handles)
             cur_available_bytes = total_available_bytes
             cur_handles = []
-            
+
         # Query if model supports partial loading
         supports_partial_loading = await self.get_supports_partial_loading()
 

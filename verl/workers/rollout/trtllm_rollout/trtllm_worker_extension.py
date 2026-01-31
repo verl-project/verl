@@ -1,3 +1,16 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import base64
 import inspect
 import pickle
@@ -10,7 +23,6 @@ from tensorrt_llm.logger import logger
 
 
 class WorkerExtension:
-
     def __init__(self):
         pass
 
@@ -30,11 +42,9 @@ class WorkerExtension:
         try:
             if not hasattr(self.engine.model_engine.model, "first_pre_reload_weights"):
                 for module in self.engine.model_engine.model.modules():
-                    if hasattr(module, "pre_reload_weights") and not getattr(
-                        module, "_weights_removed", False
-                    ):
+                    if hasattr(module, "pre_reload_weights") and not getattr(module, "_weights_removed", False):
                         module.pre_reload_weights()
-                setattr(self.engine.model_engine.model, "first_pre_reload_weights", True)
+                self.engine.model_engine.model.first_pre_reload_weights = True
 
             if ipc_handles is not None:
                 device_uuid = get_device_uuid()
@@ -46,22 +56,16 @@ class WorkerExtension:
                     supports_partial_loading = "allow_partial_loading" in load_weights_args
 
                     if supports_partial_loading:
-                        self.engine.model_engine.model_loader.reload(
-                            model, weights, allow_partial_loading=True
-                        )
+                        self.engine.model_engine.model_loader.reload(model, weights, allow_partial_loading=True)
                     else:
-                        self.engine.model_engine.model_loader.reload(
-                            model, weights, allow_partial_loading=False
-                        )
+                        self.engine.model_engine.model_loader.reload(model, weights, allow_partial_loading=False)
             else:
                 for module in self.engine.model_engine.model.modules():
                     if hasattr(module, "process_weights_after_loading") and not getattr(
                         module, "_weights_removed", False
                     ):
                         module.process_weights_after_loading()
-                    if hasattr(module, "post_load_weights") and not getattr(
-                        module, "_weights_removed", False
-                    ):
+                    if hasattr(module, "post_load_weights") and not getattr(module, "_weights_removed", False):
                         module.post_load_weights()
                 moe_load_balancer = getattr(self.engine.model_engine, "moe_load_balancer", None)
                 if isinstance(moe_load_balancer, MoeLoadBalancer):
