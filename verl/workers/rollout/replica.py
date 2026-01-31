@@ -24,6 +24,7 @@ from ray.actor import ActorHandle
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import get_device_name
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
@@ -114,6 +115,7 @@ class RolloutReplica(ABC):
         self.servers: list[ActorHandle] = []
         self._server_address: str = None
         self._server_handle: ActorHandle = None
+        self.worker_group: RayWorkerGroup = None
 
     async def init_hybrid(self, worker_group: RayWorkerGroup):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
@@ -122,6 +124,7 @@ class RolloutReplica(ABC):
             worker_group: RayWorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
         """
         self.rollout_mode = RolloutMode.HYBRID
+        self.worker_group = worker_group
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
         ]
@@ -135,6 +138,7 @@ class RolloutReplica(ABC):
             resource_pool: RayResourcePool, ray placement group where hybrid engine processes have been launched.
             bundle_indices: list[int], bundle indices for this rollout replica.
         """
+        self.worker_group = worker_group
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
@@ -185,6 +189,7 @@ class RolloutReplica(ABC):
 
         # create worker group for this rollout
         use_gpu = self.rollout_worker_use_gpu()
+        print(f"[debug] self.get_ray_class_with_init_args()={self.get_ray_class_with_init_args()}")
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
@@ -193,6 +198,7 @@ class RolloutReplica(ABC):
             if not self.is_reward_model
             else f"rollout_reward_standalone_{self.replica_rank}",
             use_gpu=use_gpu,
+            device_name=get_device_name(),
         )
         self.workers = worker_group.workers
         await self.launch_servers()

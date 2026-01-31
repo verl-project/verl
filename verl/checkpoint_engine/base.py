@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Generator, TypedDict
 
@@ -21,9 +22,10 @@ import torch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.utils.device import get_torch_device, get_visible_devices_keyword
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.ray_utils import auto_await
-from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
 
 
@@ -78,6 +80,9 @@ class CheckpointEngineRegistry:
         """
         if backend not in cls._registry:
             raise ValueError(f"Checkpoint engine {backend} not registered")
+        print(f"Create checkpoint engine {backend} with args {args} and kwargs {kwargs}")
+        if backend != "hccl":
+            raise ValueError(f"Checkpoint engine {backend} is not supported")
         return cls._registry[backend](*args, **kwargs)
 
 
@@ -254,9 +259,13 @@ class CheckpointEngineWorker(Worker):
         rollout_config: RolloutConfig,
         model_config: HFModelConfig,
         server_adapter: BaseRollout = None,
+        replica_rank: int = 0,
     ) -> None:
         self.rollout_config = rollout_config
         self.model_config = model_config
+        if os.environ.get(get_visible_devices_keyword(), None) is None:
+            local_rank = int(os.environ["RANK"]) + replica_rank * 2
+            get_torch_device().set_device(local_rank)
 
         # sglang and trt-llm need device_mesh for internal communication
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
@@ -272,7 +281,11 @@ class CheckpointEngineWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):
         weights = self.checkpoint_engine.receive_weights()
-        await self.server_adapter.update_weights(weights)
+        print(">>>>>>DEBUG SKIPPING update_weights")
+        async for name, tensor in weights:
+            print(f"update_weights {name} {tensor.shape}")
+
+        # await self.server_adapter.update_weights(weights)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
@@ -325,6 +338,10 @@ class CheckpointEngineManager:
     def build_process_group(self, rollout: RayWorkerGroup):
         """Build process group for trainer and rollout replicas."""
         trainer = self.trainer
+        checkpoint_engine_config = CheckpointEngineConfig(
+            backend=self.backend, engine_kwargs={"hccl": {"rebuild_group": False}}
+        )
+        ray.get(trainer.init_checkpoint_engine(checkpoint_engine_config))
 
         # 1. prepare all workers
         metadata = ray.get(
@@ -397,7 +414,11 @@ class CheckpointEngineManager:
         self.build_process_group(rollout)
 
         # 4. update weights of all workers
-        ray.get(trainer.update_weights() + rollout.update_weights())
+        h1 = trainer.update_weights()
+        h2 = rollout.update_weights()
+        ray.get(h1 + h2)
+
+        # ray.get(trainer.update_weights() + rollout.update_weights())
 
         # 5. finalize all workers
         ray.get(

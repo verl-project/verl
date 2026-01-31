@@ -18,7 +18,8 @@ import time
 import ray
 from ray.util.collective import collective
 
-from verl.utils.device import get_nccl_backend
+from verl.checkpoint_engine import CheckpointEngineManager
+from verl.utils.device import get_device_name, get_nccl_backend
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,19 @@ class ParameterSynchronizer:
         # Statistics
         self.current_version = 0
 
-        self._init_weights_info()
-        self._init_sync_group()
+        # self._init_weights_info()
+        # self._init_sync_group()
 
         if self.config.async_training.checkpoint_engine.enable:
-            self._init_actor_rollout_checkpoint_engine()
+            backends_candi = {
+                "cuda": "nccl",
+                "npu": "hccl",
+            }
+            checkpoint_backend = backends_candi[get_device_name()]
+            replicas = ray.get(rollouter.get_replicas.remote())
+            self.checkpoint_manager = CheckpointEngineManager(
+                backend=checkpoint_backend, trainer=self.actor_wg, replicas=replicas
+            )
 
     def get_current_param_version(self) -> int:
         """Get current parameter version number"""
@@ -79,22 +88,6 @@ class ParameterSynchronizer:
             group_name=self.sync_group_name,
         )
 
-    def _init_actor_rollout_checkpoint_engine(self):
-        ray.get(
-            self.actor_wg.init_checkpoint_engine(
-                rank_offset=0,
-                actor_num=len(self.actor_wg.workers),
-                rollout_num=len(self.rollout_wg.workers),
-            )
-        )
-        ray.get(
-            self.rollout_wg.init_checkpoint_engine(
-                rank_offset=len(self.actor_wg.workers),
-                actor_num=len(self.actor_wg.workers),
-                rollout_num=len(self.rollout_wg.workers),
-            )
-        )
-
     def sync_weights(self, version, validate=False, global_steps=0, use_trainer_do_validate=False):
         """Sync weights between trainer and rollouter, and update parameter version"""
         start_time = time.time()
@@ -114,8 +107,7 @@ class ParameterSynchronizer:
         use_checkpoint_engine = self.config.async_training.checkpoint_engine.enable and rollout_name != "sglang"
 
         if use_checkpoint_engine:
-            self.actor_wg.sync_rollout_weights_by_checkpoint(self.sync_group_name)
-            ray.get(self.rollout_wg.sync_rollout_weights_by_checkpoint(self.sync_group_name))
+            self.checkpoint_manager.update_weights()
         else:
             self.actor_wg.sync_rollout_weights(self.sync_group_name)
             ray.get(self.rollout_wg.sync_rollout_weights(self.sync_group_name))

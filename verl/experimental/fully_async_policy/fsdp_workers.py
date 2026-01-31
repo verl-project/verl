@@ -133,6 +133,11 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
             get_torch_device().synchronize()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def update_weights(self):
+        per_tensor_param, _ = self.engine.get_per_tensor_param()
+        await self.checkpoint_engine.send_weights(per_tensor_param)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights_by_checkpoint(self, sync_group_name="actor_rollout"):
         assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
         assert hasattr(self, "_weights_info") and self._weights_info is not None
@@ -210,6 +215,17 @@ class DetachActorWorker(DetachNcclSync):
             params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         )
         return params
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def update_weights(self):
+        def actor_params_to_full(actor_params):
+            for key, param in actor_params.items():
+                if hasattr(param, "full_tensor"):
+                    yield key, param.full_tensor()
+
+        actor_params = self._get_actor_params()
+        # print(f'[debug] actor_params["model.embed_tokens.weight"]: {actor_params["model.embed_tokens.weight"]}')
+        await self.checkpoint_engine.send_weights(actor_params_to_full(actor_params))
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_actor_weights_info(self):

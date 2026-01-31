@@ -170,11 +170,11 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
-        self._create_rollouter(config)
-
         print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
         self._create_trainer(config)
+
+        print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
+        self._create_rollouter(config)
 
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())

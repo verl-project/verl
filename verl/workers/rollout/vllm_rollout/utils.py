@@ -56,9 +56,9 @@ def get_device_uuid(device_id: int) -> str:
 
     # Convert torch.npu.current_device to its corresponding ASCEND_RT_VISIBLE_DEVICES.
     if is_npu_available:
-        npu_visible_devices = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-        assert device_id < len(npu_visible_devices), f"device_id {device_id} must less than {npu_visible_devices}"
-        return "NPU-" + npu_visible_devices[device_id]
+        # npu_visible_devices = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
+        # assert device_id < len(npu_visible_devices), f"device_id {device_id} must less than {npu_visible_devices}"
+        return "NPU-" + str(device_id)
     else:
         return current_platform.get_device_uuid(device_id)
 
