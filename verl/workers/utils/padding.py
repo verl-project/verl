@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
@@ -104,3 +105,45 @@ def no_padding_2_padding(nested_tensor: torch.Tensor, data: TensorDict) -> torch
     values = full_values.squeeze(-1)[:, -max_response_len - 1 : -1]  # (bsz, response_length)
 
     return values
+
+
+def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
+    """Slice response from unpad model output.
+
+    Args:
+        tensor: model output tensor [total_tokens, *] or NestedTensor [bsz, prompt+response_len, *]
+        data: TensorDict with "prompts", "responses", "attention_mask"
+
+    Returns:
+        tensor: sliced response tensor of shape [bsz, max_response_len, *]
+    """
+    values = tensor.values() if tensor.is_nested else tensor
+    prompt_ids = data["prompts"]
+    response_ids = data["responses"]
+    attention_mask = data["attention_mask"]
+
+    if prompt_ids.is_nested:
+        prompt_lens = prompt_ids.offsets().diff()
+        response_lens = response_ids.offsets().diff()
+        max_response_len = response_lens.max().item()
+    else:
+        assert not attention_mask.is_nested
+        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
+        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
+        max_response_len = response_ids.shape[1]
+
+    sequence_lens = prompt_lens + response_lens
+    sequence_offsets = sequence_lens.cumsum(dim=0)
+    assert sequence_offsets[-1].item() == values.shape[0]
+    assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
+
+    response_list = []
+    # Skip padding dimensions after sequence dimensions, if any.
+    skip_padding = (0, 0) * (values.ndim - 1)
+    for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
+        pad_size = max_response_len - resp_len
+        # left-shift model output by one token for log_probs/values
+        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (*skip_padding, 0, pad_size)))
+
+    output = torch.stack(response_list, dim=0)
+    return output

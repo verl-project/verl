@@ -292,3 +292,4 @@ class TrainingWorkerConfig(BaseConfig):
     # This function takes model config and the device name as parameter.
     # Users can pass in a higher-order function to take more parameters
     auto_select_engine_optim_fn: Callable[["HFModelConfig", str], tuple["EngineConfig", "OptimizerConfig"]] = None
+    distillation_config: BaseConfig = None
