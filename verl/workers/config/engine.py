@@ -16,6 +16,8 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Optional
 
+from omegaconf import DictConfig
+
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 
@@ -283,7 +285,7 @@ class VeOmniEngineConfig(EngineConfig):
 @dataclass
 class TrainingWorkerConfig(BaseConfig):
     model_type: str = None  # model type (language_model/value_model)
-    model_config: HFModelConfig = None
+    model_config: HFModelConfig | DictConfig = None
     engine_config: EngineConfig = None
     optimizer_config: OptimizerConfig = None
     checkpoint_config: CheckpointConfig = None
