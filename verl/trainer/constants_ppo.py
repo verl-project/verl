@@ -45,15 +45,26 @@ def get_ppo_ray_runtime_env():
     A filter function to return the PPO Ray runtime environment.
     To avoid repeat of some environment variables that are already set.
     """
-    working_dir = (
-        json.loads(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR, "{}")).get("runtime_env", {}).get("working_dir", None)
-    )
+    job_cfg_raw = os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR, "{}")
+    try:
+        job_cfg = json.loads(job_cfg_raw)
+    except Exception:
+        job_cfg = {}
 
-    runtime_env = {
-        "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
-        **({"working_dir": None} if working_dir is None else {}),
-    }
-    for key in list(runtime_env["env_vars"].keys()):
+    working_dir = None
+    if isinstance(job_cfg, dict):
+        working_dir = job_cfg.get("runtime_env", {}).get("working_dir")
+
+    runtime_env = {"env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy()}
+
+    # Only pass through working_dir if one already exists; otherwise omit.
+    if working_dir is not None:
+        runtime_env["working_dir"] = working_dir
+
+    # Avoid duplicating env vars that are already set in the driver/job env.
+    env = runtime_env["env_vars"]
+    for key in list(env.keys()):
         if os.environ.get(key) is not None:
-            runtime_env["env_vars"].pop(key, None)
+            env.pop(key, None)
+
     return runtime_env
