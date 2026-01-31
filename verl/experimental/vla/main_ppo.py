@@ -82,12 +82,16 @@ def main(config):
 
 @ray.remote
 def main_task(config):
+    import logging
+
     # print initial config
     from pprint import pprint
 
     from omegaconf import OmegaConf
 
     from verl.utils.fs import copy_local_path_from_hdfs
+
+    logger = logging.getLogger(__name__)
 
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
@@ -103,12 +107,28 @@ def main_task(config):
     # define worker classes
     if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from verl.experimental.vla.workers.env.env_worker import EnvWorker
         from verl.single_controller.ray import RayWorkerGroup
 
         from .fsdp_workers import RobActorRolloutRefWorker
 
         ray_worker_group_cls = RayWorkerGroup
+
+        # Choose EnvWorker based on config
+        isaac_server_mode = config.env.train.get("isaac_server_mode", False)
+
+        if isaac_server_mode:
+            # Ray actor mode: Isaac Sim runs as Ray actors (recommended)
+            from verl.experimental.vla.workers.env import EnvWorkerServer as EnvWorker
+
+            logger.info("Using Isaac Ray Actor mode (EnvWorkerServer)")
+            logger.info(
+                f"Isaac servers: {config.env.train.get('num_isaac_servers', 8)} per stage, "
+                f"{config.env.rollout.pipeline_stage_num} stages"
+            )
+        else:
+            from verl.experimental.vla.workers.env.env_worker import EnvWorker
+
+            logger.info("Using standard mode (EnvWorker with local Isaac instances)")
 
     else:
         raise NotImplementedError
@@ -132,10 +152,23 @@ def main_task(config):
         # colocated sim and actor rollout
         num_nodes_sim = config.trainer.nnodes
 
-    resource_pool_spec = {
-        train_rollout_pool_id: [train_rollout_gpu_num] * num_nodes_actor_rollout,
-        "env_gpu_pool": [env_gpu_num] * num_nodes_sim,
-    }
+    # In Isaac server mode, EnvWorker is a lightweight adapter that doesn't need GPUs
+    # The IsaacServerManager manages all simulation GPUs independently
+    if isaac_server_mode:
+        # Only need 1 EnvWorkerServer total (not per node)
+        # It's just an adapter between verl framework and IsaacServerManager
+        # IsaacServerManager handles all the parallelism and distribution
+        logger.info("Isaac server mode: using 1 EnvWorkerServer (adapter for IsaacServerManager)")
+        resource_pool_spec = {
+            train_rollout_pool_id: [train_rollout_gpu_num] * num_nodes_actor_rollout,
+            "env_gpu_pool": [1],  # Single EnvWorkerServer
+        }
+    else:
+        # Standard mode: need EnvWorkers on each sim node
+        resource_pool_spec = {
+            train_rollout_pool_id: [train_rollout_gpu_num] * num_nodes_actor_rollout,
+            "env_gpu_pool": [env_gpu_num] * num_nodes_sim,
+        }
     mapping = {
         Role.ActorRollout: train_rollout_pool_id,
         # Role.Critic: global_pool_id,
@@ -152,6 +185,27 @@ def main_task(config):
     train_dataset = datasets.load_dataset("parquet", data_files=config.data.train_files)["train"]
     val_dataset = datasets.load_dataset("parquet", data_files=config.data.val_files)["train"]
 
+    # Create task-balanced sampler for ray actor mode
+    # Needed to avoid exceeding per-task env capacity
+    train_sampler = None
+    if isaac_server_mode:
+        from verl.experimental.vla.workers.env import create_task_balanced_sampler
+
+        # Pass env config to sampler for task balancing
+        # For multi-stage mode, pass stage_num
+        stage_num = config.env.rollout.pipeline_stage_num
+
+        sampler_config = OmegaConf.create(
+            {
+                **OmegaConf.to_container(config.data),
+                "server_group_size": config.env.train.get("group_size", 16),  # group_size = envs per task
+                "num_envs": config.env.train.num_envs,
+                "stage_num": stage_num,
+            }
+        )
+        train_sampler = create_task_balanced_sampler(sampler_config, train_dataset)
+        logger.info("Using TaskBalancedSampler for ray actor mode")
+
     trainer = RobRayPPOTrainer(
         config=config,
         tokenizer=tokenizer,
@@ -162,6 +216,7 @@ def main_task(config):
         val_reward_fn=val_reward_fn,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        train_sampler=train_sampler,
     )
     trainer.init_workers()
     trainer.fit()

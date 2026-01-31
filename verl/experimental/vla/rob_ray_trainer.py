@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import asyncio
+import logging
 import uuid
 from collections import defaultdict
 from pprint import pprint
@@ -46,6 +47,8 @@ from verl.trainer.ppo.utils import Role
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
+
+logger = logging.getLogger(__name__)
 
 
 def compute_response_mask(data: DataProto) -> torch.Tensor:
@@ -129,6 +132,14 @@ class RobRayPPOTrainer(RayPPOTrainer):
             # pin EnvWorker to Simulator GPU nodes
             self.resource_pool_manager.get_resource_pool(Role.Env).accelerator_type = "sim"
             self.resource_pool_manager.get_resource_pool(Role.ActorRollout).accelerator_type = "train_rollout"
+
+            # In Isaac server mode, EnvWorkerServer is just a coordinator - no GPU needed
+            # IsaacServers will request their own GPUs independently
+            isaac_server_mode = self.config.env.train.get("isaac_server_mode", False)
+            if isaac_server_mode:
+                env_pool = self.resource_pool_manager.get_resource_pool(Role.Env)
+                env_pool.use_gpu = False
+                logger.info("Ray actor mode: EnvWorkerServer will not request GPU (coordinator only)")
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
         resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)

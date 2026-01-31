@@ -49,11 +49,16 @@ class EnvLoop:
         self.num_envs_per_worker = config.env.train.num_envs
         self.action_dim = config.env.actor.model.action_dim
         self.num_action_chunks = config.env.actor.model.num_action_chunks
+        self.isaac_server_mode = config.env.train.get("isaac_server_mode", False)
         # Derived properties
-        self.total_envs = self.env_wg.world_size * self.num_envs_per_worker
-        if self.total_envs % self.stage_num != 0:
-            raise ValueError(f"Total envs ({self.total_envs}) must be divisible by stage_num ({self.stage_num})")
-        self.envs_per_stage = self.total_envs // self.stage_num
+        # In server/ray mode, total_trajs is configured explicitly
+        # In local mode, it's computed from world_size * num_envs_per_worker
+        # Backward compatible: support both total_trajs (new) and total_envs (legacy)
+        default_total = self.env_wg.world_size * self.num_envs_per_worker
+        self.total_trajs = config.env.train.get("total_trajs", config.env.train.get("total_envs", default_total))
+        if self.total_trajs % self.stage_num != 0:
+            raise ValueError(f"total_trajs ({self.total_trajs}) must be divisible by stage_num ({self.stage_num})")
+        self.trajs_per_stage = self.total_trajs // self.stage_num
 
         self.env_wg.init_worker()
         self.env_wg.init_simulator()
@@ -97,7 +102,17 @@ class EnvLoop:
         # --- Pipeline state ---
         trajectories = {i: [] for i in range(self.stage_num)}  # To store (obs, action, rew, done) tuples
         rollout_futures = {}
-        # is_complete = torch.zeros((self.total_envs,), dtype=torch.bool)
+        # is_complete = torch.zeros((self.total_trajs,), dtype=torch.bool)
+
+        # Extract traj_keys for each stage (important for action-env mapping)
+        # Each traj_key maps a rollout traj to exactly one sim env
+        staged_traj_keys = {}
+        for stage_id in range(self.stage_num):
+            stage_data = staged_obs[stage_id]
+            if "traj_keys" in stage_data.non_tensor_batch:
+                staged_traj_keys[stage_id] = stage_data.non_tensor_batch["traj_keys"]
+            else:
+                staged_traj_keys[stage_id] = None
 
         for stage_id in range(self.stage_num):
             # trajectories[stage_id].append({'obs': staged_obs[stage_id]})
@@ -111,9 +126,19 @@ class EnvLoop:
                 action_result: DataProto = await asyncio.to_thread(rollout_futures[stage_id].get)
 
                 trajectories[stage_id][-1]["action"] = action_result
+
+                # Include traj_keys to ensure action-env mapping (1:1 traj-env correspondence)
+                non_tensors = {"actions": action_result.batch["action"].cpu().numpy()}
+                if staged_traj_keys[stage_id] is not None:
+                    non_tensors["traj_keys"] = staged_traj_keys[stage_id]
+
                 action_data = DataProto.from_dict(
-                    non_tensors={"actions": action_result.batch["action"].cpu().numpy()},
-                    meta_info={"stage_id": stage_id},
+                    non_tensors=non_tensors,
+                    meta_info={
+                        "stage_id": stage_id,
+                        "step_idx": step_idx,
+                        "max_steps": self.max_interactions,
+                    },
                 )
 
                 env_ref = self.env_wg.env_interact_step(action_data)
@@ -139,21 +164,33 @@ class EnvLoop:
         return self._collate_trajectories(trajectories, initial_state_ids, meta_info=prompts.meta_info)
 
     def _restructure_obs_data(self, data_proto: DataProto) -> list[DataProto]:
-        """Reshapes flat observation data from env_wg into a list of per-stage DataProto objects."""
-        # env_wg returns a flat batch ordered by [worker0_stage0, worker0_stage1, ...,
-        # worker1_stage0, worker1_stage1, ...]
-        # First, un-flatten by worker, then by stage
+        """Reshapes flat observation data from env_wg into a list of per-stage DataProto objects.
 
-        num_workers = self.env_wg.world_size
+        Reset returns data in interleaved format:
+            traj_0 (stage_0), traj_1 (stage_1), traj_2 (stage_0), traj_3 (stage_1), ...
 
+        In isaac_server_mode: each traj maps to exactly one env (1:1), so we chunk by total_trajs.
+        In local mode: each trajectory has num_envs_per_worker environments.
+        """
+        if self.isaac_server_mode:
+            # Isaac server mode: traj and env are 1:1, chunk by total_trajs
+            trajectory_chunks = data_proto.chunk(self.total_trajs)
+        else:
+            # Local mode: each trajectory has num_envs_per_worker envs
+            assert self.total_trajs % self.num_envs_per_worker == 0, (
+                f"total_trajs ({self.total_trajs}) must be divisible by "
+                f"num_envs_per_worker ({self.num_envs_per_worker})"
+            )
+            num_trajectories = self.total_trajs // self.num_envs_per_worker
+            trajectory_chunks = data_proto.chunk(num_trajectories)
+
+        # Group by stage (trajectories are assigned round-robin to stages)
         staged_data = [[] for _ in range(self.stage_num)]
-        chunks = data_proto.chunk(num_workers)
-        for worker_chunk in chunks:
-            stage_chunks = worker_chunk.chunk(self.stage_num)
-            for stage_id, data in enumerate(stage_chunks):
-                staged_data[stage_id].append(data)
+        for traj_idx, traj_data in enumerate(trajectory_chunks):
+            stage_id = traj_idx % self.stage_num
+            staged_data[stage_id].append(traj_data)
 
-        # Concatenate data from all workers for each stage
+        # Concatenate trajectories for each stage
         return [DataProto.concat(data_list) for data_list in staged_data]
 
     def _collate_trajectories(self, trajectories: dict, initial_state_ids: np.ndarray, meta_info) -> DataProto:

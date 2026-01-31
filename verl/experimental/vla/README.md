@@ -62,6 +62,24 @@ python -c "import ray; ray.init(address=\"<main_node_ip>:6379\"); print(ray._pri
 *If you see output pattern like "'train_rollout': 0.9992" and "'sim': 0.9992", the sim workers are scheduled up successfully*
 *The actual value depends on your GPUs per node, usually <1 - 1e-4 * num_gpus>*
 
+## Isaac Server Mode
+
+Isaac Server Mode runs Isaac Lab simulations as Ray Actors, enabling unified resource management and multi-task support. See `run_simpleVLA_isaac_disagg_server.sh` for example.
+
+Key configuration:
+```bash
+env.train.isaac_server_mode=True
+env.train.num_isaac_servers=$NUM_ISAAC_SERVERS    # Number of Isaac servers (one per GPU)
+env.train.num_tasks=$NUM_TASKS                    # Number of tasks in benchmark
+env.train.group_size=$GROUP_SIZE                  # Environments per task
+```
+
+Important constraints:
+- `BATCH_SIZE` must be divisible by `STAGE_NUM`
+- `NUM_TASKS × GROUP_SIZE = NUM_ROLLOUT_GPUS_PER_NODE × STAGE_NUM × ROLLOUT_N`
+
+*Note: If you see noisy renders, set `ISAAC_FLUSH_SHADER_CACHE=1` to flush NVIDIA shader cache (see script for details).*
+
 **References:**
 *   [https://github.com/PRIME-RL/SimpleVLA-RL](https://github.com/PRIME-RL/SimpleVLA-RL)
 *   [https://github.com/RLinf/RLinf](https://github.com/RLinf/RLinf)
