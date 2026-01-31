@@ -114,10 +114,17 @@ def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> Ten
         if key not in tensor_dict1.keys():
             tensor_dict1[key] = tensor_dict2[key]
         else:
-            assert tensor_dict1[key].equal(tensor_dict2[key]), (
-                f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
-            )
-
+            if key in ["input_ids", "attention_mask", "position_ids"]:
+                assert tensor_dict1[key].shape[:-1] == tensor_dict2[key].shape[:-1], (
+                    f"{key} batch dim mismatch. Got {tensor_dict1[key].shape[:-1]} and {tensor_dict2[key].shape[:-1]}"
+                )
+                # input_ids=prompt+responses
+                if tensor_dict2[key].shape[-1] > tensor_dict1[key].shape[-1]:
+                    tensor_dict1[key] = tensor_dict2[key]
+            else:
+                assert tensor_dict1[key].equal(tensor_dict2[key]), (
+                    f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
+                )
     return tensor_dict1
 
 
