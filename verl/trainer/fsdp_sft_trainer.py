@@ -222,7 +222,9 @@ class FSDPSFTTrainer:
         torch_dtype = self.config.model.fsdp_config.get("model_dtype", "fp32")
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
         # load config first
-        config = AutoConfig.from_pretrained(local_model_path, trust_remote_code=trust_remote_code)
+        config = AutoConfig.from_pretrained(
+            local_model_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2"
+        )
         self.model_config = config
         if hasattr(self.model_config, "max_position_embeddings"):
             self.model_config.max_position_embeddings = max(
@@ -233,17 +235,22 @@ class FSDPSFTTrainer:
 
         # This may be very large
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not config.tie_word_embeddings,
+            mesh=None if self.config.model.strategy == "fsdp2" else self.device_mesh,
         )
 
         with init_context():
-            self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
-                local_model_path,
-                config=config,
-                torch_dtype=torch_dtype,
-                attn_implementation="flash_attention_2",
-                trust_remote_code=trust_remote_code,
-            )
+            if self.config.model.strategy == "fsdp2" and torch.distributed.get_rank() > 0:
+                self.model: PreTrainedModel = AutoModelForCausalLM.from_config(
+                    config, trust_remote_code=trust_remote_code
+                )
+            else:
+                self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+                    local_model_path,
+                    config=config,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=trust_remote_code,
+                )
 
             if self.use_remove_padding or self.config.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -255,6 +262,8 @@ class FSDPSFTTrainer:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
                 _apply_liger_kernel_to_instance(model=self.model)
+
+            self.model = self.model.to(torch_dtype)
 
             if self.lora:
                 self.model.enable_input_require_grads()
@@ -334,7 +343,7 @@ class FSDPSFTTrainer:
                 "offload_policy": cpu_offload,
                 "reshard_after_forward": True,
             }
-            full_state = self.model.state_dict()
+            full_state = self.model.state_dict() if torch.distributed.get_rank() == 0 else {}
             apply_fsdp2(self.model, fsdp_kwargs, self.config.model.fsdp_config)
             fsdp2_load_full_state_dict(self.model, full_state, self.device_mesh, cpu_offload)
             self.fsdp_model = self.model

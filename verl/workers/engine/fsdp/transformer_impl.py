@@ -204,7 +204,8 @@ class FSDPEngine(BaseEngine):
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings,
+            mesh=None if self.engine_config.strategy == "fsdp2" else self.device_mesh,
         )
 
         with init_context(), warnings.catch_warnings():
@@ -212,12 +213,17 @@ class FSDPEngine(BaseEngine):
 
             auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
 
-            module = auto_class.from_pretrained(
-                pretrained_model_name_or_path=self.model_config.local_path,
-                torch_dtype=torch_dtype,
-                config=self.model_config.hf_config,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            if self.engine_config.strategy == "fsdp2" and self.rank > 0:
+                module = auto_class.from_config(
+                    self.model_config.hf_config, trust_remote_code=self.model_config.trust_remote_code
+                )
+            else:
+                module = auto_class.from_pretrained(
+                    pretrained_model_name_or_path=self.model_config.local_path,
+                    torch_dtype=torch_dtype,
+                    config=self.model_config.hf_config,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
 
             use_liger = self.model_config.use_liger
             # Apply Liger kernel to the model if use_liger is set to True
@@ -354,7 +360,7 @@ class FSDPEngine(BaseEngine):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            full_state = module.state_dict()
+            full_state = module.state_dict() if self.rank == 0 else {}
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
