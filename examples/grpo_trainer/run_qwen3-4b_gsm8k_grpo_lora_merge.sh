@@ -2,8 +2,6 @@ set -x
 
 # initial "val-core/openai/gsm8k/acc/mean@1":0.378316906747536
 # after training: "val-core/openai/gsm8k/acc/mean@1":0.9264594389689158
-# when removing +actor_rollout_ref.model.lora.merge=True
-# after training: "val-core/openai/gsm8k/acc/mean@1":0.9264594389689158
 
 TIMESTAMP=$(date +%Y%m%d.%H%M%S)
 project_name=verl_grpo_example_gsm8k
@@ -18,8 +16,8 @@ max_token_len_per_gpu=24576
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     trainer.val_before_train=True \
-    data.train_files=$HOME/data/gsm8k/train-v1.parquet \
-    data.val_files=$HOME/data/gsm8k/test-v1.parquet \
+    data.train_files=$HOME/data/gsm8k/train.parquet \
+    data.val_files=$HOME/data/gsm8k/test.parquet \
     data.train_batch_size=128 \
     data.max_prompt_length=1024 \
     data.max_response_length=1024 \
