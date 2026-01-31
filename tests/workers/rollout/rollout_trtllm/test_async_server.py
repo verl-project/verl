@@ -50,12 +50,13 @@ class TestTRTLLMReplica:
             mock_pg = MagicMock()
             mock_pg.bundle_count = 8
 
-            mock_resource_pool = MagicMock(spec=SubRayResourcePool)
-            mock_resource_pool.pgs = [mock_pg]
-            mock_resource_pool.subgroup_world_size = 4
-            mock_resource_pool.start_bundle_index = 4
+            resource_pool = SubRayResourcePool(
+                placement_groups=[mock_pg],
+                start_bundle_index=4,
+                subgroup_world_size=4,
+            )
 
-            replica.resource_pool = mock_resource_pool
+            replica.resource_pool = resource_pool
             replica.world_size = 4  # TP=4
 
             pgs, bundle_indices = replica.get_pgs_and_bundle_indices()
@@ -87,10 +88,15 @@ class TestTRTLLMReplica:
             mock_pg = MagicMock()
             mock_pg.bundle_count = 8
 
-            mock_resource_pool = MagicMock()
-            mock_resource_pool.pgs = [mock_pg]
+            resource_pool = RayResourcePool(
+                process_on_nodes=[8],
+                use_gpu=True,
+                max_colocate_count=1,
+                name_prefix="test_rollout",
+            )
+            resource_pool.pgs = [mock_pg]
 
-            replica.resource_pool = mock_resource_pool
+            replica.resource_pool = resource_pool
             replica.world_size = 2  # TP=2
 
             pgs, bundle_indices = replica.get_pgs_and_bundle_indices()
@@ -102,63 +108,122 @@ class TestTRTLLMReplica:
 
 
 class TestTRTLLMHttpServer:
-    def test_async_memory_management(self):
-        """Test TRT-LLM async memory management (sleep) reduces memory usage."""
+    @staticmethod
+    def _build_rollout_config(*, response_length: int | None = None, free_cache_engine: bool = False):
         from hydra import compose, initialize_config_dir
 
+        config_dir = os.path.abspath("verl/verl/trainer/config")
+        if not os.path.exists(config_dir):
+            config_dir = os.path.abspath("verl/trainer/config")
+
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            config = compose(config_name="ppo_trainer")
+
+        config.trainer.n_gpus_per_node = 1
+        config.trainer.nnodes = 1
+        model_root = os.path.expanduser(os.getenv("TRTLLM_TEST_MODEL_PATH_ROOT", "~/models"))
+        config.actor_rollout_ref.model.path = os.path.join(model_root, "Qwen/Qwen2.5-0.5B-Instruct")
+        config.actor_rollout_ref.rollout.name = "trtllm"
+        config.actor_rollout_ref.rollout.mode = "async"
+        config.actor_rollout_ref.rollout.tensor_model_parallel_size = 1
+        if response_length is not None:
+            config.actor_rollout_ref.rollout.response_length = response_length
+        if free_cache_engine:
+            config.actor_rollout_ref.rollout.free_cache_engine = True
+
+        return config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
+
+    @staticmethod
+    def _create_server(rollout_config, model_config, *, name: str):
+        resource_pool = RayResourcePool(
+            process_on_nodes=[1],
+            use_gpu=True,
+            max_colocate_count=1,
+            name_prefix="test_rollout",
+        )
+        pgs = resource_pool.get_placement_groups()
+        bundle_indices = [[0]]
+
+        pg_data = placement_group_table(pgs[0])
+        node_id = pg_data["bundles_to_node_id"][bundle_indices[0][0]]
+
+        return TRTLLMHttpServer.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=node_id,
+                soft=False,
+            ),
+            runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
+            name=name,
+        ).remote(
+            config=rollout_config,
+            model_config=model_config,
+            is_reward_model=False,
+            rollout_mode=RolloutMode.COLOCATED,
+            workers=[],
+            replica_rank=0,
+            max_colocate_count=1,
+            pgs=pgs,
+            bundle_indices=bundle_indices,
+        )
+
+    def test_async_generate(self):
+        """Test TRT-LLM generate method with real model."""
         try:
             os.environ.setdefault("TLLM_RAY_FORCE_LOCAL_CLUSTER", "1")
             ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
 
-            config_dir = os.path.abspath("verl/verl/trainer/config")
-            if not os.path.exists(config_dir):
-                config_dir = os.path.abspath("verl/trainer/config")
+            rollout_config, model_config = self._build_rollout_config(response_length=50)
 
-            with initialize_config_dir(config_dir=config_dir, version_base=None):
-                config = compose(config_name="ppo_trainer")
-
-            config.trainer.n_gpus_per_node = 1
-            config.trainer.nnodes = 1
-            config.actor_rollout_ref.model.path = os.path.expanduser(
-                "/lustre/fsw/coreai_dlalgo_llm/erinh/llm-models/Qwen2.5-1.5B-Instruct"
+            server = self._create_server(
+                rollout_config,
+                model_config,
+                name="trtllm_server_test_generate",
             )
-            config.actor_rollout_ref.rollout.name = "trtllm"
-            config.actor_rollout_ref.rollout.mode = "async"
-            config.actor_rollout_ref.rollout.tensor_model_parallel_size = 1
-            config.actor_rollout_ref.rollout.free_cache_engine = True  # Enable memory management
 
-            rollout_config = config.actor_rollout_ref.rollout
-            model_config = config.actor_rollout_ref.model
+            ray.get(server.launch_server.remote())
 
-            resource_pool = RayResourcePool(
-                process_on_nodes=[1],
-                use_gpu=True,
-                max_colocate_count=1,
-                name_prefix="test_rollout",
-            )
-            pgs = resource_pool.get_placement_groups()
-            bundle_indices = [[0]]
+            # Test generate with a simple prompt
+            prompt_ids = [1, 2, 3, 4, 5]  # Simple test prompt
+            sampling_params = {
+                "temperature": 1.0,
+                "top_k": 0,
+                "logprobs": 1,
+            }
+            request_id = "test_request_1"
 
-            pg_data = placement_group_table(pgs[0])
-            node_id = pg_data["bundles_to_node_id"][bundle_indices[0][0]]
+            result = ray.get(server.generate.remote(prompt_ids, sampling_params, request_id))
 
-            server = TRTLLMHttpServer.options(
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=node_id,
-                    soft=False,
-                ),
-                runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
+            print(f"Result: {result}")
+            # Verify the result structure
+            assert hasattr(result, "token_ids"), "Result should have token_ids attribute"
+            assert hasattr(result, "log_probs"), "Result should have log_probs attribute"
+            assert isinstance(result.token_ids, list), "token_ids should be a list"
+            assert len(result.token_ids) > 0, "Generated tokens should not be empty"
+
+            # Verify logprobs are returned when requested
+            assert result.log_probs is not None, "log_probs should not be None when requested"
+            assert len(result.log_probs) == len(result.token_ids), "log_probs length should match token_ids"
+
+            print(f"Generated {len(result.token_ids)} tokens")
+            print(f"Token IDs: {result.token_ids[:10]}...")  # Print first 10 tokens
+            print(f"Log probs: {result.log_probs[:10]}...")  # Print first 10 log probs
+
+        finally:
+            ray.shutdown()
+            subprocess.run(["ray", "stop"], capture_output=True)
+
+    def test_async_memory_management(self):
+        """Test TRT-LLM async memory management (sleep) reduces memory usage."""
+        try:
+            os.environ.setdefault("TLLM_RAY_FORCE_LOCAL_CLUSTER", "1")
+            ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
+
+            rollout_config, model_config = self._build_rollout_config(free_cache_engine=True)
+
+            server = self._create_server(
+                rollout_config,
+                model_config,
                 name="trtllm_server_test_0",
-            ).remote(
-                config=rollout_config,
-                model_config=model_config,
-                is_reward_model=False,
-                rollout_mode=RolloutMode.COLOCATED,
-                workers=[],
-                replica_rank=0,
-                max_colocate_count=1,
-                pgs=pgs,
-                bundle_indices=bundle_indices,
             )
 
             ray.get(server.launch_server.remote())
