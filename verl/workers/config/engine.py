@@ -202,7 +202,6 @@ class VeOmniEngineConfig(EngineConfig):
         pipeline_parallel_size (int): Pipeline parallel size, default 1
         context_parallel_size (int): Ring-attn context parallel size, default 1
         ulysses_parallel_size (int): Ulysses sequence parallel size, default 1
-        data_parallel_mode (str): Data parallel mode, default "fsdp"
         init_device (str): Device to initialize model weights.
             1. `cpu`: Init parameters on CPU in rank0 only.
             2. `cuda`: Init parameters on GPU.
@@ -259,7 +258,6 @@ class VeOmniEngineConfig(EngineConfig):
     pipeline_parallel_size: int = 1
     context_parallel_size: int = 1
     ulysses_parallel_size: int = 1
-    data_parallel_mode: Literal["ddp", "fsdp1", "fsdp2"] = "fsdp"
     seed: int = 42
     full_determinism: bool = False
     mixed_precision: bool = False

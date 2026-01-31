@@ -1,0 +1,68 @@
+# defaults specify the default config from each component
+defaults:
+
+  # dp actor config, inheriting from trainer/config/reward_model/reward_model.yaml
+  - reward_model
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+strategy: veomni
+
+# VeOmni parallelism config
+veomni:
+
+  # Target configuration dataclass
+  _target_: verl.workers.config.VeOmniEngineConfig
+
+  data_parallel_size: 1
+
+  data_parallel_replicate_size: 1
+
+  data_parallel_shard_size: 1
+
+  tensor_parallel_size: 1
+
+  expert_parallel_size: 1
+
+  pipeline_parallel_size: 1
+
+  context_parallel_size: 1
+
+  ulysses_parallel_size: 1
+
+  mixed_precision: true
+
+  # Random seed for reproducibility.
+  seed: 42
+
+  # Whether to enable full determinism for distributed training, only for debugging.
+  full_determinism: false
+
+  init_device: meta
+
+  enable_full_shard: true
+
+  ckpt_manager: dcp
+
+  # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
+  # before the current forward computation.
+  forward_prefetch: true
+
+  # Whether to use torch compile in fsdp.
+  use_torch_compile: false
+
+  # Whether to use forward only in fsdp.
+  forward_only: false
+
+  enable_fsdp_offload: false
+
+  enable_reentrant: false
+
+  attn_implementation: flash_attention_2
+
+  moe_implementation: eager
+
+  force_use_huggingface: false
+
+  activation_gpu_limit: 0.0

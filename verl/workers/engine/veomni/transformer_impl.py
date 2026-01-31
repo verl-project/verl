@@ -75,8 +75,8 @@ class VeOmniEngine(FSDPEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
-        assert self.engine_config.data_parallel_mode == "fsdp2", "VeOmniEngine only supports fsdp2."
-
+        # VeOmniEngine only supports fsdp2.
+        self.data_parallel_mode = "fsdp2"
         self.rank = dist.get_rank()
 
         parallel_state.init_parallel_state(
@@ -88,7 +88,7 @@ class VeOmniEngine(FSDPEngine):
             pp_size=self.engine_config.pipeline_parallel_size,
             cp_size=self.engine_config.context_parallel_size,
             ulysses_size=self.engine_config.ulysses_parallel_size,
-            dp_mode=self.engine_config.data_parallel_mode,
+            dp_mode=self.data_parallel_mode,
         )
 
         if self.engine_config.full_determinism:
@@ -155,7 +155,7 @@ class VeOmniEngine(FSDPEngine):
         )
         get_optimizer_pre_hook = getattr(module, "get_optimizer_pre_hook", None)
         if get_optimizer_pre_hook is not None:
-            optimizer_pre_hook = get_optimizer_pre_hook(module, module.config, self.engine_config.data_parallel_mode)
+            optimizer_pre_hook = get_optimizer_pre_hook(module, module.config, self.data_parallel_mode)
             optimizer.register_step_pre_hook(optimizer_pre_hook)
 
         return optimizer

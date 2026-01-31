@@ -1,0 +1,27 @@
+# veomni ref config, inheriting from trainer/config/ref/ref.yaml
+defaults:
+  - ref
+
+  # veomni engine config
+  - ../engine@veomni: veomni
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.VeOmniActorConfig
+
+strategy: veomni
+
+veomni:
+  seed: ${oc.select:actor_rollout_ref.actor.veomni.seed,42}
+  data_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.data_parallel_size,1}
+  data_parallel_replicate_size: ${oc.select:actor_rollout_ref.actor.veomni.data_parallel_replicate_size,1}
+  data_parallel_shard_size: ${oc.select:actor_rollout_ref.actor.veomni.data_parallel_shard_size,1}
+  tensor_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.tensor_parallel_size,1}
+  expert_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.expert_parallel_size,1}
+  pipeline_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.pipeline_parallel_size,1}
+  context_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.context_parallel_size,1}
+  ulysses_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.ulysses_parallel_size,1}
+  param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,False}
+  forward_only: True
+
