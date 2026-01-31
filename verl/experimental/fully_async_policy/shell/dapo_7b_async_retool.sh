@@ -132,7 +132,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes=$NNODES \
     rollout.n_gpus_per_node=$n_gpus_rollout \
     rollout.total_rollout_steps=$total_rollout_steps \
-    rollout.total_epochs=10 \
+    trainer.total_epochs=10 \
     rollout.test_freq=$test_freq \
     async_training.staleness_threshold=$staleness_threshold \
     async_training.trigger_parameter_sync_step=$trigger_parameter_sync_step \
