@@ -133,6 +133,7 @@ def compute_advantage(
     gamma: float = 1.0,
     lam: float = 1.0,
     num_repeat: int = 1,
+    multi_turn: bool = False,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
 ) -> DataProto:
@@ -147,9 +148,10 @@ def compute_advantage(
         gamma (float, optional): Discount factor for future rewards. Defaults to 1.0.
         lam (float, optional): Lambda parameter for GAE. Defaults to 1.0.
         num_repeat (int, optional): Number of times to repeat the computation. Defaults to 1.
+        multi_turn (bool, optional): Whether to interpret the batch as multi-turn conversations. Defaults to False.
         norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in
             GRPO. Defaults to True.
-        config (dict, optional): Configuration dictionary for algorithm settings. Defaults to None.
+        config (dict | AlgoConfig, optional): Configuration structure for algorithm settings. Defaults to None.
 
     Returns:
         DataProto: The updated data with computed advantages and returns.
@@ -169,15 +171,27 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
-        if config.get("use_pf_ppo", False):
-            data = core_algos.compute_pf_ppo_reweight_data(
-                data,
-                config.pf_ppo.get("reweight_method"),
-                config.pf_ppo.get("weight_pow"),
-            )
+        use_pf_ppo = False
+        reweight_method = "pow"
+        weight_pow = 2.0
+        if config is not None:
+            use_pf_ppo = getattr(config, "use_pf_ppo", False)
+            if use_pf_ppo:
+                pf_cfg = getattr(config, "pf_ppo", None)
+                if pf_cfg is None and hasattr(config, "get"):
+                    pf_cfg = config.get("pf_ppo", None)
+                if pf_cfg is not None:
+                    reweight_method = pf_cfg.get("reweight_method", reweight_method)
+                    weight_pow = pf_cfg.get("weight_pow", weight_pow)
+        if use_pf_ppo:
+            data = core_algos.compute_pf_ppo_reweight_data(data, reweight_method, weight_pow)
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = grpo_calculation_mask.size(1)
+            grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]
+        token_level_advantages = data.batch.get("token_level_advantages")
 
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
@@ -185,7 +199,10 @@ def compute_advantage(
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            token_level_advantages=token_level_advantages,
         )
+        if "token_level_advantages" in data.batch:
+            data.batch.pop("token_level_advantages")
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     else:
@@ -1583,12 +1600,20 @@ class RayPPOTrainer:
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
 
+                        rollout_multi_turn_cfg = getattr(self.config.actor_rollout_ref.rollout, "multi_turn", None)
+                        rollout_multi_turn_enabled = (
+                            getattr(rollout_multi_turn_cfg, "enable", False)
+                            if rollout_multi_turn_cfg is not None
+                            else False
+                        )
+
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
+                            multi_turn=rollout_multi_turn_enabled,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
