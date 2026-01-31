@@ -17,9 +17,9 @@ import torch
 from verl.workers.config import DistillationConfig
 from typing import Tuple
 
-def vocab_parallel_softmax(
+def vocab_parallel_log_softmax(
     vp_logits: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
     1. Converts logits to float (in calculate_logits_max)
     2. Finds max logit across all partitions
@@ -44,7 +44,8 @@ def vocab_parallel_softmax(
         op=torch.distributed.ReduceOp.SUM,
         group=get_tensor_model_parallel_group(),
     )
-    return exp_logits, sum_exp_logits
+    log_sum_exp_logits = sum_exp_logits.log()
+    return vp_logits - log_sum_exp_logits.unsqueeze(dim=-1)
 
 
 def compute_topk_log_probs(logits: torch.Tensor, config: DistillationConfig, eps: float = 1e-20) -> dict[str, torch.Tensor]:
@@ -56,11 +57,8 @@ def compute_topk_log_probs(logits: torch.Tensor, config: DistillationConfig, eps
     )
     from megatron.core.tensor_parallel.utils import VocabUtility
 
-
-
     # Compute log probs
-    exp_logits, sum_exp_logits = vocab_parallel_softmax(logits)
-    log_probs = exp_logits.clamp_min(eps).log() - sum_exp_logits.unsqueeze(dim=-1).clamp_min(eps).log()
+    log_probs = vocab_parallel_log_softmax(logits)
 
     # Get the partition's vocab indices
     rank = get_tensor_model_parallel_rank()

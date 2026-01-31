@@ -16,7 +16,7 @@
 import torch
 from typing import Optional
 from verl.workers.config import DistillationConfig
-from verl.trainer.distillation.megatron.utils import vocab_parallel_softmax
+from verl.trainer.distillation.megatron.utils import vocab_parallel_log_softmax
 
 class _VocabParallelKLDivergence(torch.autograd.Function):
     """
@@ -47,7 +47,8 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
 
 
         # Compute softmax over vocab-parallel logits
-        exp_logits, sum_exp_logits = vocab_parallel_softmax(vp_logits)
+        vp_source_logps = vocab_parallel_log_softmax(vp_logits).float()
+        vp_source_probs = torch.exp(vp_source_logps)
 
         # Find the vocab range owned by this partition
         rank = get_tensor_model_parallel_rank()
@@ -74,31 +75,18 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         # the mass of the provided top-k distribution (global), independent of TP sharding.
         if log_prob_min_clamp is not None:
             target_topk_logps = target_topk_logps.clamp_min(log_prob_min_clamp)
+        target_topk_logps = target_topk_logps.float()
         target_topk_probs = torch.exp(target_topk_logps)
         target_topk_mass = torch.sum(target_topk_probs, dim=-1)
         target_topk_probs[~topk_indices_in_vocab_mask] = 0
         target_topk_logps[~topk_indices_in_vocab_mask] = 0
 
-        # Compute source probabilities p = softmax(vp_logits) on this shard
-        target_topk_logps_origin_shape = target_topk_indices.shape
+        # Gather source log probabilities at the target top-k indices (local indices)
         topk = target_topk_indices.size(-1)
-        vp_source_probs = exp_logits
-        vp_source_probs = vp_source_probs.div(sum_exp_logits.unsqueeze(-1))
-        vp_source_probs_2d = vp_source_probs.view(-1, partition_vocab_size)  # (b*s, vocab_shard)
-
-        # Gather source probabilities at the target top-k indices (local indices)
-        arange_1d = torch.arange(
-            start=0, end=vp_source_probs_2d.size(0), device=vp_source_probs_2d.device
-        )  # (b*s,)
-        vp_source_topk_probs_2d = vp_source_probs_2d[
-            arange_1d.unsqueeze(-1), target_topk_indices.view(-1, topk)
-        ]  # (b*s, topk)
-        vp_source_topk_probs = vp_source_topk_probs_2d.view(
-            target_topk_logps_origin_shape
-        )  # (b, s, topk)
-
-        # Source log probabilities (student)
-        vp_source_topk_logps = torch.log(1e-20 + vp_source_topk_probs)
+        vp_source_logps_2d = vp_source_logps.view(-1, partition_vocab_size)  # (b*s, vocab_shard)
+        arange_1d = torch.arange(start=0, end=vp_source_logps_2d.size(0), device=vp_source_logps_2d.device)  # (b*s,)
+        vp_source_topk_logps_2d = vp_source_logps_2d[arange_1d.unsqueeze(-1), target_topk_indices.view(-1, topk)]  # (b*s, topk)
+        vp_source_topk_logps = vp_source_topk_logps_2d.view(target_topk_indices.shape)  # (b, s, topk)
 
         # `active_mask` tracks entries that should receive gradient.
         # If clamping is enabled, entries with log p_i <= clamp have zero gradient w.r.t. logits.
@@ -139,8 +127,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         )
 
         # For logging: mass of student probs that lands on the teacher's top-k indices.
-        vp_source_topk_probs = vp_source_topk_probs.detach()
-        vp_source_topk_probs[~topk_indices_in_vocab_mask] = 0
+        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
         per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
         torch.distributed.all_reduce(
             per_token_topk_mass,
