@@ -158,10 +158,73 @@ def _chunked_token_logprobs_from_hidden(
     return lp
 
 
-def infer_log_probs_batch(model: AutoModelForCausalLM, sequences, dtype, device: str, time_chunk: int = 256):
+@torch.no_grad()
+def _infer_log_probs_mamba_no_padding(model: AutoModelForCausalLM, sequences, device: str):
+    """
+    Mamba/RWKV style models often dislike padding/attention masks. Score each sequence
+    individually without padding to avoid masked-state bugs.
+    Returns padded logprobs tensor and sequence lengths.
+    """
+    lp_rows = []
+    lens = []
+    max_len = 0
+
+    for seq in sequences:
+        L = len(seq)
+        lens.append(L)
+        if L <= 1:
+            lp_rows.append(torch.empty((0,), dtype=torch.float32))
+            continue
+
+        inp = torch.tensor(seq, dtype=torch.long, device=device).unsqueeze(0)
+        out = model(
+            input_ids=inp,
+            use_cache=False,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        logits = out.logits  # [1, L, V]
+        logprobs = F.log_softmax(logits, dim=-1)
+        tgt = inp[:, 1:]
+        lp_seq = (
+            logprobs[:, :-1]
+            .gather(-1, tgt.unsqueeze(-1))
+            .squeeze(-1)
+            .reshape(-1)  # flatten to 1D [L-1]
+            .detach()
+            .cpu()
+        )
+
+        lp_rows.append(lp_seq)
+        max_len = max(max_len, lp_seq.numel())
+
+        del out, logits, logprobs, inp
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # pad to rectangular tensor with NaNs
+    padded = torch.full((len(lp_rows), max_len), float("nan"), dtype=torch.float32)
+    for i, row in enumerate(lp_rows):
+        if row.numel() > 0:
+            padded[i, : row.size(0)] = row
+    return padded, lens
+
+
+def infer_log_probs_batch(
+    model: AutoModelForCausalLM,
+    sequences,
+    dtype,
+    device: str,
+    time_chunk: int = 256,
+    is_mamba_like: bool = False,
+):
     """
     Run base forward on single GPU, offload [B,L,H] to CPU, then do chunked head on the head device.
     """
+    if is_mamba_like:
+        return _infer_log_probs_mamba_no_padding(model, sequences, device)
+
     lens = [len(s) for s in sequences]
     Lm = max(lens) if lens else 0
     pad_id = model.config.pad_token_id if model.config.pad_token_id is not None else (model.config.eos_token_id or 0)
@@ -766,6 +829,15 @@ def build_hf_model(model_name, device, dtype=torch.bfloat16, attention_impl="fla
 
 def to_list_ids(x):
     # Normalize to python list[int]
+    # HF 5.0 may return dict/BatchEncoding with "input_ids" instead of a bare list.
+    if isinstance(x, dict):
+        if "input_ids" in x:
+            return to_list_ids(x["input_ids"])
+        if len(x) == 1:
+            # Fallback: single-field dict, unwrap the lone value.
+            return to_list_ids(next(iter(x.values())))
+    if hasattr(x, "input_ids"):
+        return to_list_ids(x.input_ids)
     if hasattr(x, "tolist"):
         return x.tolist()
     if isinstance(x, tuple | list):
@@ -781,6 +853,7 @@ def build_inputs(tokenizer, dataset, num_prompts, n):
     user_texts = None
     ids_list = None
 
+    print("use_chat: ", use_chat)
     if use_chat:
         user_texts = [f"{row['problem']}\n\n{SUFFIX}" for row in dataset]
 
@@ -842,8 +915,15 @@ def main():
     ap.add_argument("--vllm-gpu-util", type=float, default=0.65, help="gpu util arg for vllm engine allocation")
     ap.add_argument("--dtype", type=str, default="bfloat16")
     ap.add_argument(
+        "--is-mamba-like",
+        action="store_true",
+        default=False,
+        help="Treat the model as Mamba/RWKV (disable padding during prefill/scoring).",
+    )
+    ap.add_argument(
         "--profile-trace",
-        action="store_false",
+        action="store_true",
+        default=False,
         help="Enable torch.profiler tracing; trace saved alongside other outputs.",
     )
     ap.add_argument(
@@ -1066,7 +1146,12 @@ def main():
             seq_batch = [sequences[i] for i in batch_idx]
 
             lp_batch, lens_batch = infer_log_probs_batch(
-                hf_model, sequences=seq_batch, device=device, dtype=dtype, time_chunk=args.time_chunk_size
+                hf_model,
+                sequences=seq_batch,
+                device=device,
+                dtype=dtype,
+                time_chunk=args.time_chunk_size,
+                is_mamba_like=args.is_mamba_like,
             )
             for j, (i_orig, L) in enumerate(zip(batch_idx, lens_batch, strict=False)):
                 prefill_rows[i_orig] = lp_batch[j, : L - 1].detach().cpu()
