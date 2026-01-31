@@ -18,7 +18,7 @@ from verl.workers.config import DistillationConfig
 from typing import Tuple
 
 def vocab_parallel_softmax(
-    vocab_parallel_logits: torch.Tensor,
+    vp_logits: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     1. Converts logits to float (in calculate_logits_max)
@@ -31,13 +31,12 @@ def vocab_parallel_softmax(
     from megatron.core.parallel_state import get_tensor_model_parallel_group
 
     # seq_len, batch_size, top_k = target_topk_logps.size()
-    vocab_parallel_logits, logits_max = calculate_logits_max(vocab_parallel_logits)
+    vp_logits, logits_max = calculate_logits_max(vp_logits)
 
     torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=get_tensor_model_parallel_group())
 
-    vocab_parallel_logits -= logits_max.unsqueeze(dim=-1)
-    vocab_parallel_logits.exp_()
-    exp_logits = vocab_parallel_logits
+    vp_logits = vp_logits - logits_max.unsqueeze(dim=-1)
+    exp_logits = vp_logits.exp()
     sum_exp_logits = exp_logits.sum(dim=-1)
 
     torch.distributed.all_reduce(
