@@ -1056,8 +1056,6 @@ def apply_bypass_mode(
     Note:
         The implementation is copied from szrlee <szrlee@gmail.com>.
     """
-    from omegaconf import open_dict
-
     if "rollout_log_probs" not in batch.batch:
         raise ValueError(
             "bypass_mode=True requires rollout_log_probs in batch. "
@@ -1066,6 +1064,28 @@ def apply_bypass_mode(
 
     # Use rollout log probs as old log probs (zero-cost substitution)
     batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+
+
+def configure_bypass_mode(
+    rollout_corr_config: RolloutCorrectionConfig,
+    policy_loss_config: PolicyLossConfig,
+) -> None:
+    """
+    Setup bypass mode: Use rollout_log_probs as old_log_probs.
+
+    Bypass mode skips expensive actor forward pass for old_log_prob computation
+    by setting old_log_probs = rollout_log_probs (2 policies instead of 3).
+
+    Uses compute_policy_loss_bypass_mode() which supports:
+    - loss_type="ppo_clip" (default): PPO clipped objective (IS handled by ratio)
+    - loss_type="reinforce": REINFORCE with explicit IS weights
+
+    Both loss types benefit from rejection sampling (RS) which masks out-of-distribution samples.
+
+    Note:
+        The implementation is copied from szrlee <szrlee@gmail.com>.
+    """
+    from omegaconf import open_dict
 
     with open_dict(policy_loss_config):
         # Pass rollout_correction config to actor for loss computation and metrics

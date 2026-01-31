@@ -739,6 +739,20 @@ class RayPPOTrainer:
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
+        # Operating Mode Selection:
+        # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
+        # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
+        #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
+        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+            from verl.trainer.ppo.rollout_corr_helper import configure_bypass_mode
+
+            configure_bypass_mode(
+                rollout_corr_config=rollout_corr_config,
+                policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
+            )
+
         # create actor and rollout
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
         if self.hybrid_engine:
