@@ -514,10 +514,23 @@ def apply_vllm_fp8_patches():
 
     logger.info("Applying vllm fp8 patches for blockwise quantization")
     _patch_vllm_qkvparallellinear_workspace_attr()
+    is_vllm_12_or_later = version.parse(vllm.__version__) >= version.parse("0.12.0")
+    if is_vllm_12_or_later:
+        # Cache original methods for wrappers above.
+        global _ORIG_FP8_LINEAR_PROCESS_WEIGHTS_AFTER_LOADING
+        global _ORIG_FP8_MOE_PROCESS_WEIGHTS_AFTER_LOADING
+        from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod, Fp8MoEMethod
+
+        if _ORIG_FP8_LINEAR_PROCESS_WEIGHTS_AFTER_LOADING is None:
+            _ORIG_FP8_LINEAR_PROCESS_WEIGHTS_AFTER_LOADING = Fp8LinearMethod.process_weights_after_loading
+        if _ORIG_FP8_MOE_PROCESS_WEIGHTS_AFTER_LOADING is None:
+            _ORIG_FP8_MOE_PROCESS_WEIGHTS_AFTER_LOADING = Fp8MoEMethod.process_weights_after_loading
     func1_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
     patcher1 = patch(
         func1_path,
-        process_weights_after_loading_for_vllm11
+        process_weights_after_loading_for_vllm12
+        if is_vllm_12_or_later
+        else process_weights_after_loading_for_vllm11
         if version.parse(vllm.__version__) >= version.parse("0.11.0")
         else process_weights_after_loading_for_vllm10,
     )
@@ -525,7 +538,9 @@ def apply_vllm_fp8_patches():
     func2_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
     patcher2 = patch(
         func2_path,
-        process_weights_after_loading_moe_for_vllm11
+        process_weights_after_loading_moe_for_vllm12
+        if is_vllm_12_or_later
+        else process_weights_after_loading_moe_for_vllm11
         if version.parse(vllm.__version__) >= version.parse("0.11.0")
         else process_weights_after_loading_moe_for_vllm10,
     )
