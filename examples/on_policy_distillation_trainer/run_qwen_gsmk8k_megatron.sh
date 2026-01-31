@@ -6,7 +6,7 @@ conda activate verlMega
 export PATH=$CONDA_PREFIX/bin:$PATH
 # export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=6,7
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
 export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
@@ -20,11 +20,12 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
 TEACHER_MODEL=Qwen2.5-3B-Instruct
+# TEACHER_MODEL=Qwen2.5-7B-Instruct
 
 DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="forward_kl_topk"
 
-DISTILLATION_LOSS_MAX_CLAMP=10.0
+# DISTILLATION_LOSS_MAX_CLAMP=10.0
 DISTILLATION_LOSS_MAX_CLAMP=null
 DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
 
@@ -39,7 +40,7 @@ STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT
 TEACHER_MICRO_BATCH_SIZE_PER_GPU=32
 TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
-WORLD_SIZE=4
+WORLD_SIZE=2
 TP=2
 PP=1
 CP=1
@@ -118,9 +119,9 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.param_offload=${PARAM_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${OPTIMIZER_OFFLOAD}
     actor_rollout_ref.actor.megatron.grad_offload=${GRAD_OFFLOAD}
-    # +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
-    # +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
-    # +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
 )
 
 ROLLOUT=(
