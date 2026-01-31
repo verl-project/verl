@@ -453,7 +453,7 @@ class RayPPOTrainer:
                 dump_path=rollout_data_dir,
             )
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
+    def _maybe_log_val_generations(self, inputs, outputs, scores, gts=None):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
         generations_to_log = self.config.trainer.log_val_generations
@@ -463,8 +463,12 @@ class RayPPOTrainer:
 
         import numpy as np
 
-        # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(inputs, outputs, scores, strict=True))
+        # Create tuples of (input, output, score, gt) and sort by input text
+        if gts is not None:
+            samples = list(zip(inputs, outputs, scores, gts, strict=True))
+        else:
+            # For backward compatibility, create samples without ground truth
+            samples = list(zip(inputs, outputs, scores, [None] * len(inputs), strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -649,7 +653,9 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        self._maybe_log_val_generations(
+            inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores, gts=sample_gts
+        )
 
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
