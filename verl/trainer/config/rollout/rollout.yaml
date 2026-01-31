@@ -352,5 +352,8 @@ quantization: null
 # extra quantization information serialized in a config file, e.g. torchao_config.json
 quantization_config_file: null
 
+# whether cast the model parameters to the rollout dtype in update_weights
+cast_to_rollout_dtype: False
+
 # MTP configuration, reuse model configuration
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}

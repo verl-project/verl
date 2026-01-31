@@ -298,6 +298,7 @@ actor_rollout_ref:
       served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
     quantization: null
     quantization_config_file: null
+    cast_to_rollout_dtype: false
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
     layer_name_map:
       qkv_layer_name: qkv
