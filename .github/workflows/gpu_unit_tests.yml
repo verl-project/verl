@@ -57,6 +57,9 @@ on:
       # Entrypoints
       - .github/workflows/gpu_unit_tests.yml
       - "tests/**test_*.py"
+      # Checkpoint-related files
+      - "verl/utils/checkpoint/**"
+      - "verl/utils/distributed.py"
       # Ignore CPU tests
       - "!tests/*_on_cpu.py"
 
@@ -123,6 +126,12 @@ jobs:
       - name: Testing FSDP2 critic functionality
         run: |
           torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/critic/test_special_dp_critic.py
+      - name: Testing FSDP checkpoint save/load
+        run: |
+          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/special_distributed/test_fsdp_ckpt.py
+      - name: Testing FSDP DCP async_save checkpoint
+        run: |
+          TEST_TYPE=async torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/special_distributed/test_fsdp_ckpt.py
 
   cleanup:
     runs-on: ubuntu-latest

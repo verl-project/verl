@@ -12,10 +12,15 @@ The API Interface has already been listed in :ref:`config-explain-page`,
 and we will not repeat them. But there are still some technique details
 we hope to clarify.
 
-.. note:: 
+.. note::
 
-    Notice that the ``checkpoint.contents`` field has no effect to FSDP checkpoint except ``hf_model``, 
+    Notice that the ``checkpoint.contents`` field has no effect to FSDP checkpoint except ``hf_model``,
     the other 3 fields are binded together to save and load. We recommend to include ``model``, ``optimizer`` and ``extra`` all.
+
+.. note::
+
+    FSDP checkpoints now use PyTorch Distributed Checkpoint (DCP) format for improved performance and reliability.
+    The ``async_save`` option is supported for both FSDP and Megatron backends, enabling non-blocking checkpoint saves.
 
 Checkpoint Saving Directory Structure
 -------------------------------------
@@ -31,19 +36,22 @@ So the inner checkpoint structure of **FSDP** is like:
     ├── global_steps_${i}
     │   ├── actor
     │   │   ├── huggingface      # default save config and tokenizer, save huggingface model if include ``hf_model`` in checkpoint.contents
-    │   │   └── fsdp_config.json # FSDP config file, including world_size and fsdp version
-    │   │   ├── model_world_size_{self.world_size}_rank_{self.rank}.pt
-    │   │   ├── optim_world_size_{self.world_size}_rank_{self.rank}.pt
-    │   │   └── extra_state_world_size_{self.world_size}_rank_{self.rank}.pt
+    │   │   ├── fsdp_config.json # FSDP config file, including world_size and fsdp version
+    │   │   ├── fsdp_app_state   # DCP directory containing model and optimizer shards
+    │   │   │   ├── .metadata
+    │   │   │   └── __*_*.distcp # distributed checkpoint shard files
+    │   │   └── extra_state      # DCP directory containing lr_scheduler and RNG state
+    │   │       ├── .metadata
+    │   │       └── __*_*.distcp
     │   ├── critic
     │   │   ├── huggingface
-    │   │   └── fsdp_config.json
-    │   │   ├── model_world_size_{self.world_size}_rank_{self.rank}.pt
-    │   │   ├── optim_world_size_{self.world_size}_rank_{self.rank}.pt
-    │   │   └── extra_state_world_size_{self.world_size}_rank_{self.rank}.pt
+    │   │   ├── fsdp_config.json
+    │   │   ├── fsdp_app_state
+    │   │   └── extra_state
     └── latest_checkpointed_iteration.txt
 
-All model shards, optimizers and extra states are stored together, in a sharded and distributed way.
+All model shards, optimizers and extra states are stored using PyTorch Distributed Checkpoint (DCP) format,
+which provides better performance and reliability compared to the legacy per-rank file format.
 
 While **Megatron** current checkpoint structure is:
 

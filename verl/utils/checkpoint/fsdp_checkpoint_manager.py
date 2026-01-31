@@ -15,14 +15,21 @@
 import json
 import logging
 import os
+import shutil
+import threading
+import time
 import warnings
 from dataclasses import asdict, dataclass
 from typing import Optional
 
 import torch
 import torch.distributed
+import torch.distributed.checkpoint as dcp
 from accelerate import init_empty_weights
 from omegaconf import DictConfig
+from torch.distributed.checkpoint import FileSystemWriter
+from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
 from transformers import GenerationConfig, PreTrainedTokenizer, ProcessorMixin
@@ -51,6 +58,103 @@ class FSDPConfig:
 
     FSDP_version: int
     world_size: int
+
+
+APP_STATE_KEY = "fsdp_app_state"
+EXTRA_STATE_KEY = "extra_state"
+
+
+class _FSDPAppState(Stateful):
+    """Wraps model/optimizer state handling for DCP saves/loads."""
+
+    def __init__(
+        self,
+        model: FSDP,
+        optimizer: Optional[torch.optim.Optimizer],
+        include_model: bool,
+        include_optimizer: bool,
+        state_dict_cfg: ShardedStateDictConfig | None,
+        optim_cfg: ShardedOptimStateDictConfig | None,
+    ):
+        self.model = model
+        self.optimizer = optimizer
+        self.include_model = include_model
+        self.include_optimizer = include_optimizer
+        self.state_dict_cfg = state_dict_cfg
+        self.optim_cfg = optim_cfg
+
+    def _fsdp_state_ctx(self):
+        return get_fsdp_state_ctx(
+            self.model,
+            StateDictType.SHARDED_STATE_DICT,
+            self.state_dict_cfg,
+            self.optim_cfg,
+        )
+
+    def state_dict(self):
+        if not (self.include_model or self.include_optimizer):
+            return {}
+        with self._fsdp_state_ctx():
+            model_state_dict, optimizer_state_dict = get_state_dict(self.model, self.optimizer)
+        state = {}
+        if self.include_model:
+            state["model"] = model_state_dict
+        if self.include_optimizer and optimizer_state_dict is not None:
+            state["optimizer"] = optimizer_state_dict
+        return state
+
+    def load_state_dict(self, state_dict):
+        if not state_dict:
+            return
+        load_kwargs = {}
+        if self.include_model and "model" in state_dict:
+            load_kwargs["model_state_dict"] = state_dict["model"]
+        if self.include_optimizer and "optimizer" in state_dict:
+            load_kwargs["optim_state_dict"] = state_dict["optimizer"]
+        if not load_kwargs:
+            return
+        with self._fsdp_state_ctx():
+            set_state_dict(
+                self.model,
+                self.optimizer,
+                **load_kwargs,
+            )
+
+
+class _ExtraState(Stateful):
+    """Handles lr_scheduler and RNG state via DCP."""
+
+    def __init__(self, manager: "FSDPCheckpointManager"):
+        self.manager = manager
+
+    def state_dict(self):
+        lr_scheduler_state = None
+        if self.manager.lr_scheduler is not None:
+            lr_scheduler_state = self.manager.lr_scheduler.state_dict()
+        return {
+            "lr_scheduler": lr_scheduler_state,
+            "rng": self.manager.get_rng_state(),
+        }
+
+    def load_state_dict(self, state_dict):
+        if not state_dict:
+            return
+        lr_scheduler_state = state_dict.get("lr_scheduler")
+        if lr_scheduler_state is not None and self.manager.lr_scheduler is not None:
+            self.manager.lr_scheduler.load_state_dict(lr_scheduler_state)
+            log_with_rank(
+                "Loaded lr_scheduler via DCP extras",
+                rank=self.manager.rank,
+                logger=logger,
+            )
+        rng_state = state_dict.get("rng")
+        if rng_state is not None:
+            self.manager.load_rng_state(rng_state)
+            log_with_rank(
+                "Loaded RNG state via DCP extras",
+                rank=self.manager.rank,
+                logger=logger,
+            )
 
 
 class FSDPCheckpointManager(BaseCheckpointManager):
@@ -94,17 +198,47 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             processing_class=processing_class,
             checkpoint_config=checkpoint_config,
         )
+        self._async_checkpoint_future = None
+        self._async_checkpoint_start_time = None
+
+    def _wait_for_pending_async_save(self):
+        """Block until the outstanding async checkpoint completes."""
+        if self._async_checkpoint_future is None:
+            return
+        self._async_checkpoint_future.result()
+        self._async_checkpoint_future = None
+        self._async_checkpoint_start_time = None
+        if hasattr(self, "_async_checkpoint_path"):
+            delattr(self, "_async_checkpoint_path")
+
+    def _spawn_async_completion_logger(self, future, checkpoint_path, start_time):
+        """Spawn a daemon thread that logs when async save finishes."""
+
+        def _worker():
+            try:
+                future.result()
+                duration = time.time() - start_time
+                log_with_rank(
+                    f"Async DCP save finished in {duration:.2f}s at {checkpoint_path}",
+                    rank=self.rank,
+                    logger=logger,
+                )
+            except Exception as e:
+                log_with_rank(
+                    f"Async DCP save failed for {checkpoint_path}: {e}",
+                    rank=self.rank,
+                    logger=logger,
+                    level=logging.ERROR,
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
-        Load an FSDP checkpoint for this rank.
-
-        Downloads and loads:
-          - model and optimizer shards
-          - extra state dict (scheduler + RNG)
+        Load an FSDP checkpoint for this rank using torch.distributed.checkpoint (DCP).
 
         Args:
-            local_path: Directory with per-rank checkpoint files.
+            local_path: Directory with checkpoint files (local or remote via copy_to_local).
             hdfs_path: Unused (for API compatibility).
             del_local_after_load: Remove local files after loading.
         """
@@ -119,7 +253,12 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 "optimizer must be provided when checkpoint_contents.load includes ['optimizer']"
             )
 
-        # every rank download its own checkpoint
+        checkpoint_path = local_path.rstrip("/")
+        copied_local_path = None
+        if is_non_local(checkpoint_path):
+            checkpoint_path = copy_to_local(checkpoint_path)
+            copied_local_path = checkpoint_path
+
         state_dict_cfg = (
             ShardedStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
             if self.should_load_model
@@ -130,46 +269,37 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             if self.should_load_optimizer
             else None
         )
-        with get_fsdp_state_ctx(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-            if self.should_load_model:
-                remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
-                local_model_path = copy_to_local(remote_model_path)
-                model_state_dict = torch.load(local_model_path, weights_only=False)
-                self.model.load_state_dict(model_state_dict)
-                log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
 
-            if self.should_load_optimizer:
-                remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
-                local_optim_path = copy_to_local(remote_optim_path)
-                optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
-                self.optimizer.load_state_dict(optimizer_state_dict)
-                log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
-
-        if self.should_load_extra:
-            remote_extra_state_path = os.path.join(
-                local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt"
+        state_dict_entries = {}
+        if self.should_load_model or self.should_load_optimizer:
+            state_dict_entries[APP_STATE_KEY] = _FSDPAppState(
+                model=self.model,
+                optimizer=self.optimizer,
+                include_model=self.should_load_model,
+                include_optimizer=self.should_load_optimizer,
+                state_dict_cfg=state_dict_cfg,
+                optim_cfg=optim_cfg,
             )
-            local_extra_state_path = copy_to_local(remote_extra_state_path)
-            extra_state_dict = torch.load(local_extra_state_path, weights_only=False)
-            # recover random state
-            if "rng" in extra_state_dict:
-                # 'rng' may not exist for backward compatibility
-                self.load_rng_state(extra_state_dict["rng"])
-                log_with_rank(f"Loaded rng from {remote_extra_state_path}", rank=self.rank, logger=logger)
+        if self.should_load_extra:
+            state_dict_entries[EXTRA_STATE_KEY] = _ExtraState(self)
 
-            lr_scheduler_state_dict = extra_state_dict["lr_scheduler"]
-            if lr_scheduler_state_dict is not None and self.lr_scheduler is not None:
-                self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
-                log_with_rank(f"Loaded lr_scheduler from {remote_extra_state_path}", rank=self.rank, logger=logger)
+        if state_dict_entries:
+            dcp.load(state_dict=state_dict_entries, checkpoint_id=checkpoint_path)
+            log_with_rank(
+                f"Loaded checkpoint via DCP from {checkpoint_path}",
+                rank=self.rank,
+                logger=logger,
+            )
 
-        if self.rank == 0 and del_local_after_load:
+        if self.rank == 0 and del_local_after_load and copied_local_path:
             try:
-                os.remove(local_model_path) if is_non_local(local_model_path) else None
-                os.remove(local_optim_path) if is_non_local(local_optim_path) else None
-                os.remove(local_extra_state_path) if is_non_local(local_extra_state_path) else None
+                if os.path.isdir(copied_local_path):
+                    shutil.rmtree(copied_local_path, ignore_errors=True)
+                else:
+                    os.remove(copied_local_path)
             except Exception as e:
                 log_with_rank(
-                    f"remove local resume ckpt file after loading failed, exception {e} will be ignored",
+                    f"remove local resume ckpt directory after loading failed, exception {e} will be ignored",
                     rank=self.rank,
                     logger=logger,
                 )
@@ -215,34 +345,58 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 "optimizer must be provided when checkpoint_contents.save includes ['optimizer']"
             )
 
-        # every rank will save its own model and optim shard
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
+
+        use_async_save = self.checkpoint_config.get("async_save", False) if self.checkpoint_config else False
+
+        if use_async_save:
+            self._wait_for_pending_async_save()
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with get_fsdp_state_ctx(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
-                optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
-                extra_path = os.path.join(local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt")
+            state_dict_entries = {}
+            if self.should_save_model or self.should_save_optimizer:
+                state_dict_entries[APP_STATE_KEY] = _FSDPAppState(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    include_model=self.should_save_model,
+                    include_optimizer=self.should_save_optimizer,
+                    state_dict_cfg=state_dict_cfg,
+                    optim_cfg=optim_cfg,
+                )
+            if self.should_save_extra:
+                state_dict_entries[EXTRA_STATE_KEY] = _ExtraState(self)
 
-                if self.should_save_model:
-                    model_state_dict = self.model.state_dict()
-                    torch.save(model_state_dict, model_path)
-                    log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
-
-                if self.should_save_optimizer:
-                    optimizer_state_dict = self.optimizer.state_dict()
-                    torch.save(optimizer_state_dict, optim_path)
-                    log_with_rank(f"Saved optim to {os.path.abspath(optim_path)}", rank=self.rank, logger=logger)
-
-                if self.should_save_extra:
-                    lr_scheduler_state_dict = self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None
-                    extra_state_dict = {
-                        "lr_scheduler": lr_scheduler_state_dict,
-                        "rng": self.get_rng_state(),
-                    }
-                    torch.save(extra_state_dict, extra_path)
-                    log_with_rank(f"Saved extra_state to {os.path.abspath(extra_path)}", rank=self.rank, logger=logger)
+            if state_dict_entries:
+                if use_async_save:
+                    self._async_checkpoint_start_time = time.time()
+                    self._async_checkpoint_path = os.path.abspath(local_path)
+                    storage_writer = FileSystemWriter(path=local_path)
+                    self._async_checkpoint_future = dcp.async_save(
+                        state_dict=state_dict_entries,
+                        storage_writer=storage_writer,
+                        checkpoint_id=local_path,
+                    )
+                    log_with_rank(
+                        f"Started async DCP save to {os.path.abspath(local_path)}",
+                        rank=self.rank,
+                        logger=logger,
+                    )
+                    self._spawn_async_completion_logger(
+                        self._async_checkpoint_future,
+                        self._async_checkpoint_path,
+                        self._async_checkpoint_start_time,
+                    )
+                else:
+                    start_time = time.time()
+                    dcp.save(state_dict=state_dict_entries, checkpoint_id=local_path)
+                    duration = time.time() - start_time
+                    log_with_rank(
+                        f"Saved checkpoint via DCP to {os.path.abspath(local_path)} in {duration:.2f}s",
+                        rank=self.rank,
+                        logger=logger,
+                    )
 
         if self.rank == 0:
             # Save HF tokenizer/processor and model config on rank 0 to huggingface/ directory, no matter whether
@@ -294,8 +448,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             with open(fsdp_config_path, "w") as f:
                 json.dump(asdict(fsdp_config), f, indent=4)
 
-        # wait for everyone to dump to local
-        torch.distributed.barrier()
+        # wait for everyone to dump to local (only when not using async save)
+        if not use_async_save:
+            torch.distributed.barrier()
 
         if self.should_save_hf_model:
             # Only rank 0 will save hf model and,

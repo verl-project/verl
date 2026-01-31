@@ -119,7 +119,17 @@ def _fsdp_activation_offloading_test(rank, world_size, rendezvous_file, strategy
     optimizer.zero_grad()
 
     # Save checkpoint after first update
-    temp_dir = tempfile.mkdtemp()
+    # Only rank 0 creates the temp dir, then broadcast to all ranks
+    if rank == 0:
+        temp_dir = tempfile.mkdtemp()
+    else:
+        temp_dir = None
+
+    # Broadcast temp_dir from rank 0 to all ranks
+    temp_dir_list = [temp_dir]
+    torch.distributed.broadcast_object_list(temp_dir_list, src=0)
+    temp_dir = temp_dir_list[0]
+
     checkpoint_path = os.path.join(temp_dir, "checkpoint")
     checkpoint_manager.save_checkpoint(local_path=checkpoint_path, hdfs_path=None, global_step=0)
 
@@ -155,9 +165,10 @@ def _fsdp_activation_offloading_test(rank, world_size, rendezvous_file, strategy
     torch.testing.assert_close(logits_without_offloading, logits_with_offloading, atol=0.0, rtol=0.0)
     print(f"Activaiton offloading for {strategy} test passed on {world_size} GPUs!")
 
-    # Cleanup
-    shutil.rmtree(temp_dir)
+    # Cleanup - only rank 0 removes the directory
     torch.distributed.barrier()
+    if rank == 0:
+        shutil.rmtree(temp_dir, ignore_errors=True)
     torch.distributed.destroy_process_group()
 
 
