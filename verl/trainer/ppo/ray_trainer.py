@@ -1550,9 +1550,18 @@ class RayPPOTrainer:
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
-
                         if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            batch_size = len(next(iter(reward_extra_infos_dict.values())))
+                            reward_extra_info_array = []
+                            for i in range(batch_size):
+                                sample_dict = {}
+                                for key, values in reward_extra_infos_dict.items():
+                                    sample_dict[key] = values[i]
+                                reward_extra_info_array.append(sample_dict)
+
+                            batch.non_tensor_batch["reward_extra_info"] = np.array(
+                                reward_extra_info_array, dtype=object
+                            )
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
