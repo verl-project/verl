@@ -89,22 +89,18 @@ actor_rollout_ref:
   # ref follow actor settings
 ```
 
-> **Note for Agent Loop Mode**:
-> When using Agent Loop, `ranks` in rollout config refers to the **Replica Rank** (instance index), not the global rank.
+**Agent Loop Scenario Description**
 
-**Inference Backend Setup (for Agent Loop)**
+When Rollout runs in Agent Loop mode, performance data for the Rollout phase **must be collected using discrete mode**. At this time, the Profiler is triggered by the inference engine backend.
 
-*   **vLLM Engine**:
-    *   **Environment Variables Required**:
-        *   `VLLM_TORCH_PROFILER_DIR`: **(Required)** Directory to save traces (e.g., `/mnt/traces`).
-        *   `VLLM_TORCH_PROFILER_WITH_STACK`: `1` to enable stack tracing (default).
-        *   `VLLM_TORCH_PROFILER_RECORD_SHAPES`: `1` to record shapes of operator inputs.
-        *   `VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY`: `1` to track tensor memory allocation/free.
-        *   `VLLM_TORCH_PROFILER_WITH_FLOPS`: `1` to estimate FLOPS.
-    *   *Note: vLLM ignores the `save_path` and `contents` in `ppo_trainer.yaml`.*
+1. **Rank Meaning**: `ranks` in the Rollout config refers to the **Replica Rank** (instance index), not the global rank.
+2. **Inference Engine Description**:
 
-*   **SGLang Engine**:
-    *   **Zero Configuration**: Automatically uses the settings from `ppo_trainer.yaml`.
+   Both vLLM and SGLang engines automatically read profiler configuration from the configuration file. No additional setup is required.
+
+   *   **vLLM Engine**: Automatically collects profiler data including Python call stacks from `AsyncLLM` and inference operations.
+
+   *   **SGLang Engine**: Automatically uses the settings from the configuration file. Note: SGLang currently does not support `memory` in the `contents` configuration.
 
 ## Visualization
 
