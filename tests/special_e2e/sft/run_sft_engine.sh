@@ -27,7 +27,7 @@ ckpts_home=${ckpts_home:-~/verl/test/gsm8k-sft-${backend}}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 SP_SIZE=${SP_SIZE:-1}
 FSDP_SIZE=${FSDP_SIZE:-${NUM_GPUS}}
@@ -85,7 +85,8 @@ MEGATRON_ENGINE_CONFIG="\
     engine.tensor_model_parallel_size=${TP_SIZE} \
     engine.pipeline_model_parallel_size=${PP_SIZE} \
     engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
-    engine.context_parallel_size=${CP_SIZE}
+    engine.context_parallel_size=${CP_SIZE} \
+    +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
     engine.use_mbridge=True"
 
 if [ "$backend" = "fsdp" ]; then

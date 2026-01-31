@@ -18,6 +18,7 @@ from hydra import compose, initialize_config_dir
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
+from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
@@ -25,6 +26,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+from verl.utils.device import get_device_name
 from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
 
@@ -91,12 +93,18 @@ def test_agent_loop_reward_manager():
         cls=ray.remote(actor_rollout_cls), config=config.actor_rollout_ref, role="actor_rollout"
     )
     actor_rollout_wg = RayWorkerGroup(
-        resource_pool=resource_pool,
-        ray_cls_with_init=actor_rollout_cls,
+        resource_pool=resource_pool, ray_cls_with_init=actor_rollout_cls, device_name=get_device_name()
     )
     actor_rollout_wg.init_model()
 
     agent_loop_manager = AgentLoopManager(config, worker_group=actor_rollout_wg)
+    # sleep rollout replicas
+    checkpoint_manager = CheckpointEngineManager(
+        backend=config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        trainer=actor_rollout_wg,
+        replicas=agent_loop_manager.rollout_replicas,
+    )
+    checkpoint_manager.sleep_replicas()
     reward_loop_manager = RewardLoopManager(config, rm_resource_pool=resource_pool)
 
     # 2. init test data
@@ -143,8 +151,11 @@ def test_agent_loop_reward_manager():
 
         return gen_batch
 
+    # wake up rollout replicas via update_weight
+    checkpoint_manager.update_weights()
     gen_batch = _get_gen_batch(batch)
     gen_batch = agent_loop_manager.generate_sequences(gen_batch)
+    checkpoint_manager.sleep_replicas()
 
     batch = batch.union(gen_batch)
     rm_outputs = reward_loop_manager.compute_rm_score(batch)

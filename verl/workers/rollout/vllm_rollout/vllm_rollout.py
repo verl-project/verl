@@ -41,7 +41,7 @@ from torch.multiprocessing.reductions import reduce_tensor
 
 from verl import DataProto
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -98,6 +98,15 @@ class ServerAdapter(BaseRollout):
         self.zmq_context = zmq.Context()
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
+        self.use_shm = not is_support_ipc()
+        if self.use_shm:
+            logger.warning(
+                "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
+                "which may cause performance degradation. If you are using Ascend NPUs, please ensure that "
+                "your software and CANN toolkit versions meet the requirements for IPC support. (Ascend HDK version "
+                ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
+            )
+
     async def _execute_method(
         self,
         method: str,
@@ -144,22 +153,38 @@ class ServerAdapter(BaseRollout):
 
     @torch.no_grad()
     async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
-        """Update model weights via CUDA IPC to inference workers."""
+        """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
         start_time = time.time()
+
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
-            kwargs=kwargs,
+            kwargs={**kwargs, "use_shm": self.use_shm},
         )
 
-        # build cuda ipc buffer
+        # build communication buffer
         bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
         bucket_size = int(bucket_size_mb) << 20
-        buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:0")
-        handle = reduce_tensor(buffer)
         s = self.zmq_context.socket(zmq.REQ)
         s.bind(self.zmq_handle)
-        s.send_pyobj(handle)
+
+        buffer, shm = None, None
+        if not self.use_shm:
+            buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:0")
+            handle = reduce_tensor(buffer)
+            s.send_pyobj(handle)
+        else:
+            import uuid
+            from multiprocessing import shared_memory
+
+            # Create unique name for shared memory
+            shm_name = f"verl_weights_{uuid.uuid4().hex}"
+            shm = shared_memory.SharedMemory(name=shm_name, create=True, size=bucket_size)
+            buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
+
+            comm_metadata = {"name": shm_name, "size": bucket_size}
+            s.send_pyobj(comm_metadata)
+
         s.recv()
 
         # send bucket weights
@@ -200,6 +225,10 @@ class ServerAdapter(BaseRollout):
         # clean up
         s.close()
         del buffer
+        if shm is not None:
+            shm.close()
+            shm.unlink()
+            del shm
         gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()

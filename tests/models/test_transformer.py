@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import torch
-from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
 from transformers import (
     ApertusConfig,
     AutoModelForCausalLM,
@@ -23,6 +22,13 @@ from transformers import (
     MistralConfig,
     Qwen2Config,
 )
+
+from verl.utils.device import get_device_name
+
+if get_device_name() == "cuda":
+    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+elif get_device_name() == "npu":
+    from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.torch_functional import log_probs_from_logits_all_rmpad, masked_mean
@@ -45,12 +51,12 @@ def test_hf_casual_models():
 
     for config in test_configs:
         # config = AutoConfig.from_pretrained(test_case)
-        with torch.device("cuda"):
+        with torch.device(get_device_name()):
             model = AutoModelForCausalLM.from_config(
                 config=config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
             )
-            model = model.to(device="cuda")
-        input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seqlen), device="cuda")
+            model = model.to(device=get_device_name())
+        input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seqlen), device=get_device_name())
         attention_mask = create_random_mask(
             input_ids=input_ids,
             max_ratio_of_left_padding=0.1,
@@ -117,12 +123,12 @@ def test_hf_value_models():
         config.num_labels = 1
         config.classifier_dropout = 0
         config.hidden_dropout = 0
-        with torch.device("cuda"):
+        with torch.device(get_device_name()):
             model = AutoModelForTokenClassification.from_config(
                 config=config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
             )
-            model = model.to(device="cuda")
-        input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seqlen), device="cuda")
+            model = model.to(device=get_device_name())
+        input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seqlen), device=get_device_name())
         attention_mask = create_random_mask(
             input_ids=input_ids,
             max_ratio_of_left_padding=0.1,

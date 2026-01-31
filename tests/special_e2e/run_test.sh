@@ -6,7 +6,7 @@ CONFIG_NAME="$1"
 ENGINE="${2:-vllm}"
 
 # Download model if needed
-#huggingface-cli download Qwen/Qwen2.5-0.5B --local-dir "$HOME/models/Qwen/Qwen2.5-0.5B"
+#hf download Qwen/Qwen2.5-0.5B --local-dir "$HOME/models/Qwen/Qwen2.5-0.5B"
 
 # Run the training with the specified configuration
 python3 -m verl.trainer.main_ppo \

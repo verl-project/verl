@@ -45,6 +45,7 @@ def should_quantize_param(param_name: str) -> bool:
         "norm",  # Various Norm layers
         "ln_",  # LayerNorm variants
         "embeddings",  # Embeddings
+        "mlp.gate.weight",  # MoE router
     ]
 
     # Check if matches exclude patterns
@@ -64,7 +65,6 @@ def should_quantize_param(param_name: str) -> bool:
         "down_proj",  # Down projection (for MLP)
         "fc1",  # Fully connected 1
         "fc2",  # Fully connected 2
-        "gate",  # Gate (for MoE)
         "mlp",  # MLP layers
     ]
 

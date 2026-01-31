@@ -15,7 +15,7 @@ pre-commit
 ray[default]
 tensordict>=0.8.0,<=0.10.0,!=0.9.0
 torchdata
-transformers
+transformers<5.0.0
 # vllm==0.8.4
 wandb
 packaging>=20.0

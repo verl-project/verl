@@ -84,6 +84,7 @@ class RouterReplay:
         self.recorded_topk_idx = None  # For recording
         self.router_replay_action = None  # Router replay action for this layer
         self.replay_backward_list = []  # List of tensors for backward pass replay
+        self.layer_number = None  # Global layer index if available
         RouterReplay.router_instances.append(self)
 
     def set_target_indices(self, topk_indices: torch.Tensor):
@@ -336,6 +337,12 @@ def apply_router_replay_patch():
         return
 
     original_init = TopKRouter.__init__
+    original_set_layer_number = TopKRouter.set_layer_number
+
+    def patched_set_layer_number(self, layer_number: int):
+        original_set_layer_number(self, layer_number)
+        if self.router_replay is not None:
+            self.router_replay.layer_number = layer_number
 
     # Step 3: Define the new __init__ method
     def patched_init(self, *args, **kwargs):
@@ -374,4 +381,5 @@ def apply_router_replay_patch():
     # Step 5: Apply the patches
     TopKRouter.__init__ = patched_init
     TopKRouter.routing = patched_routing
+    TopKRouter.set_layer_number = patched_set_layer_number
     TopKRouter._router_replay_patched = True
