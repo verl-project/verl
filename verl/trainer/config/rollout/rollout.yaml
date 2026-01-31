@@ -65,7 +65,7 @@ max_num_batched_tokens: 8192
 max_model_len: null
 
 # max length of sequences
-max_num_seqs: 256
+max_num_seqs: 1024
 
 # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
 enable_chunked_prefill: True
