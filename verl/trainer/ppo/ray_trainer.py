@@ -311,6 +311,11 @@ class RayPPOTrainer:
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
+        # In async rollout mode with colocated checkpoint engine ("naive"), we may explicitly put
+        # rollout replicas to sleep (free weights/KV cache) after pre-train validation. If so, the
+        # next generation must re-sync weights once before calling generate.
+        self._rollout_needs_weights_sync: bool = False
+
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -550,7 +555,7 @@ class RayPPOTrainer:
 
         return gen_batch
 
-    def _validate(self, merged: bool = False):
+    def _validate(self, merged: bool = False, *, release_rollout_cache: bool = False):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -665,6 +670,24 @@ class RayPPOTrainer:
 
         for key_info, lst in reward_extra_infos_dict.items():
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
+
+        # Optionally release rollout GPU cache after validation.
+        #
+        # NOTE:
+        # - For colocated ("naive") checkpoint engine, we can sleep replicas to release weights/KV cache.
+        #   In that case the next async generation must sync weights once (handled via
+        #   `self._rollout_needs_weights_sync`).
+        # - For disaggregated checkpoint engines, `CheckpointEngineManager.sleep_replicas()` is a no-op by design.
+        #   We do a best-effort KV cache clear for engines that support it.
+        if release_rollout_cache and self.async_rollout_mode:
+            backend = self.config.actor_rollout_ref.rollout.checkpoint_engine.backend
+            if backend == "naive":
+                self.checkpoint_manager.sleep_replicas()
+                self._rollout_needs_weights_sync = True
+            else:
+                rollout_name = self.config.actor_rollout_ref.rollout.name
+                if rollout_name in ("vllm", "sglang"):
+                    self.async_rollout_manager.clear_kv_cache()
 
         if merged:
             print("_merge_validation_results validate result will be merged")
@@ -1328,7 +1351,7 @@ class RayPPOTrainer:
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-            val_metrics = self._validate()
+            val_metrics = self._validate(release_rollout_cache=True)
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
@@ -1393,6 +1416,11 @@ class RayPPOTrainer:
                         else:
                             if curr_step_profile:
                                 self.async_rollout_manager.start_profile(global_step=self.global_steps)
+                            if self._rollout_needs_weights_sync:
+                                # Rollout replicas were explicitly put to sleep after pre-train validation.
+                                # Sync weights once before the first training generation.
+                                self.checkpoint_manager.update_weights()
+                                self._rollout_needs_weights_sync = False
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                             self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
