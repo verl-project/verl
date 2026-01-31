@@ -690,6 +690,9 @@ Optim
   - ``wsd``: Warmup-Stable-Decay scheduler that provides a stable learning rate phase between warmup and decay phases.
 
 - ``override_optimizer_config``: Dictionary of additional optimizer-specific keyword arguments. For example, to use ``torchao.optim``'s ``_AdamW`` with BF16 stochastic rounding: ``{"bf16_stochastic_round": true}``
+- SOAP example (paper defaults): set ``optimizer_impl: verl.optimizers.soap``, ``optimizer: SOAP``, ``lr: 3e-3``, and
+  ``betas: [0.95, 0.95]``; pass SOAP-specific arguments (e.g., ``precondition_frequency``, ``max_precond_dim``) via
+  ``override_optimizer_config``. See ``trainer/config/optim/soap.yaml`` for a full example.
 
 Model
 ~~~~~~~~~~~~
