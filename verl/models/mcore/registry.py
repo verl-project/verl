@@ -30,6 +30,7 @@ class SupportedVLM(Enum):
     QWEN2_5_VL = "Qwen2_5_VLForConditionalGeneration"
     QWEN3_MOE_VL = "Qwen3VLMoeForConditionalGeneration"
     QWEN3_VL = "Qwen3VLForConditionalGeneration"
+    QWEN2_5_OMNI = "Qwen2_5OmniForConditionalGeneration"
 
 
 supported_vlm = [member.value for member in SupportedVLM]
@@ -83,6 +84,7 @@ from .config_converter import (
     hf_to_mcore_config_qwen2_5_vl,
     hf_to_mcore_config_qwen2moe,
     hf_to_mcore_config_qwen3moe,
+    hf_to_mcore_config_qwen2_5_omni,
 )
 from .model_initializer import (
     BaseModelInitializer,
@@ -118,6 +120,7 @@ class SupportedModel(Enum):
     LLAMA_TOKEN_CLASSIFICATION = "LlamaForTokenClassification"
     QWEN3_MOE_VL = "Qwen3VLMoeForConditionalGeneration"
     QWEN3_VL = "Qwen3VLForConditionalGeneration"
+    QWEN2_5_OMNI = "Qwen2_5OmniForConditionalGeneration"
     GPT_OSS = "GptOssForCausalLM"
     MiMO = "MiMoForCausalLM"
 
@@ -135,6 +138,7 @@ MODEL_CONFIG_CONVERTER_REGISTRY: dict[SupportedModel, Callable[[PretrainedConfig
     SupportedModel.QWEN3_MOE: hf_to_mcore_config_qwen3moe,
     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: hf_to_mcore_config_dense,
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: hf_to_mcore_config_dense,
+    SupportedModel.QWEN2_5_OMNI: hf_to_mcore_config_qwen2_5_omni,
 }
 
 # Registry for model initializers
@@ -170,6 +174,7 @@ MODEL_FORWARD_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: model_forward_gen(),
     SupportedModel.GPT_OSS: model_forward_gen(),
     SupportedModel.MiMO: model_forward_gen(),
+    # SupportedModel.QWEN2_5_OMNI: model_forward_gen(True),  # not implemented
 }
 
 # Registry for model forward functions
@@ -190,6 +195,7 @@ MODEL_FORWARD_NOPAD_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: gptmodel_forward_no_padding,
     SupportedModel.GPT_OSS: gptmodel_forward_no_padding,
     SupportedModel.MiMO: gptmodel_forward_no_padding,
+    # SupportedModel.QWEN2_5_OMNI: gptmodel_forward_no_padding,  # not implemented
 }
 
 # Registry for model forward functions
@@ -208,6 +214,7 @@ MODEL_FORWARD_FUSED_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.GLM4_MOE: fused_forward_model_gen(),
     SupportedModel.GPT_OSS: fused_forward_model_gen(),
     SupportedModel.MiMO: fused_forward_model_gen(),
+    # SupportedModel.QWEN2_5_OMNI: fused_forward_model_gen(True),  # not implemented
 }
 
 # Registry for model weight converters
