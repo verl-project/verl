@@ -12,21 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=2 tests/utils/test_special_megatron_kl_loss_tp.py"""
 
 import gc
 import os
 
+import megatron.core.parallel_state as mpu
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import megatron.core.parallel_state as mpu
-
 from verl.trainer.distillation.fsdp.losses import compute_forward_kl_topk as compute_forward_kl_topk_ref
 from verl.trainer.distillation.megatron.losses import compute_forward_kl_topk as compute_forward_kl_topk_vp
+from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
 from verl.workers.config import DistillationConfig
-from verl.utils.distributed import initialize_global_process_group, destroy_global_process_group
 
 MAX_TEST_CASES = int(os.environ.get("MAX_TEST_CASES", 4))
 
@@ -96,8 +94,10 @@ class TestVocabParallelKLDivergence:
         teacher_topk_logps, teacher_topk_indices = torch.topk(teacher_full_logps, k=topk, dim=-1)
 
         # Edge case 1: Force index 0 collision on rank 1 (on rank 1, global index shard_size maps to local index 0)
-        # 1. When a teacher top-k index is not in the local shard, it's remapped to local index 0 (as a dummy placeholder, with its prob set to 0)                                                                                                                                                                                                                                                
-        # 2. But local index 0 might also be a legitimate teacher top-k index (e.g., on rank 1, global index shard_size maps to local index 0) 
+        # 1. When a teacher top-k index is not in the local shard, it's remapped to
+        # local index 0 (as a dummy placeholder, with its prob set to 0)
+        # 2. But local index 0 might also be a legitimate teacher
+        # top-k index (e.g., on rank 1, global index shard_size maps to local index 0)
         teacher_topk_indices[..., 0] = shard_size
         teacher_topk_logps[..., 0] = teacher_full_logps[..., shard_size]
 
@@ -144,7 +144,10 @@ class TestVocabParallelKLDivergence:
             # VP implementation on sharded logits
             vp_logits = full_student_logits[..., shard_start:shard_end].contiguous().detach().requires_grad_(True)
             vp_loss, vp_student_mass, vp_teacher_mass = compute_forward_kl_topk_vp(
-                student_logits=vp_logits, teacher_topk_log_probs=teacher_topk_logps, teacher_topk_indices=teacher_topk_indices, config=cfg_megatron
+                student_logits=vp_logits,
+                teacher_topk_log_probs=teacher_topk_logps,
+                teacher_topk_indices=teacher_topk_indices,
+                config=cfg_megatron,
             )
             vp_loss.sum().backward()
             grad_vp = vp_logits.grad.detach().clone()
@@ -152,7 +155,10 @@ class TestVocabParallelKLDivergence:
             # Reference implementation on full logits
             full_ref = full_student_logits.detach().clone().requires_grad_(True)
             ref_loss, ref_student_mass, ref_teacher_mass = compute_forward_kl_topk_ref(
-                student_logits=full_ref, teacher_topk_log_probs=teacher_topk_logps, teacher_topk_indices=teacher_topk_indices, config=config_fsdp
+                student_logits=full_ref,
+                teacher_topk_log_probs=teacher_topk_logps,
+                teacher_topk_indices=teacher_topk_indices,
+                config=config_fsdp,
             )
             ref_loss.sum().backward()
             grad_ref_shard = full_ref.grad[..., shard_start:shard_end].detach().clone()

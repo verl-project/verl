@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import torch
 
 from verl.workers.config import DistillationConfig
-from typing import Tuple
+
 
 def vocab_parallel_log_softmax(
     vp_logits: torch.Tensor,
@@ -48,7 +49,9 @@ def vocab_parallel_log_softmax(
     return vp_logits - log_sum_exp_logits.unsqueeze(dim=-1)
 
 
-def compute_topk_log_probs(logits: torch.Tensor, config: DistillationConfig, eps: float = 1e-20) -> dict[str, torch.Tensor]:
+def compute_topk_log_probs(
+    logits: torch.Tensor, config: DistillationConfig, eps: float = 1e-20
+) -> dict[str, torch.Tensor]:
     """Compute top-k log probabilities."""
     from megatron.core.parallel_state import (
         get_tensor_model_parallel_group,
@@ -64,7 +67,9 @@ def compute_topk_log_probs(logits: torch.Tensor, config: DistillationConfig, eps
     rank = get_tensor_model_parallel_rank()
     world_size = get_tensor_model_parallel_world_size()
     partition_vocab_size = logits.shape[-1]
-    vocab_start_index, vocab_end_index = VocabUtility.vocab_range_from_per_partition_vocab_size(partition_vocab_size, rank, world_size)
+    vocab_start_index, vocab_end_index = VocabUtility.vocab_range_from_per_partition_vocab_size(
+        partition_vocab_size, rank, world_size
+    )
 
     # Compute local top-k
     local_topk_log_probs, local_topk_indices = log_probs.topk(k=config.topk, dim=-1)
@@ -73,7 +78,7 @@ def compute_topk_log_probs(logits: torch.Tensor, config: DistillationConfig, eps
     # Gather all top-k from all partitions
     vocab_shards = [None for _ in range(world_size)]
     local_shard = (local_topk_log_probs, local_topk_indices)
-    torch.distributed.all_gather_object(vocab_shards, local_shard, group=get_tensor_model_parallel_group()) 
+    torch.distributed.all_gather_object(vocab_shards, local_shard, group=get_tensor_model_parallel_group())
 
     # Compute top-k over all partitions
     gathered_topk_log_probs = torch.cat([v[0] for v in vocab_shards], dim=-1)
