@@ -531,7 +531,8 @@ class DataParallelPPOActor(BasePPOActor):
         non_tensor_select_keys = []
         if has_multi_modal_inputs:
             non_tensor_select_keys.append("multi_modal_inputs")
-        if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
+        # Include uid for prefix_grouper and GIFT (group-wise normalization)
+        if "uid" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("uid")
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
@@ -613,6 +614,7 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_agg_mode=loss_agg_mode,
                         config=self.config,
                         rollout_is_weights=rollout_is_weights,
+                        index=model_inputs.get("uid", None),
                     )
                     micro_batch_metrics.update(pg_metrics)
 

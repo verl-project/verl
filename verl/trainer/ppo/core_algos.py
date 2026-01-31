@@ -107,6 +107,7 @@ class AdvantageEstimator(str, Enum):
     GRPO_VECTORIZED = "grpo_vectorized"
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
     TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
+    GIFT = "gift"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -1006,6 +1007,45 @@ def compute_multi_turn_optimal_token_baseline_advantage(
     return advantages, token_returns
 
 
+@register_adv_est(AdvantageEstimator.GIFT)
+def compute_gift_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for GIFT (Group Implicit Fine Tuning).
+    GIFT normalizes rewards within each uid group: (reward - mean) / std
+    """
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+                id2std[idx] = torch.tensor(1.0)
+            elif len(id2score[idx]) > 1:
+                scores_tensor = torch.stack(id2score[idx])
+                id2mean[idx] = torch.mean(scores_tensor)
+                id2std[idx] = torch.std(scores_tensor)
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        for i in range(bsz):
+            scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
+
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     """Compute token-level rewards with KL penalty.
 
@@ -1778,6 +1818,122 @@ def compute_policy_loss_cispo(
     }
     return pg_loss, pg_metrics
 
+# Global counter for GIFT debug output (print every N calls)
+_GIFT_DEBUG_COUNTER = 0
+_GIFT_DEBUG_INTERVAL = 100  # Print every 100 calls
+
+
+def normalize_gift_kl(
+    kl_div_sum: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    debug: bool = False,
+) -> torch.Tensor:
+    """
+    Normalize KL divergence group-wise for GIFT.
+    Groups samples by uid (index) and normalizes: (kl - mean) / std
+    Gradients flow through kl_div_sum, but mean/std are detached.
+    
+    Args:
+        kl_div_sum: KL divergence sum per sample, shape (bsz,)
+        index: uid array mapping each sample to its prompt group
+        epsilon: small value for numerical stability
+        debug: if True, print debug information
+        
+    Returns:
+        Normalized KL divergence, shape (bsz,)
+    """
+    id2kl = defaultdict(list)
+    id2indices = defaultdict(list)  # Track which samples belong to each group
+    id2mean = {}
+    id2std = {}
+
+    bsz = kl_div_sum.shape[0]
+    
+    # Group samples by uid
+    for i in range(bsz):
+        id2kl[index[i]].append(kl_div_sum[i])
+        id2indices[index[i]].append(i)
+    
+    # Compute group-wise mean and std (detached)
+    for idx in id2kl:
+        if len(id2kl[idx]) == 1:
+            id2mean[idx] = id2kl[idx][0].detach()
+            id2std[idx] = torch.tensor(1.0, device=kl_div_sum.device, dtype=kl_div_sum.dtype)
+        else:
+            kl_tensor = torch.stack(id2kl[idx])
+            id2mean[idx] = kl_tensor.mean().detach()
+            id2std[idx] = kl_tensor.std().detach()
+
+    # Debug: print group statistics
+    if debug:
+        num_groups = len(id2kl)
+        group_sizes = [len(v) for v in id2kl.values()]
+        print(f"[GIFT KL Norm] num_groups={num_groups}, group_sizes={group_sizes[:5]}{'...' if len(group_sizes) > 5 else ''}")
+        if num_groups > 0:
+            first_uid = list(id2kl.keys())[0]
+            print(f"[GIFT KL Norm] first_group: uid={first_uid}, size={len(id2kl[first_uid])}, "
+                  f"mean={id2mean[first_uid].item():.4f}, std={id2std[first_uid].item():.4f}")
+
+    # Normalize KL (gradients flow through kl_div_sum, not mean/std)
+    kl_div_sum_normalized = kl_div_sum.clone()
+    for i in range(bsz):
+        kl_div_sum_normalized[i] = (kl_div_sum[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+    
+    return kl_div_sum_normalized
+
+
+@register_policy_loss("gift")
+def compute_policy_loss_gift(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """
+    Compute the policy loss for GIFT (Group Implicit Fine Tuning).
+    GIFT computes loss as: MSE(normalized_advantage, beta * normalized_kl)
+    """
+    global _GIFT_DEBUG_COUNTER
+    _GIFT_DEBUG_COUNTER += 1
+    should_debug = (_GIFT_DEBUG_COUNTER % _GIFT_DEBUG_INTERVAL == 1)  # Print on 1st, 101st, 201st, etc.
+    
+    kl_loss_coef = getattr(config, "kl_loss_coef", 1.0)
+    epsilon = getattr(config, "epsilon", 1e-6)
+
+    # Compute KL divergence sum per sample
+    kl_div = log_prob - old_log_prob
+    kl_div_sum = (kl_div * response_mask).sum(dim=-1)
+
+    # Normalize KL group-wise using the separate function
+    kl_div_sum_normalized = normalize_gift_kl(
+        kl_div_sum=kl_div_sum,
+        index=index,
+        epsilon=epsilon,
+        debug=should_debug,
+    )
+    
+    advantage_scalar = advantages[:, 0]
+    mse_losses = (advantage_scalar - kl_loss_coef * kl_div_sum_normalized) ** 2
+    pg_loss = mse_losses.mean()
+
+    # Debug: print loss statistics (periodically)
+    if should_debug:
+        print(f"[GIFT Loss] call={_GIFT_DEBUG_COUNTER}, pg_loss={pg_loss.item():.4f}, "
+              f"kl_mean={kl_div_sum.mean().item():.4f}, kl_norm_mean={kl_div_sum_normalized.mean().item():.4f}, "
+              f"adv_mean={advantage_scalar.mean().item():.4f}")
+
+    pg_metrics = {
+        "actor/pg_clipfrac": 0.0,
+        "actor/ppo_kl": kl_div_sum.mean().detach().item(),
+        "actor/pg_clipfrac_lower": 0.0,
+    }
+
+    return pg_loss, pg_metrics
 
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
     """Compute categorical entropy loss (For backward compatibility)
