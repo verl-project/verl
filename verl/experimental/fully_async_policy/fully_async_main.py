@@ -20,7 +20,7 @@ from pprint import pprint
 
 import hydra
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
@@ -173,12 +173,20 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
         self._create_rollouter(config)
 
+        total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
+        print(f"total_train_steps {total_train_steps}")
+
+        total_optimizer_steps = total_train_steps * config.async_training.trigger_parameter_sync_step
+        with open_dict(config):
+            if OmegaConf.select(config, "actor_rollout_ref.actor.optim"):
+                config.actor_rollout_ref.actor.optim.total_training_steps = total_optimizer_steps
+            if OmegaConf.select(config, "critic.optim"):
+                config.critic.optim.total_training_steps = total_optimizer_steps
+
         print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
         self._create_trainer(config)
 
         # sync total_train_steps between rollouter and trainer
-        total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
-        print(f"total_train_steps {total_train_steps}")
         ray.get(self.components["trainer"].set_total_train_steps.remote(total_train_steps))
 
         # max_queue_size
