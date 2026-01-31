@@ -87,6 +87,7 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
+      mbridge_config: {}
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -459,6 +460,7 @@ critic:
     - extra
     load_contents: ${.save_contents}
     async_save: false
+    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}
