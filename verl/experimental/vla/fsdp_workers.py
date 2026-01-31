@@ -22,7 +22,9 @@ import os
 
 import torch
 import torch.distributed
+from packaging import version
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._unshard_param_utils import _get_module_fsdp_state, _unshard_params_for_summon
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
@@ -33,7 +35,7 @@ from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_id, get_device_name, get_torch_device, set_expandable_segments
 from verl.utils.flops_counter import FlopsCounter
-from verl.utils.fsdp_utils import fsdp_version
+from verl.utils.fsdp_utils import fsdp_version, set_reshard_after_forward
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.profiler import DistProfiler, log_gpu_memory_usage, simple_timer
@@ -56,8 +58,6 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
     fsdp_unshard_exit_stack = contextlib.ExitStack()
 
     def _build_rollout(self, trust_remote_code=False):
-        from verl.experimental.vla.naive_rollout_rob import NaiveRolloutRob
-
         self.base_sync_done = False
         world_size = torch.distributed.get_world_size()
         dp = world_size
@@ -72,23 +72,37 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
         self.gen_random_states = get_torch_device().get_rng_state()
         get_torch_device().set_rng_state(self.torch_random_states)
 
-        if torch.distributed.get_world_size() == 1 and fsdp_version(self.actor_module_fsdp) == 1:
+        fsdp_ver = fsdp_version(self.actor_module_fsdp)
+        if torch.distributed.get_world_size() == 1 and fsdp_ver == 1:
             FSDP.set_state_dict_type(
                 self.actor_module_fsdp,
                 state_dict_type=StateDictType.FULL_STATE_DICT,
                 state_dict_config=FullStateDictConfig(),
             )
-        elif fsdp_version(self.actor_module_fsdp) == 1:
+        elif fsdp_ver == 1:
             FSDP.set_state_dict_type(
                 self.actor_module_fsdp,
                 state_dict_type=StateDictType.SHARDED_STATE_DICT,
                 state_dict_config=ShardedStateDictConfig(),
             )
+        elif fsdp_ver == 2:
+            # FSDP2 already handles state dict logic via torch.distributed.checkpoint APIs.
+            pass
         else:
-            raise NotImplementedError(f"Unsupported fsdp version {fsdp_version(self.actor_module_fsdp)}")
+            raise NotImplementedError(f"Unsupported fsdp version {fsdp_ver}")
 
         self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
-        self.rollout = NaiveRolloutRob(module=self.actor_module_fsdp, model_config=self.config.model)
+
+        if self.config.get("algorithm", "grpo") == "sac":
+            from verl.experimental.vla.sac.naive_rollout_pi05 import PI0RolloutRob
+
+            self.rollout = PI0RolloutRob(
+                module=self.actor_module_fsdp, model_config=self.config.model, tokenizer=self.tokenizer
+            )
+        else:
+            from verl.experimental.vla.naive_rollout_rob import NaiveRolloutRob
+
+            self.rollout = NaiveRolloutRob(module=self.actor_module_fsdp, model_config=self.config.model)
 
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model, dataclass_type=HFModelConfig)
         self.model_config = model_config
@@ -107,30 +121,48 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
 
     async def rollout_mode(self):
         """Context switch hybridengine to rollout mode."""
-        aggressive_empty_cache(force_sync=True)
-        fsdp_unshard_exit_stack = contextlib.ExitStack()
-        optional_state = _get_module_fsdp_state(self.actor_module_fsdp)
-        if optional_state is None:
-            self.fsdp_unshard_exit_stack = fsdp_unshard_exit_stack
-        states_and_modules = ([optional_state], [self.actor_module_fsdp])
 
+        self.actor_module_fsdp.eval()
+
+        aggressive_empty_cache(force_sync=True)
         self.base_sync_done = True
+
         # important: need to manually set the random states of each tp to be identical.
         self.torch_random_states = get_torch_device().get_rng_state()
         get_torch_device().set_rng_state(self.gen_random_states)
-        for state, fsdp_module in zip(*states_and_modules, strict=False):
-            fsdp_unshard_exit_stack.enter_context(
-                _unshard_params_for_summon(
-                    module=fsdp_module,
-                    state=state,
-                    writeback=False,
-                    rank0_only=False,
-                    offload_to_cpu=False,
-                    with_grads=False,
-                )
-            )
 
-        self.fsdp_unshard_exit_stack = fsdp_unshard_exit_stack
+        if fsdp_version(self.actor_module_fsdp) == 1:
+            fsdp_unshard_exit_stack = contextlib.ExitStack()
+            optional_state = _get_module_fsdp_state(self.actor_module_fsdp)
+            if optional_state is None:
+                self.fsdp_unshard_exit_stack = fsdp_unshard_exit_stack
+            states_and_modules = ([optional_state], [self.actor_module_fsdp])
+
+            for state, fsdp_module in zip(*states_and_modules, strict=False):
+                fsdp_unshard_exit_stack.enter_context(
+                    _unshard_params_for_summon(
+                        module=fsdp_module,
+                        state=state,
+                        writeback=False,
+                        rank0_only=False,
+                        offload_to_cpu=False,
+                        with_grads=False,
+                    )
+                )
+
+            self.fsdp_unshard_exit_stack = fsdp_unshard_exit_stack
+        elif fsdp_version(self.actor_module_fsdp) == 2:
+            self.actor_module_fsdp.unshard()
+            for m in self.actor_module_fsdp.modules():
+                if isinstance(m, FSDPModule) or hasattr(m, "unshard"):
+                    m.unshard()
+            if version.parse(torch.__version__) < version.parse("2.8"):
+                set_reshard_after_forward(self.actor_module_fsdp, False)
+            else:
+                self.actor_module_fsdp.set_reshard_after_forward(False)
+        else:
+            raise NotImplementedError(f"Unsupported fsdp version {fsdp_version(self.actor_module_fsdp)}")
+
         logger.info("rollout mode")
 
     async def trainer_mode(self):
@@ -140,15 +172,28 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
 
         # add empty cache after each compute
         aggressive_empty_cache(force_sync=True)
-
         set_expandable_segments(True)
 
         # restore random states
         self.gen_random_states = get_torch_device().get_rng_state()
         get_torch_device().set_rng_state(self.torch_random_states)
-        if self.fsdp_unshard_exit_stack is not None:
-            self.fsdp_unshard_exit_stack.close()
-            self.fsdp_unshard_exit_stack = None
+
+        if fsdp_version(self.actor_module_fsdp) == 1:
+            if self.fsdp_unshard_exit_stack is not None:
+                self.fsdp_unshard_exit_stack.close()
+                self.fsdp_unshard_exit_stack = None
+        elif fsdp_version(self.actor_module_fsdp) == 2:
+            self.actor_module_fsdp.reshard()
+            for m in self.actor_module_fsdp.modules():
+                if isinstance(m, FSDPModule) or hasattr(m, "reshard"):
+                    m.reshard()
+            if version.parse(torch.__version__) < version.parse("2.8"):
+                set_reshard_after_forward(self.actor_module_fsdp, True)
+            else:
+                self.actor_module_fsdp.set_reshard_after_forward(True)
+        else:
+            raise NotImplementedError(f"Unsupported fsdp version {fsdp_version(self.actor_module_fsdp)}")
+
         logger.info("trainer mode")
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"), blocking=False)
@@ -193,27 +238,21 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.experimental.vla.dp_rob import RobDataParallelPPOActor
-
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
         from omegaconf import OmegaConf
 
         override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
-        from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 
-        from verl.experimental.vla.models.openvla_oft.configuration_prismatic import OpenVLAConfig
-        from verl.experimental.vla.models.openvla_oft.modeling_prismatic import OpenVLAForActionPrediction
-        from verl.experimental.vla.models.openvla_oft.processing_prismatic import (
-            PrismaticImageProcessor,
-            PrismaticProcessor,
-        )
+        from verl.experimental.vla.models import register_vla_models
 
-        AutoConfig.register("openvla", OpenVLAConfig)
-        AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
-        AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
-        AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+        register_vla_models()
+
+        from transformers import AutoProcessor
+
+        self.processor = AutoProcessor.from_pretrained(self.config.model.path, trust_remote_code=True)
+
         if self._is_actor or self._is_rollout:
             # we need the model for actor and rollout
             if self._is_actor:
@@ -239,9 +278,21 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
 
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
-            self.actor = RobDataParallelPPOActor(
-                config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
-            )
+            if self.config.get("algorithm") == "sac":
+                from verl.experimental.vla.sac.sac_actor import RobDataParallelSACActor
+
+                self.actor = RobDataParallelSACActor(
+                    config=self.config.actor,
+                    actor_module=self.actor_module_fsdp,
+                    actor_optimizer=self.actor_optimizer,
+                    tokenizer=self.tokenizer,
+                )
+            else:
+                from verl.experimental.vla.dp_rob import RobDataParallelPPOActor
+
+                self.actor = RobDataParallelPPOActor(
+                    config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
+                )
 
         if self._is_rollout:
             self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))

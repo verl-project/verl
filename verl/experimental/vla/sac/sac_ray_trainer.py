@@ -1,6 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright 2023-2024 SGLang Team
-# Copyright 2025 ModelBest Inc. and/or its affiliates
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,10 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-PPO Trainer with Ray-based single controller.
-This trainer supports model-agonistic model initialization with huggingface
-"""
 
 import asyncio
 import uuid
@@ -33,14 +27,11 @@ from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
     compute_throughout_metrics,
-    compute_timing_metrics,
     process_validation_metrics,
 )
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import compute_reward
 from verl.trainer.ppo.utils import Role
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
@@ -99,17 +90,44 @@ def flatten_trajectories(data: DataProto) -> DataProto:
     return new_data
 
 
-# def filter_by_acc(data: DataProto, accuracy_lower_bound, accuracy_upper_bound) -> torch.Tensor:
+def add_transition_prefixes(data: DataProto) -> DataProto:
+    batch = data.batch
+    step_key = "action" if "action" in batch else "full_action"
+    if step_key not in batch:
+        return data
+
+    num_steps = batch[step_key].shape[1]
+    if num_steps <= 1:
+        return data
+
+    def drop_last(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor[:, :-1, ...]
+
+    def shift_next(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor[:, 1:, ...]
+
+    state_keys = ["states", "images", "image_masks", "lang_tokens", "lang_masks"]
+    action_keys = ["full_action", "action"]
+
+    for key in state_keys:
+        if key in batch:
+            batch[f"s0.{key}"] = drop_last(batch[key])
+            batch[f"s1.{key}"] = shift_next(batch[key])
+
+    for key in action_keys:
+        if key in batch:
+            batch[f"a0.{key}"] = drop_last(batch[key])
+            batch[f"a1.{key}"] = shift_next(batch[key])
+
+    batch_size = batch[step_key].shape[0]
+    for key, tensor in list(batch.items()):
+        if tensor.ndim >= 2 and tensor.shape[0] == batch_size and tensor.shape[1] == num_steps:
+            batch[key] = drop_last(tensor)
+
+    return data
 
 
-class RobRayPPOTrainer(RayPPOTrainer):
-    """Distributed PPO trainer using Ray for scalable reinforcement learning.
-
-    This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
-    managing actor rollouts, critic training, and reward computation with Ray backend.
-    Supports various model architectures including FSDP, Megatron, vLLM, and SGLang integration.
-    """
-
+class RobRaySACTrainer(RayPPOTrainer):
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups including env workers."""
         super()._start_profiling(do_profile)
@@ -288,10 +306,7 @@ class RobRayPPOTrainer(RayPPOTrainer):
                 batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
 
                 gen_batch = self._get_gen_batch(batch)
-
-                # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
-                # pass generation config to gen_batch
                 gen_batch.meta_info["do_sample"] = True
                 gen_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
                 gen_batch.meta_info["prompt_length"] = self.config.actor_rollout_ref.rollout.prompt_length
@@ -338,105 +353,18 @@ class RobRayPPOTrainer(RayPPOTrainer):
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                    batch.batch["rewards"] = reward_tensor
+                    average_reward = reward_tensor.any(-1).mean(dtype=torch.float32).item()
+                    metrics["data/trajectory_avg_reward"] = average_reward
 
-                    batch.batch["reward_tensor"] = reward_tensor
+                    batch = add_transition_prefixes(batch)
                     batch = flatten_trajectories(batch)
 
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    # batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    batch.meta_info["global_token_num"] = [0]
 
-                    # recompute old_log_probs
-                    with marked_timer("old_log_prob", timing_raw, color="blue"):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
-                        response_masks = batch.batch["response_mask"]
-                        actor_config = self.config.actor_rollout_ref.actor
-                        entropy_agg = agg_loss(
-                            loss_mat=entropys,
-                            loss_mask=response_masks,
-                            loss_agg_mode=actor_config.loss_agg_mode,
-                            loss_scale_factor=actor_config.loss_scale_factor,
-                        )
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
-                        metrics.update(old_log_prob_metrics)
-                        old_log_prob.batch.pop("entropys")
-                        batch = batch.union(old_log_prob)
-
-                        if "rollout_log_probs" in batch.batch.keys():
-                            # TODO: we may want to add diff of probs too.
-                            from verl.utils.debug.metrics import calculate_debug_metrics
-
-                            metrics.update(calculate_debug_metrics(batch))
-
-                    if self.use_reference_policy:
-                        # compute reference log_prob
-                        with marked_timer("ref", timing_raw, color="olive"):
-                            if not self.ref_in_actor:
-                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                            else:
-                                ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
-
-                    # compute values
-                    if self.use_critic:
-                        with marked_timer("values", timing_raw, color="cyan"):
-                            values = self.critic_wg.compute_values(batch)
-                            batch = batch.union(values)
-
-                    with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list] = None
-
-                        token_level_scores = torch.zeros_like(response_masks, dtype=torch.float32)
-                        flipped_mask = response_masks.flip(dims=[1])
-                        indices_in_flipped = torch.argmax(flipped_mask.long(), dim=1)
-
-                        last_true_indices = response_masks.shape[-1] - 1 - indices_in_flipped
-                        rows_with_response = response_masks.any(dim=1)
-                        effective_rewards = batch.batch["reward_tensor"] * rows_with_response.to(
-                            batch.batch["reward_tensor"].dtype
-                        )
-                        row_indices = torch.arange(response_masks.shape[0], device=token_level_scores.device)
-
-                        token_level_scores[row_indices, last_true_indices] = effective_rewards
-                        batch.batch["token_level_scores"] = token_level_scores
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-
-                        # compute rewards. apply_kl_penalty if available
-                        if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(
-                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
-                            )
-                            metrics.update(kl_metrics)
-                        else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-
-                        # compute advantages, executed on the driver process
-
-                        norm_adv_by_std_in_grpo = self.config.algorithm.get(
-                            "norm_adv_by_std_in_grpo", True
-                        )  # GRPO adv normalization factor
-
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
-                        )
-
-                    # update critic
-                    if self.use_critic:
-                        with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self.critic_wg.update_critic(batch)
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
-                        metrics.update(critic_output_metrics)
-
-                    # implement critic warmup
+                    # update actor
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch)
@@ -523,8 +451,8 @@ class RobRayPPOTrainer(RayPPOTrainer):
                     }
                 )
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
-                metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+                # metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                # metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
