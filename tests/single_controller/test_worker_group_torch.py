@@ -17,13 +17,13 @@ import os
 os.environ["RAY_DEDUP_LOGS"] = "0"
 os.environ["NCCL_DEBUG"] = "WARN"
 
-import ray
 import torch
 import torch.distributed
 
 from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils.device import get_device_name
+import ray
 
 
 @ray.remote

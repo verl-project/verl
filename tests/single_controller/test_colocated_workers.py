@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ray
 
 from verl import DataProto
 from verl.single_controller.base import Worker
@@ -24,6 +23,7 @@ from verl.single_controller.ray.base import (
     create_colocated_worker_cls,
 )
 from verl.utils.device import get_device_name
+import ray
 
 
 @ray.remote

@@ -16,7 +16,6 @@ import asyncio
 import time
 
 import pytest
-import ray
 import torch
 from tensordict import TensorDict
 
@@ -25,6 +24,7 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
+import ray
 
 
 # Pytest fixture for Ray setup/teardown

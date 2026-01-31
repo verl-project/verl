@@ -20,13 +20,13 @@ Rollout rank 2, 3 - Rollout rank 1
 Then, we initiate 4 p2p comms from actor to rollout
 """
 
-import ray
-import ray.util.collective as collective
 import torch
 
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+import ray
+import ray.util.collective as collective
 
 
 @ray.remote

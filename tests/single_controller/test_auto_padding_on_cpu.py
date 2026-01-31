@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import numpy as np
-import ray
 import torch
 
 from verl import DataProto
@@ -21,6 +20,7 @@ from verl.protocol import DataProtoConfig
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+import ray
 
 # or set env var VERL_AUTO_PADDING = "1" / "true"
 DataProtoConfig.auto_padding = True
