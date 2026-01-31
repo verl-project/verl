@@ -186,7 +186,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
                     tokenizer=self.tokenizer,
                     processor=self.processor,
                     dataset_cls=self.dataset_cls,
-                    dataset_config=self.config.data,
+                    dataset_config=DictConfigWrap(config=self.config.data),
                 )
                 output: AgentLoopOutput = await agent_loop.run(
                     sampling_params, cancellation_event=self.cancellation_event, **kwargs
