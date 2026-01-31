@@ -101,13 +101,21 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         sampling_params = dict(
             temperature=config.temperature,
             top_p=config.top_p,
+            top_k=config.top_k,
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
 
+        # configure max generation tokens for vllm/sglang
+        for param_name in ["max_tokens", "max_new_tokens"]:
+            param_value = getattr(config, param_name, None)
+            if param_value is not None:
+                sampling_params[param_name] = param_value
+
         # override sampling params for validation
         if batch.meta_info.get("validate", False):
             sampling_params["top_p"] = config.val_kwargs.top_p
+            sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
 
         if "agent_name" not in batch.non_tensor_batch:

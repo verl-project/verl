@@ -195,6 +195,8 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    max_tokens: null
+    max_new_tokens: null
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
