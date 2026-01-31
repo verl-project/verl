@@ -167,16 +167,16 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
 
         topk = target_topk_indices.size(-1)
         grad_input_2d = grad_input.view(-1, grad_input.size(-1))
-        arange_1d = torch.arange(start=0, end=grad_input_2d.size(0), device=grad_input_2d.device).unsqueeze(-1)  # (b*s, 1)
         target_topk_probs_flat = target_topk_probs.view(-1, topk)  # (b*s, topk)
         target_topk_indices_flat = target_topk_indices.view(-1, topk)  # (b*s, topk)
         
-        grad = grad_input_2d[arange_1d, target_topk_indices_flat] 
-        grad = grad - (target_topk_probs_flat * active_mask.view(-1, topk).to(grad.dtype))
+        # subtract teacher probs for active entries, accumulating if indices repeat (index 0 might repeat)
+        # index 0 is a dummy index for top-k entries not on this shard where probs have been set to zero
+        # index 0 may also be a valid index in the top-k entries, so scatter_add_ to sum all repeats
+        sub = target_topk_probs_flat * active_mask.view(-1, topk).to(grad_input_2d.dtype)  # (b*s, topk)
+        grad_input_2d.scatter_add_(dim=1, index=target_topk_indices_flat, src=-sub)
 
-        grad_input_2d[arange_1d, target_topk_indices_flat] = grad
         grad_input.mul_(grad_loss.unsqueeze(dim=-1))
-
         return grad_input, None, None, None  # 返回给第一个输入 vp_logits 的梯度
 
 def compute_forward_kl_topk(
