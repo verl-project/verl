@@ -72,9 +72,7 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
 
 
 def validate_config(
-    config: DictConfig,
-    use_reference_policy: bool,
-    use_critic: bool,
+    config: DictConfig, use_reference_policy: bool, use_critic: bool, use_distillation_policy: bool = False
 ) -> None:
     """Validate an OmegaConf DictConfig.
 
@@ -82,6 +80,8 @@ def validate_config(
         config (DictConfig): The OmegaConf DictConfig to validate.
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
+        use_distillation_policy (bool): is distillation policy needed
+        TODO: RM default False for use_distillation_policy after integration with all main_ppo (transfer_queue, async)
     """
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
@@ -160,6 +160,14 @@ def validate_config(
                 "actor_rollout_ref.ref",
             )
 
+        if use_distillation_policy:
+            # distillation: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
+            check_mutually_exclusive(
+                config.actor_rollout_ref.distillation.log_prob_micro_batch_size,
+                config.actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu,
+                "actor_rollout_ref.distillation",
+            )
+
         #  The rollout section also has log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
         check_mutually_exclusive(
             config.actor_rollout_ref.rollout.log_prob_micro_batch_size,
@@ -209,5 +217,19 @@ def validate_config(
         from verl.workers.rollout.vllm_rollout.utils import get_vllm_max_lora_rank
 
         get_vllm_max_lora_rank(lora_rank)
+
+    # check that both distillation policy and reference policy are not enabled at the same time
+    if use_distillation_policy and use_reference_policy:
+        raise ValueError(
+            "Both distillation policy and reference policy are enabled. "
+            "Please choose one or the other, or disable both."
+        )
+
+    # check that distillation is not enabled with legacy worker implementation
+    if use_distillation_policy and config.trainer.use_legacy_worker_impl != "disable":
+        raise NotImplementedError(
+            "Distillation is not supported with legacy worker implementation. "
+            "Please set trainer.use_legacy_worker_impl to 'disable' to use distillation."
+        )
 
     print("[validate_config] All configuration checks passed successfully!")

@@ -18,6 +18,7 @@ from enum import Enum
 from omegaconf import DictConfig
 
 from verl.single_controller.base import Worker
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.core_algos import AdvantageEstimator
 
 WorkerType = type[Worker]
@@ -74,6 +75,13 @@ def need_reference_policy(
 ) -> bool:
     """Given the config, do we need ref policy."""
     return config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss
+
+
+def need_distillation_policy(
+    config: DictConfig,
+) -> bool:
+    """Given the config, do we need distillation policy."""
+    return is_distillation_enabled(config.actor_rollout_ref.get("distillation"))
 
 
 def need_reward_model(
