@@ -211,11 +211,11 @@ def get_npu_versions() -> tuple[str, str]:
 
     # Check CANN toolkit version
     arch = platform.machine()
-    if arch not in ["aarch64", "x86_64"]:
+    if arch not in ["arm64", "aarch64", "x86_64"]:
         raise RuntimeError(f"Unsupported architecture: {arch}")
 
-    # NOTE: if user install CANN toolkit in custom path, this check may fail
-    cann_path = os.path.join("/usr/local/Ascend/ascend-toolkit/latest", f"{arch}-linux")
+    ascend_home = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
+    cann_path = os.path.join(ascend_home, f"{arch}-linux")
 
     if not os.path.exists(cann_path):
         raise RuntimeError(f"CANN toolkit path does not exist: {cann_path}")
