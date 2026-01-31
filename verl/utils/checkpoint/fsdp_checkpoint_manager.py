@@ -39,6 +39,139 @@ from .checkpoint_manager import BaseCheckpointManager
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+def unflatten_fsdp_checkpoint(flat_state_dict, model):
+    """
+    Convert a flattened FSDP checkpoint (_flat_param) to original parameter names.
+    
+    This is needed when loading a checkpoint saved with use_orig_params=False
+    into a model expecting original parameter names.
+    
+    Args:
+        flat_state_dict: State dict containing '_flat_param'
+        model: The FSDP model to extract parameter structure from
+    
+    Returns:
+        Dict with original parameter names
+    """
+    if "_flat_param" not in flat_state_dict:
+        return flat_state_dict
+    
+    log_with_rank(
+        "Converting flattened checkpoint to original parameter names...",
+        rank=torch.distributed.get_rank() if torch.distributed.is_initialized() else 0,
+        logger=logger
+    )
+    
+    flat_param = flat_state_dict["_flat_param"]
+    
+    # Get the parameter metadata from the current model
+    # This tells us the order and shapes of parameters
+    
+    # Extract from FSDP wrapped model
+    # We need the original parameter structure to unflatten the checkpoint.
+    # If the model is FSDP wrapped, we should try to get the underlying module
+    # to ensure we iterate over original parameters, especially if use_orig_params=False.
+    if fsdp_version(model) == 1 and hasattr(model, "_fsdp_wrapped_module"):
+        base_model = model._fsdp_wrapped_module
+    elif hasattr(model, "module"):
+        base_model = model.module
+    else:
+        base_model = model
+    
+    # Debug: log first few parameter names from base_model
+    base_model_params = list(base_model.named_parameters())
+    log_with_rank(
+        f"Base model has {len(base_model_params)} parameters. First 5: {[name for name, _ in base_model_params[:5]]}",
+        rank=torch.distributed.get_rank() if torch.distributed.is_initialized() else 0,
+        logger=logger
+    )
+    
+    # Unflatten the tensor
+    new_state_dict = {}
+    offset = 0
+    seen_params = {} # param_obj -> tensor (unflattened)
+    
+    # Identify keys that are already present in the checkpoint (unwrapped)
+    existing_keys = set(k for k in flat_state_dict.keys() if k != "_flat_param")
+    log_with_rank(
+        f"Checkpoint has {len(existing_keys)} non-flat keys. First 5: {list(existing_keys)[:5]}",
+        rank=torch.distributed.get_rank() if torch.distributed.is_initialized() else 0,
+        logger=logger
+    )
+    
+    params_from_existing = 0
+    params_from_flat = 0
+    
+    # Iterate in order, handling shared parameters
+    # Use remove_duplicate=False to handle tied weights (e.g. embeddings) generically
+    for name, param in base_model.named_parameters(remove_duplicate=False):
+        # Check if this parameter is already in the checkpoint
+        # The checkpoint keys might have a prefix (e.g. _fsdp_wrapped_module.) if saved from FSDP
+        # but we are iterating the unwrapped base_model.
+        # We try to find the key in existing_keys using the clean name or potential prefixed names.
+        key_in_checkpoint = None
+        if name in existing_keys:
+            key_in_checkpoint = name
+        elif f"_fsdp_wrapped_module.{name}" in existing_keys:
+            # Some checkpoints saved under FSDP or DataParallel may prepend "_fsdp_wrapped_module." or "module."
+            # We check all possible variants to ensure compatibility.
+            key_in_checkpoint = f"_fsdp_wrapped_module.{name}"
+        elif f"module.{name}" in existing_keys:
+             key_in_checkpoint = f"module.{name}"
+
+        if key_in_checkpoint:
+            # It's already loaded, just copy it to new_state_dict
+            # We must add it to seen_params so shared params work correctly
+            if param not in seen_params:
+                seen_params[param] = flat_state_dict[key_in_checkpoint]
+            new_state_dict[name] = flat_state_dict[key_in_checkpoint]
+            params_from_existing += 1
+            continue
+
+        if param in seen_params:
+            # Shared parameter (e.g., tied embeddings), reuse the already extracted tensor
+            new_state_dict[name] = seen_params[param]
+        else:
+            # New parameter, extract from flat_param
+            numel = param.numel()
+            shape = param.shape
+            
+            if offset + numel > flat_param.numel():
+                log_with_rank(
+                    f"Warning: Cannot unflatten parameter {name}, insufficient data in flat_param. "
+                    f"Offset: {offset}, Needed: {numel}, Available: {flat_param.numel()}. "
+                    f"This may indicate the parameter is stored elsewhere or in a different format.",
+                    rank=torch.distributed.get_rank() if torch.distributed.is_initialized() else 0,
+                    logger=logger
+                )
+                break
+            
+            # Extract and reshape
+            param_flat = flat_param[offset:offset + numel]
+            reconstructed_param = param_flat.reshape(shape)
+            
+            new_state_dict[name] = reconstructed_param
+            seen_params[param] = reconstructed_param
+            offset += numel
+            params_from_flat += 1
+
+    # Copy over any other keys from the original state_dict (e.g. buffers, or params we skipped)
+    for k, v in flat_state_dict.items():
+        if k != "_flat_param" and k not in new_state_dict:
+            new_state_dict[k] = v
+    
+    log_with_rank(
+        f"Successfully converted checkpoint: {params_from_flat} params from _flat_param, "
+        f"{params_from_existing} params from individual keys, total {len(new_state_dict)} entries. "
+        f"Used {offset:,}/{flat_param.numel():,} elements in _flat_param.",
+        rank=torch.distributed.get_rank() if torch.distributed.is_initialized() else 0,
+        logger=logger
+    )
+    
+    return new_state_dict
+
+
+
 
 @dataclass
 class FSDPConfig:
@@ -135,6 +268,16 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
+                
+                # If checkpoint contains _flat_param, convert it to original parameter names
+                if "_flat_param" in model_state_dict:
+                    log_with_rank(
+                        f"Detected _flat_param in checkpoint. Converting to original parameter names...",
+                        rank=self.rank,
+                        logger=logger
+                    )
+                    model_state_dict = unflatten_fsdp_checkpoint(model_state_dict, self.model)
+                
                 self.model.load_state_dict(model_state_dict)
                 log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
 
@@ -142,8 +285,17 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_optim_path = copy_to_local(remote_optim_path)
                 optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
-                self.optimizer.load_state_dict(optimizer_state_dict)
-                log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
+                try:
+                    self.optimizer.load_state_dict(optimizer_state_dict)
+                    log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
+                except (ValueError, KeyError) as e:
+                    log_with_rank(
+                        f"Warning: Failed to load optimizer state dict: {e}. "
+                        f"This may happen when use_orig_params setting changed between save and load. "
+                        f"Optimizer will be reinitialized from scratch.",
+                        rank=self.rank,
+                        logger=logger
+                    )
 
         if self.should_load_extra:
             remote_extra_state_path = os.path.join(
