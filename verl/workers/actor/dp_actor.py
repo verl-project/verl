@@ -303,13 +303,10 @@ class DataParallelPPOActor(BasePPOActor):
                             unpad_dim=0,
                             padding_size=pad_size,
                         )
-<<<<<<< HEAD
-=======
                     if calculate_sum_pi_squared:
                         sum_pi_squared_rmpad = gather_outputs_and_unpad(
                             sum_pi_squared_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
                         )
->>>>>>> b178a3cd56f58b2d502255daba591e92833930a7
 
                 if is_mask_all_zero:
                     log_probs = log_probs[:0]
