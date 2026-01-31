@@ -682,9 +682,8 @@ class AgentLoopWorker:
         image_grid_thw = multi_modal_inputs.get("image_grid_thw")
         video_grid_thw = multi_modal_inputs.get("video_grid_thw")
 
-        
         vision_position_ids = None
-        if video_grid_thw is not None: # some models that use cross attention do not need vision position ids
+        if video_grid_thw is not None:  # some models that use cross attention do not need vision position ids
             # Model's get_rope_index has been dynamically bind to the processor.
             vision_position_ids, _ = self.processor.get_rope_index(
                 input_ids=input_ids,

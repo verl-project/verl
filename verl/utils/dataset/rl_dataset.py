@@ -393,13 +393,15 @@ class RLHFDataset(Dataset):
         from qwen_vl_utils import process_vision_info
 
         if image_patch_size is not None:
-            images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
+            images, videos = process_vision_info(
+                messages, image_patch_size=image_patch_size, return_video_metadata=True
+            )
             return images, videos
-        else: # some processor does not need and have a image patch size parameter, than this function will be used with image_patch_size as None, indicating no image patch size is needed
+        else:  # some processor does not need and have a image patch size parameter, than this function will be used with image_patch_size as None, indicating no image patch size is needed
             try:
                 images, videos = process_vision_info(messages, return_video_metadata=True)
                 return images, videos
-            except Exception as e:# some processor does not have a return_video_metadata parameter, this param is used with try-except to handle this case
+            except Exception:  # some processor does not have a return_video_metadata parameter, this param is used with try-except to handle this case
                 images, videos = process_vision_info(messages)
                 return images, videos
 
