@@ -33,6 +33,7 @@ def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
         return False
     return config.enabled
 
+
 def distillation_requires_logits(config: DistillationConfig) -> bool:
     """Check if distillation loss requires logits based on the provided configuration."""
     distillation_settings: DistillationLossSettings = config.loss_settings

@@ -19,8 +19,8 @@ from typing import Any, Callable
 import torch
 
 import verl.trainer.distillation.fsdp.losses as fsdp_losses
-from verl.trainer.distillation.megatron import losses as megatron_losses
 from verl.base_config import BaseConfig
+from verl.trainer.distillation.megatron import losses as megatron_losses
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.metric import AggregationType, Metric

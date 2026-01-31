@@ -13,10 +13,13 @@
 # limitations under the License.
 
 
-import torch
 from typing import Optional
-from verl.workers.config import DistillationConfig
+
+import torch
+
 from verl.trainer.distillation.megatron.utils import vocab_parallel_log_softmax
+from verl.workers.config import DistillationConfig
+
 
 class _VocabParallelKLDivergence(torch.autograd.Function):
     """
@@ -44,7 +47,6 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
             get_tensor_model_parallel_world_size,
         )
         from megatron.core.tensor_parallel.utils import VocabUtility
-
 
         # Compute softmax over vocab-parallel logits
         vp_source_logps = vocab_parallel_log_softmax(vp_logits).float()
@@ -85,7 +87,9 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         topk = target_topk_indices.size(-1)
         vp_source_logps_2d = vp_source_logps.view(-1, partition_vocab_size)  # (b*s, vocab_shard)
         arange_1d = torch.arange(start=0, end=vp_source_logps_2d.size(0), device=vp_source_logps_2d.device)  # (b*s,)
-        vp_source_topk_logps_2d = vp_source_logps_2d[arange_1d.unsqueeze(-1), target_topk_indices.view(-1, topk)]  # (b*s, topk)
+        vp_source_topk_logps_2d = vp_source_logps_2d[
+            arange_1d.unsqueeze(-1), target_topk_indices.view(-1, topk)
+        ]  # (b*s, topk)
         vp_source_topk_logps = vp_source_topk_logps_2d.view(target_topk_indices.shape)  # (b, s, topk)
 
         # `active_mask` tracks entries that should receive gradient.
@@ -122,9 +126,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
             group=get_tensor_model_parallel_group(),
         )
 
-        ctx.save_for_backward(
-            vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass
-        )
+        ctx.save_for_backward(vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass)
 
         # For logging: mass of student probs that lands on the teacher's top-k indices.
         vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
@@ -162,9 +164,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         Then for any vocab index j on this shard (with p = softmax(logits)):
             dL/dz_j = m_A * p_j - q_j * 1[j in A]
         """
-        vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass = (
-            ctx.saved_tensors
-        )
+        vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass = ctx.saved_tensors
 
         # Scale by m_A: grad starts as m_A * p_j for all j on this shard.
         grad_input = vp_source_probs * target_active_mass.unsqueeze(-1)  # [b, s, vocab_shard]
@@ -191,4 +191,6 @@ def compute_forward_kl_topk(
     config: DistillationConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute forward KL distillation loss using top-k log probabilities."""
-    return _VocabParallelKLDivergence.apply(student_logits, teacher_topk_log_probs, teacher_topk_indices, config.log_prob_min_clamp)
+    return _VocabParallelKLDivergence.apply(
+        student_logits, teacher_topk_log_probs, teacher_topk_indices, config.log_prob_min_clamp
+    )
