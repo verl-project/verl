@@ -8,7 +8,6 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp"}  # fsdp or megatron
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 
 rollout_mode="async"
@@ -122,6 +121,13 @@ common_params=(
     trainer.val_before_train=True
 )
 
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
 if [ "${ACTOR_STRATEGY}" == "fsdp" ]; then
     echo "Running TransferQueue training with FSDP strategy..."
     # FSDP specific parameters; fsdp_size need to be -1
@@ -130,6 +136,15 @@ if [ "${ACTOR_STRATEGY}" == "fsdp" ]; then
     fsdp_size=-1
     ref_offload=True
     actor_offload=False
+
+    extra_npu_args=()
+    
+    if [ "$device_name" == "npu" ]; then
+        echo "Detect NPU device, enabling FULL_AND_PIECEWISE..."
+        extra_npu_args+=(
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE"
+        )
+    fi
 
     python3 -m verl.experimental.transfer_queue.main_ppo \
         --config-path=config \
@@ -150,6 +165,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp" ]; then
         actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
         actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
         actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
+        "${extra_npu_args[@]}" \
         2>&1 | tee "$log_file" $@
 
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
@@ -160,6 +176,23 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     train_pp=2
     ref_offload=True
     actor_offload=False
+
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
+    extra_flash_args=()
+
+    if [ "$device_name" == "npu" ]; then
+        echo "Detect NPU device, enabling FlashAttention..."
+        extra_flash_args+=(
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
+            ++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+        )
+    fi
 
     # For Ascend NPU, please add:
     #++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
@@ -180,6 +213,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
         actor_rollout_ref.ref.megatron.param_offload=${ref_offload} \
+        "${extra_flash_args[@]}" \
         2>&1 | tee "$log_file" $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp' or 'megatron'"
