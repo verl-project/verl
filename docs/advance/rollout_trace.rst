@@ -16,6 +16,27 @@ Trace Parameter Configuration
 
 - ``actor_rollout_ref.rollout.trace.backend=mlflow|weave`` # the trace backend type
 - ``actor_rollout_ref.rollout.trace.token2text=True`` # To show decoded text in trace view
+- ``actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=N`` # Limit traces per worker (optional)
+
+Limiting Trace Volume
+~~~~~~~~~~~~~~~~~~~~~~
+
+By default, all samples are traced, which can generate large amounts of data and incur significant costs with trace backends like Weave or MLflow. To limit trace volume while maintaining representative coverage, use ``max_samples_per_step_per_worker``.
+
+Example configuration:
+
+.. code-block:: yaml
+
+   actor_rollout_ref:
+     rollout:
+       trace:
+         backend: weave
+         token2text: False
+         max_samples_per_step_per_worker: 5  # Each worker traces 5 random samples
+
+Each agent loop worker independently selects up to N unique samples to trace per training step. For GRPO (``n > 1``), all rollouts for selected samples are traced. Total traces per step = max_samples_per_step_per_worker * num_workers * n.
+
+Example: With 4 workers, max_samples_per_step_per_worker=5, and GRPO n=4, you get 4 * 5 * 4 = 80 traces per step instead of tracing all samples. Set to null (default) to trace all samples.
 
 
 Glossary

@@ -17,6 +17,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from verl import DataProto
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.model import create_random_mask
 from verl.utils.seqlen_balancing import (
     ceildiv,
@@ -62,9 +63,9 @@ def test_dynamic_batch():
 
 def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
     # 1) init process group & CUDA
-    torch.cuda.set_device(rank)
+    get_torch_device().set_device(rank)
     dist.init_process_group(
-        backend="nccl",
+        backend=get_nccl_backend(),
         init_method=init_method,
         world_size=world_size,
         rank=rank,
@@ -72,7 +73,7 @@ def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
 
     # 2) build a small random batch (each rank different length to force mismatch)
     torch.manual_seed(42 + rank)
-    input_ids = torch.randint(0, 10, (20 + rank * 5, 100), device=f"cuda:{rank}")
+    input_ids = torch.randint(0, 10, (20 + rank * 5, 100), device=f"{get_device_name()}:{rank}")
     attention_mask = create_random_mask(
         input_ids=input_ids,
         max_ratio_of_left_padding=0.1,
@@ -102,7 +103,7 @@ def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
         assert len(micros) == expected
     if use_same_dp:
         # gather all local_counts
-        counts = [torch.zeros(1, device=f"cuda:{rank}") for _ in range(world_size)]
+        counts = [torch.zeros(1, device=f"{get_device_name()}:{rank}") for _ in range(world_size)]
         counts[rank].fill_(local)
         dist.all_gather(counts, counts[rank])
         expected = max(int(c.item()) for c in counts)
@@ -199,3 +200,79 @@ def test_seqlen_balancing_distributed_params(tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+def test_group_balanced_partitions():
+    """Test group-level balancing keeps same-uid samples together."""
+    from verl.utils.seqlen_balancing import get_group_balanced_partitions
+
+    # Create test data: 4 groups with different sizes
+    # Group 0 (uid=0): indices 0,1,2,3 with seqlens [100, 100, 100, 100]
+    # Group 1 (uid=1): indices 4,5,6,7 with seqlens [200, 200, 200, 200]
+    # Group 2 (uid=2): indices 8,9,10,11 with seqlens [150, 150, 150, 150]
+    # Group 3 (uid=3): indices 12,13,14,15 with seqlens [50, 50, 50, 50]
+    seqlen_list = [100] * 4 + [200] * 4 + [150] * 4 + [50] * 4
+    uid_list = [0] * 4 + [1] * 4 + [2] * 4 + [3] * 4
+
+    # Partition into 2 groups
+    partitions = get_group_balanced_partitions(seqlen_list, uid_list, k_partitions=2)
+
+    assert len(partitions) == 2
+
+    # Verify all indices are covered
+    all_indices = set()
+    for partition in partitions:
+        all_indices.update(partition)
+    assert all_indices == set(range(16))
+
+    # Verify same-uid samples stay together
+    for partition in partitions:
+        uids_in_partition = set(uid_list[i] for i in partition)
+        for uid in uids_in_partition:
+            # All samples with this uid should be in this partition
+            uid_indices = [i for i, u in enumerate(uid_list) if u == uid]
+            assert all(i in partition for i in uid_indices), f"uid {uid} samples split across partitions"
+
+
+def test_group_balanced_partitions_single_sample_groups():
+    """Test group balancing with single-sample groups (n=1)."""
+    from verl.utils.seqlen_balancing import get_group_balanced_partitions
+
+    # Each sample is its own group
+    seqlen_list = [100, 200, 150, 50, 300, 250]
+    uid_list = [0, 1, 2, 3, 4, 5]
+
+    partitions = get_group_balanced_partitions(seqlen_list, uid_list, k_partitions=2)
+
+    assert len(partitions) == 2
+    all_indices = set()
+    for partition in partitions:
+        all_indices.update(partition)
+    assert all_indices == set(range(6))
+
+
+def test_group_balanced_partitions_equal_size():
+    """Test group balancing with equal_size constraint simulation."""
+    from verl.utils.seqlen_balancing import get_group_balanced_partitions
+
+    # 8 groups, partition into 4 (simulating world_size=4)
+    # Each group has 2 samples
+    seqlen_list = [100, 100, 200, 200, 150, 150, 50, 50, 300, 300, 250, 250, 180, 180, 120, 120]
+    uid_list = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7]
+
+    partitions = get_group_balanced_partitions(seqlen_list, uid_list, k_partitions=4)
+
+    assert len(partitions) == 4
+
+    # Verify all indices are covered
+    all_indices = set()
+    for partition in partitions:
+        all_indices.update(partition)
+    assert all_indices == set(range(16))
+
+    # Verify same-uid samples stay together
+    for partition in partitions:
+        uids_in_partition = set(uid_list[i] for i in partition)
+        for uid in uids_in_partition:
+            uid_indices = [i for i, u in enumerate(uid_list) if u == uid]
+            assert all(i in partition for i in uid_indices)

@@ -1,0 +1,28 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# config for the rollout (only for resource isolation)
+rollout:
+  # Number of nodes used in the rollout
+  nnodes: 1
+  # Number of GPUs per node
+  n_gpus_per_node: 8
+
+# To adapt to the current logic of AgentLoopManager
+actor_rollout_ref:
+  rollout:
+    # Must be turned off! Otherwise, Parameter synchronization cannot be performed.
+    free_cache_engine: False
+    # Must be enabled! Otherwise, log_probs cannot be calculated.
+    calculate_log_probs: True
+
+# Only then will the use of log probs be correct.
+# And it can be used in conjunction with other rollout_correction algorithms.
+algorithm:
+  rollout_correction:
+    bypass_mode: True

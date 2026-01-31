@@ -4,16 +4,27 @@ defaults:
 
   # megatron engine config
   - ../engine@megatron: megatron
-  
+
   # load the reference default config, then apply the fields in the current yaml
   - _self_
+
+_target_: verl.workers.config.McoreActorConfig
 
 strategy: megatron
 
 megatron:
-  _target_: verl.workers.config.MegatronEngineConfig
   seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
   override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
   use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
+  vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
+  use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
+  tensor_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.tensor_model_parallel_size,1}
+  pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.pipeline_model_parallel_size,1}
+  virtual_pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size,null}
+  context_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.context_parallel_size,1}
+  expert_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_model_parallel_size,1}
+  expert_tensor_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_tensor_parallel_size,null}
+  param_offload: ${oc.select:actor_rollout_ref.actor.megatron.param_offload,False}
+  forward_only: True
 
 load_weight: True

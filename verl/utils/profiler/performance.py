@@ -238,3 +238,25 @@ def topk_reduce_ratio_min_max(timing: float, k: int = 10) -> tuple[float, float,
     top_k_percentile = torch.quantile(tensor_stack, 1 - k / 100)
     tail_ratio = torch.mean((tensor_stack > top_k_percentile).float()).cpu().item()
     return tail_ratio, timing_min, timing_max
+
+
+def gather_timing(timing_raw: dict[str, float]) -> dict[str, list[float]]:
+    if not dist.is_initialized():
+        return {k: [v] for k, v in timing_raw.items()}
+
+    key_list, timing_list = [], []
+    for key in sorted(timing_raw.keys()):
+        key_list.append(key)
+        timing_list.append(timing_raw[key])
+
+    world_size = torch.distributed.get_world_size()
+
+    object_gather_list = [None] * world_size
+
+    torch.distributed.all_gather_object(object_gather_list, timing_list)
+
+    timing_generate = {
+        key_list[i]: [timing_list[i] for timing_list in object_gather_list] for i in range(len(key_list))
+    }
+
+    return timing_generate

@@ -201,17 +201,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # record the previous global step
         self.previous_global_step = global_step
 
-        # remove previous local_path, only rank 0 should do this
-        if (
-            self.rank == 0
-            and max_ckpt_to_keep
-            and isinstance(max_ckpt_to_keep, int)
-            and max_ckpt_to_keep > 0
-            and len(self.previous_saved_paths) >= max_ckpt_to_keep
-        ):
-            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
-            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
-            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
+        if self.rank == 0:
+            self.ensure_checkpoint_capacity(max_ckpt_to_keep)
 
         local_path = local_mkdir_safe(local_path)
         torch.distributed.barrier()
@@ -275,6 +266,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 except Exception:
                     # if the generation config isn't available, we don't save it
                     pass
+
+            if hasattr(model_config, "auto_map") and None in model_config.auto_map:
+                model_config.auto_map = {k: v for k, v in model_config.auto_map.items() if k is not None}
 
             model_config.save_pretrained(hf_config_tokenizer_path)
             if self.processing_class is not None:
@@ -364,4 +358,5 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             # wait for rank0 to dump hf_model to local
             torch.distributed.barrier()
 
-        self.previous_saved_paths.append(local_path)
+        if self.rank == 0:
+            self.register_checkpoint(local_path, max_ckpt_to_keep)

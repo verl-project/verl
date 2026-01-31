@@ -387,7 +387,11 @@ class DataProto:
 
     def __getstate__(self):
         if version.parse(tensordict.__version__) >= version.parse("0.5.0") and self.batch is not None:
-            batch = self.batch.contiguous().consolidate()
+            # Check if batch is empty to avoid torch.cat error in consolidate
+            if len(self.batch.keys()) > 0:
+                batch = self.batch.contiguous().consolidate()
+            else:
+                batch = self.batch
         else:
             batch = self.batch
 
@@ -806,7 +810,7 @@ class DataProto:
 
     def make_iterator(self, mini_batch_size, epochs, seed=None, dataloader_kwargs=None):
         r"""Make an iterator from the DataProto. This is built upon that TensorDict can be used as a normal Pytorch
-        dataset. See https://pytorch.org/tensordict/tutorials/data_fashion for more details.
+        dataset. See https://pytorch.org/tensordict/stable/tutorials/data_fashion for more details.
 
 
         Args:
@@ -1118,6 +1122,8 @@ class DataProto:
         tensor_batch = self.batch.to_dict()
         non_tensor_batch = self.non_tensor_batch
 
+        from tensordict.tensorclass import NonTensorData, NonTensorStack
+
         from verl.utils import tensordict_utils as tu
 
         common_keys = set(tensor_batch.keys()) & set(non_tensor_batch.keys())
@@ -1125,7 +1131,8 @@ class DataProto:
 
         for key, val in non_tensor_batch.items():
             assert isinstance(val, np.ndarray)
-            tensor_batch[key] = val.tolist()
+            # Convert to NonTensorStack instead of plain list to handle nested structures
+            tensor_batch[key] = NonTensorStack.from_list([NonTensorData(item) for item in val])
         output = tu.get_tensordict(tensor_dict=tensor_batch, non_tensor_dict=self.meta_info)
         return output
 
@@ -1216,8 +1223,17 @@ class DataProtoFuture:
     def get(self):
         output = ray.get(self.futures)  # dp_size.
         for o in output:
-            assert isinstance(o, DataProto)
-        output = self.collect_fn(output)  # select dp, concat
+            assert isinstance(o, DataProto | TensorDict)
+
+        if isinstance(output[0], DataProto):
+            output = DataProto.concat(output)  # select dp, concat
+        elif isinstance(output[0], TensorDict):
+            from verl.utils.tensordict_utils import concat_tensordict
+
+            output = concat_tensordict(output)
+        else:
+            raise TypeError(f"Unknown type {type(o[0])} in DataProtoFuture")
+
         if self.dispatch_fn is not None:
             output = self.dispatch_fn(output)  # split in batch dim, select using dp
         return output

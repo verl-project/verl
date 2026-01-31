@@ -1,0 +1,19 @@
+# libero
+timm<1.0.0 
+imageio
+draccus==0.8.0
+einops
+huggingface_hub
+json-numpy
+jsonlines
+matplotlib
+rich
+sentencepiece==0.1.99
+# dlimp @ git+https://github.com/moojink/dlimp_openvla
+diffusers==0.30.3
+imageio
+uvicorn
+fastapi
+json-numpy
+wandb==0.19.11
+protobuf==3.20.3

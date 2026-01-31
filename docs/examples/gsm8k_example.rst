@@ -10,7 +10,7 @@ In this example, we train an LLM to tackle the GSM8k task.
 
 Paper: https://arxiv.org/pdf/2110.14168
 
-Dataset: https://huggingface.co/datasets/gsm8k
+Dataset: https://huggingface.co/datasets/openai/gsm8k
 
 Note that the original paper mainly focuses on training a verifier (a
 reward model) to solve math problems via Best-of-N sampling. In this

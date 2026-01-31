@@ -1,0 +1,72 @@
+# Base image from NGC TensorRT-LLM, which includes a pre-installed TensorRT-LLM.
+# For available images, visit: https://nvidia.github.io/TensorRT-LLM/installation/containers.html
+# Use TRTLLM_BASE_IMAGE to specify the base image (default: release:1.2.0rc6)
+ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6
+FROM ${TRTLLM_BASE_IMAGE}
+
+
+# ==============================================================================
+# Install Megatron dependencies
+# ==============================================================================
+# DeepEP is required for IBGDA support.
+# Clone and build gdrcopy and deepep-nvshmem dependencies.
+WORKDIR /home/dpsk_a2a
+RUN git clone -b v2.3.1 https://github.com/NVIDIA/gdrcopy.git && \
+    git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout a84a248 && \
+    cd /home/dpsk_a2a && \
+    wget https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz && \
+    tar -xvf nvshmem_src_3.2.5-1.txz && mv nvshmem_src deepep-nvshmem && \
+    cd deepep-nvshmem && git apply /home/dpsk_a2a/DeepEP/third-party/nvshmem.patch && \
+    sed -i '16i#include <getopt.h>' /home/dpsk_a2a/deepep-nvshmem/examples/moe_shuffle.cu && \
+    sed -i 's/CUDA_STANDARD 11/CUDA_STANDARD 17/g' /home/dpsk_a2a/deepep-nvshmem/src/CMakeLists.txt && \
+    # Cleanup downloaded archive
+    rm /home/dpsk_a2a/nvshmem_src_3.2.5-1.txz
+
+# Set environment variables
+ENV CUDA_HOME=/usr/local/cuda \
+    CPATH=/usr/local/mpi/include \
+    LD_LIBRARY_PATH=/usr/local/mpi/lib:/usr/local/x86_64-linux-gnu:$LD_LIBRARY_PATH \
+    GDRCOPY_HOME=/home/dpsk_a2a/gdrcopy
+
+# Build deepep-nvshmem
+WORKDIR /home/dpsk_a2a/deepep-nvshmem
+ARG CUDA_ARCHS="80;90;100"
+RUN NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    NVSHMEM_BUILD_EXAMPLES=0 \
+    NVSHMEM_BUILD_TESTS=0 \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=/home/dpsk_a2a/deepep-nvshmem/install -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" && \
+    cd build && make install -j && \
+    # Cleanup build directory
+    rm -rf /home/dpsk_a2a/deepep-nvshmem/build
+
+# Build deepep
+WORKDIR /home/dpsk_a2a/DeepEP
+ENV NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install
+RUN NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install python setup.py install
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir --no-deps trl && \
+    pip3 install --no-cache-dir nvtx matplotlib liger_kernel && \
+    pip install --no-cache-dir -U git+https://github.com/ISEEKYAN/mbridge.git && \
+    pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.14.0rc7
+
+
+# ==============================================================================
+# Install verl dependencies
+# ==============================================================================
+RUN pip install git+https://github.com/volcengine/verl.git@v0.6.0
+RUN pip uninstall -y verl
+
+
+# ==============================================================================
+# Install a specific TensorRT-LLM on demand
+# ==============================================================================
+# Note: The NGC image already includes a pre-installed TensorRT-LLM, but you can install a specific version if needed.
+# Refer to https://nvidia.github.io/TensorRT-LLM/installation/index.html for more details.

@@ -93,7 +93,13 @@ class CriticConfig(BaseConfig):
 
         if self.model_config is None:
             warnings.warn("using model in Critic Config is deprecated, please use model_config instead", stacklevel=2)
-            self.model_config = self.model
+            self.model_config = HFModelConfig(
+                path=self.model.path,
+                tokenizer_path=self.model.tokenizer_path,
+                override_config=self.model.override_config,
+                external_lib=self.model.external_lib,
+                trust_remote_code=self.model.trust_remote_code,
+            )
 
         if not self.use_dynamic_bsz:
             self._check_mutually_exclusive(self.ppo_micro_batch_size, self.ppo_micro_batch_size_per_gpu, "critic")
@@ -157,14 +163,12 @@ class McoreCriticConfig(CriticConfig):
         nccl_timeout (int): NCCL timeout in seconds for distributed operations.
         megatron (Dict[str, Any]): Megatron-specific parallelism settings.
         load_weight (bool): Whether to load initial weights.
-        data_loader_seed (Optional[int]): Seed for data loader.
     """
 
     strategy: str = "megatron"
     nccl_timeout: int = 600
     megatron: McoreEngineConfig = field(default_factory=McoreEngineConfig)
     load_weight: bool = True
-    data_loader_seed: Optional[int] = None
 
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate Megatron critic configuration with runtime parameters."""
@@ -180,7 +184,7 @@ class FSDPCriticConfig(CriticConfig):
     Args:
         forward_micro_batch_size (int): Forward-only batch size during inference (global).
         forward_micro_batch_size_per_gpu (int): Forward-only batch size during inference (per GPU).
-        ulysses_sequence_parallel_size (int): Sequence parallelism size for Ulysses-style model parallelism.
+        ulysses_sequence_parallel_size (int): [DEPRECATED] Ulysses sequence parallel size for long sequences.
         grad_clip (float): Gradient clipping for critic updates.
     """
 
@@ -244,3 +248,5 @@ class FSDPCriticModelCfg(BaseModelConfig):
     lora_rank: int = 0
     lora_alpha: int = 16
     target_modules: str | list[str] = "all-linear"
+    # TiledMLP configuration for memory-efficient MLP computation
+    tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})

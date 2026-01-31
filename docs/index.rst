@@ -80,6 +80,7 @@ verl is fast with:
    algo/gpg.md
    algo/rollout_corr.md
    algo/rollout_corr_math.md
+   algo/otb.md
 
 .. toctree::
    :maxdepth: 1
@@ -89,6 +90,7 @@ verl is fast with:
    workers/fsdp_workers
    workers/megatron_workers
    workers/sglang_worker
+   workers/trtllm_worker
    workers/model_engine
 
 .. toctree::
@@ -102,6 +104,7 @@ verl is fast with:
    perf/device_tuning
    perf/verl_profiler_system.md
    perf/nsight_profiling.md
+   perf/torch_profiling.md
 
 .. toctree::
    :maxdepth: 1
@@ -131,6 +134,9 @@ verl is fast with:
    advance/fully_async
    data/transfer_queue.md
    advance/grafana_prometheus.md
+   advance/fp8.md
+   advance/async-on-policy-distill
+   advance/mtp.md
 
 .. toctree::
    :maxdepth: 1
@@ -139,10 +145,13 @@ verl is fast with:
    amd_tutorial/amd_build_dockerfile_page.rst
    amd_tutorial/amd_vllm_page.rst
    ascend_tutorial/ascend_quick_start.rst
+   ascend_tutorial/ascend_consistency.rst
    ascend_tutorial/ascend_profiling_zh.rst
    ascend_tutorial/ascend_profiling_en.rst
    ascend_tutorial/dockerfile_build_guidance.rst
    ascend_tutorial/ascend_sglang_quick_start.rst
+   ascend_tutorial/ascend_optimization_pratice/gspo_optimization_practice.md
+   ascend_tutorial/ascend_best_practice/dapo_multi_model_optimization_practice.md
 
 .. toctree::
    :maxdepth: 1
@@ -153,6 +162,11 @@ verl is fast with:
    api/trainer.rst
    api/utils.rst
 
+.. toctree::
+   :maxdepth: 1
+   :caption: Blog
+
+   blog/v0.7.md
 
 .. toctree::
    :maxdepth: 2

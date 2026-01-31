@@ -10,6 +10,7 @@ defaults:
   - model@model: hf_model
   - engine@engine: fsdp
   - optim@optim: fsdp
+  - profiler@profiler: profiler
   - _self_
 
 data:
@@ -35,6 +36,13 @@ data:
     name: null
   use_shm: False
   apply_chat_template_kwargs: {}
+
+  # MultiTurnSFTDataset apply_chat_template to each turn separately and concat `input_ids`
+  # as a whole sequence, which may not equal to apply_chat_template to whole messages at once. 
+  # For example, Qwen Thinking series models add <think></think> tags to last turn, please check
+  # your tokenizer chat template settings.
+  # Set to True to ignore input_ids mismatch and use the concatenated input_ids as the final input_ids.
+  ignore_input_ids_mismatch: False
 
 # Checkpoint configuration
 checkpoint:
@@ -68,3 +76,8 @@ trainer:
   # Path to resume training from (used when resume_mode is "resume_path" or "auto")
   resume_from_path: null  
   device: cuda
+
+  nnodes: 1
+  n_gpus_per_node: 1
+
+  profile_interval: [-1, -1]

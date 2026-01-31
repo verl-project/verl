@@ -57,6 +57,7 @@ Instead of adding KL penalty in the reward, GRPO regularizes by directly adding 
 Configure the following to enable DrGRPO, with all other parameters the same as GRPO's:
 
 - `actor_rollout_ref.actor.loss_agg_mode`: "seq-mean-token-sum-norm", which turns off seq-dim averaging
+- `actor_rollout_ref.actor.loss_scale_factor`: (Optional) Set to a constant integer (e.g., max response length) to ensure consistent normalization throughout training. If not set, uses the current batch's response length.
 - `actor_rollout_ref.actor.use_kl_loss`: Please set it to False for DrGRPO
 - `algorithm.norm_adv_by_std_in_grpo`: False, which turns off standard deviation norm
 

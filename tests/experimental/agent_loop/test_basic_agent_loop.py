@@ -22,6 +22,7 @@ from omegaconf import DictConfig
 from transformers.utils import get_json_schema
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
+from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.agent_loop.agent_loop import get_trajectory_info
 from verl.protocol import DataProto
@@ -348,6 +349,13 @@ def test_tool_agent_with_interaction(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path = interaction_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
     agent_loop_manager = init_agent_loop_manager(init_config)
+    checkpoint_manager = CheckpointEngineManager(
+        backend=init_config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        trainer=agent_loop_manager.worker_group,
+        replicas=agent_loop_manager.rollout_replicas,
+    )
+    checkpoint_manager.sleep_replicas()
+    checkpoint_manager.update_weights()
 
     # =========================== 2. Generate sequences  ===========================
     raw_prompts = [

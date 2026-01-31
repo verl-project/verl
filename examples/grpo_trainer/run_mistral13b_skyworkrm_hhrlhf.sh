@@ -34,10 +34,14 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     reward_model.enable=True \
-    reward_model.model.fsdp_config.param_offload=True \
     reward_model.model.path=Skywork/Skywork-Reward-Llama-3.1-8B \
-    reward_model.model.input_tokenizer=mistralai/Mistral-Nemo-Instruct-2407 \
-    reward_model.micro_batch_size_per_gpu=4 \
+    reward_model.use_reward_loop=True \
+    reward_model.rollout.name=vllm \
+    reward_model.rollout.gpu_memory_utilization=0.8 \
+    reward_model.rollout.tensor_model_parallel_size=1 \
+    reward_model.rollout.prompt_length=8192 \
+    reward_model.rollout.response_length=4096 \
+    reward_model.num_workers=8 \
     algorithm.use_kl_in_reward=False \
     trainer.logger='["console","wandb"]' \
     trainer.val_before_train=False \

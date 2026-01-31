@@ -255,6 +255,16 @@ Actor/Rollout/Reference Policy
   padding in the model. If set to True, the model will remove padding
   tokens in the input_ids and response_ids. This helps a lot in improving model running efficiency.
 
+- ``actor_rollout_ref.model.tiled_mlp``: TiledMLP configuration for memory-efficient
+  MLP computation. Reduces peak memory by processing MLP forward/backward in tiles.
+  Only compatible with FSDP2 (requires ``actor_rollout_ref.actor.strategy=fsdp2``).
+
+  - ``actor_rollout_ref.model.tiled_mlp.enabled``: Whether to enable TiledMLP.
+    Default is False.
+  - ``actor_rollout_ref.model.tiled_mlp.num_shards``: Number of shards to split
+    the input. Higher values reduce peak memory but may slightly impact performance.
+    Default is 4.
+
 **Actor model**
 
 - ``actor_rollout_ref.actor.strategy``: fsdp or megatron. In this

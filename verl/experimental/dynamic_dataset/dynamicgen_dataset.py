@@ -30,7 +30,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl import DataProto
 from verl.utils.dataset import RLHFDataset
-from verl.utils.import_utils import load_extern_type
+from verl.utils.import_utils import load_extern_object
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class DynamicGenDataset(RLHFDataset):
             f"datagen path is not set in config: {config}"
         )
         # Dynamically load the custom datagen class
-        datagen_cls = load_extern_type(config.datagen.path, config.datagen.name)
+        datagen_cls = load_extern_object(config.datagen.path, config.datagen.name)
 
         # Verify that the custom datagen class inherits from AbstractDataGenerator
         abs_cls = AbstractDataGenerator

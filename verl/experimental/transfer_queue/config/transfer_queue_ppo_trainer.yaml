@@ -1,0 +1,14 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# config for TransferQueue
+transfer_queue:
+  enable: True
+  num_global_batch: 1
+  storage_backend: AsyncSimpleStorageManager
+  num_data_storage_units: 8

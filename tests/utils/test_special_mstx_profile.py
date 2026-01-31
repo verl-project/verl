@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 from verl.utils.profiler.config import NPUToolConfig, ProfilerConfig
 from verl.utils.profiler.mstx_profile import NPUProfiler
+from verl.utils.profiler.profile import DistProfiler
 
 
 class TestNPUProfilerInitialization(unittest.TestCase):
@@ -25,69 +26,68 @@ class TestNPUProfilerInitialization(unittest.TestCase):
 
     def test_init_with_default_config(self):
         tool_config = NPUToolConfig()
-        profiler = NPUProfiler(rank=0, config=None, tool_config=tool_config)
-        self.assertFalse(profiler.enable)
-        self.assertFalse(hasattr(profiler, "profile_npu"))
+        config = ProfilerConfig(tool="npu")
+        profiler = DistProfiler(rank=0, config=config, tool_config=tool_config)
+        self.assertFalse(profiler.check_enable())
 
     def test_init_with_disabled_config(self):
-        config = ProfilerConfig(enable=False)
+        config = ProfilerConfig(enable=False, tool="npu")
         tool_config = NPUToolConfig()
-        profiler = NPUProfiler(rank=0, config=config, tool_config=tool_config)
-        self.assertFalse(profiler.enable)
-        self.assertFalse(hasattr(profiler, "profile_npu"))
+        profiler = DistProfiler(rank=0, config=config, tool_config=tool_config)
+        self.assertFalse(profiler.check_enable())
 
     def test_init_with_all_ranks_true(self):
-        config = ProfilerConfig(enable=True, all_ranks=True)
+        config = ProfilerConfig(enable=True, all_ranks=True, tool="npu")
         tool_config = NPUToolConfig()
-        profiler = NPUProfiler(rank=0, config=config, tool_config=tool_config)
-        self.assertTrue(profiler.this_rank)
+        profiler = DistProfiler(rank=0, config=config, tool_config=tool_config)
+        self.assertTrue(profiler.check_this_rank())
 
     def test_init_with_ranks_list(self):
-        config = ProfilerConfig(enable=True, ranks=[1, 2])
+        config = ProfilerConfig(enable=True, ranks=[1, 2], tool="npu")
         tool_config = NPUToolConfig()
-        profiler = NPUProfiler(rank=1, config=config, tool_config=tool_config)
-        self.assertTrue(profiler.this_rank)
+        profiler = DistProfiler(rank=1, config=config, tool_config=tool_config)
+        self.assertTrue(profiler.check_this_rank())
 
     def test_init_with_rank_not_in_ranks(self):
-        config = ProfilerConfig(enable=True, ranks=[1, 2])
+        config = ProfilerConfig(enable=True, ranks=[1, 2], tool="npu")
         tool_config = NPUToolConfig()
-        profiler = NPUProfiler(rank=3, config=config, tool_config=tool_config)
-        self.assertFalse(profiler.this_rank)
+        profiler = DistProfiler(rank=3, config=config, tool_config=tool_config)
+        self.assertFalse(profiler.check_this_rank())
 
 
 class TestNPUProfilerStart(unittest.TestCase):
     def setUp(self):
         NPUProfiler._define_count = 0
-        self.config = ProfilerConfig(enable=True, ranks=[0])
+        self.config = ProfilerConfig(enable=True, ranks=[0], tool="npu")
         self.tool_config = NPUToolConfig(discrete=False)
 
     @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
     def test_start_when_enabled_and_this_rank(self, mock_get_profiler):
-        profiler = NPUProfiler(rank=0, config=self.config, tool_config=self.tool_config)
+        profiler = DistProfiler(rank=0, config=self.config, tool_config=self.tool_config)
         profiler.start(role="worker", profile_step="1")
-        self.assertTrue(profiler.this_step)
+        self.assertTrue(profiler.check_this_step())
         self.assertEqual(NPUProfiler._define_count, 1)
         mock_get_profiler.assert_called_once()
 
     @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
     def test_start_when_not_this_rank(self, mock_get_profiler):
-        profiler = NPUProfiler(rank=1, config=self.config, tool_config=self.tool_config)
+        profiler = DistProfiler(rank=1, config=self.config, tool_config=self.tool_config)
         profiler.start()
-        self.assertFalse(profiler.this_step)
+        self.assertFalse(profiler.check_this_step())
         self.assertEqual(NPUProfiler._define_count, 0)
         mock_get_profiler.assert_not_called()
 
     @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
     def test_start_discrete_mode_does_not_increase_count(self, mock_get_profiler):
         tool_config = NPUToolConfig(discrete=True)
-        profiler = NPUProfiler(rank=0, config=self.config, tool_config=tool_config)
+        profiler = DistProfiler(rank=0, config=self.config, tool_config=tool_config)
         profiler.start()
         self.assertEqual(NPUProfiler._define_count, 0)
         mock_get_profiler.assert_not_called()
 
     @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
     def test_multiple_start_calls_do_not_increase_count(self, mock_get_profiler):
-        profiler = NPUProfiler(rank=0, config=self.config, tool_config=self.tool_config)
+        profiler = DistProfiler(rank=0, config=self.config, tool_config=self.tool_config)
         profiler.start()
         profiler.start()
         self.assertEqual(NPUProfiler._define_count, 1)
@@ -97,7 +97,7 @@ class TestNPUProfilerStart(unittest.TestCase):
 class TestNPUProfilerStartStopInteraction(unittest.TestCase):
     def setUp(self):
         NPUProfiler._define_count = 0
-        self.config = ProfilerConfig(enable=True, ranks=[0])
+        self.config = ProfilerConfig(enable=True, ranks=[0], tool="npu")
         self.tool_config = NPUToolConfig(discrete=False)
 
     @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
@@ -105,7 +105,7 @@ class TestNPUProfilerStartStopInteraction(unittest.TestCase):
         mock_profile_npu = MagicMock()
         mock_get_profiler.return_value = mock_profile_npu
 
-        profiler = NPUProfiler(rank=0, config=self.config, tool_config=self.tool_config)
+        profiler = DistProfiler(rank=0, config=self.config, tool_config=self.tool_config)
         profiler.start()
         self.assertEqual(NPUProfiler._define_count, 1)
         self.assertEqual(mock_profile_npu.start.call_count, 1)
@@ -119,8 +119,8 @@ class TestNPUProfilerStartStopInteraction(unittest.TestCase):
         mock_profile_npu = MagicMock()
         mock_get_profiler.return_value = mock_profile_npu
 
-        profiler1 = NPUProfiler(rank=0, config=self.config, tool_config=self.tool_config)
-        profiler2 = NPUProfiler(rank=0, config=self.config, tool_config=self.tool_config)
+        profiler1 = DistProfiler(rank=0, config=self.config, tool_config=self.tool_config)
+        profiler2 = DistProfiler(rank=0, config=self.config, tool_config=self.tool_config)
         profiler1.start()
         profiler2.start()
         self.assertEqual(NPUProfiler._define_count, 1)
@@ -131,14 +131,15 @@ class TestNPUProfilerStartStopInteraction(unittest.TestCase):
 
 class TestNPUProfilerAnnotate(unittest.TestCase):
     def setUp(self):
-        self.config = ProfilerConfig(enable=True, all_ranks=True)
+        self.config = ProfilerConfig(enable=True, all_ranks=True, tool="npu")
         self.tool_config = NPUToolConfig(discrete=False)
         self.rank = 0
 
     def test_annotate_decorator_applied_correctly(self):
         mock_worker = MagicMock()
-        mock_worker.profiler = NPUProfiler(rank=self.rank, config=self.config, tool_config=self.tool_config)
-        mock_worker.profiler.this_step = True
+        mock_worker.profiler = DistProfiler(rank=self.rank, config=self.config, tool_config=self.tool_config)
+        # Manually set private attribute for testing annotation in active step
+        mock_worker.profiler._this_step = True
 
         mock_mark_range = "mocked_range_handle"
 
@@ -163,9 +164,9 @@ class TestNPUProfilerAnnotate(unittest.TestCase):
                 mock_get_profiler.assert_not_called()
 
     def test_annotate_when_profiler_disabled(self):
-        disabled_config = ProfilerConfig(enable=False)
+        disabled_config = ProfilerConfig(enable=False, tool="npu")
         mock_worker = MagicMock()
-        mock_worker.profiler = NPUProfiler(rank=self.rank, config=disabled_config, tool_config=self.tool_config)
+        mock_worker.profiler = DistProfiler(rank=self.rank, config=disabled_config, tool_config=self.tool_config)
 
         with (
             patch("verl.utils.profiler.mstx_profile.mark_start_range") as mock_start_patch,
@@ -187,8 +188,8 @@ class TestNPUProfilerAnnotate(unittest.TestCase):
 
     def test_annotate_when_this_step_disabled(self):
         mock_worker = MagicMock()
-        mock_worker.profiler = NPUProfiler(rank=self.rank, config=self.config, tool_config=self.tool_config)
-        mock_worker.profiler.this_step = False
+        mock_worker.profiler = DistProfiler(rank=self.rank, config=self.config, tool_config=self.tool_config)
+        mock_worker.profiler._this_step = False
 
         with (
             patch("verl.utils.profiler.mstx_profile.mark_start_range") as mock_start_patch,
@@ -211,8 +212,8 @@ class TestNPUProfilerAnnotate(unittest.TestCase):
     def test_annotate_discrete_mode_enabled(self):
         discrete_tool_config = NPUToolConfig(discrete=True)
         mock_worker = MagicMock()
-        mock_worker.profiler = NPUProfiler(rank=self.rank, config=self.config, tool_config=discrete_tool_config)
-        mock_worker.profiler.this_step = True
+        mock_worker.profiler = DistProfiler(rank=self.rank, config=self.config, tool_config=discrete_tool_config)
+        mock_worker.profiler._this_step = True
 
         mock_mark_range = "mocked_range_handle"
         mock_profile_npu = MagicMock()
@@ -236,10 +237,10 @@ class TestNPUProfilerAnnotate(unittest.TestCase):
             mock_start_patch.assert_called_once_with(message="test")
             mock_end_patch.assert_called_once_with(mock_mark_range)
             mock_get_profiler.assert_called_once_with(
-                contents=mock_worker.profiler.profile_contents,
-                profile_level=mock_worker.profiler.profile_level,
-                profile_save_path=mock_worker.profiler.profile_save_path,
-                analysis=mock_worker.profiler.analysis,
+                contents=mock_worker.profiler._impl.profile_contents,
+                profile_level=mock_worker.profiler._impl.profile_level,
+                profile_save_path=mock_worker.profiler._impl.profile_save_path,
+                analysis=mock_worker.profiler._impl.analysis,
                 role="test_role",
             )
             mock_profile_npu.start.assert_called_once()
@@ -248,8 +249,8 @@ class TestNPUProfilerAnnotate(unittest.TestCase):
 
     def test_annotate_with_default_message(self):
         mock_worker = MagicMock()
-        mock_worker.profiler = NPUProfiler(rank=self.rank, config=self.config, tool_config=self.tool_config)
-        mock_worker.profiler.this_step = True
+        mock_worker.profiler = DistProfiler(rank=self.rank, config=self.config, tool_config=self.tool_config)
+        mock_worker.profiler._this_step = True
 
         mock_mark_range = "mocked_range_handle"
         with (

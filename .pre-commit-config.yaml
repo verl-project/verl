@@ -8,7 +8,7 @@ repos:
       - id: ruff-format
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: 'v1.17.0'
+    rev: "v1.17.0"
     hooks:
       - id: mypy
 
@@ -32,7 +32,7 @@ repos:
     hooks:
       - id: check-license
         name: Check license
-        entry: python3 tests/special_sanity/check_license.py --directories examples recipe scripts tests verl setup.py
+        entry: python3 tests/special_sanity/check_license.py --directories examples scripts tests verl setup.py
         language: python
         pass_filenames: false
 

@@ -153,12 +153,12 @@ https://excalidraw.com/#json=pfhkRmiLm1jnnRli9VFhb,Ut4E8peALlgAUpr7E5pPCA
 How to generate ray timeline to analyse performance of a training job?
 ------------------------------------------------------------------------------------------
 
-To generate the ray timeline file, you can set the config term ``ray_init.timeline_file`` to a json file path.
+To generate the ray timeline file, you can set the config term ``ray_init.timeline_json_file`` to a json file path.
 For example:
 
 .. code:: bash
 
-    ray_init.timeline_file=/tmp/ray_timeline.json
+    ray_init.timeline_json_file=/tmp/ray_timeline.json
   
 The file will be generated in the specified path at the end of a training job.
 You can use tools like chrome://tracing or the Perfetto UI and view the ray timeline file.

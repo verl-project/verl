@@ -43,3 +43,30 @@ class AbstractRewardManager(ABC):
         return_dict: bool = False,
     ) -> torch.Tensor | dict[str, Any]:
         pass
+
+    def _extract_reward_from_rm_scores(
+        self, data: DataProto, return_dict: bool = False
+    ) -> torch.Tensor | dict[str, Any] | None:
+        """
+        Extract reward from already-computed rm_scores if available.
+        This is used when use_reward_loop=True and rewards are already computed during generate_sequences.
+
+        Args:
+            data: DataProto object containing the batch data
+            return_dict: Whether to return a dictionary with reward_tensor and reward_extra_info
+
+        Returns:
+            If rm_scores exists:
+                - If return_dict=True: dict with "reward_tensor" and "reward_extra_info"
+                - If return_dict=False: torch.Tensor of rm_scores
+            If rm_scores doesn't exist: None
+        """
+        if "rm_scores" not in data.batch.keys():
+            return None
+
+        if return_dict:
+            reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
+            reward_extra_info = {key: data.non_tensor_batch[key] for key in reward_extra_keys}
+            return {"reward_tensor": data.batch["rm_scores"], "reward_extra_info": reward_extra_info}
+        else:
+            return data.batch["rm_scores"]

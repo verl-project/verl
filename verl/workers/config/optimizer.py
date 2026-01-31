@@ -19,7 +19,7 @@ from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
 
-__all__ = ["OptimizerConfig", "FSDPOptimizerConfig", "McoreOptimizerConfig", "build_optimizer"]
+__all__ = ["OptimizerConfig", "FSDPOptimizerConfig", "McoreOptimizerConfig", "build_optimizer", "VeOmniOptimizerConfig"]
 
 
 @dataclass
@@ -51,6 +51,29 @@ class OptimizerConfig(BaseConfig):
         if self.grad_clip is not None:
             warnings.warn("`grad_clip` is deprecated, use `clip_grad` instead.", DeprecationWarning, stacklevel=2)
             self.clip_grad = self.grad_clip
+
+
+@dataclass
+class VeOmniOptimizerConfig(OptimizerConfig):
+    """VeOmni optimizer configuration extending base OptimizerConfig.
+
+    Args:
+        optimizer (str): Optimizer name; default is "adamw".
+        lr (float): Learning rate.
+        lr_min (float): Minimum learning rate.
+        lr_start (float): Starting learning rate for warmup.
+        lr_decay_ratio (float): LR decay ratio.
+        lr_scheduler_type (str): LR scheduler type: "constant" or "cosine".
+    """
+
+    _mutable_fields = OptimizerConfig._mutable_fields.copy()
+
+    optimizer: str = "adamw"
+    lr_min: float = 0.0
+    lr_start: float = 0.0
+    lr_decay_ratio: float = 1.0
+    lr_scheduler_type: str = "constant"
+    override_optimizer_config: Optional[dict] = None
 
 
 @dataclass

@@ -49,7 +49,13 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, get_
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.dataset import SFTDataset
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
-from verl.utils.device import get_device_id, get_device_name, is_cuda_available, is_npu_available
+from verl.utils.device import (
+    auto_set_device,
+    get_device_id,
+    get_device_name,
+    is_cuda_available,
+    is_npu_available,
+)
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
@@ -132,6 +138,7 @@ class FSDPSFTTrainer:
 
         if self.device_mesh.get_rank() == 0:
             print(self.config)
+
         self.device_name = self.config.trainer.device
 
     def _normalize_config_bsz(self):
@@ -835,6 +842,9 @@ def run_sft(config):
 
 @hydra.main(config_path="config", config_name="sft_trainer", version_base=None)
 def main(config):
+    # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
+    auto_set_device(config)
+
     run_sft(config)
 
 
@@ -843,9 +853,9 @@ def create_sft_dataset(data_paths, data_config, tokenizer, max_samples=-1):
     # build dataset
     # First check if a custom dataset class is specified
     if data_config.custom_cls.get("path", None):
-        from verl.utils.import_utils import load_extern_type
+        from verl.utils.import_utils import load_extern_object
 
-        dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
+        dataset_cls = load_extern_object(data_config.custom_cls.path, data_config.custom_cls.name)
     # Then check if multi-turn dataset should be used
     elif data_config.get("multiturn", {}).get("enable", False):
         dataset_cls = MultiTurnSFTDataset

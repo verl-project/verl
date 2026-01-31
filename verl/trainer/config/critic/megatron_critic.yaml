@@ -36,6 +36,69 @@ model:
 
       freeze_moe_router: False
 
+  # LoRA (Low-Rank Adaptation) configuration for parameter-efficient fine-tuning
+  lora:
+      # LoRA type: "lora", "vlm_lora", "canonical_lora", or "dora"
+      type: lora
+
+      # LoRA rank (Dimension of the low-rank projection space.). Set to 0 to disable LoRA
+      rank: 0  # typical values: 8, 16, 32, 64
+      
+      #  Weighting factor for the low-rank projection. Defaults to 32
+      alpha: 32
+      
+      # Dropout rate for the low-rank projection. Defaults to 0.0
+      dropout: 0.0
+      
+      # A list of module names to apply LoRA to.
+      # For fused LoRA, Defaults to all linear layers ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2'].
+      # For canonical LoRA: ["linear_q", "linear_k", "linear_v", "linear_proj", "linear_fc1_up", "linear_fc1_gate", "linear_fc2"]
+      # - 'linear_qkv': Apply LoRA to the fused linear layer used for query, key, and value projections in self-attention
+      # - 'linear_proj': Apply LoRA to the linear layer used for projecting the output of self-attention
+      # - 'linear_fc1': Apply LoRA to the first fully-connected layer in MLP
+      # - 'linear_fc2': Apply LoRA to the second fully-connected layer in MLP
+      # Target modules can also contain wildcards. For example, you can specify
+      # target_modules=['*.layers.0.*.linear_qkv', '*.layers.1.*.linear_qkv'] to add LoRA to only linear_qkv on the first two layers
+      # 
+      # Note:
+      # For MLA (e.g., DeepSeek), you should use ["linear_kv_down_proj","linear_kv_up_proj","linear_q_down_proj","linear_q_up_proj","linear_q_proj"]
+      # Instead of "linear_qkv" or ["linear_q","linear_k","linear_v"]
+      # By default, MoE routers are excluded from LoRA adaptation, and you will need to specify "router" in target_modules to include them.
+      target_modules:
+        - linear_qkv
+        - linear_proj
+        - linear_fc1
+        - linear_fc2
+      
+      # A list of module names not to apply LoRa to. It will match all nn.Linear & nn.Linear-adjacent modules whose name
+      # does not match any string in exclude_modules. If used, will require target_modules to be empty list or null
+      exclude_modules: []
+
+      # Position for applying dropout, can be 'pre' (before the low-rank projection) or 'post' (after). Defaults to 'pre'
+      dropout_position: pre
+
+      # Initialization method for the low-rank matrix A. Defaults to "xavier".
+      lora_A_init_method: xavier
+
+      # Initialization method for the low-rank matrix B. Defaults to "zero".
+      lora_B_init_method: zero
+
+      # Enables the experimental All-to-All (A2A) communication strategy. Defaults to False
+      a2a_experimental: False
+
+      # Parameter data type for LoRA weights. Default to null, which will use model's dtype.
+      dtype: null
+
+      # Path to pre-trained LoRA adapter weights (null to train from scratch)
+      adapter_path: null
+
+      # VLMLoRA additionally allows the user to specify whether the language or vision models should be frozen.
+      # For example, a common finetuning workload for multimodal models is to apply adapters to language model and fully
+      # finetune the vision model.
+      freeze_vision_model: True
+      freeze_vision_projection: True
+      freeze_language_model: True
+
 # Whether to load initial weights
 load_weight: True
 

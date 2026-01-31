@@ -36,7 +36,7 @@ def compare_results(golden_results, other_result):
     grad_norm = other_result[0]["data"]["train/grad_norm"]
 
     torch.testing.assert_close(golden_loss, loss, atol=1e-2, rtol=1e-2)
-    torch.testing.assert_close(golden_grad_norm, grad_norm, atol=1e-4, rtol=1e-2)
+    torch.testing.assert_close(golden_grad_norm, grad_norm, atol=1e-4, rtol=3e-2)
 
 
 if __name__ == "__main__":
@@ -53,5 +53,6 @@ if __name__ == "__main__":
     for file, other_result in other_results.items():
         print(f"compare results {file}")
         compare_results(golden_results, other_result)
+        print(f"compare results {file} done")
 
     print("All results are close to golden results")

@@ -17,7 +17,7 @@ RUN ARCH=$(uname -m) && \
         pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
     fi && \
     # Clone libs
-    git clone --depth 1 --branch v0.11.0 https://github.com/vllm-project/vllm && \
+    git clone --depth 1 --branch v0.11.0 https://github.com/vllm-project/vllm.git && \
     git clone --depth 1 --branch v0.11.0rc1 https://github.com/vllm-project/vllm-ascend.git && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
     cd MindSpeed && git checkout f2b0977e && cd .. && \
@@ -34,17 +34,22 @@ RUN ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     # Install torch & torch_npu & torchvision
-    pip install torch==2.7.1 torch_npu==2.7.1 torchvision==0.22.1 && \
+    pip install torch==2.7.1 torch_npu==2.7.1 torchvision==0.22.1 transformers==4.57.6 && \
     # Install vllm
     cd vllm && VLLM_TARGET_DEVICE=empty pip install -v -e . && cd .. && \
     # Install vllm-ascend
     cd vllm-ascend && pip install -v -e . && cd .. && \
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
-    echo "export PYTHONPATH=\$PYTHONPATH:/Megatron-LM" >> ~/.bashrc && \
+    # Remove existing triton or triton-ascend installed by some third-party packages
+    pip uninstall -y triton triton-ascend && \
+    # Install mbridge
+    pip install mbridge && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
+
+ENV PYTHONPATH="/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Prepare and install verl (update frequently)
 RUN git clone --depth 1 https://github.com/volcengine/verl.git && \

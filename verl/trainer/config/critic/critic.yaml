@@ -73,6 +73,9 @@ ppo_epochs: ${oc.select:actor_rollout_ref.actor.ppo_epochs,1}
 # Shuffle training data across PPO epochs
 shuffle: ${oc.select:actor_rollout_ref.actor.shuffle,false}
 
+# The seed used to construct mini-batch
+data_loader_seed: 42
+
 # PPO value function clipping range
 cliprange_value: 0.5
 
@@ -140,7 +143,7 @@ profiler:
       contents: []
 
       # Collection level, optional values: level_none, level0, level1, level2.
-      level: "level1"
+      level: "level0"
 
       # Whether to automatically parse the data.
       analysis: True
@@ -154,13 +157,12 @@ profiler:
       # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
       _target_: verl.utils.profiler.config.TorchProfilerToolConfig
 
-      # start profile mini-batch in training
-      # NOTICE: different with global steps config which refers to iteration
-      # This field only related with mini-batch
-      step_start: 0
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: []
 
-      # stop profile mini-batch in training
-      step_end: null
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: false
 
     # torch memory profiler config
     torch_memory:

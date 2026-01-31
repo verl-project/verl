@@ -21,6 +21,7 @@ import torch
 from verl.single_controller.base.decorator import Dispatch, Execute, collect_all_to_all, register
 from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+from verl.utils.device import get_device_name
 
 
 def two_to_all_dispatch_fn(worker_group, *args, **kwargs):
@@ -36,6 +37,19 @@ def two_to_all_dispatch_fn(worker_group, *args, **kwargs):
         for i in range(worker_group.world_size - 2):
             v.append(v[i % 2])
     return args, kwargs
+
+
+def get_ray_remote_options() -> str:
+    """Function that gets the torch.device based on the current machine.
+    This currently only supports CPU, CUDA, NPU.
+    Returns:
+        device
+    """
+    if get_device_name() == "cuda":
+        return dict(num_gpus=0.1)
+    elif get_device_name() == "npu":
+        return dict(resources={"NPU": 0.1})
+    return dict(num_cpus=0.1)
 
 
 @ray.remote
@@ -65,7 +79,7 @@ class TestActor(Worker):
         return self._x + y + x
 
 
-@ray.remote(num_gpus=0.1)
+@ray.remote(**get_ray_remote_options())
 def remote_call_wg(worker_names):
     class_with_args = RayClassWithInitArgs(cls=TestActor, x=2)
     worker_group = RayWorkerGroup.from_detached(
@@ -83,7 +97,7 @@ def remote_call_wg(worker_names):
 
 
 def add_one(data):
-    data = data.to("cuda")
+    data = data.to(get_device_name())
     data += 1
     data = data.to("cpu")
     return data
@@ -97,7 +111,10 @@ def test_basics():
     class_with_args = RayClassWithInitArgs(cls=TestActor, x=2)
 
     worker_group = RayWorkerGroup(
-        resource_pool=resource_pool, ray_cls_with_init=class_with_args, name_prefix="worker_group_basic"
+        resource_pool=resource_pool,
+        ray_cls_with_init=class_with_args,
+        name_prefix="worker_group_basic",
+        device_name=get_device_name(),
     )
 
     print(worker_group.worker_names)

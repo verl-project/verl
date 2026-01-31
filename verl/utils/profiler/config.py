@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -27,6 +26,7 @@ class NsightToolConfig(BaseConfig):
 
     "True for each task has its own database, False for all tasks in one training step share one database."
     discrete: bool = False
+    name: str = "nsight"
 
     def __post_init__(self) -> None:
         pass
@@ -34,20 +34,23 @@ class NsightToolConfig(BaseConfig):
 
 @dataclass
 class TorchProfilerToolConfig(BaseConfig):
-    """Torch profiler tool config.
+    """Torch profiler tool config."""
 
-    Args:
-        step_start (int): Start step in update_policy.
-        step_end (int): End step.
-    """
-
-    step_start: int = -1
+    step_start: int = 0
     step_end: int = -1
+    # options: cuda, cpu, memory, shapes, stack
+    contents: list[str] = field(default_factory=list)
+    discrete: bool = False
+    name: str = "torch"
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
-        warnings.warn("Torch profiler tool config is not fully supported now.", stacklevel=1)
-        assert isinstance(self.step_start, int), f"Profiler step_start must be of type int, got {type(self.step_start)}"
+        __support_contents = ["cuda", "cpu", "memory", "shapes", "stack", "profile-by-stage", "merge-profiles"]
+        for content in self.contents:
+            assert content in __support_contents, (
+                f"Profiler contents only supports {__support_contents}, but gets {content}"
+            )
+        assert isinstance(self.contents, list), f"Profiler contents must be of type list, got {type(self.contents)}"
 
 
 @dataclass
@@ -61,6 +64,7 @@ class TorchMemoryToolConfig(BaseConfig):
 
     trace_alloc_max_entries: int = 100_000
     stack_depth: int = 32
+    name: str = "torch_memory"
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
@@ -82,10 +86,12 @@ class NPUToolConfig(NsightToolConfig):
     contents: list[str] = field(default_factory=list)
 
     # Collection level, optional values: level_none, level0, level1, level2.
-    level: str = "level1"
+    level: str = "level0"
 
     # Whether to automatically parse the data.
     analysis: bool = False
+
+    name: str = "npu"
 
     def __post_init__(self) -> None:
         """config validation logics go here"""

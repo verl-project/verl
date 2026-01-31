@@ -1,0 +1,73 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.utils.profiler.ProfilerConfig
+
+# profiler tool, default same as profiler.tool in global config
+# choices: nsys, npu, torch
+tool: torch
+
+# whether enable profile on Actor
+enable: False
+
+# Whether to profile all ranks.
+all_ranks: False
+
+# The ranks that will be profiled. [] or [0,1,...]
+ranks: []
+
+# profile results saving path
+save_path: "outputs/profile"
+
+tool_config:
+  npu:
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.utils.profiler.config.NPUToolConfig
+
+    # Contents to profile, can be empty
+    # options: npu, cpu, memory, shapes, module, stack
+    contents: [ ]
+
+    # Collection level, optional values: level_none, level0, level1, level2.
+    level: "level0"
+
+    # Whether to automatically parse the data.
+    analysis: True
+
+    # True for each task has its own database, False for all tasks in one training step share one database.
+    discrete: False
+
+    name: npu
+
+
+  nsys:
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.utils.profiler.config.NsightToolConfig
+
+    # True for each task has its own database, False for all tasks in one training step share one database.
+    discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete}
+
+    name: nsight
+
+  torch:
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+
+    # Contents to profile, can be empty
+    # options: cuda, cpu, memory, shapes, stack
+    contents: []
+
+    # True for each task has its own database, False for all tasks in one training step share one database.
+    discrete: false
+
+    name: torch
+
+  torch_memory:
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+
+    # Maximum number of memory allocation entries to track
+    trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+
+    # Stack trace depth for memory allocations
+    stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+    name: torch_memory

@@ -67,5 +67,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=5 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
-    trainer.device=npu $@
+    actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} $@

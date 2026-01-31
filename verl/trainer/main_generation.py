@@ -84,6 +84,7 @@ def main_task(config):
 
     ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(ActorRolloutRefWorker), config=config, role="rollout")
     resource_pool = RayResourcePool(process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes)
+
     wg = RayWorkerGroup(
         resource_pool=resource_pool,
         ray_cls_with_init=ray_cls_with_init,

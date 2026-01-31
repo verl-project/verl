@@ -80,24 +80,32 @@ def get_tool_class(cls_name):
 
 
 def initialize_tools_from_config(tools_config_file):
+    """Initialize tools from config file.
+
+    Supports both NATIVE and MCP tool types. For MCP tools, a temporary event loop
+    is created only when needed and properly closed after use to prevent memory leaks.
+    """
     tools_config = OmegaConf.load(tools_config_file)
     tool_list = []
 
-    # Use a temporary event loop in a new thread because event
-    # loop may already exist in new async architecture while retaining
-    # backwards compatibility
-    tmp_event_loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=tmp_event_loop.run_forever, name="mcp tool list fetcher", daemon=True)
+    # Lazy initialization for MCP support - only create event loop when needed
+    tmp_event_loop = None
+    thread = None
+
+    def get_mcp_event_loop():
+        """Lazily create event loop and thread for MCP tools."""
+        nonlocal tmp_event_loop, thread
+        if tmp_event_loop is None:
+            tmp_event_loop = asyncio.new_event_loop()
+            thread = threading.Thread(target=tmp_event_loop.run_forever, name="mcp tool list fetcher", daemon=True)
+            thread.start()
+        return tmp_event_loop
 
     def run_coroutine(coroutine):
-        if not thread.is_alive():
-            thread.start()
-
-        future = asyncio.run_coroutine_threadsafe(coroutine, tmp_event_loop)
+        """Run coroutine in the MCP event loop."""
+        loop = get_mcp_event_loop()
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         return future.result()
-
-    async def stop_loop():
-        tmp_event_loop.stop()
 
     try:
         for tool_config in tools_config.tools:
@@ -123,8 +131,12 @@ def initialize_tools_from_config(tools_config_file):
                 case _:
                     raise NotImplementedError
     finally:
-        if thread.is_alive():
-            asyncio.run_coroutine_threadsafe(stop_loop(), tmp_event_loop)
-            thread.join()
+        # Properly cleanup event loop if it was created
+        if tmp_event_loop is not None:
+            # stop first and then close
+            tmp_event_loop.call_soon_threadsafe(tmp_event_loop.stop)
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=5.0)
+            tmp_event_loop.close()
 
     return tool_list

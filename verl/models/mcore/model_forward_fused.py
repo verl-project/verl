@@ -26,6 +26,7 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.utils import deprecate_inference_params
+from packaging import version
 from torch import Tensor
 
 from verl.models.mcore.util import preprocess_packed_seqs
@@ -49,7 +50,9 @@ def _get_patching_model(model: torch.nn.Module):
 
 
 def patch_fused_forward(model: torch.nn.Module):
-    assert mcore.__version__ >= "0.13.0", "Fused forward patching requires mecore >= 0.13.0"
+    assert version.parse(mcore.__version__) >= version.parse("0.13.0"), (
+        "Fused forward patching requires mecore >= 0.13.0"
+    )
     model = _get_patching_model(model)
     if model is not None:
         model.forward_backup = model.forward
@@ -198,9 +201,17 @@ def _fused_GPTModel_forward(
 
     if model.config.sequence_parallel:
         hidden_states = gather_from_sequence_parallel_region(hidden_states)
+
+    # Get the output weight - use embedding weight if output_layer is None or weight is shared
+    if hasattr(model, "output_layer") and model.output_layer is not None and model.output_layer.weight is not None:
+        output_weight = model.output_layer.weight
+    else:
+        # When embeddings are tied, use the embedding weight
+        output_weight = model.embedding.word_embeddings.weight
+
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
-        model.output_layer.weight,
+        output_weight,
         labels,
         temperature,
         "none",

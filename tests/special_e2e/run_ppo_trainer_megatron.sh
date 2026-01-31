@@ -9,6 +9,7 @@ NUM_GPUS=${NUM_GPUS:-8}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
+RM_MODEL_PATH=${RM_MODEL_PATH:-${HOME}/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B}
 #huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 USE_DUMMY_MODEL=${USE_DUMMY_MODEL:-False}
@@ -18,7 +19,7 @@ if [ "$USE_DUMMY_MODEL" = "True" ]; then
         echo "[ERROR] DUMMY_MODEL_CONFIG_PATH not set"
         exit 1
     fi
-    
+
     python scripts/init_random_model.py \
         --hf_model_path "${MODEL_PATH}" \
         --new_config_path "${DUMMY_MODEL_CONFIG_PATH}" \
@@ -50,8 +51,15 @@ train_traj_mini_bsz=$((train_traj_micro_bsz * 2)) # 2 * b * n
 train_prompt_mini_bsz=$((train_traj_mini_bsz * n_resp_per_prompt)) # 2 * b * n / g
 train_prompt_bsz=$((train_prompt_mini_bsz * 2)) # 4 * b * n / g
 
+LORA_RANK=${LORA_RANK:-0}
+CRITIC_LORA_RANK=${CRITIC_LORA_RANK:-$LORA_RANK}
+LORA_ALPHA=${LORA_ALPHA:-${LORA_RANK}}
+LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"['linear_qkv','linear_proj','linear_fc1','linear_fc2']"}
+LORA_MERGE=${LORA_MERGE:-False}
+
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
+MAX_RM_LENGTH=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
 
 COMMON_PP=${COMMON_PP:-2}
 COMMON_VPP=${COMMON_VPP:-2}
@@ -82,12 +90,6 @@ CRITIC_CP=${CRITIC_CP:-$COMMON_CP}
 CRITIC_TP=${CRITIC_TP:-$TRAIN_TP}
 CRITIC_EP=${CRITIC_EP:-$COMMON_EP}
 CRITIC_ETP=${CRITIC_ETP:-$COMMON_ETP}
-RM_PP=${RM_PP:-$COMMON_PP}
-RM_VPP=${RM_VPP:-$COMMON_VPP}
-RM_CP=${RM_CP:-$COMMON_CP}
-RM_TP=${RM_TP:-$TRAIN_TP}
-RM_EP=${RM_EP:-$COMMON_EP}
-RM_ETP=${RM_ETP:-$COMMON_ETP}
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-False}
 COMMON_PARAM_OFFLOAD=${COMMON_PARAM_OFFLOAD:-$ALL_OFFLOAD}
@@ -103,6 +105,8 @@ CRITIC_GRAD_OFFLOAD=${CRITIC_GRAD_OFFLOAD:-$COMMON_GRAD_OFFLOAD}
 CRITIC_OPTIMIZER_OFFLOAD=${CRITIC_OPTIMIZER_OFFLOAD:-$COMMON_OPTIMIZER_OFFLOAD}
 RM_PARAM_OFFLOAD=${RM_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
 USE_MBRIDGE=${USE_MBRIDGE:-False}
+VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-True}
+VALUE_VANILLA_MBRIDGE=${VALUE_VANILLA_MBRIDGE:-$VANILLA_MBRIDGE}
 USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-False}
 
 LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-null}
@@ -125,16 +129,16 @@ if [ "$USE_DIST_CKPT" = "True" ]; then
 fi
 
 ENGINE=${ENGINE:-"vllm"}
+if [ "$ENGINE" = "vllm" ]; then
+    export VLLM_USE_V1=1
+fi
 
 exp_name="$(basename "${MODEL_ID,,}")-megatron-gsm8k-minimal"
-ROLLOUT_MODE=${ROLLOUT_MODE:-sync}
+ROLLOUT_MODE="async"
+ROLLOUT_QUANTIZATION=${ROLLOUT_QUANTIZATION:-null}
 
-RETURN_RAW_CHAT="False"
-SKIP_TOKENIZER_INIT=${SKIP_TOKENIZER_INIT:-False}
-if [ "$ROLLOUT_MODE" = "async" ]; then
-    RETURN_RAW_CHAT="True"
-    SKIP_TOKENIZER_INIT="True"
-fi
+RETURN_RAW_CHAT="True"
+SKIP_TOKENIZER_INIT="True"
 
 OPTIM_MEMORY_EFFICIENT=${OPTIM_MEMORY_EFFICIENT:-False}
 
@@ -157,6 +161,10 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     data.truncation='error' \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.use_fused_kernels=${USE_FUSED_KERNELS} \
+    actor_rollout_ref.model.lora.rank=${LORA_RANK} \
+    actor_rollout_ref.model.lora.alpha=${LORA_ALPHA} \
+    actor_rollout_ref.model.lora.target_modules=${LORA_TARGET_MODULES} \
+    actor_rollout_ref.model.lora.merge=${LORA_MERGE} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=$LR_WARMUP_STEPS \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=$OPTIM_MEMORY_EFFICIENT \
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=$OPTIM_MEMORY_EFFICIENT \
@@ -166,6 +174,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.actor.use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${ppo_max_token_len_per_gpu} \
     actor_rollout_ref.actor.megatron.use_mbridge=${USE_MBRIDGE} \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$ACTOR_PP \
     actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=$ACTOR_VPP \
     actor_rollout_ref.actor.megatron.context_parallel_size=$ACTOR_CP \
@@ -189,10 +198,11 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
-    actor_rollout_ref.rollout.update_weights_bucket_megabytes=128 \
+    ++actor_rollout_ref.rollout.quantization=${ROLLOUT_QUANTIZATION} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     actor_rollout_ref.ref.megatron.use_mbridge=${USE_MBRIDGE} \
+    actor_rollout_ref.ref.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=$REF_PP \
     actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=$REF_VPP \
     actor_rollout_ref.ref.megatron.context_parallel_size=$REF_CP \
@@ -208,9 +218,13 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     +critic.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=$OPTIM_MEMORY_EFFICIENT \
     +critic.optim.override_optimizer_config.use_precision_aware_optimizer=$OPTIM_MEMORY_EFFICIENT \
     critic.model.path="${MODEL_PATH}" \
+    critic.model.lora.rank=${CRITIC_LORA_RANK} \
+    critic.model.lora.alpha=${LORA_ALPHA} \
+    critic.model.lora.target_modules=${LORA_TARGET_MODULES} \
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     critic.ppo_max_token_len_per_gpu=${forward_max_token_len_per_gpu} \
     critic.megatron.use_mbridge=${USE_MBRIDGE} \
+    critic.megatron.vanilla_mbridge=${VALUE_VANILLA_MBRIDGE} \
     critic.megatron.pipeline_model_parallel_size=$CRITIC_PP \
     critic.megatron.virtual_pipeline_model_parallel_size=$CRITIC_VPP \
     critic.megatron.context_parallel_size=$CRITIC_CP \
@@ -227,21 +241,14 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     critic.profiler.ranks=$PROFILE_RANKS \
     critic.profiler.all_ranks=$PROFILE_RANKS_ALL \
     reward_model.enable=True \
-    reward_model.model.path="${MODEL_PATH}" \
-    reward_model.micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    reward_model.megatron.use_mbridge=${USE_MBRIDGE} \
-    reward_model.megatron.pipeline_model_parallel_size=$RM_PP \
-    reward_model.megatron.virtual_pipeline_model_parallel_size=$RM_VPP \
-    reward_model.megatron.context_parallel_size=$RM_CP \
-    reward_model.megatron.tensor_model_parallel_size=$RM_TP \
-    reward_model.megatron.expert_model_parallel_size=$RM_EP \
-    reward_model.megatron.expert_tensor_parallel_size=$RM_ETP \
-    reward_model.megatron.param_offload=${RM_PARAM_OFFLOAD} \
-    reward_model.megatron.use_dist_checkpointing=${USE_DIST_CKPT} \
-    reward_model.megatron.dist_checkpointing_path=${DIST_CKPT_PATH} \
-    reward_model.profiler.enable=$PROFILE_ENABLE \
-    reward_model.profiler.ranks=$PROFILE_RANKS \
-    reward_model.profiler.all_ranks=$PROFILE_RANKS_ALL \
+    reward_model.model.path="${RM_MODEL_PATH}" \
+    reward_model.use_reward_loop=True \
+    reward_model.rollout.name=${ENGINE} \
+    reward_model.rollout.gpu_memory_utilization=0.6 \
+    reward_model.rollout.tensor_model_parallel_size=${INFER_TP} \
+    reward_model.rollout.prompt_length=${MAX_RM_LENGTH} \
+    reward_model.rollout.response_length=${MAX_RESPONSE_LENGTH} \
+    reward_model.num_workers=8 \
     algorithm.use_kl_in_reward=False \
     algorithm.kl_penalty=kl \
     algorithm.kl_ctrl.kl_coef=0.001 \

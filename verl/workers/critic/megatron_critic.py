@@ -87,6 +87,9 @@ class MegatronPPOCritic(BasePPOCritic):
 
     @GPUMemoryLogger("megatron critic", logger=logger)
     def compute_values(self, data: DataProto) -> DataProto:
+        prev_modes = [m.training for m in self.critic_module]
+        for module in self.critic_module:
+            module.eval()
         responses = data.batch["responses"]
         attention_mask = data.batch["attention_mask"]
         use_dynamic_bsz = data.meta_info.get("use_dynamic_bsz", False)
@@ -139,6 +142,8 @@ class MegatronPPOCritic(BasePPOCritic):
         # add empty cache after each compute
         get_torch_device().empty_cache()
 
+        for module, mode in zip(self.critic_module, prev_modes, strict=False):
+            module.train(mode)
         return values
 
     def make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:

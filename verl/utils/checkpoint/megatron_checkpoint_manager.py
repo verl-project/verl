@@ -20,11 +20,13 @@ from collections.abc import Callable
 from dataclasses import asdict
 
 import numpy as np
+import ray
 import torch
 import torch.distributed
 from megatron.core import mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.transformer.enums import AttnBackend
+from ray.util.state import api
 from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
@@ -118,6 +120,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         use_checkpoint_opt_param_scheduler: bool = False,
         use_dist_checkpointing: bool = True,
         bridge=None,
+        provider=None,
+        peft_cls=None,
         **kwargs,
     ):
         super().__init__(
@@ -142,8 +146,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.use_distributed_optimizer = use_distributed_optimizer
         self.use_checkpoint_opt_param_scheduler = use_checkpoint_opt_param_scheduler
         self.bridge = bridge
+        self.provider = provider
+        self.vanilla_bridge = self.provider is None
+        self.peft_cls = peft_cls
         self.rank = torch.distributed.get_rank()
-        self.use_dist_checkpointing = use_dist_checkpointing or not self.bridge or self.is_value_model
+        # Megatron-Bridge is Okay to load/save HF checkpoint for value model as well
+        self.use_dist_checkpointing = (
+            use_dist_checkpointing or not self.bridge or (self.vanilla_bridge and self.is_value_model)
+        )
         self.use_hf_checkpoint = not self.use_dist_checkpointing
 
         self.weight_saver = None
@@ -297,10 +307,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             assert os.path.exists(local_path), f"Checkpoint path {local_path} does not exist."
 
         # For load optimizer dist_ckpt
-        import transformer_engine
+        try:
+            import transformer_engine
 
-        torch.serialization.add_safe_globals([torch.optim.AdamW])
-        torch.serialization.add_safe_globals([transformer_engine.pytorch.optimizers.fused_adam.FusedAdam])
+            torch.serialization.add_safe_globals([torch.optim.AdamW])
+            torch.serialization.add_safe_globals([transformer_engine.pytorch.optimizers.fused_adam.FusedAdam])
+        except Exception:
+            pass
 
         dist_checkpoint_path = get_dist_checkpoint_path(local_path)
 
@@ -332,10 +345,38 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 mpu.set_virtual_pipeline_model_parallel_rank(vpp_rank)
                 self.model[vpp_rank].load_state_dict(model_state_dict)
             log_with_rank(f"Loaded sharded model checkpoint from {local_path}", rank=self.rank, logger=logger)
-        elif self.should_load_model and self.use_hf_checkpoint:
+
+        # Skip HF checkpoint loading if PEFT is used
+        elif self.should_load_model and self.use_hf_checkpoint and self.peft_cls is None:
             hf_model_path = get_hf_model_checkpoint_path(local_path)
-            self.bridge.load_weights(self.model, hf_model_path)
+            if self.vanilla_bridge:
+                self.bridge.load_weights(self.model, hf_model_path)
+            else:
+                self.bridge.load_hf_weights(self.model, hf_model_path)
             log_with_rank(f"Loaded HF model checkpoint from {hf_model_path} with bridge", rank=self.rank, logger=logger)
+        # Load PEFT adapter checkpoint if available
+        if self.should_load_model and self.peft_cls is not None:
+            adapter_ckpt_path = os.path.join(local_path, "adapter_checkpoint")
+            if os.path.exists(adapter_ckpt_path):
+                from verl.utils.megatron_peft_utils import load_adapter_checkpoint
+
+                # TODO: a better format for adapter checkpoint, waiting megatron-bridge support
+
+                load_adapter_checkpoint(
+                    self.model,
+                    adapter_ckpt_path,
+                )
+                log_with_rank(
+                    f"Loaded adapter checkpoint from {adapter_ckpt_path}",
+                    rank=self.rank,
+                    logger=logger,
+                )
+            else:
+                log_with_rank(
+                    f"PEFT config is set but no adapter checkpoint found at {adapter_ckpt_path}",
+                    rank=self.rank,
+                    logger=logger,
+                )
 
         if self.should_load_optimizer:
             assert "optimizer" in state_dict, (
@@ -376,16 +417,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # record the previous global step
         self.previous_global_step = global_step
 
-        # remove previous local_path
-        if (
-            max_ckpt_to_keep
-            and isinstance(max_ckpt_to_keep, int)
-            and max_ckpt_to_keep > 0
-            and len(self.previous_saved_paths) >= max_ckpt_to_keep
-        ):
-            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
-            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
-            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
+        if not self.checkpoint_config.async_save:
+            self.ensure_checkpoint_capacity(max_ckpt_to_keep)
 
         local_path = local_mkdir_safe(local_path)
         dist_checkpoint_path = get_dist_checkpoint_path(local_path)
@@ -439,11 +472,36 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 torch.distributed.barrier()
 
         if self.should_save_model:
-            if self.use_hf_checkpoint:
+            # Save adapter-only checkpoint if PEFT is enabled
+            if self.peft_cls is not None:
+                from verl.utils.megatron_peft_utils import save_adapter_checkpoint
+
+                adapter_ckpt_path = os.path.join(local_path, "adapter_checkpoint")
+
+                # Save adapter weights only (much smaller than full model)
+                save_adapter_checkpoint(
+                    self.model,
+                    adapter_ckpt_path,
+                    self.rank,
+                )
+
+                log_with_rank(
+                    f"Saved adapter-only checkpoint to {adapter_ckpt_path}",
+                    rank=self.rank,
+                    logger=logger,
+                    log_only_rank_0=True,
+                )
+            elif self.use_hf_checkpoint:
                 # Use mbridge to save HF model checkpoint
                 log_with_rank(f"Saving HF model checkpoint to {local_path} with bridge", rank=self.rank, logger=logger)
                 hf_ckpt_path = get_hf_model_checkpoint_path(local_path)
-                self.bridge.save_weights(self.model, hf_ckpt_path)
+                if self.vanilla_bridge:
+                    self.bridge.save_weights(
+                        self.model, hf_ckpt_path, distributed_filesystem=True, memory_efficient=True
+                    )
+                else:
+                    self.bridge.save_hf_weights(self.model, hf_ckpt_path)
+
                 log_with_rank(f"Saved bridge checkpoint to {hf_ckpt_path}", rank=self.rank, logger=logger)
 
             # Only rank 0 saves the hf config and tokenizer to huggingface path
@@ -479,13 +537,16 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     "no_sync_func",
                     "grad_sync_func",
                     "param_sync_func",
+                    "generation_config",
+                    "_pg_collection",
                 ]
                 backup = {}
                 for k in bypass_keys:
-                    backup[k] = getattr(self.transformer_config, k, None)
-                    delattr(self.transformer_config, k)
+                    if hasattr(self.transformer_config, k):
+                        backup[k] = getattr(self.transformer_config, k, None)
+                        delattr(self.transformer_config, k)
                 transformer_config_dict = asdict(self.transformer_config)
-                for k in bypass_keys:
+                for k in backup:
                     setattr(self.transformer_config, k, backup[k])
                 to_convert_types = {torch.dtype: str, AttnBackend: str}
                 ignore_types = [Callable]
@@ -507,7 +568,12 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             # wait for everyone to dump to local
             if self.bridge is not None:
                 hf_model_ckpt_path = get_hf_model_checkpoint_path(local_path)
-                self.bridge.save_weights(self.model, hf_model_ckpt_path)
+                if self.vanilla_bridge:
+                    self.bridge.save_weights(
+                        self.model, hf_model_ckpt_path, distributed_filesystem=True, memory_efficient=True
+                    )
+                else:
+                    self.bridge.save_hf_weights(self.model, hf_model_ckpt_path)
             else:
                 state_dict = self.weight_saver(
                     self.model,
@@ -574,10 +640,44 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     hdfs_io.copy(src=dist_checkpoint_path, dst=hdfs_path, dirs_exist_ok=True)
                     hdfs_io.copy(src=hf_config_tokenizer_path, dst=hdfs_path, dirs_exist_ok=True)
 
+            # update latest_checkpointed_iteration.txt when async_save is True
+            if self.checkpoint_config.async_save:
+                head_node = None
+                nodes = api.list_nodes()
+                for node in nodes:
+                    if node.is_head_node:
+                        head_node = node
+                        break
+
+                current_node_id = ray.get_runtime_context().get_node_id()
+                ray_local_world_size = int(os.getenv("RAY_LOCAL_WORLD_SIZE", -1))
+                if ray_local_world_size == -1:
+                    nnodes = int(os.getenv("NNODES", 1))
+                    ray_local_world_size = torch.distributed.get_world_size() / nnodes
+
+                if (
+                    head_node is not None
+                    and head_node.node_id == current_node_id
+                    and self.rank % ray_local_world_size == 0
+                ):
+                    log_with_rank(
+                        f"Update latest_checkpointed_iteration.txt to step {global_step}",
+                        rank=self.rank,
+                        logger=logger,
+                    )
+                    local_latest_checkpointed_iteration = os.path.join(
+                        os.path.dirname(os.path.dirname(local_path)), "latest_checkpointed_iteration.txt"
+                    )
+                    with open(local_latest_checkpointed_iteration, "w") as f:
+                        f.write(str(global_step))
+
+            self.register_checkpoint(local_path, max_ckpt_to_keep)
+
         if self.checkpoint_config.async_save:
             assert async_save_request is not None, "Async save request should not be None when using async save."
             async_save_request.add_finalize_fn(finalize_save_fn)
+            from megatron.core.dist_checkpointing.strategies.base import async_calls
+
+            async_calls.schedule_async_request(async_save_request)
         else:
             finalize_save_fn()
-
-        self.previous_saved_paths.append(local_path)

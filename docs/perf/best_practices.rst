@@ -110,6 +110,10 @@ Parameter Reference
     Path to the actor checkpoint in HuggingFace-compatible format.
   - ``actor_rollout_ref.actor.megatron.use_mbridge``:
     Enable mbridge format conversion when the model was trained with Megatron. Use the latest mbridge release: https://github.com/ISEEKYAN/mbridge.
+    Now it must be True.
+  - ``actor_rollout_ref.actor.megatron.vanilla_mbridge``:
+    If set to True, use mbridge, else use Megatron-Bridge https://github.com/NVIDIA-NeMo/Megatron-Bridge.
+    Now it is True by default. and it will defaultly be set to False in the future(v0.8).
 
 :math:`\pi`
   - ``actor_rollout_ref.rollout.name``:

@@ -74,7 +74,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install the current repository
         run: |
-          pip install -e .[test] --no-deps
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
           pip install -r docs/requirements-docs.txt
 
       - name: Run doc make html

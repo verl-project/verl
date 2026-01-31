@@ -24,7 +24,48 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
-__all__ = ["HFModelConfig"]
+__all__ = ["HFModelConfig", "MtpConfig"]
+
+
+@dataclass
+class MtpConfig(BaseConfig):
+    """
+    Configuration for MTP model.
+
+    enable: Enable loading and saving of MTP parameters, but do not use them
+
+    enable_train: Whether to enable using MTP parameters during training
+    enable_rollout: Whether to enable using MTP parameters during rollout
+
+    Training parameters:
+        detach_encoder: Whether to detach encoder parameters during MTP training
+        mtp_loss_scaling_factor: Loss scaling factor during MTP training
+
+    vLLM rollout parameters:
+        method: "mtp"
+        num-speculative-tokens: 1
+
+    SGLang rollout parameters:
+        speculative-algorithm: EAGLE
+        speculative-num-steps: 2
+        speculative-eagle-topk: 2
+        speculative-num-draft-tokens: [value]
+    """
+
+    enable: bool = False
+    enable_train: bool = False
+    enable_rollout: bool = False
+
+    detach_encoder: bool = False
+    mtp_loss_scaling_factor: float = 0.1
+
+    speculative_algorithm: str = "EAGLE"
+    speculative_num_steps: int = 2
+    speculative_eagle_topk: int = 2
+    speculative_num_draft_tokens: int = 4
+
+    method: str = "mtp"
+    num_speculative_tokens: int = 1
 
 
 @dataclass
@@ -72,14 +113,18 @@ class HFModelConfig(BaseConfig):
     enable_gradient_checkpointing: bool = True
     enable_activation_offload: bool = False
 
-    use_remove_padding: bool = False
+    use_remove_padding: bool = True
 
-    # lora related. We may setup a separate config later
+    # TODO: unify fsdp and megatron lora config
+    # fsdp lora related. We may setup a separate config later
     lora_rank: int = 0
     lora_alpha: int = 16
     target_modules: Optional[str] = "all-linear"
 
     exclude_modules: Optional[str] = None
+
+    # megatron lora config
+    lora: dict[str, Any] = field(default_factory=dict)
 
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
@@ -88,7 +133,12 @@ class HFModelConfig(BaseConfig):
     use_fused_kernels: bool = False
     fused_kernel_options: dict = field(default_factory=dict)
 
+    # TiledMLP configuration for memory-efficient MLP computation
+    tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
+
     architectures: Optional[list[str]] = None
+
+    mtp: MtpConfig = field(default_factory=MtpConfig)
 
     def __post_init__(self):
         import_external_libs(self.external_lib)
@@ -100,7 +150,7 @@ class HFModelConfig(BaseConfig):
 
         self.local_path = copy_to_local(self.path, use_shm=self.use_shm)
 
-        # constuct tokenizer
+        # construct tokenizer
         if self.load_tokenizer:
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
             self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
@@ -117,7 +167,7 @@ class HFModelConfig(BaseConfig):
             self.local_hf_config_path, trust_remote_code=self.trust_remote_code
         )
 
-        # constuct hf_config
+        # construct hf_config
         attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation

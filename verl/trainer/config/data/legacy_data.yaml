@@ -53,7 +53,7 @@ tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_p
 return_raw_input_ids: False
 
 # Whether to return the original chat (prompt) without applying chat template.
-return_raw_chat: False
+return_raw_chat: True
 
 # Whether to return the full prompt with chat template.
 return_full_prompt: False

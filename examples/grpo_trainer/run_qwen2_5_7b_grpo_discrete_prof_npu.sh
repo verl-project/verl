@@ -8,7 +8,7 @@ PROFILE_RANKS="[1,2]"
 
 # profiling NPU options
 SAVE_PATH="$HOME/profile_data"
-LEVEL="level1"
+LEVEL="level0"
 CONTENTS=['npu','cpu']
 ANALYSIS=True
 
@@ -65,7 +65,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=5 \
-    trainer.device=npu \
     global_profiler.tool=npu \
     global_profiler.steps=$PROFILE_STEPS \
     global_profiler.save_path=$SAVE_PATH

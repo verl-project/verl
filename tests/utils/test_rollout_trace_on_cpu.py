@@ -128,6 +128,82 @@ async def test_rollout_trace_with_dummy_backend(mock_weave_client):
     mock_weave_client.create_call.assert_not_called()
 
 
+async def test_trace_disabled_with_trace_false(mock_weave_client):
+    """Tests that tracing is disabled when trace=False."""
+    RolloutTraceConfig.init(
+        project_name="my-project",
+        experiment_name="my-experiment",
+        backend="weave",
+    )
+    instance = TracedClass()
+
+    assert RolloutTraceConfig.get_backend() == "weave"
+
+    with rollout_trace_attr(step=1, sample_index=0, rollout_n=0, trace=False):
+        result = await instance.my_method("test_a", b="test_b")
+        assert result == "result: test_a, test_b"
+
+    # No tracing should have occurred
+    mock_weave_client.create_call.assert_not_called()
+
+    # Verify that tracing works again with trace=True (default)
+    with rollout_trace_attr(step=1, sample_index=0, rollout_n=0):
+        result = await instance.my_method("test_a", b="test_b")
+        assert result == "result: test_a, test_b"
+
+    assert mock_weave_client.create_call.call_count == 1
+
+
+async def test_trace_false_disables_nested_trace_ops(mock_weave_client):
+    """Tests that trace=False disables all nested @rollout_trace_op calls."""
+    RolloutTraceConfig.init(
+        project_name="my-project",
+        experiment_name="my-experiment",
+        backend="weave",
+    )
+    instance = TracedClass()
+
+    with rollout_trace_attr(step=1, sample_index=0, rollout_n=0, trace=False):
+        # Call upper_method which internally calls my_method and middle_method
+        # All of these are decorated with @rollout_trace_op
+        result = await instance.upper_method()
+        assert result is True
+
+    # No tracing should have occurred for any of the nested calls
+    mock_weave_client.create_call.assert_not_called()
+
+    with rollout_trace_attr(step=1, sample_index=0, rollout_n=0):
+        result = await instance.my_method("test_a", b="test_b")
+        assert result == "result: test_a, test_b"
+
+    assert mock_weave_client.create_call.call_count == 1
+
+
+async def test_trace_enabled_restored_after_exception(mock_weave_client):
+    """Tests that trace state is restored even if an exception occurs when trace=False."""
+    RolloutTraceConfig.init(
+        project_name="my-project",
+        experiment_name="my-experiment",
+        backend="weave",
+    )
+    instance = TracedClass()
+
+    assert RolloutTraceConfig.get_backend() == "weave"
+
+    # Use trace=False and raise an exception
+    try:
+        with rollout_trace_attr(step=1, sample_index=0, rollout_n=0, trace=False):
+            raise RuntimeError("Test exception with trace disabled")
+    except RuntimeError:
+        pass
+
+    with rollout_trace_attr(step=1, sample_index=0, rollout_n=0):
+        result = await instance.my_method("test_a", b="test_b")
+        assert result == "result: test_a, test_b"
+
+    assert mock_weave_client.create_call.call_count == 1
+
+
 @pytest.mark.skipif(
     os.environ.get("RUN_WEAVE_INTEGRATION_TESTS", "false").lower() != "true",
     reason="Skipping weave integration test. Set RUN_WEAVE_INTEGRATION_TESTS=true to run.",

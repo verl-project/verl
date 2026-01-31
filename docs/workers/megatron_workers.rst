@@ -1,7 +1,7 @@
 Megatron-LM Backend
 ===================
 
-Last updated: 06/24/2025.
+Last updated: 12/01/2025.
 
 We support Megatron Backend by implementing various workers for actor,
 critic, reference, rollout and reward models. We also implement the
@@ -121,8 +121,6 @@ highlighted below:
 2. ``vLLMRollout`` support generation with vLLM. We modify the vLLM
    Engine and make it executed under SPMD to fit into our
    ``WorkerGroup`` design.
-3. ``MegatronVLLMShardingManager`` a context manager to perform actual
-   resharding between actor and rollout.
 
 See `source code <https://github.com/volcengine/verl/blob/main/verl/workers/megatron_workers.py#L63>`_ for more information.
 
@@ -143,11 +141,6 @@ See `source code <https://github.com/volcengine/verl/blob/main/verl/workers/mega
                         tokenizer=self.tokenizer,
                         model_hf_config=self.actor_model_config,
                         train_tp=mpu.get_tensor_model_parallel_world_size())
-   # perform weight resharding between actor and rollout
-   sharding_manager = MegatronVLLMShardingManager(module=self.hybrid_engine,
-                                                  inference_engine=rollout.inference_engine,
-                                                  model_config=self.actor_model_config,
-                                                  layer_name_mapping=layer_name_mapping)
    ...
 
 1. Generate sequence and recompute log prob

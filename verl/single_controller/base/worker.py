@@ -117,6 +117,9 @@ class Worker(WorkerHelper):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def _query_collect_info(self, mesh_name: str):
+        return self.query_collect_info(mesh_name)
+
+    def query_collect_info(self, mesh_name: str):
         """Query the collect info for a given mesh name.
 
         Args:
@@ -130,14 +133,45 @@ class Worker(WorkerHelper):
         assert mesh_name in self.__collect_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
         return self.__collect_dp_rank[mesh_name]
 
+    def get_dispatch_collect(self):
+        """Get all registered dispatch and collect dp_ranks.
+
+        Returns:
+            dict[str, int]:
+                A dictionary mapping mesh names to their dispatch dp_ranks.
+            dict[str, bool]:
+                A dictionary mapping mesh names to whether they are used for collect.
+        """
+        return {"dispatch_dp_rank": self.__dispatch_dp_rank, "collect_dp_rank": self.__collect_dp_rank}
+
+    def set_dispatch_collect(self, mesh_name: str, dispatch_dp_rank: dict[str, int], collect_dp_rank: dict[str, bool]):
+        """Set the dispatch and collect dp_ranks for all registered meshes.
+
+        Args:
+            mesh_name (str): Mesh name to set dispatch and collect dp_ranks for.
+            dispatch_dp_rank (dict[str, int]):
+                A dictionary mapping mesh names to their dispatch dp_ranks.
+            collect_dp_rank (dict[str, bool]):
+                A dictionary mapping mesh names to whether they are used for collect.
+        """
+        assert mesh_name not in self.__dispatch_dp_rank, (
+            f"{mesh_name} is already registered, {self.__dispatch_dp_rank.keys()}"
+        )
+        assert mesh_name not in self.__collect_dp_rank, (
+            f"{mesh_name} is already registered, {self.__collect_dp_rank.keys()}"
+        )
+        for dp_rank in dispatch_dp_rank.values():
+            self.__dispatch_dp_rank[mesh_name] = dp_rank
+        for is_collect in collect_dp_rank.values():
+            self.__collect_dp_rank[mesh_name] = is_collect
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def create_transferqueue_client(self, controller_infos, storage_infos, role="train"):
+    def create_transferqueue_client(self, config):
         from verl.utils.transferqueue_utils import create_transferqueue_client
 
         create_transferqueue_client(
-            client_id=f"{role}_worker_{self.rank}",
-            controller_infos=controller_infos,
-            storage_infos=storage_infos,
+            client_id=f"worker_{self.rank}",
+            config=config.transfer_queue,
         )
 
     @classmethod

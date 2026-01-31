@@ -174,7 +174,9 @@ class SandboxFusionTool(BaseTool):
 
         result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
         # sandbox has no score or metrics, use Nones
-        return ToolResponse(text=result), None, None
+        if isinstance(result, ToolResponse):
+            return result, None, None
+        return ToolResponse(text=None if result is None else str(result)), None, None
 
     def execute_code(self, instance_id, code, timeout=30, language="python"):
         result_status, metadata = _process_single_case(

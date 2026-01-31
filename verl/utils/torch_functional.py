@@ -46,17 +46,25 @@ except ImportError:
     NPU_CROSS_ENTROPY_LOSS_AVAILABLE = False
 
 
-def gather_from_labels(data, label):
-    """Gather the label from data. The value in label should be [0, vocab_size)
+def gather_from_labels(data: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
+    """Gather values from data tensor at positions specified by label indices.
+
+    Selects elements from the last dimension of `data` based on indices in `label`.
+    Commonly used to extract log-probabilities for specific token IDs from a
+    vocabulary distribution.
 
     Args:
-        data: (..., vocab_size)
-        label (torch.IntTensor) : (...,)
+        data: Input tensor of shape (..., vocab_size) containing values to gather from.
+        label: Index tensor of shape (...,) with values in range [0, vocab_size).
 
     Returns:
+        torch.Tensor: Gathered values with shape (...,), same as label shape.
 
+    Example:
+        >>> logits = torch.randn(2, 3, 100)  # [batch, seq, vocab]
+        >>> labels = torch.randint(0, 100, (2, 3))  # [batch, seq]
+        >>> gathered = gather_from_labels(logits, labels)  # [batch, seq]
     """
-
     output = torch.gather(data, -1, label.unsqueeze(-1)).squeeze(-1)
     return output
 
@@ -92,7 +100,25 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
     return output
 
 
-def logprobs_from_logits_flash_attn(logits, labels, inplace_backward=True):
+def logprobs_from_logits_flash_attn(
+    logits: torch.Tensor, labels: torch.Tensor, inplace_backward: bool = True
+) -> torch.Tensor:
+    """Compute log-probabilities using Flash Attention's optimized cross-entropy.
+
+    Uses the Flash Attention library's Triton-based cross-entropy implementation
+    for efficient computation on NVIDIA GPUs.
+
+    Args:
+        logits: Model output logits of shape (batch_size, vocab_size).
+        labels: Target token indices of shape (batch_size,).
+        inplace_backward: If True, perform backward pass in-place for memory efficiency.
+
+    Returns:
+        torch.Tensor: Log-probabilities for target labels, shape (batch_size,).
+
+    Raises:
+        AssertionError: If flash-attn version < 2.4.3 (different return format).
+    """
     output = cross_entropy_loss(logits, labels, inplace_backward=inplace_backward)
     assert isinstance(output, tuple), (
         "please make sure flash-attn>=2.4.3 where cross_entropy_loss returns Tuple[losses, z_losses]."
@@ -100,22 +126,63 @@ def logprobs_from_logits_flash_attn(logits, labels, inplace_backward=True):
     return -output[0]
 
 
-def logprobs_from_logits_torch_npu(logits, labels):
+def logprobs_from_logits_torch_npu(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Compute log-probabilities using Ascend NPU's optimized cross-entropy.
+
+    Uses torch_npu's native cross-entropy implementation for efficient
+    computation on Huawei Ascend NPU devices.
+
+    Args:
+        logits: Model output logits of shape (..., vocab_size).
+        labels: Target token indices of shape (...,).
+
+    Returns:
+        torch.Tensor: Log-probabilities for target labels, same shape as labels.
+    """
     batch_dim = logits.shape[:-1]
     logits = logits.reshape(-1, logits.shape[-1])
     loss, _, _, _ = torch_npu.npu_cross_entropy_loss(logits, labels.reshape(-1), reduction="none")
     return -loss.view(*batch_dim)
 
 
-def logprobs_from_logits_naive(logits, labels):
+def logprobs_from_logits_naive(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Compute log-probabilities using standard log-softmax approach.
+
+    Simple implementation using PyTorch's log_softmax followed by gathering.
+    Less memory-efficient than specialized implementations but works on all devices.
+
+    Args:
+        logits: Model output logits of shape (..., vocab_size).
+        labels: Target token indices of shape (...,).
+
+    Returns:
+        torch.Tensor: Log-probabilities for target labels, same shape as labels.
+    """
     logp = F.log_softmax(logits, dim=-1)
     logpy = gather_from_labels(logp, labels)
     return logpy
 
 
-def logprobs_from_logits_v2(logits: torch.FloatTensor, labels):
-    """
-    A memory efficient implementation of logprobs_from_logits
+def logprobs_from_logits_v2(logits: torch.FloatTensor, labels: torch.Tensor) -> torch.Tensor:
+    """Memory-efficient log-probability computation using row-wise processing.
+
+    Computes log-probabilities by processing one row at a time to reduce peak
+    memory consumption. Uses logsumexp for float32/float64, falls back to
+    log_softmax for bfloat16 due to numerical stability concerns.
+
+    The mathematical identity used is: log_softmax(x_i) = x_i - logsumexp(x)
+
+    Args:
+        logits: Model output logits of shape (batch_size, seq_len, vocab_size)
+            or (batch_size, vocab_size).
+        labels: Target token indices matching logits shape without vocab dimension.
+
+    Returns:
+        torch.Tensor: Log-probabilities for target labels.
+
+    Note:
+        This implementation trades compute for memory by iterating over batch
+        dimension, making it suitable for large vocabulary sizes.
     """
     if logits.dtype in [torch.float32, torch.float64]:
         logits_labels = torch.gather(logits, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
@@ -133,24 +200,60 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels):
     return logprobs_labels
 
 
-def clip_by_value(x, tensor_min, tensor_max):
-    """
-    Tensor extenstion to torch.clamp
-    https://github.com/pytorch/pytorch/issues/2793#issuecomment-428784713
+def clip_by_value(x: torch.Tensor, tensor_min: torch.Tensor, tensor_max: torch.Tensor) -> torch.Tensor:
+    """Clip tensor values to a range defined by tensor bounds.
+
+    Extension of torch.clamp that supports tensor-valued min/max bounds
+    instead of only scalar bounds.
+
+    Args:
+        x: Input tensor to clip.
+        tensor_min: Minimum bound tensor (broadcastable to x).
+        tensor_max: Maximum bound tensor (broadcastable to x).
+
+    Returns:
+        torch.Tensor: Clipped tensor with values in [tensor_min, tensor_max].
+
+    See Also:
+        https://github.com/pytorch/pytorch/issues/2793#issuecomment-428784713
     """
     clipped = torch.max(torch.min(x, tensor_max), tensor_min)
     return clipped
 
 
-def entropy_from_logits(logits: torch.Tensor):
-    """Calculate entropy from logits."""
+def entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
+    """Calculate Shannon entropy from unnormalized logits.
+
+    Computes H(p) = -sum(p * log(p)) using the numerically stable formula:
+    entropy = logsumexp(logits) - sum(softmax(logits) * logits)
+
+    Args:
+        logits: Unnormalized log-probabilities of shape (..., vocab_size).
+
+    Returns:
+        torch.Tensor: Entropy values with shape (...,), one per distribution.
+    """
     pd = torch.nn.functional.softmax(logits, dim=-1)
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
     return entropy
 
 
-def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 2048):
-    """Memory-efficient entropy calculation with chunking."""
+def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 2048) -> torch.Tensor:
+    """Memory-efficient entropy calculation using chunked processing.
+
+    Computes entropy by processing the batch in chunks to reduce peak memory
+    usage. Useful for large batch sizes or when memory is constrained.
+
+    Args:
+        logits: Unnormalized log-probabilities of shape (batch_size, vocab_size).
+        chunk_size: Number of samples to process at once. Defaults to 2048.
+
+    Returns:
+        torch.Tensor: Entropy values with shape (batch_size,).
+
+    Note:
+        Converts chunks to float32 for numerical stability during computation.
+    """
     entropy = torch.zeros(logits.shape[0], device=logits.device)
     for i in range(0, logits.shape[0], chunk_size):
         logits_chunk = logits[i : i + chunk_size].float()
@@ -160,8 +263,21 @@ def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 20
     return entropy
 
 
-def masked_sum(values, mask, axis=None):
-    """Compute mean of tensor with a masked values."""
+def masked_sum(values: torch.Tensor, mask: torch.Tensor, axis: int | tuple[int, ...] | None = None) -> torch.Tensor:
+    """Compute sum of tensor values where mask is True.
+
+    NaN values outside the mask are replaced with zeros to prevent
+    contaminating the sum.
+
+    Args:
+        values: Input tensor containing values to sum.
+        mask: Boolean or numeric mask tensor (same shape as values).
+            Non-zero values indicate elements to include.
+        axis: Dimension(s) along which to sum. None sums all elements.
+
+    Returns:
+        torch.Tensor: Sum of masked values, reduced along specified axis.
+    """
     # If NaNs exist out of mask, replace NaNs in values with a value that
     # won't affect the sum (e.g., 0 for masked regions)
     valid_values = torch.where(mask.bool(), values, 0.0)
@@ -246,7 +362,22 @@ def get_response_mask(response_id: torch.Tensor, eos_token: int | list[int] = 2,
     return (eos_mask.cumsum(dim=1) - eos_mask).eq(0).to(dtype)
 
 
-def compute_grad_norm(model: nn.Module):
+def compute_grad_norm(model: nn.Module) -> float:
+    """Compute the squared L2 norm of all gradients in a model.
+
+    Sums the squared values of all gradient tensors across all parameters.
+    Useful for monitoring gradient magnitudes during training.
+
+    Args:
+        model: PyTorch model with computed gradients.
+
+    Returns:
+        float: Sum of squared gradient values (not the square root).
+
+    Note:
+        Returns the squared norm, not the norm itself. To get the actual
+        L2 norm, take the square root of the returned value.
+    """
     total_grad_square = 0
     for param in model.parameters():
         if param.grad is not None:
@@ -254,27 +385,46 @@ def compute_grad_norm(model: nn.Module):
     return total_grad_square
 
 
-def broadcast_dict_tensor(tensors: dict[str, torch.Tensor] | TensorDict, src, group):
-    """
-    TODO: optimize this. Technically, we only need one broadcast
-    """
+def broadcast_dict_tensor(tensors: dict[str, torch.Tensor] | TensorDict, src: int, group) -> None:
+    """Broadcast all tensors in a dictionary from source rank to all ranks.
 
+    Iterates over all tensors in the dictionary and broadcasts each one
+    from the source rank to all other ranks in the process group.
+
+    Args:
+        tensors: Dictionary or TensorDict containing tensors to broadcast.
+        src: Source rank from which to broadcast.
+        group: Process group for the broadcast operation.
+
+    Note:
+        This implementation broadcasts tensors one at a time. Could be optimized
+        to use a single broadcast with packed tensors.
+    """
     for key in tensors.sorted_keys:
         torch.distributed.broadcast(tensors[key], src=src, group=group, async_op=False)
 
 
-def allgather_dict_tensors(tensors: dict[str, torch.Tensor] | TensorDict, size, group, dim=0):
-    """
-    TODO: optimize this.
-    - We can use async ops
-    - We can use only one allgather
+def allgather_dict_tensors(
+    tensors: dict[str, torch.Tensor] | TensorDict, size: int, group, dim: int = 0
+) -> dict[str, torch.Tensor] | TensorDict:
+    """Gather tensors from all ranks and concatenate them.
+
+    Performs all_gather on each tensor in the dictionary and concatenates
+    the results along the specified dimension.
+
     Args:
-        tensors:
-        size:
-        group:
+        tensors: Dictionary or TensorDict containing tensors to gather.
+        size: Number of ranks in the process group.
+        group: Process group for the all_gather operation.
+        dim: Dimension along which to concatenate gathered tensors. Defaults to 0.
 
     Returns:
+        Dictionary or TensorDict (matching input type) with gathered and
+        concatenated tensors. Each tensor's size along `dim` is multiplied by `size`.
 
+    Note:
+        This implementation gathers tensors one at a time synchronously.
+        Could be optimized using async ops or packed all_gather.
     """
     if isinstance(tensors, TensorDict):
         is_tensor_dict = True
@@ -295,6 +445,32 @@ def allgather_dict_tensors(tensors: dict[str, torch.Tensor] | TensorDict, size, 
         output = TensorDict(source=output, batch_size=tensors.batch_size[0] * size)
 
     return output
+
+
+def allgather_dict_into_dict(data: dict, group=None) -> dict:
+    """allgather a dict into a dict of list
+
+    Args:
+        data: a dict
+        group: the process group to allgather
+
+    Returns: dict containing a list of the results from allgather
+
+    """
+    assert isinstance(data, dict), f"Expect data to be a dictionary, Got {type(data)}"
+
+    group_size = torch.distributed.get_world_size(group=group)
+
+    final_metrics = {}
+    all_metrics_lst = [None for _ in range(group_size)]
+    torch.distributed.all_gather_object(all_metrics_lst, data, group=group)
+
+    for all_metrics in all_metrics_lst:
+        for key, val in all_metrics.items():
+            if key not in final_metrics:
+                final_metrics[key] = []
+            final_metrics[key].append(val)
+    return final_metrics
 
 
 def split_dict_tensor_into_batches(tensors: TensorDict, batch_size) -> list[TensorDict]:
@@ -499,6 +675,23 @@ def post_process_logits(input_ids, logits, temperature, top_k, top_p):
     # if top_p is not None and top_p < 1.0 and top_p > 0.0:
     #     logits = TopPLogitsWarper(top_p=top_p)(input_ids, logits)
     return logits
+
+
+def calculate_sum_pi_squared_from_logits(logits: torch.Tensor):
+    """
+    Compute exact sum of squared probabilities from logits.
+    Formula: Σπ² = exp(logsumexp(2*logits) - 2*logsumexp(logits))
+
+    Used for optimal baseline variance reduction as described in
+    "What Matters for Model Merging at Scale?" (arXiv:2410.03617)
+
+    Args:
+        logits: Logits tensor (..., vocab_size).
+
+    Returns:
+        Sum of squared probabilities tensor (...).
+    """
+    return torch.exp(torch.logsumexp(2.0 * logits, dim=-1) - 2.0 * torch.logsumexp(logits, dim=-1))
 
 
 """
@@ -775,3 +968,52 @@ def distributed_masked_mean(local_tensor, local_mask):
 
     global_mean = local_sum / local_num
     return global_mean
+
+
+def expand_as_nested(tensor: torch.Tensor, nested_tensor: torch.Tensor) -> torch.Tensor:
+    """
+
+    Args:
+        tensor: a tensor with shape (bsz,)
+        nested_tensor: a nested tensor with shape (bsz, xxx)
+
+    Returns:
+        a tensor with the same shape as nested_tensor
+
+    """
+    assert nested_tensor.is_nested, "nested_tensor must be nested"
+    assert tensor.shape[0] == nested_tensor.shape[0], (
+        f"The batch shape must be the same. Got {tensor.shape[0]} vs {nested_tensor.shape[0]}"
+    )
+    assert len(tensor.shape) == 1, "The ndim of tensor must be 1"
+    assert len(nested_tensor.shape) == 2, "The ndim of nested_tensor must be 2"
+
+    offsets = nested_tensor.offsets()
+    seqlens = offsets.diff()
+    output = torch.repeat_interleave(tensor, seqlens, dim=0)
+    output = torch.nested.nested_tensor_from_jagged(values=output, offsets=offsets)
+    return output
+
+
+@contextmanager
+def use_original_torch_compile():
+    """torch.compile might be replaced by mindspeed on NPU, this contextmanager
+    can revert torch.compile temporarily.
+    """
+    try:
+        from mindspeed.patch_utils import MindSpeedPatchesManager
+
+        compile_patch = None
+        for patch in MindSpeedPatchesManager.patches_info.values():
+            if patch.orig_module_name == "torch" and patch.orig_func_name == "compile":
+                if patch.is_applied():
+                    compile_patch = patch
+                break
+        if compile_patch is not None:
+            compile_patch.remove_patch()
+            yield
+            compile_patch.apply_patch()
+        else:
+            yield
+    except Exception:
+        yield

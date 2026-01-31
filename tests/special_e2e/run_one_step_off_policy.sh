@@ -99,7 +99,7 @@ common_params=(
     trainer.logger=['console']
     trainer.project_name='verl-test'
     trainer.experiment_name="${exp_name}"
-    trainer.val_before_train=False
+    trainer.val_before_train=True
     trainer.test_freq=-1
     trainer.save_freq=-1
     trainer.total_epochs=2
@@ -121,7 +121,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m recipe.one_step_off_policy.main_ppo \
+    python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.strategy=fsdp2 \
         critic.strategy=fsdp2 \
@@ -148,7 +148,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m recipe.one_step_off_policy.main_ppo \
+    python3 -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
         --config-name='one_step_off_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \

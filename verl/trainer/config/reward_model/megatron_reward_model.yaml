@@ -52,6 +52,9 @@ megatron:
   # Path for distributed checkpoints
   dist_checkpointing_path: null
 
+  # distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
+  dist_checkpointing_prefix: ''
+
   # RNG seed for megatron
   seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
 
@@ -60,6 +63,12 @@ megatron:
 
   # Whether to use mbridge for faster comms
   use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
+
+  # Whether to use mbridge instead of Megatron-Bridge
+  vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
+
+  # Whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
+  use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
 
   dtype: bfloat16
 

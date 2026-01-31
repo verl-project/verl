@@ -74,7 +74,8 @@ jobs:
         run: |
           pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip3 install -r requirements.txt
-          pip install -e .[test]
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
       - name: Run sanity test
         run: |
           pytest -s -x tests/special_sanity
@@ -97,8 +98,6 @@ jobs:
         run: python3 tests/special_sanity/validate_structure.py
       - name: Assert documentation requirement for functions
         run: python3 tests/special_sanity/validate_imported_docs.py
-      - name: Assert device api usage in verl/recipe
-        run: python3 tests/special_sanity/check_device_api_usage.py --directory ./recipe
       - name: Assert device api usage in verl/verl
         run: python3 tests/special_sanity/check_device_api_usage.py --directory ./verl
       - name: Assert documentation time info

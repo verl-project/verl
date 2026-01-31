@@ -23,6 +23,7 @@ from split_monkey_patch import fit
 
 from verl import DataProto
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.reward_score import gsm8k, math_reward
 
 
@@ -171,7 +172,7 @@ def main_task(config):
     }
 
     # use reference model
-    if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+    if need_reference_policy(config):
         role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
         mapping[Role.RefPolicy] = actor_rollout_ref_pool_id
 

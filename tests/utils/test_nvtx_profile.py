@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 from verl.utils import omega_conf_to_dataclass
 from verl.utils.profiler.config import NsightToolConfig, ProfilerConfig
-from verl.utils.profiler.nvtx_profile import NsightSystemsProfiler
+from verl.utils.profiler.profile import DistProfiler
 
 
 class TestProfilerConfig(unittest.TestCase):
@@ -83,24 +83,24 @@ class TestNsightSystemsProfiler(unittest.TestCase):
     """
 
     def setUp(self):
-        self.config = ProfilerConfig(enable=True, all_ranks=True)
+        self.config = ProfilerConfig(tool="nsys", enable=True, all_ranks=True)
         self.rank = 0
-        self.profiler = NsightSystemsProfiler(self.rank, self.config, tool_config=NsightToolConfig(discrete=False))
+        self.profiler = DistProfiler(self.rank, self.config, tool_config=NsightToolConfig(discrete=False))
 
     def test_initialization(self):
-        self.assertEqual(self.profiler.this_rank, True)
-        self.assertEqual(self.profiler.this_step, False)
+        self.assertEqual(self.profiler.check_this_rank(), True)
+        self.assertEqual(self.profiler.check_this_step(), False)
 
     def test_start_stop_profiling(self):
         with patch("torch.cuda.profiler.start") as mock_start, patch("torch.cuda.profiler.stop") as mock_stop:
             # Test start
             self.profiler.start()
-            self.assertTrue(self.profiler.this_step)
+            self.assertTrue(self.profiler.check_this_step())
             mock_start.assert_called_once()
 
             # Test stop
             self.profiler.stop()
-            self.assertFalse(self.profiler.this_step)
+            self.assertFalse(self.profiler.check_this_step())
             mock_stop.assert_called_once()
 
     # def test_discrete_profiling(self):
@@ -119,7 +119,7 @@ class TestNsightSystemsProfiler(unittest.TestCase):
     def test_annotate_decorator(self):
         mock_self = MagicMock()
         mock_self.profiler = self.profiler
-        mock_self.profiler.this_step = True
+        mock_self.profiler.start()
         decorator = mock_self.profiler.annotate(message="test")
 
         @decorator

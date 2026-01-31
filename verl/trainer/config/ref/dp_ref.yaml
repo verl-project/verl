@@ -10,10 +10,14 @@ defaults:
   # load the reference default config, then apply the fields in the current yaml
   - _self_
 
-# ref model is assumed to be identical to actor model. Specify model.path for using a different ref model.
-# Potential use case involves on policy distillation where we calculate KL divergence between student actor
-# and teacher ref
-model: null
+# Target class for this configuration
+_target_: verl.workers.config.FSDPActorConfig
+
+# fsdp config
+fsdp_config:
+
+  # ref model is forward only
+  forward_only: True
 
 # sequence parallel size
 # same as actor_rollout_ref.actor.ulysses_sequence_parallel_size if it exists, otherwise 1

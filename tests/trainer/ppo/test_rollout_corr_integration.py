@@ -16,6 +16,7 @@
 import pytest
 import torch
 
+from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.trainer.ppo.core_algos import compute_policy_loss_vanilla
 from verl.trainer.ppo.rollout_corr_helper import (
     compute_offpolicy_metrics,
@@ -69,9 +70,8 @@ class TestRolloutISIntegration:
             rollout_log_prob=sample_data["rollout_log_prob"],
             response_mask=sample_data["response_mask"],
             rollout_is="token",
-            rollout_rs=None,
             rollout_is_threshold=2.0,
-            rollout_token_veto_threshold=1e-4,
+            rollout_rs=None,
         )
 
         rollout_is_weights = rollout_is_weights_proto.batch["rollout_is_weights"]
@@ -100,9 +100,8 @@ class TestRolloutISIntegration:
             rollout_log_prob=sample_data["rollout_log_prob"],
             response_mask=sample_data["response_mask"],
             rollout_is="token",
-            rollout_rs=None,
             rollout_is_threshold=2.0,
-            rollout_token_veto_threshold=1e-4,
+            rollout_rs=None,
         )
 
         # Check weights
@@ -119,7 +118,7 @@ class TestRolloutISIntegration:
         assert "rollout_corr/rollout_is_mean" in metrics
 
     def test_all_aggregation_levels(self, sample_data):
-        """Test all aggregation levels (token, sequence for IS; geometric for RS)."""
+        """Test all aggregation levels (token, sequence for IS; K1 for RS)."""
         # Test IS weight levels
         is_levels = ["token", "sequence"]
         for level in is_levels:
@@ -133,16 +132,16 @@ class TestRolloutISIntegration:
             )
             assert "rollout_corr/rollout_is_mean" in metrics
 
-        # Test rejection sampling with geometric level
+        # Test rejection sampling with K1 sequence mean level
         _, _, metrics_geo = compute_rollout_correction_and_rejection_mask(
             old_log_prob=sample_data["old_log_prob"],
             rollout_log_prob=sample_data["rollout_log_prob"],
             response_mask=sample_data["response_mask"],
             rollout_is=None,
-            rollout_rs="geometric",
-            rollout_rs_threshold=2.0,
+            rollout_rs="seq_mean_k1",
+            rollout_rs_threshold="0.999_1.001",
         )
-        assert "rollout_corr/rollout_rs_mean" in metrics_geo
+        assert "rollout_corr/rollout_rs_seq_mean_k1_mean" in metrics_geo
 
     def test_both_bounding_modes(self, sample_data):
         """Test both truncate and mask modes."""
@@ -164,12 +163,11 @@ class TestRolloutISIntegration:
             response_mask=sample_data["response_mask"],
             rollout_is="token",  # Can also compute IS weights in mask mode
             rollout_is_threshold=2.0,
-            rollout_rs="token",  # Enable rejection sampling
-            rollout_rs_threshold=2.0,
-            rollout_rs_threshold_lower=0.5,
+            rollout_rs="token_k1",  # Enable rejection sampling
+            rollout_rs_threshold=1.3,  # Float upper bound (lower inferred automatically)
         )
         assert "rollout_corr/rollout_is_mean" in metrics_mask
-        assert "rollout_corr/rollout_rs_mean" in metrics_mask
+        assert "rollout_corr/rollout_rs_token_k1_mean" in metrics_mask
 
     def test_offpolicy_metrics(self, sample_data):
         """Test off-policy diagnostic metrics computation."""
@@ -184,33 +182,6 @@ class TestRolloutISIntegration:
         assert "rollout_ppl" in metrics
         assert "kl" in metrics
         assert isinstance(metrics["kl"], float)
-
-    def test_veto_mechanism(self):
-        """Test veto mechanism with catastrophic outliers."""
-        batch_size, seq_length = 2, 5
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        old_log_prob = torch.randn(batch_size, seq_length, device=device)
-        rollout_log_prob = old_log_prob.clone()
-
-        # Create catastrophic outlier in first sequence
-        rollout_log_prob[0, 2] += 15.0  # Makes ratio ~3e-7
-
-        response_mask = torch.ones(batch_size, seq_length, device=device)
-
-        _, _, metrics = compute_rollout_correction_and_rejection_mask(
-            old_log_prob=old_log_prob,
-            rollout_log_prob=rollout_log_prob,
-            response_mask=response_mask,
-            rollout_is="token",
-            rollout_is_threshold=2.0,
-            rollout_rs=None,
-            rollout_token_veto_threshold=1e-4,
-        )
-
-        # Should have vetoed one sequence
-        assert metrics["rollout_corr/rollout_is_veto_fraction"] > 0
-        assert metrics["rollout_corr/rollout_is_veto_fraction"] <= 1.0
 
     def test_metrics_only_mode(self, sample_data, config_with_rollout_is):
         """Test metrics-only mode: compute IS weights/metrics but don't apply to loss.
@@ -258,6 +229,33 @@ class TestRolloutISIntegration:
 
         # Losses should be different (weights have an effect)
         assert not torch.allclose(pg_loss_no_weights, pg_loss_with_weights)
+
+
+class TestRolloutCorrectionConfigNormalization:
+    """Unit tests for RolloutCorrectionConfig canonicalization logic."""
+
+    def test_alias_normalization_and_threshold_parsing(self):
+        config = RolloutCorrectionConfig(
+            rollout_is="token",
+            rollout_is_threshold=2.5,
+            rollout_rs="seq_mean_k1,seq_max_k3",
+            rollout_rs_threshold="0.8_1.2,3.0",
+        )
+
+        assert config.rollout_is == "token"
+        assert config.rollout_is_threshold == pytest.approx(2.5)
+        assert config.rollout_rs == "seq_mean_k1,seq_max_k3"
+        assert config.rollout_rs_threshold == "0.8_1.2,3.0"
+
+    def test_missing_threshold_raises(self):
+        config = RolloutCorrectionConfig(rollout_rs="token_k1")
+        assert config.rollout_rs == "token_k1"
+        assert config.rollout_rs_threshold is None
+
+    def test_float_threshold_conversion_in_factory(self):
+        config = RolloutCorrectionConfig.decoupled_geo_rs_seq_tis(rs_threshold=1.001)
+        assert config.rollout_rs == "seq_mean_k1"
+        assert config.rollout_rs_threshold == 1.001
 
 
 if __name__ == "__main__":

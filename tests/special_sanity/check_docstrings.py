@@ -125,7 +125,7 @@ def main():
         if missing:
             print(f"  Found {len(missing)} missing docstrings")
         else:
-            print("  All functions and classes have docstrings ✓")
+            print("  All functions and classes have docstrings [OK]")
 
     print("=" * 60)
 
@@ -149,7 +149,7 @@ def main():
         raise Exception(f"Found {len(all_missing_docstrings)} functions/classes without proper docstrings!")
 
     else:
-        print("\n✅ All functions and classes have proper docstrings!")
+        print("\n[OK] All functions and classes have proper docstrings!")
 
 
 if __name__ == "__main__":

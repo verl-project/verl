@@ -20,17 +20,18 @@ import os
 import re
 import traceback
 from collections import defaultdict
+from io import BytesIO
 from typing import Optional
 
 import datasets
 import numpy as np
 import torch
 from omegaconf import DictConfig, ListConfig
+from PIL import Image
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-import verl.utils.torch_functional as verl_F
-from verl.utils.model import compute_position_id_with_mask
+from verl.utils.import_utils import load_extern_object
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +153,13 @@ class RLHFDataset(Dataset):
     def _read_files_and_tokenize(self):
         dataframes = []
         for parquet_file in self.data_files:
-            # read parquet files and cache
-            dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
+            # read files and cache
+            if parquet_file.endswith(".parquet"):
+                dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
+            elif parquet_file.endswith(".json"):
+                dataframe = datasets.load_dataset("json", data_files=parquet_file)["train"]
+            else:
+                raise ValueError(f"Unsupported file format: {parquet_file}")
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
@@ -263,180 +269,83 @@ class RLHFDataset(Dataset):
         else:
             print(r"old dataloader ckpt file is used, please train from scratch for better ckpt performance")
 
+    def __getstate__(self):
+        if not self.serialize_dataset:
+            state = self.__dict__.copy()
+
+            if "dataframe" in state:
+                del state["dataframe"]
+            return state
+
+        return self.__dict__.copy()
+
     def __len__(self):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict):
-        messages: list = example.pop(self.prompt_key)
+        """Replace <image> and <video> placeholder in messages with corresponding image and video
+        which is required by processor.apply_chat_template.
+        - <image>: {"type": "image", **image}
+        - <video>: {"type": "video", **video}
 
-        if self.image_key in example or self.video_key in example:
-            for message in messages:
-                content = message["content"]
-                content_list = []
-                segments = re.split("(<image>|<video>)", content)
-                segments = [item for item in segments if item != ""]
-                for segment in segments:
-                    if segment == "<image>":
-                        content_list.append({"type": "image"})
-                    elif segment == "<video>":
-                        content_list.append({"type": "video"})
+        Args:
+            example: Row dictionary from dataframe.
+
+        Returns:
+            messages: List of messages with replaced placeholder.
+        """
+        messages: list = example[self.prompt_key]
+        # When concatenating image and video datasets, pop will return None for image or video sample
+        images = example.pop(self.image_key, None) or []
+        videos = example.pop(self.video_key, None) or []
+
+        image_offset, video_offset = 0, 0
+        for message in messages:
+            if not images and not videos:
+                continue
+            assert self.processor is not None, "processor is needed to process image and video"
+
+            content = message["content"]
+            if not isinstance(content, str):
+                continue
+
+            content_list = []
+            segments = re.split("(<image>|<video>)", content)
+            segments = [item for item in segments if item != ""]
+            for segment in segments:
+                if segment == "<image>":
+                    assert image_offset < len(images), f"image_offset {image_offset} >= len(images) {len(images)}"
+                    image = images[image_offset]
+                    if isinstance(image, Image.Image):
+                        image = image.convert("RGB")
+                        content_list.append({"type": "image", "image": image})
+                    elif isinstance(image, dict):
+                        if "bytes" in image:
+                            image["image"] = Image.open(BytesIO(image["bytes"]))
+                        content_list.append({"type": "image", **image})
                     else:
-                        content_list.append({"type": "text", "text": segment})
+                        raise TypeError(f"image must be dict or PIL.Image, unsupported image type: {type(image)}")
+                    image_offset += 1
+                elif segment == "<video>":
+                    assert video_offset < len(videos), f"video_offset {video_offset} >= len(videos) {len(videos)}"
+                    content_list.append({"type": "video", **videos[video_offset]})
+                    video_offset += 1
+                else:
+                    content_list.append({"type": "text", "text": segment})
+            message["content"] = content_list
 
-                message["content"] = content_list
-
+        assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
+        assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
         return messages
 
     def __getitem__(self, item):
-        """
-        Note that we also return the raw_input_ids so that it can be combined with other chat template
-        """
+        """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
         row_dict: dict = self.dataframe[item]
-        messages = self._build_messages(row_dict)
-        model_inputs = {}
+        row_dict["raw_prompt"] = self._build_messages(row_dict)
 
-        if self.processor is not None:
-            from verl.utils.dataset.vision_utils import process_image, process_video
-
-            raw_prompt = self.processor.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
-            )
-            multi_modal_data = {}
-
-            images = None
-            row_dict_images = row_dict.pop(self.image_key, None)
-            if row_dict_images:
-                images = [process_image(image, image_patch_size=self.image_patch_size) for image in row_dict_images]
-
-                # due to the image key is "image" instead of "images" in vllm, we need to use "image" here
-                # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205
-                multi_modal_data["image"] = images
-
-            videos = None
-            videos_kwargs = {}
-            row_dict_videos = row_dict.pop(self.video_key, None)
-            if row_dict_videos:
-                videos, video_metadata = zip(
-                    *[
-                        process_video(video, image_patch_size=self.image_patch_size, return_video_metadata=True)
-                        for video in row_dict_videos
-                    ],
-                    strict=True,
-                )
-                videos = list(videos)
-                video_metadata = list(video_metadata)
-                videos_kwargs = {"video_metadata": video_metadata, "do_sample_frames": False}
-
-                # due to the video key is "video" instead of "videos" in vllm, we need to use "video" here
-                # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205
-                multi_modal_data["video"] = [
-                    (video.numpy(), metadata) for video, metadata in zip(videos, video_metadata, strict=True)
-                ]
-
-            model_inputs = self.processor(
-                text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs, return_tensors="pt"
-            )
-
-            input_ids = model_inputs.pop("input_ids")
-            attention_mask = model_inputs.pop("attention_mask")
-
-            if "second_per_grid_ts" in model_inputs:
-                model_inputs.pop("second_per_grid_ts")
-
-            # There's a trap here, multi_modal_inputs has to be a dict, not BatchFeature
-            row_dict["multi_modal_data"] = multi_modal_data
-
-            # We will do batch.union() in the trainer,
-            # so we cannot have "multi_modal_inputs" in row_dict if rollout generates new multi_modal_inputs
-            if self.return_multi_modal_inputs:
-                row_dict["multi_modal_inputs"] = dict(model_inputs)
-
-                # second_per_grid_ts isn't used for training, just for mrope
-                row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
-
-        else:
-            if self.apply_chat_template_kwargs.get("chat_template") is None:
-                assert hasattr(self.tokenizer, "chat_template"), (
-                    "chat_template should be provided in apply_chat_template_kwargs or tokenizer config, "
-                    "models like GLM can copy chat_template.jinja from instruct models"
-                )
-            raw_prompt = self.tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
-            )
-            model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
-            input_ids = model_inputs.pop("input_ids")
-            attention_mask = model_inputs.pop("attention_mask")
-
-        input_ids, attention_mask = verl_F.postprocess_data(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_length=self.max_prompt_length,
-            pad_token_id=self.tokenizer.pad_token_id,
-            left_pad=True,
-            truncation=self.truncation,
-        )
-
-        if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
-            # qwen-vl mrope
-            if "Qwen3VLProcessor" in self.processor.__class__.__name__:
-                from verl.models.transformers.qwen3_vl import get_rope_index
-            else:
-                from verl.models.transformers.qwen2_vl import get_rope_index
-
-            vision_position_ids = get_rope_index(
-                self.processor,
-                input_ids=input_ids[0],
-                image_grid_thw=model_inputs.get("image_grid_thw"),
-                video_grid_thw=model_inputs.get("video_grid_thw"),
-                second_per_grid_ts=model_inputs.get("second_per_grid_ts"),
-                attention_mask=attention_mask[0],
-            )  # (3, seq_length)
-            valid_mask = attention_mask[0].bool()
-            text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
-            text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-            position_ids = [torch.cat((text_position_ids, vision_position_ids), dim=0)]  # (1, 4, seq_length)
-        elif self.processor is not None and "Glm4vImageProcessor" in self.processor.image_processor.__class__.__name__:
-            from verl.models.transformers.glm4v import get_rope_index
-
-            vision_position_ids = get_rope_index(
-                self.processor,
-                input_ids=input_ids[0],
-                image_grid_thw=model_inputs.get("image_grid_thw"),
-                video_grid_thw=model_inputs.get("video_grid_thw"),
-                attention_mask=attention_mask[0],
-            )  # (3, seq_length)
-            valid_mask = attention_mask[0].bool()
-            text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
-            text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-            position_ids = [torch.cat((text_position_ids, vision_position_ids), dim=0)]  # (1, 4, seq_length)
-        else:
-            position_ids = compute_position_id_with_mask(attention_mask)
-
-        row_dict["input_ids"] = input_ids[0]
-        row_dict["attention_mask"] = attention_mask[0]
-        row_dict["position_ids"] = position_ids[0]
-
-        raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
-        if len(raw_prompt_ids) > self.max_prompt_length:
-            if self.truncation == "left":
-                raw_prompt_ids = raw_prompt_ids[-self.max_prompt_length :]
-            elif self.truncation == "right":
-                raw_prompt_ids = raw_prompt_ids[: self.max_prompt_length]
-            elif self.truncation == "middle":
-                left_half = self.max_prompt_length // 2
-                right_half = self.max_prompt_length - left_half
-                raw_prompt_ids = raw_prompt_ids[:left_half] + raw_prompt_ids[-right_half:]
-            elif self.truncation == "error":
-                raise RuntimeError(f"Prompt length {len(raw_prompt_ids)} is longer than {self.max_prompt_length}.")
-
-        row_dict["raw_prompt_ids"] = raw_prompt_ids
-        # encode prompts without chat template
-        if self.return_raw_chat:
-            row_dict["raw_prompt"] = messages
-
-        # get prompts with chat template
-        if self.return_full_prompt:
-            row_dict["full_prompts"] = raw_prompt  # array of strings
+        # TODO(wuxibin): We still need a dummy tensor to make sure DataProto.batch is not empty.
+        # Remove this after deprecate DataProto by TensorDict.
+        row_dict["dummy_tensor"] = torch.tensor([0], dtype=torch.uint8)
 
         # add index for each prompt
         if "extra_info" not in row_dict or row_dict["extra_info"] is None:
@@ -452,12 +361,116 @@ class RLHFDataset(Dataset):
         row_dict["interaction_kwargs"] = interaction_kwargs
         return row_dict
 
-    def __getstate__(self):
-        if not self.serialize_dataset:
-            state = self.__dict__.copy()
+    @classmethod
+    async def process_vision_info(
+        cls,
+        messages: list[dict],
+        image_patch_size,
+        config: DictConfig,
+    ) -> tuple[list[Image.Image], list[tuple[torch.Tensor, dict]]]:
+        """Extract images and videos from messages.
 
-            if "dataframe" in state:
-                del state["dataframe"]
-            return state
+        This method is called by AgentLoop (e.g SingleTurnAgentLoop) before apply_chat_template to
+        the `raw_prompt` from dataset. User may customize RLHFDataset and override this method to
+        support custom vision extraction.
 
-        return self.__dict__.copy()
+        >>> messages = kwargs["raw_prompt"]
+        >>> images, videos = RLHFDataset.process_vision_info(messages, image_patch_size)
+        >>> videos, video_metadatas = zip(*videos)
+        >>> raw_prompt = processor.apply_chat_template(messages, tokenize=False)
+        >>> inputs = processor(text=[raw_prompt], images=images, videos=videos,
+        ...                    video_metadata=video_metadatas, do_sample_frames=False)
+
+        Args:
+            messages: List of messages from dataset `raw_prompt`.
+            image_patch_size: Image patch size for processor.
+            config: Config for dataset.
+
+        Returns:
+            images: List of images.
+            videos: List of videos, each video is a tuple of (video_tensor, video_metadata).
+        """
+        from qwen_vl_utils import process_vision_info
+
+        images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
+        return images, videos
+
+    def split(self, num_splits: int):
+        """
+        split the dataset into num_splits sub-datasets
+        Args:
+            num_splits: specified number of splits
+        Returns:
+            List[RLHFDataset]: list of RLHFDataset splits
+        Raises:
+            ValueError: if num_splits is not a positive integer
+        """
+        if not isinstance(num_splits, int) or num_splits <= 0:
+            raise ValueError(f"num_splits must be a positive integer, got {num_splits}")
+
+        if not hasattr(self, "dataframe"):
+            raise AttributeError(
+                "dataframe not found in RLHFDataset\n"
+                "reason: _read_files_and_tokenize() not called or Parquet file loading failed"
+            )
+        if self.dataframe is None:
+            raise ValueError("RLHFDataset dataframe 为 None!")
+
+        total_samples = len(self.dataframe)
+        print(f"total_samples: {total_samples}")
+        if total_samples == 0:
+            raise ValueError("Cannot split an empty dataset")
+        if total_samples % num_splits != 0:
+            raise ValueError(f"Cannot split dataset size {total_samples} into {num_splits} splits")
+        split_size = total_samples // num_splits
+        splits = []
+
+        for i in range(num_splits):
+            start_idx = i * split_size
+            end_idx = (i + 1) * split_size if i < num_splits - 1 else total_samples
+
+            split_dataframe = self.dataframe.select(range(start_idx, end_idx))
+
+            split_dataset = RLHFDataset(
+                data_files=self.data_files,
+                tokenizer=self.tokenizer,
+                config=self.config,
+                processor=self.processor,
+                max_samples=self.max_samples,
+            )
+            split_dataset.dataframe = split_dataframe
+            split_dataset.serialize_dataset = self.serialize_dataset
+            split_dataset.original_data_files = self.original_data_files
+
+            splits.append(split_dataset)
+
+        return splits
+
+
+def get_dataset_class(data_config: DictConfig):
+    """Get RLHF dataset class.
+
+    Args:
+        data_config: The data config.
+
+    Returns:
+        dataset_cls: The dataset class.
+    """
+
+    # Check if a custom dataset class is specified in the data configuration
+    # and if the path to the custom class is provided
+    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
+        # Dynamically load the custom dataset class
+        dataset_cls = load_extern_object(data_config.custom_cls.path, data_config.custom_cls.name)
+        # Verify that the custom dataset class inherits from torch.utils.data.Dataset
+        if not issubclass(dataset_cls, Dataset):
+            raise TypeError(
+                f"The custom dataset class '{data_config.custom_cls.name}' from "
+                f"'{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
+            )
+    else:
+        # Use the default RLHFDataset class if no custom class is specified
+        dataset_cls = RLHFDataset
+    print(f"Using dataset class: {dataset_cls.__name__}")
+
+    return dataset_cls

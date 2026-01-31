@@ -34,6 +34,9 @@ model:
   # Whether to enable loading a remote code model, default to False
   trust_remote_code: False
 
+  # override hf config
+  override_config: {}
+
 # [Deprecated] Global micro batch size
 # will be deprecated, use micro_batch_size_per_gpu
 micro_batch_size: null
@@ -50,10 +53,19 @@ use_dynamic_bsz: ${critic.use_dynamic_bsz}
 # Maximum number of tokens per GPU in one forward pass
 forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
 
-# Reward Manager. This defines the mechanism of computing rule-based reward and handling different reward sources.
-# Default is naive. If all verification functions are multiprocessing-safe,
-# the reward manager can be set to prime for parallel verification.
+# Deprecated. Use `reward_manager.name` instead. See `verl/trainer/config/reward_manager.yaml` for details.
+# Kept for backward compatibility.
 reward_manager: naive
+
+# Reward Loop Loading Configuration (for experimental reward system)
+# Source for loading reward loop manager: "register" (default) or "importlib"
+reward_loop_source: register
+
+# Module path when using importlib (e.g., "hytuner/reward/reward_loop/xxx_reward_loop.py")
+reward_loop_module_path: null
+
+# Class name when using importlib (e.g., "XXXRewardManager")
+reward_loop_class_name: null
 
 # Whether to launch custom reward function asynchronously during log_prob
 # custom reward function executed async on CPU, during log_prob

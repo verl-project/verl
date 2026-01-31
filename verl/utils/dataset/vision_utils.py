@@ -17,10 +17,11 @@ from typing import Optional
 
 import torch
 from PIL import Image
-from qwen_vl_utils import fetch_image, fetch_video
 
 
 def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Image.Image:
+    from qwen_vl_utils import fetch_image
+
     if isinstance(image, Image.Image):
         return image.convert("RGB")
 
@@ -73,6 +74,7 @@ def process_video(
 
     Add video sample FPS in a future MR
     """
+    from qwen_vl_utils import fetch_video
 
     if not isinstance(video, dict) or "video" not in video:
         raise NotImplementedError(VIDEO_FORMAT_HELP)

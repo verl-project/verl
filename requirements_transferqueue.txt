@@ -1,2 +1,0 @@
-# requirements.txt records the full set of dependencies for development
-git+https://github.com/TransferQueue/TransferQueue.git@68c04e7

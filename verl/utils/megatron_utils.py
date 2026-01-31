@@ -30,7 +30,7 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.enums import ModelType
 from megatron.core.optimizer import ChainedOptimizer
-from megatron.core.transformer import TransformerConfig
+from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
@@ -175,27 +175,111 @@ def make_megatron_module(
     tf_config: TransformerConfig,
     hf_config: PretrainedConfig,
     bridge: Any = None,
+    provider: Any = None,
     override_model_config: dict[str, Any] = None,
     override_ddp_config: dict[str, Any] = None,
+    peft_cls: Any = None,
+    peft_config: Any = None,
 ):
     if override_model_config is None:
         override_model_config = {}
 
     if bridge is not None:
-        from verl.models.mcore.mbridge import freeze_moe_router, make_value_model
+        if provider is None:
+            from verl.models.mcore.mbridge import freeze_moe_router, make_value_model
+
+            value_model_hook = make_value_model
+        else:
+            from verl.models.mcore.bridge import freeze_moe_router, make_value_model
+
+            hidden_size = (
+                hf_config.text_config.hidden_size if hasattr(hf_config, "text_config") else hf_config.hidden_size
+            )
+            value_model_hook = make_value_model(hidden_size, provider.sequence_parallel)
 
         post_model_creation_callbacks = []
         if wrap_config.is_value_model:
-            post_model_creation_callbacks.append(make_value_model)
+            post_model_creation_callbacks.append(value_model_hook)
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
             post_model_creation_callbacks.append(freeze_moe_router)
-        return bridge.get_model(
-            post_model_creation_callbacks=post_model_creation_callbacks,
-            wrap_with_ddp=wrap_config.wrap_with_ddp,
-            fp16=tf_config.fp16,
-            bf16=tf_config.bf16,
-            ddp_config=override_ddp_config,
-        )
+        if provider is not None:
+            # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
+            # BEFORE wrapping the model in DDP. This is required because:
+            # 1. PEFT freezes base model parameters (requires_grad=False)
+            # 2. DDP must be aware of which parameters are trainable when building gradient buckets
+            # 3. The distributed optimizer must only track trainable (adapter) parameters
+            # See Megatron-Bridge docs: training/peft.md
+
+            # Register PEFT transformation as pre-wrap hook if peft_cls is specified
+            # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
+            if peft_cls is not None:
+                from verl.utils.megatron_peft_utils import load_adapter_checkpoint, print_adapter_info
+
+                def peft_pre_wrap_hook(model):
+                    """Pre-wrap hook that applies PEFT transformation."""
+                    # Apply PEFT transformation - this will freeze base model and add adapters
+                    # The PEFT callable handles both freezing and transformation
+                    transformed_model = peft_cls(model, training=True)
+
+                    # Set parameters to save (adapter-only checkpointing)
+                    peft_cls.set_params_to_save(transformed_model)
+
+                    # Load adapter weights if adapter_path is specified
+                    adapter_path = getattr(peft_config, "adapter_path", None)
+                    if adapter_path is not None and adapter_path:
+                        print(f"Loading adapter weights from: {adapter_path}")
+                        load_adapter_checkpoint(transformed_model, adapter_path)
+
+                    # Print PEFT statistics
+                    if torch.distributed.get_rank() == 0:
+                        print_adapter_info(transformed_model)
+
+                    return transformed_model
+
+                provider.register_pre_wrap_hook(peft_pre_wrap_hook)
+
+            # Register post-creation callbacks (make_value_model, freeze_moe_router) as pre-wrap hooks
+            for callback in post_model_creation_callbacks:
+                provider.register_pre_wrap_hook(callback)
+
+            # Create DDP config if needed
+            ddp_config = None
+            if wrap_config.wrap_with_ddp:
+                from megatron.bridge.training.config import DistributedDataParallelConfig
+
+                ddp_config_dict = {
+                    "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
+                }
+                # Apply any DDP config overrides
+                if override_ddp_config is not None:
+                    ddp_config_dict.update(override_ddp_config)
+
+                ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
+                ddp_config.finalize()
+
+            # Now call provide_distributed_model with all hooks registered
+            # Hooks will be applied automatically before DDP wrapping
+            model = provider.provide_distributed_model(
+                wrap_with_ddp=wrap_config.wrap_with_ddp,
+                ddp_config=ddp_config,
+            )
+
+            # Extract TransformerConfig from the created model
+            tf_config = get_model_config(model[0] if isinstance(model, list) else model)
+        else:
+            model = bridge.get_model(
+                post_model_creation_callbacks=post_model_creation_callbacks,
+                wrap_with_ddp=wrap_config.wrap_with_ddp,
+                fp16=tf_config.fp16,
+                bf16=tf_config.bf16,
+                ddp_config=override_ddp_config,
+            )
+
+        if isinstance(tf_config, MLATransformerConfig):
+            # Keep the same behavior as hf_to_mcore_config_dpskv3
+            from verl.models.mcore.patch import apply_patch
+
+            apply_patch()
     else:
 
         def megatron_model_provider(pre_process, post_process, vp_stage=None):
@@ -214,12 +298,13 @@ def make_megatron_module(
             parallel_model.to(get_device_name())
             return parallel_model
 
-        return get_model(
+        model = get_model(
             megatron_model_provider,
             wrap_with_ddp=wrap_config.wrap_with_ddp,
             use_distributed_optimizer=wrap_config.use_distributed_optimizer,
             override_ddp_config=override_ddp_config,
         )
+    return model, tf_config
 
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
@@ -366,7 +451,7 @@ def load_megatron_model_to_gpu(models, load_grad=True):
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
                     # sometimes, we don't want to load grad for pure inference
-                    if load_grad:
+                    if load_grad and hasattr(buffer, "grad_data_size"):
                         buffer.grad_data.storage().resize_(buffer.grad_data_size)
                         buffer.grad_data.zero_()
 
@@ -478,12 +563,37 @@ def offload_megatron_optimizer(optimizers):
         offload_megatron_copy_params(_opt)
         ## worker may hold zero parameter when enabling custom pipeline layout
         if _opt.optimizer is not None:
-            opt_state_dict_values = _opt.optimizer.state.values()
-            for v in opt_state_dict_values:
-                if "exp_avg" in v:
-                    v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
-                if "exp_avg_sq" in v:
-                    v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+            # HybridDeviceOptimizer: offload all sub-optimizer states to CPU
+            # TODO: this should be a method in Megatron-LM's HybridDeviceOptimizer
+            hdo = _opt.optimizer
+            if all(hasattr(hdo, attr) for attr in ("sub_optimizers", "inner_param_to_orig_param", "state")):
+                for optimizer in hdo.sub_optimizers:
+                    for param, state in optimizer.state.items():
+                        for k, v in state.items():
+                            if not isinstance(v, torch.Tensor):
+                                continue
+                            orig_param = hdo.inner_param_to_orig_param.get(param, param)
+                            hdo.state[orig_param][k] = state[k] = v.to("cpu")
+            else:
+                opt_state_dict_values = _opt.optimizer.state.values()
+                for v in opt_state_dict_values:
+                    if "exp_avg" in v:
+                        v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
+                    if "exp_avg_sq" in v:
+                        v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+
+        try:
+            # Free TransformerEngine's dummy weight gradients cache
+            # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.10/transformer_engine/pytorch/module/base.py#L64
+            from transformer_engine.pytorch.module.base import _dummy_wgrads
+
+            _dummy_wgrads.clear()
+        except ImportError:
+            pass
+
+        # Free Megatron-LM's global memory buffer
+        # get_global_memory_buffer().buffer.clear()
+
         gc.collect()
         get_torch_device().empty_cache()
 
@@ -1141,3 +1251,29 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
             config.param_sync_func = [model_chunk.start_param_sync for model_chunk in model]
             if len(model) == 1:
                 config.param_sync_func = config.param_sync_func[0]
+
+
+def mapping_string_to_attn_backend(args: dict) -> dict:
+    if "attention_backend" in args and isinstance(args["attention_backend"], str):
+        from megatron.core.transformer.enums import AttnBackend
+
+        args["attention_backend"] = AttnBackend[args["attention_backend"]]
+    return args
+
+
+def get_megatron_module_device(models: list[Any]) -> str:
+    if not models:
+        return "cpu"
+
+    model_chunk = models[0]
+    if not model_chunk.buffers:
+        try:
+            return next(model_chunk.module.parameters()).device.type
+        except StopIteration:
+            return "cpu"
+
+    buffer = model_chunk.buffers[0]
+    if buffer.param_data.storage().size() == 0:
+        return "cpu"
+    else:
+        return get_device_name()

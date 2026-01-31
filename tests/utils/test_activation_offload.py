@@ -26,15 +26,18 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2Config
 
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.fsdp_utils import MixedPrecisionPolicy, apply_fsdp2, get_fsdp_wrap_policy
 
 
 def create_random_input_ids(batch_size, seq_len, vocab_size):
-    from flash_attn.bert_padding import unpad_input
-
+    if get_device_name() == "cuda":
+        from flash_attn.bert_padding import unpad_input
+    elif get_device_name() == "npu":
+        from verl.utils.attention_utils import unpad_input
     from verl.utils.model import compute_position_id_with_mask, create_random_mask
 
-    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device="cuda")
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=get_device_name())
 
     attention_mask = create_random_mask(
         input_ids, max_ratio_of_left_padding=0.1, min_ratio_of_valid_token=0.5, max_ratio_of_valid_token=0.7
@@ -47,23 +50,23 @@ def create_random_input_ids(batch_size, seq_len, vocab_size):
 
 
 def _fsdp_activation_offloading_test(rank, world_size, rendezvous_file, strategy="fsdp"):
-    torch.cuda.set_device(rank)
+    get_torch_device().set_device(rank)
     torch.distributed.init_process_group(
-        backend="nccl",
+        backend=get_nccl_backend(),
         init_method=f"file://{rendezvous_file}",
         rank=rank,
         world_size=world_size,
     )
-    device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=("dp",))
+    device_mesh = init_device_mesh(get_device_name(), mesh_shape=(world_size,), mesh_dim_names=("dp",))
 
-    model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    model_name = os.path.expanduser("~/models/Qwen/Qwen2.5-0.5B-Instruct")
     config = Qwen2Config(num_hidden_layers=4)
 
-    with torch.device("cuda"):
+    with torch.device(get_device_name()):
         model = AutoModelForCausalLM.from_config(
             config=config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
         )
-        model = model.to(device="cuda")
+        model = model.to(device=get_device_name())
 
     # Wrap model with FSDP
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
@@ -72,7 +75,7 @@ def _fsdp_activation_offloading_test(rank, world_size, rendezvous_file, strategy
         model = FSDP(
             model,
             use_orig_params=False,
-            device_id=torch.cuda.current_device(),
+            device_id=get_torch_device().current_device(),
             sharding_strategy=ShardingStrategy.FULL_SHARD,
             mixed_precision=mixed_precision,
             device_mesh=device_mesh,

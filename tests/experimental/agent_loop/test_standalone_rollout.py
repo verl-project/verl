@@ -20,6 +20,7 @@ from omegaconf import DictConfig
 from openai import AsyncOpenAI, OpenAI
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
+from verl.checkpoint_engine import CheckpointEngineManager
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 
@@ -52,6 +53,7 @@ async def test_standalone_rollout(init_config, tp_size):
                 "NCCL_DEBUG": "WARN",
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
+                "NCCL_P2P_DISABLE": "1",  # disable p2p in L20
             }
         }
     )
@@ -121,12 +123,13 @@ def test_hybrid_rollout_with_ep(init_config):
     # - offload FSDP model and optimizer, build rollout
     # - sleep rollout and load FSDP model and optimizer
     agent_loop_manager = init_agent_loop_manager(init_config)
-
-    # 2. wake up rollout
-    # - wake_up weights
-    # - load_weights from FSDP
-    # - wake_up kv_cache
-    agent_loop_manager.wake_up()
+    checkpoint_manager = CheckpointEngineManager(
+        backend=init_config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        trainer=agent_loop_manager.worker_group,
+        replicas=agent_loop_manager.rollout_replicas,
+    )
+    checkpoint_manager.sleep_replicas()
+    checkpoint_manager.update_weights()
 
     # 3. test async openai call
     server_address = agent_loop_manager.server_addresses[0]

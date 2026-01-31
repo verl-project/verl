@@ -40,6 +40,9 @@ use_dist_checkpointing: False
 # distributed checkpointing path
 dist_checkpointing_path: null
 
+# distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
+dist_checkpointing_prefix: ''
+
 # oc.select: default val for ref.megatron.seed
 seed: 42
 
@@ -72,7 +75,13 @@ override_transformer_config:
 override_mcore_model_config: {}
 
 # oc.select: default val for ref.megatron.use_mbridge
-use_mbridge: False
+use_mbridge: True
+
+# oc.select: default val for ref.megatron.vanilla_mbridge
+vanilla_mbridge: True
+
+# whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
+use_remove_padding: True
 
 # whether to use forward only
 forward_only: False

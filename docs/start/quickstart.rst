@@ -9,7 +9,7 @@ Post-train a LLM using GSM8K dataset.
 Introduction
 ------------
 
-.. _hf_dataset_gsm8k: https://huggingface.co/datasets/gsm8k
+.. _hf_dataset_gsm8k: https://huggingface.co/datasets/openai/gsm8k
 
 In this example, we train an LLM to tackle the `GSM8k <hf_dataset_gsm8k>`_ task with function-based rewards. [1]_
 
@@ -87,7 +87,7 @@ You may set ``VERL_USE_MODELSCOPE=True`` to download models from `modelscope <ht
     data.val_files=$HOME/data/gsm8k/test.parquet \
     data.train_batch_size=256 \
     data.max_prompt_length=512 \
-    data.max_response_length=256 \
+    data.max_response_length=512 \
     actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \

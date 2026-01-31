@@ -11,25 +11,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
-import importlib.util
 import inspect
 import multiprocessing
-import os
-import sys
 import warnings
 from functools import partial
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import ray
 import torch
-from omegaconf import DictConfig
 
-from verl import DataProto
 from verl.utils.reward_score import default_compute_score
 from verl.utils.transferqueue_utils import tqbridge
-from verl.workers.reward_manager import get_reward_manager_cls
-from verl.workers.reward_manager.abstract import AbstractRewardManager, RawRewardFn
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
+
+    from verl import DataProto
+    from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
+    from verl.trainer.config.config import ModuleConfig, RewardManagerConfig
+    from verl.workers.reward_manager.abstract import AbstractRewardManager, RawRewardFn
+else:
+    try:
+        from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
+    except ImportError:
+        RewardManagerBase = None  # type: ignore[assignment,misc]
 
 
 def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
@@ -71,36 +78,18 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
     """
 
     reward_fn_config = config.get("custom_reward_function") or {}
-    file_path = reward_fn_config.get("path")
-    if not file_path:
+    module_path = reward_fn_config.get("path")
+    if not module_path:
         return None
 
-    function_name = reward_fn_config.get("name")
-    assert function_name is not None
+    fn_name = reward_fn_config.get("name")
+    assert fn_name is not None
 
-    module = sys.modules.get("custom_module", None)
-    if module is None:
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
+    from verl.utils.import_utils import load_extern_object
 
-        spec = importlib.util.spec_from_file_location("custom_module", file_path)
-        assert spec is not None
-        module = importlib.util.module_from_spec(spec)
-        try:
-            sys.modules["custom_module"] = module
-            assert spec.loader is not None
-            spec.loader.exec_module(module)
-        except Exception as e:
-            raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
-
-    if not hasattr(module, function_name):
-        raise AttributeError(f"Reward function '{function_name}' not found in '{module.__file__}'.")
-
-    print(f"using customized reward function '{function_name}' from '{module.__file__}'")
-    raw_fn = getattr(module, function_name)
+    raw_fn = load_extern_object(module_path=module_path, object_name=fn_name)
 
     reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
-
     if not inspect.iscoroutinefunction(raw_fn):
         return partial(_call_with_kwargs, raw_fn, reward_kwargs)
     else:
@@ -128,16 +117,24 @@ def load_reward_manager(
     compute_score = get_custom_reward_fn(config)
     final_compute_score = compute_score
 
-    # The list of pre-defined reward managers are defined in `verl/workers/reward_manager/`:
-    # naive: NaiveRewardManager
-    # prime: PrimeRewardManager
-    # batch: BatchRewardManager
-    # dapo: DAPORewardManager
-    # Note(haibin.lin): For custom reward managers, please make sure they are imported and
-    # registered via `verl.workers.reward_manager.register`
-    # By default reward_manager is set to naive (NaiveRewardManager)
-    reward_manager_name = config.reward_model.get("reward_manager", "naive")
-    reward_manager_cls = get_reward_manager_cls(reward_manager_name)
+    reward_manager_cfg: RewardManagerConfig = config.reward_manager
+    reward_manager_cls: type[AbstractRewardManager]
+    if reward_manager_cfg.source == "register":
+        from verl.workers.reward_manager import get_reward_manager_cls
+
+        reward_manager_cls = get_reward_manager_cls(reward_manager_cfg.name)
+    elif reward_manager_cfg.source == "importlib":
+        from verl.utils.import_utils import load_extern_object
+
+        module_cfg: ModuleConfig | None = reward_manager_cfg.module
+        assert module_cfg is not None and module_cfg.path is not None, (
+            f"Module path is required when {reward_manager_cfg.source=}, but got {module_cfg=}"
+        )
+        reward_manager_cls_name = reward_manager_cfg.name
+        reward_manager_cls = cast(
+            "type[AbstractRewardManager]",
+            load_extern_object(module_path=module_cfg.path, object_name=reward_manager_cls_name),
+        )
 
     if compute_score is None:
         sandbox_config = config.reward_model.get("sandbox_fusion")
@@ -157,13 +154,25 @@ def load_reward_manager(
             final_compute_score = default_compute_score
 
     # Instantiate and return the reward manager with the specified parameters
-    return reward_manager_cls(
-        tokenizer=tokenizer,
-        num_examine=num_examine,
-        compute_score=final_compute_score,
-        reward_fn_key=config.data.reward_fn_key,
-        **reward_kwargs,
-    )
+    # RewardManagerBase subclasses (like RateLimitedRewardLoopManager) don't accept num_examine
+    # while AbstractRewardManager subclasses (like NaiveRewardManager) do
+    if RewardManagerBase is not None and issubclass(reward_manager_cls, RewardManagerBase):
+        # RewardManagerBase-based managers use a different signature
+        return reward_manager_cls(
+            config=config,
+            tokenizer=tokenizer,
+            compute_score=final_compute_score,
+            **reward_kwargs,
+        )
+    else:
+        # Traditional AbstractRewardManager-based managers
+        return reward_manager_cls(
+            tokenizer=tokenizer,
+            num_examine=num_examine,
+            compute_score=final_compute_score,
+            reward_fn_key=config.data.reward_fn_key,
+            **reward_kwargs,
+        )
 
 
 @tqbridge(put_data=False)

@@ -39,6 +39,11 @@ def _init_args():
     parser.add_argument("--hf_model_path", type=str, required=True, help="The path for the huggingface model")
     parser.add_argument("--new_config_path", type=str, required=True, help="The path for the new config file")
     parser.add_argument("--output_path", type=str, required=True, help="The path for the output random model")
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Whether to trust remote code when loading HF model. Disabled by default for security.",
+    )
     args = parser.parse_args()
     return args
 
@@ -69,9 +74,9 @@ def check_configs(original_config: dict[str, Any], new_config: dict[str, Any]) -
             )
 
 
-def init_random_model(hf_model_path, new_config_path, output_path):
-    config = AutoConfig.from_pretrained(hf_model_path)
-    tokenizer = AutoTokenizer.from_pretrained(hf_model_path)
+def init_random_model(hf_model_path, new_config_path, output_path, trust_remote_code: bool = False):
+    config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=trust_remote_code)
     config_dict = PretrainedConfig.get_config_dict(hf_model_path)[0]
     print(config_dict)
     with open(new_config_path) as f:
@@ -80,7 +85,12 @@ def init_random_model(hf_model_path, new_config_path, output_path):
     config_dict.update(new_config_dict)
     new_confg = config.from_dict(config_dict)
     print(f"new_config: {new_confg}")
-    model = AutoModelForCausalLM.from_config(new_confg)
+    if trust_remote_code:
+        model = AutoModelForCausalLM.from_pretrained(
+            hf_model_path, config=new_confg, trust_remote_code=trust_remote_code
+        )
+    else:
+        model = AutoModelForCausalLM.from_config(new_confg)
     model.save_pretrained(output_path)
     tokenizer.save_pretrained(output_path)
     new_confg.save_pretrained(output_path)
@@ -91,5 +101,8 @@ if __name__ == "__main__":
     args = _init_args()
     check_output_path(args.output_path)
     init_random_model(
-        hf_model_path=args.hf_model_path, new_config_path=args.new_config_path, output_path=args.output_path
+        hf_model_path=args.hf_model_path,
+        new_config_path=args.new_config_path,
+        output_path=args.output_path,
+        trust_remote_code=args.trust_remote_code,
     )

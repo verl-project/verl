@@ -1,0 +1,16 @@
+working_dir: ./
+
+excludes:
+  - ".git/"
+
+env_vars:
+  VLLM_USE_V1: "1"
+  HYDRA_FULL_ERROR: "1"
+  NCCL_NVLS_ENABLE: "0"
+  NCCL_SOCKET_IFNAME: "eth0"
+  TMPDIR: "/tmp"
+  CUDA_HOME: "/usr/local/cuda"
+  CUDA_TMPDIR: "/tmp"
+  CUDA_CACHE_PATH: "/tmp/cuda_cache"
+  HF_HOME: "/tmp/hf_home_mimo"
+  PYTHONPATH: "/tmp/hf_home_mimo/modules/"

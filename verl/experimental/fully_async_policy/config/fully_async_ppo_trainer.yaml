@@ -1,0 +1,76 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+async_training:
+
+  # Maximum samples staleness threshold
+  staleness_threshold: 0.1
+
+  # Frequency of parameter synchronization between rollouter and trainer, 
+  # One step means trainer obtains a batch of required samples
+  trigger_parameter_sync_step: 4
+  
+  # The number of ppo_mini_batches that the FullyAsyncTrainer obtains once
+  require_batches: 1
+
+  # When synchronizing parameters, whether to interrupt rollouter and perform partial rollout
+  partial_rollout: True
+
+  # Whether to use rollout log probs for training
+  use_rollout_log_probs: True
+
+  # compute_prox_log_prob
+  compute_prox_log_prob: False
+
+  # whether to use trainer do_validate
+  use_trainer_do_validate: False
+
+
+  # checkpoint_engine config for accelerating parameter synchronization between rollouter and trainer
+  checkpoint_engine:
+    # Whether to use checkpoint_engine
+    enable: True
+
+    # Device buffer size for checkpoint_engine, default is 4096 MB
+    device_buffer_size_M: 4096
+
+    # Enable the pipeline for broadcasting and updating parameters, but it requires more device memory
+    overlap_broadcast_and_consume: False
+
+# Rollout config
+rollout:
+
+  # Number of nodes used in the rollout
+  nnodes: 1
+
+  # Number of GPUs per node                     
+  n_gpus_per_node: 8
+
+  # number of responses (i.e. num sample times). > 1 for grpo
+  n: 4
+
+  # total rollout samples # TODO rename to total_rollout_samples
+  total_rollout_steps: 100
+
+  # Number of epochs in training 
+  total_epochs: 10
+
+  # Test frequency, how many times a parameter update triggers a validation
+  test_freq: 1
+
+data:
+  # Number of samples generated, currently only support 1
+  gen_batch_size: 1
+
+actor_rollout_ref:
+  # checkpoint_engine config for accelerating parameter synchronization between rollouter and trainer
+  checkpoint_engine: ${oc.select:async_training.checkpoint_engine, null}
+
+  actor:
+    # Whether to use rollout log probs for training
+    use_rollout_log_probs: ${oc.select:async_training.use_rollout_log_probs, True}
