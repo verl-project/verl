@@ -394,6 +394,117 @@ actor_rollout_ref:
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+  distillation:
+    rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+    strategy: megatron
+    use_torch_compile: ${oc.select:actor_rollout_ref.actor.use_torch_compile,true}
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
+    log_prob_max_token_len_per_gpu: ${oc.select:actor_rollout_ref.actor.ppo_max_token_len_per_gpu,16384}
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: ${oc.select:global_profiler.tool,null}
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,null}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete}
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: []
+          level: level0
+          analysis: true
+          discrete: false
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+    router_replay:
+      _target_: verl.workers.config.RouterReplayConfig
+      mode: disabled
+      record_file: null
+      replay_file: null
+    teacher_model:
+      _target_: verl.workers.config.HFModelConfig
+      path: ~/models/deepseek-llm-7b-chat
+      hf_config_path: null
+      tokenizer_path: null
+      use_shm: false
+      trust_remote_code: false
+      custom_chat_template: null
+      external_lib: null
+      override_config: {}
+      enable_gradient_checkpointing: true
+      enable_activation_offload: false
+      use_remove_padding: true
+      lora_rank: 0
+      lora_alpha: 16
+      target_modules: all-linear
+      exclude_modules: null
+      lora_adapter_path: null
+      use_liger: false
+      use_fused_kernels: false
+      fused_kernel_options:
+        impl_backend: torch
+      tiled_mlp:
+        enabled: false
+        num_shards: 4
+      mtp:
+        _target_: verl.workers.config.MtpConfig
+        enable: false
+        enable_train: false
+        enable_rollout: false
+        detach_encoder: false
+        mtp_loss_scaling_factor: 0.1
+        speculative_algorithm: EAGLE
+        speculative_num_steps: 2
+        speculative_eagle_topk: 2
+        speculative_num_draft_tokens: 4
+        method: mtp
+        num_speculative_tokens: 1
+    _target_: verl.workers.config.McoreDistillationConfig
+    enabled: false
+    loss_mode: k3
+    topk: 32
+    use_policy_loss: true
+    distillation_loss_coef: 1.0
+    jsd_beta: 0.5
+    loss_max_clamp: null
+    log_prob_min_clamp: null
+    megatron:
+      _target_: verl.workers.config.McoreEngineConfig
+      param_offload: ${oc.select:actor_rollout_ref.actor.megatron.param_offload,False}
+      grad_offload: false
+      optimizer_offload: false
+      tensor_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.tensor_model_parallel_size,1}
+      expert_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_model_parallel_size,1}
+      expert_tensor_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_tensor_parallel_size,null}
+      pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.pipeline_model_parallel_size,1}
+      virtual_pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size,null}
+      context_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.context_parallel_size,1}
+      sequence_parallel: true
+      use_distributed_optimizer: true
+      use_dist_checkpointing: false
+      dist_checkpointing_path: null
+      dist_checkpointing_prefix: ''
+      seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
+      override_ddp_config: {}
+      override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
+      override_mcore_model_config: {}
+      use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
+      vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
+      use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
+      forward_only: true
+      dtype: bfloat16
+    load_weight: true
   hybrid_engine: true
   nccl_timeout: 600
 data:
