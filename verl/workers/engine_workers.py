@@ -32,7 +32,7 @@ from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.memory_utils import aggressive_empty_cache
@@ -595,6 +595,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
+        set_expandable_segments(False)
         # 1. resume weights and update weights
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
@@ -634,6 +635,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After resume kv_cache", logger=logger)
 
         self.base_sync_done = True
+        set_expandable_segments(True)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
