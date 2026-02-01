@@ -37,25 +37,25 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class RewardLoopWorker:
+    """
+    RewardLoopWork can tackle reward computation:
+    (1) rule-based reward computation
+    (2) reward model-based reward computation (both disrm and genrm)
+    (3) high-flexible user-customized reward function (can access rm by posting requests to reward_model_router)
+
+    Reward Computation Logic:
+    - if user-customized reward function is provided:
+        -> directly use user-customized reward function
+    - if user-customized reward function is not provided:
+        -> rm is not enabled: use default rule-based reward function
+        -> rm is disrm: compute reward score using disrm
+        -> rm is genrm: raise error (user-costomized reward func must be provided)
+
+    Args:
+        config: DictConfig, the config for reward loop worker.
+        reward_router_address: str, the address of reward router.
+    """
     def __init__(self, config: DictConfig, reward_router_address: str = None):
-        """
-        RewardLoopWork can tackle reward computation:
-        (1) rule-based reward computation
-        (2) reward model-based reward computation (both disrm and genrm)
-        (3) high-flexible user-customized reward function (can access rm by posting requests to reward_model_router)
-
-        Reward Computation Logic:
-        - if user-customized reward function is provided:
-            -> directly use user-customized reward function
-        - if user-customized reward function is not provided:
-            -> rm is not enabled: use default rule-based reward function
-            -> rm is disrm: compute reward score using disrm
-            -> rm is genrm: raise error (user-costomized reward func must be provided)
-
-        Args:
-            config: DictConfig, the config for reward loop worker.
-            reward_router_address: str, the address of reward router.
-        """
         self.config = config
         self.reward_router_address = reward_router_address
         self._init_reward_fn()
