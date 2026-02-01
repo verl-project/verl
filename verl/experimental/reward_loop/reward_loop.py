@@ -55,6 +55,7 @@ class RewardLoopWorker:
         config: DictConfig, the config for reward loop worker.
         reward_router_address: str, the address of reward router.
     """
+
     def __init__(self, config: DictConfig, reward_router_address: str = None):
         self.config = config
         self.reward_router_address = reward_router_address
