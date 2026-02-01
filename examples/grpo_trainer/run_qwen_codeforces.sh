@@ -73,6 +73,7 @@ ACTOR=(
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP_SIZE
+    actor_rollout_ref.actor.use_kl_loss=False
 )
 
 ROLLOUT=(
@@ -91,7 +92,7 @@ ALGORITHM=(
 )
 
 TRAINER=(
-    trainer.logger='["console"]'
+    trainer.logger='["wandb","console"]'
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXP_NAME
     trainer.n_gpus_per_node=$WORLD_SIZE
