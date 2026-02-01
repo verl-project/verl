@@ -26,6 +26,51 @@ env:
     num_envs: 16
     seed: 42
     task_suite_name: libero_10
+
+    # ============================================================
+    # Isaac Simulation Mode Configuration
+    # ============================================================
+    # Two modes available:
+    # 1. Standard mode (isaac_server_mode=false):
+    #    - Each EnvWorker runs local Isaac instances
+    #    - Simple but limited scalability
+    #
+    # 2. Isaac Server mode (isaac_server_mode=true):
+    #    - Isaac Sim runs as Ray-managed IsaacServers
+    #    - Ray manages all resources uniformly
+    #    - Better scalability and resource management
+    # ============================================================
+    
+    # Enable Isaac server mode (recommended for production)
+    isaac_server_mode: False
+    
+    # Number of EnvWorker instances per node in Isaac server mode
+    # These are lightweight clients, so typically only need 1
+    server_mode_env_workers: 1
+    
+    # Number of Isaac servers per stage (only for isaac_server_mode=true)
+    # Typically equals the number of simulation GPUs
+    num_isaac_servers: 8
+    
+    # Number of tasks in the multi-task environment
+    num_tasks: 10
+    
+    # Envs per task (only for Ray actor mode)
+    # sim_envs_per_stage = num_tasks × group_size
+    group_size: 16
+    
+    # Original env worker count (how many workers would exist in standard mode)
+    # This tells the coordinator how many stages to handle
+    # total_stages = original_env_worker_count × pipeline_stage_num
+    original_env_worker_count: 8
+    
+    # Total trajectories for training (for EnvWorkerServer coordination)
+    # This is the number of trajectories participating in training, NOT sim envs
+    total_trajs: 128
+    
+    # Environment ID for Isaac Lab
+    env_id: "Isaac-Libero-Franka-OscPose-Camera-All-Tasks-v0"
+
     init_params:
       camera_depths: False
       camera_heights: 256
