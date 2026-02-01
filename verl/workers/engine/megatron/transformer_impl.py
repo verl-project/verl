@@ -286,7 +286,18 @@ class MegatronEngine(BaseEngine):
         self.optimizer = self._build_optimizer()
         self.lr_scheduler = self._build_lr_scheduler()
 
-        tmp_config = OmegaConf.create({"model": {"path": self.model_config.local_path}})
+        full_reshardable = self.engine_config.dist_ckpt_optim_fully_reshardable
+        mem_eff = self.engine_config.distrib_optim_fully_reshardable_mem_efficient
+
+        tmp_config = OmegaConf.create(
+            {
+                "model": {"path": self.model_config.local_path},
+                "megatron": {
+                    "dist_ckpt_optim_fully_reshardable": full_reshardable,
+                    "distrib_optim_fully_reshardable_mem_efficient": mem_eff,
+                },
+            }
+        )
 
         role = "actor" if not self.is_value_model else "critic"
 
