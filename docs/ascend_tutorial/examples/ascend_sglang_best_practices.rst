@@ -48,7 +48,7 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
 .. code-block:: bash
 
   export HF_ENDPOINT=https://hf-mirror.com
-  huggingface-cli download --resume-download Qwen/Qwen3-30B-A3B --local-dir /path/to/local_dir
+  hf download --resume-download Qwen/Qwen3-30B-A3B --local-dir /path/to/local_dir
 
 **下载数据集**
 
@@ -80,7 +80,7 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
 .. code-block:: bash
 
   export HF_ENDPOINT=https://hf-mirror.com
-  huggingface-cli download --resume-download Qwen/Qwen2.5-32B --local-dir /path/to/local_dir
+  hf download --resume-download Qwen/Qwen2.5-32B --local-dir /path/to/local_dir
 
 **下载及处理数据集**
 
