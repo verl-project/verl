@@ -4,9 +4,10 @@
 eval "$(conda shell.bash hook)"
 conda activate verlMega
 export PATH=$CONDA_PREFIX/bin:$PATH
-# export NCCL_P2P_DISABLE=1
+export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=6,7
+# export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
 export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
@@ -30,22 +31,23 @@ DISTILLATION_LOSS_MAX_CLAMP=null
 DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
-EXP_NAME="megatron/${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
 TRAIN_PROMPT_BSZ=128
-STUDENT_MICRO_BATCH_SIZE_PER_GPU=32
+STUDENT_MICRO_BATCH_SIZE_PER_GPU=1
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
-TEACHER_MICRO_BATCH_SIZE_PER_GPU=32
+TEACHER_MICRO_BATCH_SIZE_PER_GPU=1
 TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
 WORLD_SIZE=2
-TP=2
+TP=1
 PP=1
 CP=1
 EP=1
 ETP=1
+
+EXP_NAME="megatron-tp${TP}/${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
 
 PARAM_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                         
 OPTIMIZER_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                          
