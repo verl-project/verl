@@ -37,11 +37,14 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         output: Optional[AgentLoopOutput] = kwargs.get("output", None)
         messages = list(kwargs["raw_prompt"])
+        multi_modal_data = await self.process_vision_info(messages)
+        images = multi_modal_data.get("images")
+        videos = multi_modal_data.get("videos")
+
         param_version = kwargs.get("param_version", 0)
 
         metrics = {}
         request_id = uuid4().hex
-        image_data = (kwargs.get("multi_modal_data") or {}).get("image", None)
 
         param_version_start = param_version
         param_version_end = param_version
@@ -60,10 +63,17 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                         tokenize=False,
                         **self.apply_chat_template_kwargs,
                     )
-                    model_inputs = self.processor(text=[raw_prompt], images=image_data, return_tensors="pt")
+                    model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
                     return model_inputs.pop("input_ids").squeeze(0).tolist()
 
                 prompt_ids = await self.loop.run_in_executor(None, get_prompt_ids)
+            # Refer to the implementation of the run function in verl/experimental/agent_loop/single_turn_agent_loop.py
+            elif self.processor is not None:
+                prompt_ids = await self.apply_chat_template(
+                    messages,
+                    images=images,
+                    videos=videos,
+                )
             else:
                 prompt_ids = await self.loop.run_in_executor(
                     None,
@@ -86,7 +96,11 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                 return output
         with simple_timer("generate_sequences", metrics):
             response_ids, response_logprobs, is_cancel = await self.server_manager.generate_for_partial(
-                request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data
+                request_id=request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=images,
+                video_data=videos,
             )
         if not output:
             response_mask = [1] * len(response_ids)
@@ -111,5 +125,6 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                 "param_version_start": param_version_start,
                 "param_version_end": param_version_end,
             },
+            multi_modal_data=multi_modal_data,
             # multi_modal_data={"image": image_data} if image_data is not None else {},
         )
