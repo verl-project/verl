@@ -5,7 +5,7 @@ Last updated: 02/02/2026.
 
 我们在 verl 上增加基于华为昇腾设备的CI用例添加指导。
 
-verl 仓库使用 GitHub Actions 作为持续集成（CI）平台，通过分层测试架构保障代码质量与系统稳定性。
+verl 仓库使用 GitHub Actions 作为 CI 平台，通过分层测试架构保障代码质量与系统稳定性。
 NPU 相关的工作流主要包括：
 
 * ``npu_unit_test.yml``：运行单元测试。
