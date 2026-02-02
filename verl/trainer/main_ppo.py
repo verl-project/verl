@@ -262,9 +262,23 @@ class TaskRunner:
         if use_legacy_worker_impl == "disable":
             return
 
-        if need_reference_policy(config) or need_distillation_policy(config):
+        if need_reference_policy(config):
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
+
+    def add_teacher_policy_worker(self, config):
+        """Add distillation policy worker if distillation is used."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        if need_distillation_policy(config):
+            if config.trainer.get("use_legacy_worker_impl", "auto") != "disable":
+                raise NotImplementedError(
+                    "Distillation is not supported with legacy worker implementation. "
+                    "Please set trainer.use_legacy_worker_impl to 'disable' to use distillation."
+                )
+            from verl.workers.engine_workers import TeacherWorker
+            self.role_worker_mapping[Role.TeacherPolicy] = ray.remote(TeacherWorker)
+            self.mapping[Role.TeacherPolicy] = "global_pool"
 
     def run(self, config):
         """Execute the main PPO training workflow.
@@ -294,6 +308,9 @@ class TaskRunner:
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
+
+        # Add a distillation policy worker if distillation is used.
+        self.add_teacher_policy_worker(config)
 
         # validate config
         validate_config(
