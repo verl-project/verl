@@ -23,5 +23,7 @@ veomni:
   context_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.context_parallel_size,1}
   ulysses_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.ulysses_parallel_size,1}
   param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,False}
+  attn_implementation: ${oc.select:actor_rollout_ref.actor.veomni.attn_implementation,flash_attention_2}
+  moe_implementation: ${oc.select:actor_rollout_ref.actor.veomni.moe_implementation,fused}
   forward_only: True
 
