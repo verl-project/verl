@@ -596,6 +596,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return
 
         set_expandable_segments(False)
+        log_gpu_memory_usage("Before resume weights", logger=logger)
+
         # 1. resume weights and update weights
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
