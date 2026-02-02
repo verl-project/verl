@@ -29,11 +29,9 @@ class MessageQueue:
     Simplified Ray-based asynchronous message queue for communication between Rollouter and Trainer
     """
 
-    def __init__(self, config: DictConfig, max_queue_size: int = 1000):
+    def __init__(self, config: DictConfig, max_queue_size: int = None):
         self.config = config
-        if max_queue_size is None:
-            raise ValueError(f"max_queue_size cannot be None, got: {max_queue_size}")
-        self.max_queue_size = int(max_queue_size)
+        self.max_queue_size = max_queue_size
         self.queue = deque(maxlen=self.max_queue_size)
         self.current_param_version = 0
 
@@ -58,13 +56,14 @@ class MessageQueue:
         self.total_produced = 0
         self.total_consumed = 0
         self.dropped_samples = 0
+        self.trajectory_count = 0
 
         print(
             f"[MessageQueue] initialized with max_queue_size={max_queue_size},"
             f"staleness_threshold={self.staleness_threshold}"
         )
 
-    async def put_sample(self, sample: Any, param_version: int) -> bool:
+    async def put_sample(self, sample: Any, size: int, param_version: int) -> bool:
         """
         Put a batch sample into the queue
 
@@ -78,13 +77,14 @@ class MessageQueue:
         async with self._lock:
             # If queue is full, remove the oldest sample (rarely happens)
             is_drop = False
-            if len(self.queue) >= self.max_queue_size:
+            if self.max_queue_size and len(self.queue) >= self.max_queue_size:
                 self.queue.popleft()
                 self.dropped_samples += 1
                 is_drop = True
                 logger.warning("Queue full, dropped sample")
-            self.queue.append(sample)
+            self.queue.append((sample, size))
             self.total_produced += 1
+            self.trajectory_count += size
 
             # Notify waiting consumers
             self._consumer_condition.notify_all()
@@ -111,8 +111,9 @@ class MessageQueue:
                 return None
 
             # Get one sample
-            data = self.queue.popleft()
+            data, size = self.queue.popleft()
             self.total_consumed += 1
+            self.trajectory_count -= size
             return data, len(self.queue)
 
     async def update_param_version(self, version: int):
@@ -121,11 +122,19 @@ class MessageQueue:
             old_version = self.current_param_version
             self.current_param_version = version
             print(f"Parameter version updated from {old_version} to {version}")
+            if self.config.async_training.force_cleanup_stale_samples:
+                print(f"MessageQueue clear, drop {len(self.queue)} samples, {self.trajectory_count} trajectories")
+                self.queue.clear()
+                self.trajectory_count = 0
 
     async def get_queue_size(self) -> int:
         """Get current queue length"""
         async with self._lock:
             return len(self.queue)
+
+    async def get_trajectory_count(self) -> int:
+        async with self._lock:
+            return self.trajectory_count
 
     async def get_statistics(self) -> dict[str, Any]:
         """Get queue statistics"""
@@ -198,6 +207,64 @@ class MessageQueue:
             else:
                 return None
 
+    async def get_samples_by_trajectory_count(self, target_total_length: int) -> dict:
+        """
+        Get samples based on the total number of trajectories required.
+        Args:
+            target_total_length: total number of trajectories required
+
+        Returns:
+            dict: Includes information such as samples and batch_lengths.
+        """
+        async with self._lock:
+            result_samples = []
+            result_lengths = []
+            total_length = 0
+            is_shutdown = False
+
+            while total_length < target_total_length:
+                # If the queue is empty, wait
+                while len(self.queue) == 0 and self.running:
+                    await self._consumer_condition.wait()
+
+                # Check if is shutdown
+                if not self.running and len(self.queue) == 0:
+                    print(
+                        f"MessageQueue shutdown, collected {len(result_samples)} Samples "
+                        f"with total_length={total_length}/{target_total_length}"
+                    )
+                    is_shutdown = True
+                    break
+
+                # Get a sample (serialized)
+                serialized_sample, batch_length = self.queue.popleft()
+                self.trajectory_count -= batch_length
+                # Check if the last value is None
+                if serialized_sample is None:
+                    print(
+                        f"[MessageQueue] Detected termination signal (None), stopping sample collection, "
+                        f"collected {len(result_samples)} Samples "
+                        f"with total trajectories={total_length}/{target_total_length}"
+                    )
+                    is_shutdown = True
+                    break
+
+                self.total_consumed += 1
+
+                # Add to results
+                result_samples.append(serialized_sample)
+                result_lengths.append(batch_length)
+                total_length += batch_length
+
+            return {
+                "samples": result_samples,
+                "batch_lengths": result_lengths,
+                "total_length": total_length,
+                "num_samples": len(result_samples),
+                "queue_remaining": len(self.queue),
+                "is_shutdown": is_shutdown,
+            }
+
 
 class MessageQueueClient:
     """Asyncio-compatible MessageQueue client for communicating with MessageQueue Actor"""
@@ -205,9 +272,9 @@ class MessageQueueClient:
     def __init__(self, queue_actor: Any):
         self.queue_actor = queue_actor
 
-    async def put_sample(self, sample: Any, param_version: int) -> bool:
+    async def put_sample(self, sample: Any, size: int, param_version: int) -> bool:
         """Put batch into queue (async)"""
-        future = self.queue_actor.put_sample.remote(sample, param_version)
+        future = self.queue_actor.put_sample.remote(sample, size, param_version)
         return await asyncio.wrap_future(future.future())
 
     async def put_validate(self, data: Any) -> bool:
@@ -225,6 +292,11 @@ class MessageQueueClient:
     async def get_queue_size(self) -> int:
         """Get queue size (async)"""
         future = self.queue_actor.get_queue_size.remote()
+        return await asyncio.wrap_future(future.future())
+
+    async def get_trajectory_count(self) -> int:
+        """Get queue trajectory count (async)"""
+        future = self.queue_actor.get_trajectory_count.remote()
         return await asyncio.wrap_future(future.future())
 
     async def get_statistics(self) -> dict[str, Any]:
@@ -248,9 +320,9 @@ class MessageQueueClient:
         return await asyncio.wrap_future(future.future())
 
     # Synchronous version of the method (deprecated)
-    def put_sample_sync(self, sample: Any, param_version: int) -> bool:
+    def put_sample_sync(self, sample: Any, size: int, param_version: int) -> bool:
         """Put batch into queue (sync - deprecated, use put_sample instead)"""
-        return ray.get(self.queue_actor.put_sample.remote(sample, param_version))
+        return ray.get(self.queue_actor.put_sample.remote(sample, size, param_version))
 
     def get_sample_sync(self) -> Any | None:
         """Get single sample from queue (sync - deprecated, use get_sample instead)"""
@@ -263,3 +335,26 @@ class MessageQueueClient:
     def update_param_version_sync(self, version: int):
         """Update parameter version (async)"""
         return ray.get(self.queue_actor.update_param_version.remote(version))
+
+    def get_samples_by_trajectory_count_sync(self, target_total_length: int) -> dict:
+        """
+        Get samples based on the total number of trajectories required.
+        Args:
+            target_total_length: total number of trajectories required
+
+        Returns:
+            dict: Includes information such as samples and batch_lengths.
+        """
+        return ray.get(self.queue_actor.get_samples_by_trajectory_count.remote(target_total_length))
+
+    async def get_samples_by_trajectory_count(self, target_total_length: int) -> dict:
+        """
+        Get samples based on the total number of trajectories required.
+        Args:
+            target_total_length: total number of trajectories required
+
+        Returns:
+            dict: Includes information such as samples and batch_lengths.
+        """
+        future = self.queue_actor.get_samples_by_trajectory_count.remote(target_total_length)
+        return await asyncio.wrap_future(future.future())

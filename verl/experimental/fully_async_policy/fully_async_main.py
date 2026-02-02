@@ -176,11 +176,6 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
         self._create_trainer(config)
 
-        # sync total_train_steps between rollouter and trainer
-        total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
-        print(f"total_train_steps {total_train_steps}")
-        ray.get(self.components["trainer"].set_total_train_steps.remote(total_train_steps))
-
         # max_queue_size
         max_queue_size = ray.get(self.components["rollouter"].get_max_queue_size.remote())
         print(f"[ASYNC MAIN] Creating MessageQueue... max_queue_size {max_queue_size}")
@@ -254,6 +249,11 @@ class FullyAsyncTaskRunner:
             device_name=config.trainer.device,
         )
 
+        # sync total_train_steps between rollouter and trainer
+        total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
+        print(f"total_train_steps {total_train_steps}")
+        ray.get(trainer.set_total_train_steps.remote(total_train_steps))
+
         ray.get(trainer.init_workers.remote())
         self.components["trainer"] = trainer
         print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
@@ -265,7 +265,11 @@ class FullyAsyncTaskRunner:
         rollouter_future = self.components["rollouter"].fit.remote()
         trainer_future = self.components["trainer"].fit.remote()
 
-        futures = [rollouter_future, trainer_future]
+        # start monitor
+        print("[ASYNC MAIN] Starting Rollouter monitor...")
+        monitor_future = self.components["rollouter"].run_monitor.remote()
+
+        futures = [rollouter_future, trainer_future, monitor_future]
 
         try:
             while futures:

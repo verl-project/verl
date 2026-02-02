@@ -505,6 +505,44 @@ GPU 数量整除，这使得资源调整的灵活性受到影响。此外，随�
 
 > source data: https://wandb.ai/hou-zg-meituan/fully-async-policy-multiturn-tool?nw=nwuserhouzg
 
+## 超采样(super sample) & 过滤(filter)
+
+本模块在 Rollouter 侧提供 `超采样(super sample)` 与 `过滤(filter)` 功能，并支持插件化扩展。当前内置：
+- 过滤函数：`dummy_filter`、`random_filter`、`filter_dapo`
+- 超采样函数：`default_super_sample_func`
+
+此外：
+- Trainer 按轨迹数进行组 batch
+- 支持在 Rollouter 侧计算优势 `advantages`（单个 sample group 内）
+
+### 参数配置
+
+```yaml
+filter:
+  # 过滤函数与路径，默认 `dummy_filter` 不过滤任何轨迹
+  filter_function_path: verl/experimental/fully_async_policy/utils/filter/dummy_filter.py
+  filter_function_name: dummy_filter
+  trajectories_per_mini_batch: null   # 可选：Trainer 每次 mini_batch 训练所需轨迹数，默认 ppo_mini_batch_size * rollout.n
+  avg_trajectories_per_sample: ${oc.select:actor_rollout_ref.rollout.n,null} # 可选：过滤后平均每个样本保留的轨迹数，默认初始值 rollout.n
+
+super_sample:
+  # 超采样函数与路径，默认 `default_super_sample_func` 每个 sample 按 rollout.n 采样
+  super_sample_function_path: verl/experimental/fully_async_policy/utils/super_sample/default_super_sample.py
+  super_sample_function_name: default_super_sample_func
+```
+
+### 函数签名
+
+- Filter：`def xxx(batch: DataProto, config: DictConfig, **kwargs) -> DataProto`
+- Super sample：`def xxx(batch: DataProto, config: DictConfig, **kwargs) -> DataProto`
+
+### 内置函数
+
+- `dummy_filter`：不做过滤
+- `random_filter`：随机截断 batch（用于测试功能）
+- `filter_dapo`：DAPO 根据 `algorithm.filter_groups.metric` 进行零方差过滤
+- `default_super_sample_func`：按 `actor_rollout_ref.rollout.n` 重复采样
+
 ## 后续计划
 
 * GRPO实验

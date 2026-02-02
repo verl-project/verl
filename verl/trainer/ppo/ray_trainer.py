@@ -155,6 +155,8 @@ def compute_advantage(
         DataProto: The updated data with computed advantages and returns.
     """
     # Back-compatible with trainers that do not compute response mask in fit
+    if "advantages" in data.batch.keys():
+        return data
     if "response_mask" not in data.batch.keys():
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group

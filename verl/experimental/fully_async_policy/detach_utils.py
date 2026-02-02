@@ -38,14 +38,6 @@ class RolloutSample:
     sample_id: str
     epoch: int
 
-    # Processing metadata
-    processing_times: list[float]
-    tool_calls: list[float]
-    param_version: int
-    param_version_start: list[int]
-    param_version_end: list[int]
-    rollout_status: dict[str, Any]
-
 
 @dataclass
 class ValidateMetrics:
@@ -82,55 +74,71 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
 
     # Setting selected agent, that supports partial
     if config.actor_rollout_ref.rollout.multi_turn.enable:
-        full_batch.non_tensor_batch["agent_name"] = np.array(
-            ["async_partial_tool_agent"] * len(full_batch), dtype=object
-        )
+        if config.actor_rollout_ref.rollout.agent.default_agent_loop == "tool_agent":
+            full_batch.non_tensor_batch["agent_name"] = np.array(
+                ["async_partial_tool_agent"] * len(full_batch), dtype=object
+            )
+        else:
+            raise NotImplementedError(
+                f"There is no agent_loop corresponding to \
+                {config.actor_rollout_ref.rollout.agent.default_agent_loop}, \
+                for the fully_async_policy version."
+            )
     else:
         full_batch.non_tensor_batch["agent_name"] = np.array(
             ["partial_single_turn_agent"] * len(full_batch), dtype=object
         )
 
-    # Add global step count to generated data
-    full_batch = full_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
     return full_batch
 
 
-def assemble_batch_from_rollout_samples(
-    rollout_samples: list[RolloutSample], tokenizer, config, balance_batch=None
+def assemble_batch(
+    rollout_datas: list[DataProto],
+    trajectories_per_request: int = None,
+    excess_batch: DataProto = None,
+    balance_batch=None,
 ) -> DataProto:
     """
-    Assemble gen_batch_output from RolloutSample objects
-    Assembles batches from RolloutSample objects, similar to the _post_generate_batch logic in ray_trainer.
+    Assemble gen_batch_output from list of DataProto, similar to the _post_generate_batch logic in ray_trainer.
 
     Args:
-        rollout_samples: List of RolloutSample objects
-        tokenizer: Tokenizer instance
-        config: Configuration object containing trainer settings
+        rollout_datas: List of DataProto
+        trajectories_per_request: Number of trajectories to be acquired at one time
+        excess_batch: Contains the remaining trajectories
         balance_batch: Whether to balance the batch (simplified version)
 
     Returns:
-        DataProto: Assembled gen_batch_output
+        DataProto: Assembled gen_batch_output.
 
     Raises:
-        ValueError: If rollout_samples is empty
+        ValueError: If rollout_datas is empty.
     """
     start_time = time.time()
 
-    if not rollout_samples:
-        raise ValueError("Empty rollout_samples provided for batch assembly")
+    if not rollout_datas:
+        raise ValueError("Empty rollout_datas provided for batch assembly!")
 
-    print(f"[BatchUtils] Assembling batch from {len(rollout_samples)} RolloutSample objects")
+    # pop conflict meta_info
+    rollout_status = rollout_datas[-1].meta_info["rollout_status"]
+    rollout_param_versions = []
+    for item in rollout_datas:
+        rollout_param_versions.append(
+            item.pop(meta_info_keys=["rollout_param_versions"]).meta_info["rollout_param_versions"]
+        )
+        item.pop(meta_info_keys=["rollout_status"])
 
-    rollout_samples_batch = []
-    processing_times = []
-    tool_calls = []
-    rollout_status = rollout_samples[0].rollout_status
+    if excess_batch:
+        rollout_datas.insert(0, excess_batch)
+    total_batch = DataProto.concat(rollout_datas)
+    print(f"[BatchUtils] Assembling batch from {len(rollout_datas)} DataProto, total {len(total_batch)} trajectories.")
+    if trajectories_per_request:
+        final_batch = total_batch[:trajectories_per_request]
+        excess_batch = total_batch[trajectories_per_request:]
+    else:
+        final_batch = total_batch
+        excess_batch = None
     # Add a prefix to all rollout_status keys
     rollout_status = {f"fully_async/{key}": value for key, value in rollout_status.items()}
-
-    for rs in rollout_samples:
-        rollout_samples_batch.append(rs.full_batch)
-    final_batch = DataProto.concat(rollout_samples_batch)
 
     # Calculate response_mask (if not present)
     if "response_mask" not in final_batch.batch.keys():
@@ -143,18 +151,19 @@ def assemble_batch_from_rollout_samples(
     if "attention_mask" in final_batch.batch:
         final_batch.meta_info["global_token_num"] = torch.sum(final_batch.batch["attention_mask"], dim=-1).tolist()
 
-    processing_times = final_batch.non_tensor_batch["processing_times"]
-    tool_calls = final_batch.non_tensor_batch["tool_calls_times"]
-    # Collect statistics
+    processing_times = []
+    tool_calls = []
+    processing_times = final_batch.non_tensor_batch["generate_sequences"]
+    tool_calls = final_batch.non_tensor_batch["tool_calls"]
 
-    processing_time_stats = {
-        "processing_time/avg": np.mean(processing_times),
-        "processing_time/max": np.max(processing_times),
-        "processing_time/min": np.min(processing_times),
-        "processing_time/tp50": np.percentile(processing_times, 50),
-        "processing_time/tp99": np.percentile(processing_times, 99),
-        "processing_time/tp95": np.percentile(processing_times, 95),
-    }
+    # Collect statistics
+    processing_time_stats = {}
+    if len(processing_times) > 0:
+        processing_time_stats = {
+            "timing_s/agent_loop/generate_sequences/min": np.min(processing_times),
+            "timing_s/agent_loop/generate_sequences/max": np.max(processing_times),
+            "timing_s/agent_loop/generate_sequences/mean": np.mean(processing_times),
+        }
     tool_calls_stats = {}
     if len(tool_calls) > 0:
         tool_calls_stats = {
@@ -162,7 +171,6 @@ def assemble_batch_from_rollout_samples(
             "timing_s/agent_loop/tool_calls/min": np.min(tool_calls),
             "timing_s/agent_loop/tool_calls/mean": np.mean(tool_calls),
         }
-    processing_time_stats = {f"fully_async/{key}": value for key, value in processing_time_stats.items()}
 
     param_version_start = final_batch.non_tensor_batch["param_version_start"]
     param_version_end = final_batch.non_tensor_batch["param_version_end"]
@@ -174,13 +182,12 @@ def assemble_batch_from_rollout_samples(
         "fully_async/partial/max_partial_span": max(param_version_diff),
     }
     # add meta_info
-    param_versions = [rs.param_version for rs in rollout_samples]
     trajectorys_param_versions = final_batch.non_tensor_batch["param_version_end"]
 
     final_batch.meta_info.update(
         {
-            "rollout_param_versions": param_versions,
-            "param_version_diversity": len(set(param_versions)) if param_versions else 0,
+            "rollout_param_versions": rollout_param_versions,
+            "param_version_diversity": len(set(rollout_param_versions)) if rollout_param_versions else 0,
             "trajectory_param_versions": trajectorys_param_versions,
             **processing_time_stats,
             **rollout_status,
@@ -191,7 +198,7 @@ def assemble_batch_from_rollout_samples(
 
     print(f"[BatchUtils] Batch assembly completed in {time.time() - start_time:.2f}s")
 
-    return final_batch
+    return final_batch, excess_batch
 
 
 class MetricsAggregator:
@@ -217,9 +224,18 @@ class MetricsAggregator:
         return {
             # Time-Based metrics, can add metrics here
             "time_sum": ["perf/time_per_step"],
-            "min": ["timing_s/agent_loop/tool_calls/min"],
-            "avg": ["timing_s/agent_loop/tool_calls/mean"],
-            "max": ["timing_s/agent_loop/tool_calls/max"],
+            "min": [
+                "timing_s/agent_loop/tool_calls/min",
+                "timing_s/agent_loop/generate_sequences/min",
+            ],
+            "avg": [
+                "timing_s/agent_loop/tool_calls/mean",
+                "timing_s/agent_loop/generate_sequences/mean",
+            ],
+            "max": [
+                "timing_s/agent_loop/tool_calls/max",
+                "timing_s/agent_loop/generate_sequences/max",
+            ],
             "last": [
                 "fully_async/count/total_generated_samples",
                 "fully_async/count/stale_samples_processed",

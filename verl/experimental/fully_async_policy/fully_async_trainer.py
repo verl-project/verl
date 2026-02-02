@@ -16,19 +16,19 @@ import os
 import time
 from datetime import datetime
 from pprint import pprint
-from typing import Any
 
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
 
 from verl.experimental.fully_async_policy.detach_utils import (
     MetricsAggregator,
     ValidateMetrics,
-    assemble_batch_from_rollout_samples,
+    assemble_batch,
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
+from verl.protocol import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -113,6 +113,14 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
         self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        # Number of trajectories to be acquired at one time(filter mode)
+        self.trajectories_per_request = None
+        self.trajectories_per_request = (
+            self.config.filter.trajectories_per_mini_batch
+            or self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ) * self.require_batches
+        # The extra or remaining trajectories requested last time(filter mode)
+        self.excess_batch = DataProto(None, {}, {})
         self.compute_prox_log_prob = self.config.async_training.compute_prox_log_prob
         total_gpus = (
             config.trainer.nnodes * config.trainer.n_gpus_per_node
@@ -163,68 +171,71 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         self.total_train_steps = total_train_steps
         self.progress_bar = tqdm(total=self.total_train_steps, initial=0, desc="Training Progress")
 
+        print(f"Total training steps: {self.total_train_steps}")
+
+        try:
+            OmegaConf.set_struct(self.config, True)
+            with open_dict(self.config):
+                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = self.total_train_steps
+                if OmegaConf.select(self.config, "critic.optim"):
+                    self.config.critic.optim.total_training_steps = self.total_train_steps
+        except Exception as e:
+            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
     def get_actor_wg(self):
         """Get actor worker group"""
         return self.actor_wg
 
-    def _get_samples_from_queue(self) -> tuple[None, None] | tuple[int, Any]:
-        """
-        Get samples from message queue and compose gen_batch_output
-        Uses a loop to continuously collect samples until enough are gathered
-
-        Returns:
-            tuple: (epoch, batch_dict, gen_batch_output)
-        """
+    def _get_samples_by_trajectory_count(self) -> DataProto:
+        request_trajectory_count = self.trajectories_per_request - len(self.excess_batch)
+        if request_trajectory_count <= 0:
+            print(
+                f"There are {len(self.excess_batch)} remaining trajectories, "
+                f"and {self.trajectories_per_request} are extracted.",
+                flush=True,
+            )
+            batch = self.excess_batch[:request_trajectory_count]
+            self.excess_batch = self.excess_batch[request_trajectory_count:]
+            batch.meta_info["fully_async/total_wait_time"] = 0
+            return batch
+        t_start = time.time()
         print(
-            f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
+            f"[FullyAsyncTrainer] Requesting {request_trajectory_count} trajectories from queue",
             flush=True,
         )
-
-        # Collect samples using a simple loop calling get_sample
-        consumer_start = time.time()
-        queue_samples = []
-        queue_len = 0
-        while len(queue_samples) < self.required_samples:
-            # Get a single sample and wait until there is a sample or None is received
-            sample, queue_len = self.message_queue_client.get_sample_sync()
-
-            if sample is None:
-                print(
-                    f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. "
-                    f"Collected {len(queue_samples)}/{self.required_samples} samples"
-                )
-                break
-
-            queue_samples.append(sample)
-
-            if len(queue_samples) % 64 == 0:
-                print(
-                    f"[FullyAsyncTrainer] Collected {len(queue_samples)}/{self.required_samples} samples. "
-                    f"mq_len: {queue_len}"
-                )
-
-        consumer_end = time.time()
-
-        if not queue_samples or len(queue_samples) < self.required_samples:
-            print("[FullyAsyncTrainer] not enough samples collected after loop")
-            return None, None
-        total_wait_time = consumer_end - consumer_start
-
+        # get 'trajectories_per_request' trajectories from MessageQueue
+        ret = self.message_queue_client.get_samples_by_trajectory_count_sync(request_trajectory_count)
+        if ret["is_shutdown"]:
+            print("[FullyAsyncTrainer] MessageQueue shutdown or not enough trajectory collected!")
+            return None
+        t_end = time.time()
+        total_wait_time = t_end - t_start
+        queue_samples = [ray.cloudpickle.loads(x) for x in ret["samples"]]
         print(
-            f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, "
+            f"[FullyAsyncTrainer] Loop collection completed: "
+            f"collected: {ret['total_length']} trajectories, "
+            f"remaining: {len(self.excess_batch)} trajectories, "
+            f"mq remaining: {ret['queue_remaining']} samples, "
             f"total wait time: {total_wait_time:.2f} seconds."
-            f"mq_len: {queue_len}"
         )
 
-        queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
-        # Assemble batch - now working directly with RolloutSample objects
         if self.config.trainer.balance_batch:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, self._balance_batch)
+            batch, self.excess_batch = assemble_batch(
+                queue_samples,
+                self.trajectories_per_request,
+                self.excess_batch,
+                self._balance_batch,
+            )
         else:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
-
+            batch, self.excess_batch = assemble_batch(
+                queue_samples,
+                self.trajectories_per_request,
+                self.excess_batch,
+                None,
+            )
         batch.meta_info["fully_async/total_wait_time"] = total_wait_time
-        return 0, batch
+        return batch
 
     def _create_actor_rollout_classes(self):
         # create actor
@@ -319,7 +330,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
 
             with marked_timer("step", timing_raw):
                 with marked_timer("gen", timing_raw, color="red"):
-                    epoch, batch = self._get_samples_from_queue()
+                    batch = self._get_samples_by_trajectory_count()
                     if batch is None:
                         break
                     self._collect_metrics_from_samples(batch, metrics)
@@ -356,9 +367,9 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
             self._log_validation_data()
         self.progress_bar.close()
 
-        self._check_save_checkpoint(timing_raw)
+        self._check_save_checkpoint(timing_raw, is_finished=True)
 
-    def _check_save_checkpoint(self, timing_raw):
+    def _check_save_checkpoint(self, timing_raw, is_finished=False):
         if self.current_param_version == self.last_ckpt_version:
             return
         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
@@ -372,11 +383,14 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         # 1. The save frequency is set to a positive value.
         # 2. The current step number is a multiple of the save frequency.
         # 3. The ESI(Elastic Server Instance)/training plan is close to expiration.
+        # 4. Train process finish
         if self.config.trainer.save_freq > 0 and (
-            self.current_param_version % self.config.trainer.save_freq == 0 or esi_close_to_expiration
+            self.current_param_version % self.config.trainer.save_freq == 0 or esi_close_to_expiration or is_finished
         ):
             if esi_close_to_expiration:
                 print("Force saving checkpoint: ESI instance expiration approaching.")
+            if is_finished:
+                print("Train finish, final addition checkpoint saving...")
             with marked_timer("save_checkpoint", timing_raw, color="green"):
                 self._save_checkpoint()
                 self.last_ckpt_version = self.current_param_version
@@ -486,6 +500,8 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
             f"current_param_version to {self.current_param_version}"
         )
         print(f"[FullyAsyncTrainer] Resuming from  {global_step_folder}")
+        print(f"[FullyAsyncTrainer] Training progress set to {self.current_param_version}/{self.total_train_steps}")
+        self.progress_bar.update(self.current_param_version)
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, str(Role.Critic))
@@ -551,7 +567,8 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                     use_trainer_do_validate=self.config.async_training.use_trainer_do_validate,
                 )
             )
-
+        if self.config.async_training.force_cleanup_stale_samples:
+            self.excess_batch = DataProto(None, {}, {})
         #  do trainer validate
         do_validate_param = (
             self.config.rollout.test_freq > 0

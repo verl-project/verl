@@ -587,6 +587,45 @@ To validate the performance of `fully_async_policy` on multi-turn tool-calling t
 
 > source data: https://wandb.ai/hou-zg-meituan/fully-async-policy-multiturn-tool?nw=nwuserhouzg
 
+## Super Sample & Filter
+
+This module provides `super sample` and `filter` capabilities on the Rollouter side and supports plugin-based
+extensions. Built-in functions include:
+- Filter functions: `dummy_filter`, `random_filter`, `filter_dapo`
+- Super-sample functions: `default_super_sample_func`
+
+In addition:
+- The Trainer batches by trajectory count.
+- Supports computing `advantages` on the Rollouter side (within a single sample group).
+
+### Configuration
+
+```yaml
+filter:
+  # Filter function and path; default `dummy_filter` keeps all trajectories.
+  filter_function_path: verl/experimental/fully_async_policy/utils/filter/dummy_filter.py
+  filter_function_name: dummy_filter
+  trajectories_per_mini_batch: null   # Optional: trajectories per mini-batch for Trainer, default ppo_mini_batch_size * rollout.n
+  avg_trajectories_per_sample: ${oc.select:actor_rollout_ref.rollout.n,null} # Optional: avg trajectories per sample after filtering, default initial value rollout.n
+
+super_sample:
+  # Super-sample function and path; default `default_super_sample_func` samples each sample by rollout.n
+  super_sample_function_path: verl/experimental/fully_async_policy/utils/super_sample/default_super_sample.py
+  super_sample_function_name: default_super_sample_func
+```
+
+### Function Signatures
+
+- Filter: `def xxx(batch: DataProto, config: DictConfig, **kwargs) -> DataProto`
+- Super sample: `def xxx(batch: DataProto, config: DictConfig, **kwargs) -> DataProto`
+
+### Built-in Functions
+
+- `dummy_filter`: no filtering
+- `random_filter`: randomly truncates the batch (for testing)
+- `filter_dapo`: DAPO zero-variance filtering based on `algorithm.filter_groups.metric`
+- `default_super_sample_func`: repeats sampling by `actor_rollout_ref.rollout.n`
+
 ## Future Plans
 
 * GRPO experiments

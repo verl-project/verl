@@ -42,6 +42,12 @@ async_training:
     # Enable the pipeline for broadcasting and updating parameters, but it requires more device memory
     overlap_broadcast_and_consume: False
 
+  # whether compute advantage in rollout phase
+  compute_advantage_in_rollout: False
+
+  # whether to discard old samples/trajectories when parameter sync
+  force_cleanup_stale_samples: False
+
 # Rollout config
 rollout:
 
@@ -51,14 +57,8 @@ rollout:
   # Number of GPUs per node                     
   n_gpus_per_node: 8
 
-  # number of responses (i.e. num sample times). > 1 for grpo
-  n: 4
-
   # total rollout samples # TODO rename to total_rollout_samples
   total_rollout_steps: 100
-
-  # Number of epochs in training 
-  total_epochs: 10
 
   # Test frequency, how many times a parameter update triggers a validation
   test_freq: 1
@@ -74,3 +74,18 @@ actor_rollout_ref:
   actor:
     # Whether to use rollout log probs for training
     use_rollout_log_probs: ${oc.select:async_training.use_rollout_log_probs, True}
+
+filter:
+  # filter function path, default `dummy_filter` does not filter
+  filter_function_path: verl/experimental/fully_async_policy/utils/filter/dummy_filter.py
+  filter_function_name: dummy_filter
+  # number of trajectories required by the Trainer in each mini-batch, 
+  # with a default value of ppo_mini_batch_size * rollout.n
+  trajectories_per_mini_batch: null
+  # expected average number of trajectories per sample after filtering
+  avg_trajectories_per_sample: ${oc.select:actor_rollout_ref.rollout.n,null}
+  
+super_sample:
+  # super_sample function path, default `default_super_sample_func` will sample rollout.n trajectories per sample
+  super_sample_function_path: verl/experimental/fully_async_policy/utils/super_sample/default_super_sample.py
+  super_sample_function_name: default_super_sample_func
