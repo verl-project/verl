@@ -40,9 +40,9 @@ def compute_topk_distillation_inputs(
     stage = batch["stage"]
 
     match stage:
-        case Stage.OLD_LOG_PROB:
+        case Stage.OLD_LOG_PROB | Stage.REF_LOG_PROB:
             return {}
-        case Stage.REF_LOG_PROB:
+        case Stage.ACQUIRE_TEACHER_KNOWLEDGE:
             # Teacher model
             match config.strategy:
                 case "fsdp":
@@ -99,7 +99,7 @@ def extract_distillation_inputs(
     elif distillation_settings.use_estimator:
         return {}
     elif distillation_settings.use_topk:
-        if stage == Stage.REF_LOG_PROB.value:
+        if stage == Stage.ACQUIRE_TEACHER_KNOWLEDGE.value:
             return {
                 TEACHER_TOPK_INDICES_KEY: output[TEACHER_TOPK_INDICES_KEY],
                 TEACHER_TOPK_LOG_PROBS_KEY: output[TEACHER_TOPK_LOG_PROBS_KEY],

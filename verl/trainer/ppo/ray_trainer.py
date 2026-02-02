@@ -1145,13 +1145,10 @@ class RayPPOTrainer:
                 output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
             # gather output
             log_probs = tu.get(output, "log_probs")
-            distillation_inputs = extract_distillation_inputs(
-                stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation
-            )
             # step 4. No padding to padding
             log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
-            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float(), **distillation_inputs})
+            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
             ref_log_prob = DataProto.from_tensordict(ref_log_prob)
         else:
             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
@@ -1166,12 +1163,9 @@ class RayPPOTrainer:
             # step 2: convert from padding to nopadding
             batch_td = left_right_2_no_padding(batch_td)
             # step 3: add meta info
-            metadata = {"calculate_entropy": False, "compute_loss": False, "stage": Stage.REF_LOG_PROB}
+            metadata = {"calculate_entropy": False, "compute_loss": False, "stage": Stage.ACQUIRE_TEACHER_KNOWLEDGE}
             tu.assign_non_tensor(batch_td, **metadata)
             for i in range(self.config.actor_rollout_ref.distillation.teacher_models.num_teachers):
-                print("\n\n\n")
-                print("Acquiring knowledge from teacher model:", i)
-                print("\n\n\n")
                 teacher_role = f"{str(Role.TeacherPolicy)}_{i}"
                 teacher_wg = self.teacher_policy_wgs[teacher_role]
                 output = teacher_wg.acquire_teacher_knowledge(batch_td)
@@ -1179,7 +1173,7 @@ class RayPPOTrainer:
             # gather output
             log_probs = tu.get(output, "log_probs")
             distillation_inputs = extract_distillation_inputs(
-                stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation
+                stage=Stage.ACQUIRE_TEACHER_KNOWLEDGE, output=output, config=self.config.actor_rollout_ref.distillation
             )
             # step 4. No padding to padding
             log_probs = no_padding_2_padding(log_probs, batch_td)
