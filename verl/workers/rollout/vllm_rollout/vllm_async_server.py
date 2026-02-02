@@ -570,6 +570,14 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here
             await self.engine.collective_rpc("sleep", kwargs={"level": 2})
+
+            # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
+            encoder_cache_manager = self.engine.engine_core.scheduler.encoder_cache_manager
+            encoder_cache_manager.cached.clear()
+            encoder_cache_manager.cached.freeable.clear()
+            encoder_cache_manager.cached.freed.clear()
+            encoder_cache_manager.num_free_slots = encoder_cache_manager.cache_size
+            encoder_cache_manager.num_freeable_slots = encoder_cache_manager.cache_size
         elif self.rollout_mode == RolloutMode.COLOCATED:
             await self.engine.sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
