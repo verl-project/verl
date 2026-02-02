@@ -81,6 +81,9 @@ from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
+
+# QAT support
+from verl.utils.qat import QATQuantizer, apply_qat, enable_qat_fuse
 from verl.utils.ray_utils import get_event_loop
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.config.optimizer import build_optimizer
@@ -274,6 +277,47 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
             self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
+
+    def _init_qat_config(self):
+        """Initialize QAT configuration from actor.qat."""
+        self.qat_config = self.config.actor.qat
+        self._qat_enabled = self.qat_config.enable
+        if self._qat_enabled:
+            logger.info(
+                f"QAT enabled: mode={self.qat_config.mode}, config_path={self.qat_config.quantization_config_path}"
+            )
+
+    def _restore_w4a4_input_scales(self, model, model_path):
+        """Restore input_global_scale and input_amax from checkpoint for W4A4 mode."""
+        import glob
+
+        from safetensors import safe_open
+
+        safetensor_files = glob.glob(f"{model_path}/model*.safetensors")
+        loaded_count = 0
+
+        for sf_path in safetensor_files:
+            with safe_open(sf_path, framework="pt") as f:
+                for key in f.keys():
+                    if "input_global_scale" in key:
+                        module_path = key.replace(".input_global_scale", "")
+                        amax_key = f"{module_path}.input_amax"
+
+                        module = model
+                        for part in module_path.split("."):
+                            module = getattr(module, part)
+
+                        scale_val = f.get_tensor(key)
+                        val = scale_val.item() if scale_val.numel() == 1 else scale_val.max().item()
+                        module.input_global_scale.fill_(val)
+
+                        amax_val = f.get_tensor(amax_key)
+                        amax = amax_val.item() if amax_val.numel() == 1 else amax_val.max().item()
+                        module.input_amax.fill_(amax)
+                        loaded_count += 1
+
+        if self.rank == 0:
+            logger.info(f"[W4A4] Loaded {loaded_count} input scales from checkpoint")
 
     def _build_model_optimizer(
         self,
@@ -485,6 +529,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 if self.rank == 0:
                     print("[actor model] No vision tower found.")
 
+        # Apply QAT before FSDP wrapping (actor only)
+        if role == "actor" and self._qat_enabled:
+            actor_module = apply_qat(actor_module, self.qat_config)
+            enable_qat_fuse(actor_module)
+            if self.qat_config.mode == "w4a4":
+                self._restore_w4a4_input_scales(actor_module, self.config.model.path)
+
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -504,6 +555,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             buffer_dtype = torch.float32
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+
+        # Store param_dtype for QAT quantizer
+        self._param_dtype = param_dtype
 
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=actor_module,
@@ -740,6 +794,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 for name, param in params.items()
             )
 
+        # QAT: quantize weights before sending to vLLM
+        if self._qat_enabled:
+            params_dict = dict(per_tensor_param)
+            quantizer = QATQuantizer(
+                mode=self.qat_config.mode,
+                ignore_patterns=self.qat_config.ignore_patterns,
+                device=torch.device(get_device_id()),
+                param_dtype=self._param_dtype,
+            )
+            per_tensor_param = quantizer.quantize_with_fusion(
+                params_dict,
+                target_device=torch.device("cpu"),
+            ).items()
+            del params_dict
+            aggressive_empty_cache(force_sync=True)
+
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
@@ -773,6 +843,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
+
+        # Initialize QAT config before _build_model_optimizer
+        self._init_qat_config()
 
         override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
         use_remove_padding = self.config.model.get("use_remove_padding", False)

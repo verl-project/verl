@@ -163,6 +163,12 @@ class vLLMColocateWorkerExtension:
         # 2. patch online fp8 quant
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1":
             apply_vllm_fp8_patches()
+        # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
+        if os.environ.get("VERL_QAT_ENABLED", "0") == "1":
+            from verl.utils.qat import apply_qat_patches
+
+            apply_qat_patches()
+            logger.info("Applied QAT patches in vLLM worker subprocess")
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -210,12 +216,21 @@ class vLLMColocateWorkerExtension:
             buffer, shm = rebuild_shared_memory(shm_name, shm_size, dtype=torch.uint8)
         socket.send(b"")
 
+        # Check if QAT is enabled (set by vllm_async_server based on config.qat.enable)
+        self._is_qat_model = os.environ.get("VERL_QAT_ENABLED", "0") == "1"
+
         use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
             self.model_runner.vllm_config
         )
 
-        # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
-        if use_standard_weight_load:
+        if self._is_qat_model:
+            # QAT: Prepare for weight loading BEFORE receiving any buckets
+            from verl.utils.qat import prepare_qat_for_load_weights
+
+            prepare_qat_for_load_weights(self.model_runner.model, device=self.device)
+            logger.info("QAT: prepare_qat_for_load_weights completed")
+        elif use_standard_weight_load:
+            # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
             patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
         # receive bucket and update weights
@@ -241,7 +256,13 @@ class vLLMColocateWorkerExtension:
             if metadata["is_last"]:
                 break
 
-        if use_standard_weight_load:
+        if self._is_qat_model:
+            # QAT: call process_weights_after_loading AFTER all buckets are received
+            from verl.utils.qat import manual_process_weights_after_loading
+
+            manual_process_weights_after_loading(self.model_runner.model)
+            logger.info("QAT: process_weights_after_loading completed")
+        elif use_standard_weight_load:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
@@ -273,9 +294,12 @@ class vLLMColocateWorkerExtension:
             self.add_lora(lora_request)
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
-            # Add the FP8 related logic here as sharding manager has been deprecated.
-            # Check if FP8 quantization is enabled and apply appropriate weight loading
-            if is_fp8_model(self.model_runner.vllm_config):
+            if self._is_qat_model:
+                # QAT: prepare was done in update_weights_from_ipc, just load weights
+                self.model_runner.model.load_weights(iter(weights))
+            elif is_fp8_model(self.model_runner.vllm_config):
+                # Add the FP8 related logic here as sharding manager has been deprecated.
+                # Check if FP8 quantization is enabled and apply appropriate weight loading
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
                 loaded_params = load_quanted_weights(weights, self.model_runner)
