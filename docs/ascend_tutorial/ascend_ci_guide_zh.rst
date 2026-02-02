@@ -46,6 +46,10 @@ NPU 相关的工作流主要包括：
 
    gpu用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s /root/.cache/models ~/models``
 
+   此处为原始数据集，按需进行数据处理，如下。
+   
+   ``python examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k``
+
 
 2. 工作流 YAML 模板
 -------------------
