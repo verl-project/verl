@@ -38,7 +38,7 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
-from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.single_controller.ray.base import create_colocated_worker_cls, split_resource_pool
 from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation import extract_distillation_inputs
 from verl.trainer.ppo import core_algos
@@ -277,7 +277,8 @@ class RayPPOTrainer:
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = need_reference_policy(self.config) or need_distillation_policy(self.config)
+        self.use_reference_policy = need_reference_policy(self.config)
+        self.use_distillation_policy = need_distillation_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
 
@@ -736,6 +737,28 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
+        # create distillation policy if needed
+        if self.use_distillation_policy:
+            assert Role.TeacherPolicy in self.role_worker_mapping
+
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherPolicy)
+            num_teachers = self.config.actor_rollout_ref.distillation.teacher_models.num_teachers
+            world_size = resource_pool.world_size
+            teacher_world_size = world_size // num_teachers
+            if teacher_world_size == 0:
+                raise ValueError(
+                    f"World is not big enough for distillation teachers: {world_size} for {num_teachers} teachers"
+                )
+            sub_resource_pools = split_resource_pool(resource_pool, teacher_world_size)
+            teacher_policy_role = str(Role.TeacherPolicy)
+            for i, sub_pool in enumerate(sub_resource_pools):
+                teacher_policy_cls = RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.TeacherPolicy],
+                    config=self.config.actor_rollout_ref,
+                    teacher_id=i,
+                )
+                self.resource_pool_to_cls[sub_pool] = {f"{teacher_policy_role}_{i}": teacher_policy_cls}
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -793,6 +816,13 @@ class RayPPOTrainer:
                 assert str(Role.ActorRolloutRef) in all_wg, f"{all_wg.keys()=}"
                 self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
 
+        if self.use_distillation_policy:
+            self.teacher_policy_wgs = dict()
+            for teacher_id in range(num_teachers):
+                teacher_role = f"{str(Role.TeacherPolicy)}_{teacher_id}"
+                teacher_wg = all_wg[teacher_role]
+                teacher_wg.init_model()
+                self.teacher_policy_wgs[teacher_role] = teacher_wg
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(actor_role)]
         self.actor_rollout_wg.init_model()
@@ -1128,6 +1158,39 @@ class RayPPOTrainer:
 
         return ref_log_prob
 
+
+    def _acquire_teacher_knowledge(self, batch: DataProto) -> DataProto:
+        if self.use_legacy_worker_impl == "disable":
+            # step 1: convert dataproto to tensordict.
+            batch_td = batch.to_tensordict()
+            # step 2: convert from padding to nopadding
+            batch_td = left_right_2_no_padding(batch_td)
+            # step 3: add meta info
+            metadata = {"calculate_entropy": False, "compute_loss": False, "stage": Stage.REF_LOG_PROB}
+            tu.assign_non_tensor(batch_td, **metadata)
+            for i in range(self.config.actor_rollout_ref.distillation.teacher_models.num_teachers):
+                print("\n\n\n")
+                print("Acquiring knowledge from teacher model:", i)
+                print("\n\n\n")
+                teacher_role = f"{str(Role.TeacherPolicy)}_{i}"
+                teacher_wg = self.teacher_policy_wgs[teacher_role]
+                output = teacher_wg.acquire_teacher_knowledge(batch_td)
+
+            # gather output
+            log_probs = tu.get(output, "log_probs")
+            distillation_inputs = extract_distillation_inputs(
+                stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation
+            )
+            # step 4. No padding to padding
+            log_probs = no_padding_2_padding(log_probs, batch_td)
+            # step 5: rebuild a tensordict and convert to dataproto
+            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float(), **distillation_inputs})
+            ref_log_prob = DataProto.from_tensordict(ref_log_prob)
+        else:
+            raise NotImplementedError
+
+        return ref_log_prob
+
     def _compute_old_log_prob(self, batch: DataProto):
         if self.use_legacy_worker_impl == "disable":
             # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
@@ -1433,6 +1496,11 @@ class RayPPOTrainer:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                    if self.use_distillation_policy:
+                        with marked_timer(str(Role.TeacherPolicy), timing_raw, color="teal"):
+                            distillation_inputs = self._acquire_teacher_knowledge(batch)
+                            batch = batch.union(distillation_inputs)
 
                     # compute values
                     if self.use_critic:
