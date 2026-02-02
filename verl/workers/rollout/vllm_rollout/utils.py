@@ -209,7 +209,7 @@ class vLLMColocateWorkerExtension:
         # receive bucket and update weights
         while True:
             metadata = socket.recv_pyobj()
-            weights = []
+            weights, tensor = [], None
             for name, meta in metadata["bucket_meta"].items():
                 shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
                 size = dtype.itemsize * shape.numel()
@@ -225,7 +225,7 @@ class vLLMColocateWorkerExtension:
             get_torch_device().synchronize()
             socket.send(b"")
             self._update_weights(weights, peft_config=peft_config, base_sync_done=base_sync_done)
-            del weights
+            del weights, tensor
             if metadata["is_last"]:
                 break
 
