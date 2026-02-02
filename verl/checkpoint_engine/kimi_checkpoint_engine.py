@@ -270,19 +270,25 @@ class KIMICheckpointEngine(CheckpointEngine):
             "method": ["init_process_group"] * trainer_world_size,
             "rank": list(range(0, trainer_world_size)),
             "trainer_world_size": [trainer_world_size] * trainer_world_size,
-            "rollout_world_size": [rollout_world_size] * rollout_world_size,
+            "rollout_world_size": [rollout_world_size] * trainer_world_size,
             "master_metadata": [metadata[0]] * trainer_world_size,
         }
         rollout_kwargs = {
             "method": ["init_process_group"] * rollout_world_size,
             "rank": list(range(trainer_world_size, trainer_world_size + rollout_world_size)),
-            "trainer_world_size": [trainer_world_size] * trainer_world_size,
+            "trainer_world_size": [trainer_world_size] * rollout_world_size,
             "rollout_world_size": [rollout_world_size] * rollout_world_size,
             "master_metadata": [metadata[0]] * rollout_world_size,
         }
         return trainer_kwargs, rollout_kwargs
 
-    def init_process_group(self, rank: int, trainer_world_size: int, rollout_world_size :int, master_metadata: MasterMetadata):
+    def init_process_group(
+        self,
+        rank: int,
+        trainer_world_size: int,
+        rollout_world_size: int,
+        master_metadata: MasterMetadata,
+    ):
         """Initialize the ckpt engine process group.
 
         Args:
@@ -293,9 +299,8 @@ class KIMICheckpointEngine(CheckpointEngine):
         self.trainer_world_size = trainer_world_size
         self.rollout_world_size = rollout_world_size
         self.world_size = trainer_world_size + rollout_world_size
-        # unregister_memory in transfer engine is not supported on NPU,
-        # so we have to initialize ParameterServer each time
-        if get_device_name() == "npu" or not self.initialized:
+
+        if not self.initialized:
             self.parameter_server = ParameterServer(
                 rank=rank,
                 world_size=self.world_size,
@@ -304,7 +309,7 @@ class KIMICheckpointEngine(CheckpointEngine):
                 master_port=master_metadata.dist_port,
             )
             self.parameter_server.receive_tensor = types.MethodType(receive_tensor, self.parameter_server)
-        if not self.initialized:
+
             dist.use_backend(f"vllm_{get_nccl_backend()}")
             self.parameter_server.init_process_group()
 
@@ -345,7 +350,7 @@ class KIMICheckpointEngine(CheckpointEngine):
 
         self.parameter_server.register_checkpoint(self.checkpoint_name, named_tensors=named_tensors)
         named_tensors = {}
-        torch.cuda.empty_cache()
+        get_torch_device().empty_cache()
         logger.info(f"Rank {self.rank} offload and register, time cost: {time.time() - start_time:.2f}s")
 
         self.parameter_server.gather_metas(self.checkpoint_name)

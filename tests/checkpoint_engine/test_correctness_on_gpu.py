@@ -147,7 +147,6 @@ async def test_kimi_checkpoint_engine(
             "env_vars": {
                 "NCCL_IB_HCA": "mlx5",
                 "VERL_LOGGING_LEVEL": "DEBUG",
-                "ASCEND_USE_SHORT_CONNECTION": "1",
             }
         }
     )

@@ -77,25 +77,22 @@ async def test_hccl_checkpoint_engine(
 @pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
-@pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@pytest.mark.parametrize("num_trainer, num_rollout", [(4, 28)])
 async def test_kimi_checkpoint_engine(
     rebuild_group,
     num_trainer,
     num_rollout,
-    num_nodes=1,
-    num_gpus_per_node=8,
+    num_nodes=2,
+    num_gpus_per_node=16,
     check_allclose=True,
-    model_path="~/models/Qwen/Qwen3-8B-Base",
+    model_path="~/models/Qwen/Qwen3-32B",
 ):
     model_path = os.path.expanduser(model_path)
     ray.init(
         runtime_env={
             "env_vars": {
                 "HCCL_CONNECT_TIMEOUT": "1500",
-                "HCCL_HOST_SOCKET_PORT_RANGE": "60000-60050",
-                "HCCL_NPU_SOCKET_PORT_RANGE": "61000-61050",
                 "VERL_LOGGING_LEVEL": "DEBUG",
-                "ASCEND_USE_SHORT_CONNECTION": "1",
             }
         }
     )
