@@ -1648,7 +1648,11 @@ class RayPPOTrainer:
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
+                        # sleep replicas to avoid OOM during checkpoint saving
+                        self.checkpoint_manager.sleep_replicas()
                         self._save_checkpoint()
+                        # wake replicas to avoid OOM during checkpoint saving
+                        self.checkpoint_manager.update_weights()
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

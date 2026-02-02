@@ -19,13 +19,13 @@ import pytest
 import torch
 import torch.distributed
 import transformers
-from flash_attn.bert_padding import index_first_axis, rearrange, unpad_input
 from packaging import version
 from torch.distributed import init_device_mesh
 from transformers import AutoModelForCausalLM, LlamaConfig, PretrainedConfig, Qwen2Config
 
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.protocol import DataProto
+from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.ulysses import (
@@ -35,6 +35,11 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
+
+if get_device_name() == "cuda":
+    from flash_attn.bert_padding import index_first_axis, rearrange, unpad_input
+elif get_device_name() == "npu":
+    from verl.utils.attention_utils import index_first_axis, rearrange, unpad_input
 
 # TODO(sgm): add more models for test
 # we only need one scale for each model
@@ -105,10 +110,10 @@ def test_hf_casual_fwd_bwd(test_config):
 
 
 def _hf_casual_fwd(config, sp_size, dp_size):
-    assert torch.cuda.device_count() >= 2, "need at least 2 gpus for test"
+    assert get_torch_device().device_count() >= 2, "need at least 2 gpus for test"
 
     ulysses_device_mesh = init_device_mesh(
-        device_type="cuda", mesh_shape=(dp_size, sp_size), mesh_dim_names=("dp", "sp")
+        device_type=get_device_name(), mesh_shape=(dp_size, sp_size), mesh_dim_names=("dp", "sp")
     )
     sharding_manager = FSDPUlyssesShardingManager(ulysses_device_mesh)
 
@@ -117,16 +122,16 @@ def _hf_casual_fwd(config, sp_size, dp_size):
     # response_length = 127
 
     # patch before load
-    with torch.device("cuda"):
+    with torch.device(get_device_name()):
         model = AutoModelForCausalLM.from_config(
             config=config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
         )
         apply_monkey_patch(model, sp_size)
-        model = model.to(device="cuda")
+        model = model.to(device=get_device_name())
         sync_model_parameters_global(model)
 
     # different rank will generate different input_ids following fsdp
-    input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seqlen), device="cuda")
+    input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seqlen), device=get_device_name())
     attention_mask = create_random_mask(
         input_ids=input_ids, max_ratio_of_left_padding=0, max_ratio_of_valid_token=0.9, min_ratio_of_valid_token=0.8
     )
@@ -135,9 +140,9 @@ def _hf_casual_fwd(config, sp_size, dp_size):
     )  # TODO(sgm): we can construct the position_ids_rmpad here
 
     model_inputs = {
-        "input_ids": input_ids.cuda(),
-        "attention_mask": attention_mask.cuda(),
-        "position_ids": position_ids.int().cuda(),
+        "input_ids": input_ids.to(get_device_name()),
+        "attention_mask": attention_mask.to(get_device_name()),
+        "position_ids": position_ids.int().to(get_device_name()),
     }
 
     model_inputs = DataProto.from_dict(model_inputs)
@@ -184,10 +189,10 @@ def _hf_casual_fwd(config, sp_size, dp_size):
 
 
 def _hf_casual_fwd_bwd(config, sp_size, dp_size):
-    assert torch.cuda.device_count() >= 2, "need at least 2 gpus for test"
+    assert get_torch_device().device_count() >= 2, "need at least 2 gpus for test"
 
     ulysses_device_mesh = init_device_mesh(
-        device_type="cuda", mesh_shape=(dp_size, sp_size), mesh_dim_names=("dp", "sp")
+        device_type=get_device_name(), mesh_shape=(dp_size, sp_size), mesh_dim_names=("dp", "sp")
     )
     sharding_manager = FSDPUlyssesShardingManager(ulysses_device_mesh)
 
@@ -196,16 +201,16 @@ def _hf_casual_fwd_bwd(config, sp_size, dp_size):
     # response_length = 127
 
     # patch before load
-    with torch.device("cuda"):
+    with torch.device(get_device_name()):
         model = AutoModelForCausalLM.from_config(
             config=config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
         )
         apply_monkey_patch(model, sp_size)
-        model = model.to(device="cuda")
+        model = model.to(device=get_device_name())
         sync_model_parameters_global(model)
 
     # different rank will generate different input_ids following fsdp
-    input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seqlen), device="cuda")
+    input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seqlen), device=get_device_name())
     attention_mask = create_random_mask(
         input_ids=input_ids, max_ratio_of_left_padding=0, max_ratio_of_valid_token=0.9, min_ratio_of_valid_token=0.8
     )
@@ -214,9 +219,9 @@ def _hf_casual_fwd_bwd(config, sp_size, dp_size):
     )  # TODO(sgm): we can construct the position_ids_rmpad here
 
     model_inputs = {
-        "input_ids": input_ids.cuda(),
-        "attention_mask": attention_mask.cuda(),
-        "position_ids": position_ids.int().cuda(),
+        "input_ids": input_ids.to(get_device_name()),
+        "attention_mask": attention_mask.to(get_device_name()),
+        "position_ids": position_ids.int().to(get_device_name()),
     }
 
     model_inputs = DataProto.from_dict(model_inputs)

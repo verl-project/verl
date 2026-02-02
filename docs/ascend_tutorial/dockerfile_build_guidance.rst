@@ -34,20 +34,24 @@ Megatron-LM        v0.12.1
 MindSpeed          (f2b0977e)
 triton-ascend      3.2.0rc4
 mbridge            latest version
+SGLang             v0.5.8
+sgl-kernel-npu     (46b73de)
 ================= ============
 
 
 Dockerfile构建镜像脚本清单
 ---------------------------
 
-============== ============== ==============
-设备类型         基础镜像版本     参考文件
-============== ============== ==============
-A2              8.2.RC1       `Dockerfile.ascend_8.2.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a2>`_
-A2              8.3.RC1       `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
-A3              8.2.RC1       `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
-A3              8.3.RC1       `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
-============== ============== ==============
+============== ============== ============== ==============================================================
+设备类型         基础镜像版本     推理后端        参考文件
+============== ============== ============== ==============================================================
+A2              8.2.RC1        vLLM            `Dockerfile.ascend_8.2.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a2>`_
+A2              8.3.RC1        vLLM            `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
+A2              8.3.RC1        SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2>`_
+A3              8.2.RC1        vLLM            `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
+A3              8.3.RC1        vLLM            `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
+A3              8.3.RC1         SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
+============== ============== ============== ==============================================================
 
 
 镜像构建命令示例
@@ -57,9 +61,12 @@ A3              8.3.RC1       `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/
 
    # Navigate to the directory containing the Dockerfile 
    cd {verl-root-path}/docker/ascend
-   # Build the image
-   docker build -f Dockerfile.ascend_8.3.rc1_a2 -t verl-ascend:8.3.rc1-a2 .
 
+   # Build the image
+   # vLLM
+   docker build -f Dockerfile.ascend_8.3.rc1_a2 -t verl-ascend:8.3.rc1-a2 .
+   # SGLang
+   docker build -f Dockerfile.ascend_8.3.rc1_a2 -t verl-ascend-sglang:8.3.rc1-a2 .
 
 公开镜像地址
 --------------------

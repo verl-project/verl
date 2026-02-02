@@ -9,7 +9,6 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp"}  # fsdp or megatron
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 
-
 rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
 if [ "$rollout_mode" = "async" ]; then

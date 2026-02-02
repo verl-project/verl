@@ -20,6 +20,7 @@ import os
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -36,6 +37,7 @@ from verl.utils.model import check_exclude_modules, check_target_modules
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
+    from torch.distributed.fsdp._fully_shard._fsdp_init import _get_post_forward_mesh_info
     from torch.distributed.tensor import Shard
 
     fully_shard_module = torch.distributed.fsdp._fully_shard._fully_shard
@@ -692,3 +694,37 @@ def replace_lora_wrapper(k, peft_config):
         elif any([module_k.endswith(s) for s in stacked_params]) or check_target_modules(peft_config, module_k):
             return f"{module_k}.base_layer.bias"
     return k
+
+
+def set_reshard_after_forward(module: FSDPModule, reshard_after_forward: bool, recurse: bool = True) -> None:
+    """
+    Sets if the module should reshard parameters after forward. This can be
+    used to change the ``reshard_after_forward`` FSDP arg at runtime. For
+    example, this can be used to set the FSDP root module's value to
+    ``True`` (since it is otherwise specially set to ``False``), or it can
+    set an FSDP module's value to ``False`` for running evals and set back
+    to ``True`` for training.
+
+    Args:
+        reshard_after_forward (bool): Whether to reshard parameters after
+            forward.
+        recurse (bool): Whether to set for all FSDP submodules or just the
+            passed-in module.
+
+    ---
+    Copied from https://github.com/pytorch/pytorch/blob/main/torch/distributed/fsdp/_fully_shard/_fully_shard.py to
+    address the absence of the set_reshard_after_forward function in torch versions earlier than 2.8.0.
+    """
+
+    if not isinstance(reshard_after_forward, bool):
+        raise ValueError(f"reshard_after_forward should be a bool, got {type(reshard_after_forward)}")
+    self_module = cast(nn.Module, module)
+    modules = list(self_module.modules()) if recurse else [self_module]
+    for module in modules:
+        if isinstance(module, FSDPModule):
+            state = module._get_fsdp_state()
+            state._auto_reshard_after_forward = False
+            if fsdp_param_group := state._fsdp_param_group:
+                fsdp_param_group.post_forward_mesh_info = _get_post_forward_mesh_info(
+                    reshard_after_forward, fsdp_param_group.mesh_info
+                )

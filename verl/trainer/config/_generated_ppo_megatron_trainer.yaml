@@ -218,7 +218,7 @@ actor_rollout_ref:
     pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null
-    max_num_seqs: 256
+    max_num_seqs: 1024
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs
@@ -338,8 +338,8 @@ actor_rollout_ref:
       detach_encoder: false
       mtp_loss_scaling_factor: 0.1
       speculative_algorithm: EAGLE
-      speculative_num_steps: 2
-      speculative_eagle_topk: 2
+      speculative_num_steps: 3
+      speculative_eagle_topk: 1
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
