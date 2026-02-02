@@ -1,0 +1,18 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.TeacherHFModelConfig
+
+# specify the default per-component configs
+defaults:
+
+  # distillation config, inheriting from trainer/config/model/hf_model.yaml
+  # Use absolute path + @_here_ to flatten fields at current level
+  - /model/hf_model@_here_
+
+  # load the default config, then apply the fields in the current yaml
+  # self config override anything above
+  - _self_
+
+domain: null
+
+# Huggingface model path; if null, the teacher is considered inactive
+path: null
