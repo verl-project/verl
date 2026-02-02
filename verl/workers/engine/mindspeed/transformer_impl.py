@@ -23,6 +23,8 @@ try:
 except ImportError:
     repatch = None
 
+from typing import Optional
+
 from verl.trainer.config import CheckpointConfig
 from verl.workers.config import DistillationConfig, HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
