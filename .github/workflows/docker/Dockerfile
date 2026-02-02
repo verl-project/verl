@@ -1,6 +1,6 @@
 # Base image
-# FROM docker.io/rocm/megatron-lm:v25.9_gfx942
-FROM docker.io/rocm/megatron-lm:v25.10
+# FROM docker.io/rocm/primus:v25.9_gfx942
+FROM docker.io/rocm/primus:v25.10
 
 # Specify the commit of Primus-Turbo when building: docker build --build-arg PRIMUS_TURBO_COMMIT=xxx .)
 # ARG PRIMUS_TURBO_COMMIT
