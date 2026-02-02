@@ -32,7 +32,7 @@ from verl.experimental.agent_loop.agent_loop import (
 )
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.protocol import DataProto
-from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
+from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
@@ -246,7 +246,10 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
     @classmethod
     async def create(
-        cls, config: DictConfig, worker_group: RayWorkerGroup = None, reward_loop_worker_handles: list[ray.actor.ActorHandle] = None
+        cls,
+        config: DictConfig,
+        worker_group: RayWorkerGroup = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         instance = cls(config, worker_group, reward_loop_worker_handles)
         await instance._async_init()
