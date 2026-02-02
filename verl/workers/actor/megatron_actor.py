@@ -49,7 +49,7 @@ from verl.utils.megatron.router_replay_utils import (
     set_router_replay_data,
 )
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
-from verl.utils.megatron_utils import get_model_config, unwrap_model
+from verl.utils.megatron_utils import get_megatron_mtp_loss, get_model_config, unwrap_model
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
@@ -747,27 +747,8 @@ class MegatronPPOActor(BasePPOActor):
 
         # Collect and pass MTP metrics to losses_reduced
         if not forward_only and self.mtp_config and self.mtp_config.enable_train:
-            from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
-
-            # Calculate MTP loss scale similar to Megatron-LM implementation
-            mtp_loss_scale = 1.0 / n_micro_batch
-
-            # Create a dummy total_loss_dict to collect MTP metrics
-            total_loss_dict = {}
-
-            # Track MTP metrics - this will populate total_loss_dict with MTP losses
-            MTPLossLoggingHelper.track_mtp_metrics(
-                loss_scale=mtp_loss_scale, iteration=0, writer=None, wandb_writer=None, total_loss_dict=total_loss_dict
-            )
-            # Add MTP metrics to losses_reduced if any were collected
-            # total_loss_dict: {'mtp_1 loss': tensor(value, device='cuda:0')}
-            if total_loss_dict:
-                mtp_metrics = {}
-                for key, value in total_loss_dict.items():
-                    # Convert key to have proper prefix and format
-                    formatted_key = f"mtp_losses/{key.replace(' ', '_')}"
-                    mtp_metrics[formatted_key] = [value.cpu().item()]
-                losses_reduced["mtp_losses"] = [mtp_metrics]
+            metrics = get_megatron_mtp_loss(n_micro_batch)
+            losses_reduced["mtp_losses"] = [metrics]
 
         return losses_reduced
 

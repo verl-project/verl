@@ -627,15 +627,6 @@ class RayPPOTrainer:
             sample_inputs.extend(input_texts)
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
-            # compute reward model score if needed (similar to training loop)
-            if self.use_rm and "rm_scores" not in test_batch.batch.keys():
-                if not self.use_reward_loop:
-                    reward_tensor = self.rm_wg.compute_rm_score(test_batch)
-                else:
-                    assert self.reward_loop_manager is not None, "RewardLoopManager is None"
-                    reward_tensor = self.reward_loop_manager.compute_rm_score(test_batch)
-                test_batch = test_batch.union(reward_tensor)
-
             # evaluate using reward_function
             reward_tensor, reward_extra_info = self._compute_or_extract_reward(
                 test_batch, reward_fn=self.val_reward_fn, reward_for_val=True

@@ -26,6 +26,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+from verl.utils.device import get_device_name
 from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
 
@@ -92,8 +93,7 @@ def test_agent_loop_reward_manager():
         cls=ray.remote(actor_rollout_cls), config=config.actor_rollout_ref, role="actor_rollout"
     )
     actor_rollout_wg = RayWorkerGroup(
-        resource_pool=resource_pool,
-        ray_cls_with_init=actor_rollout_cls,
+        resource_pool=resource_pool, ray_cls_with_init=actor_rollout_cls, device_name=get_device_name()
     )
     actor_rollout_wg.init_model()
 

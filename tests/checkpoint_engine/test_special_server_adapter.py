@@ -44,6 +44,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.model.path = os.path.expanduser("~/models/Qwen/Qwen3-VL-2B-Instruct")
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.skip_tokenizer_init = False
+    config.actor_rollout_ref.rollout.max_num_seqs = 256
     config.actor_rollout_ref.rollout.checkpoint_engine.backend = "nccl" if get_device_name() == "cuda" else "hccl"
 
     return config

@@ -62,10 +62,13 @@ if _VLLM_VERSION > version.parse("0.11.0"):
     if _VLLM_VERSION == version.parse("0.12.0"):
         from vllm.entrypoints.harmony_utils import get_encoding
 
-        get_encoding()
     elif _VLLM_VERSION >= version.parse("0.13.0"):
         from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 
+    else:
+        get_encoding = None
+
+    if get_encoding is not None and os.getenv("VERL_USE_GPT_OSS", "0") == "1":
         get_encoding()
 else:
     from vllm.utils import FlexibleArgumentParser
@@ -257,9 +260,9 @@ class vLLMHttpServer:
             hf_overrides["quantization_config"] = fp8_block_quant_kwargs
         compilation_config = engine_kwargs.get("compilation_config", None)
         if compilation_config is None:
-            compilation_config = json.dumps({"cudagraph_mode": "FULL_DECODE_ONLY"})
+            compilation_config = json.dumps({"cudagraph_mode": "FULL_AND_PIECEWISE"})
         else:
-            cudagraph_mode = compilation_config.get("cudagraph_mode", "FULL_DECODE_ONLY")
+            cudagraph_mode = compilation_config.get("cudagraph_mode", "FULL_AND_PIECEWISE")
             compilation_config = json.dumps({"cudagraph_mode": cudagraph_mode})
         args = {
             "dtype": self.config.dtype,

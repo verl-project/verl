@@ -237,7 +237,7 @@ def _patched_topk_routing_with_score_function(
     return routing_probs, routing_map
 
 
-def patched_routing(self, logits: torch.Tensor):
+def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     """Top-k routing function
 
     Args:

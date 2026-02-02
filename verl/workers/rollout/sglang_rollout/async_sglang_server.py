@@ -305,21 +305,17 @@ class SGLangHttpServer:
 
         # mtp
         if self.config.mtp.enable and self.config.mtp.enable_rollout:
+            # Enable weights CPU backup for sglang >= 0.5.6
+            if sglang.__version__ < "0.5.6":
+                raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
+
             args["speculative_algorithm"] = self.config.mtp.speculative_algorithm
             args["speculative_num_steps"] = self.config.mtp.speculative_num_steps
             args["speculative_eagle_topk"] = self.config.mtp.speculative_eagle_topk
             args["speculative_num_draft_tokens"] = self.config.mtp.speculative_num_draft_tokens
 
-            args["log_level"] = "info"
-            args["load_format"] = "auto"
-
-            # Enable weights CPU backup for sglang >= 0.5.6
-            if sglang.__version__ >= "0.5.6":
-                args["enable_weights_cpu_backup"] = True
-                args["enable_draft_weights_cpu_backup"] = True
-
-            # args['enable_memory_saver'] = False
-            # enable_memory_saver = False MTP success but memory can't be release
+            args["enable_weights_cpu_backup"] = True
+            args["enable_draft_weights_cpu_backup"] = True
 
         # NOTE: We can't directly call SGLang's launch_server since it's not an async function.
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py

@@ -1,8 +1,8 @@
 # download datasets and models
 # python3 examples/data_preprocess/gsm8k.py
 # python3 examples/data_preprocess/math_dataset.py
-# huggingface-cli download Skywork/Skywork-Reward-V2-Llama-3.2-3B --local-dir $HOME/models/Skywork-Reward-V2-Llama-3.2-3B
-# huggingface-cli download Qwen/Qwen2.5-3B-Instruct --local-dir $HOME/models/Qwen2.5-3B-Instruct
+# hf download Skywork/Skywork-Reward-V2-Llama-3.2-3B --local-dir $HOME/models/Skywork-Reward-V2-Llama-3.2-3B
+# hf download Qwen/Qwen2.5-3B-Instruct --local-dir $HOME/models/Qwen2.5-3B-Instruct
 
 gsm8k_train_path=$HOME/data/gsm8k/train.parquet
 gsm8k_test_path=$HOME/data/gsm8k/test.parquet
