@@ -759,6 +759,7 @@ class TeacherWorker(Worker, DistProfilerExtension):
             engine_config=distillation_config.engine,
             optimizer_config=distillation_config.optim,
             checkpoint_config=distillation_config.checkpoint,
+            distillation_config=distillation_config
         )
 
         # assign engine configs
