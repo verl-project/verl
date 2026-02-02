@@ -331,8 +331,10 @@ class TeacherHFModelConfig(HFModelConfig):
     """Configuration for a teacher model used in distillation.
 
     Args:
+        path (Optional[str]): Path to the pre-trained teacher model.
         domain (Optional[str]): Domain or task associated with this teacher model.
     """
+    path: Optional[str] = None
     domain: Optional[str] = None
 
     def __post_init__(self):
@@ -346,35 +348,41 @@ class TeacherModelsConfig(BaseConfig):
 
     Args:
         teacher0 (TeacherModelConfig): Configuration for the first teacher model.
-        teacher1 (Optional[TeacherModelConfig]): Configuration for the second teacher model.
-        teacher2 (Optional[TeacherModelConfig]): Configuration for the third teacher model.
-        teacher3 (Optional[TeacherModelConfig]): Configuration for the fourth teacher model.
+        teacher1 (TeacherModelConfig): Configuration for the second teacher model.
+        teacher2 (TeacherModelConfig): Configuration for the third teacher model.
+        teacher3 (TeacherModelConfig): Configuration for the fourth teacher model.
         num_teachers (int): Number of teacher models specified.
     """
 
     teacher0: TeacherHFModelConfig = field(default_factory=TeacherHFModelConfig)
-    teacher1: Optional[TeacherHFModelConfig] = None
-    teacher2: Optional[TeacherHFModelConfig] = None
-    teacher3: Optional[TeacherHFModelConfig] = None
+    teacher1: TeacherHFModelConfig = field(default_factory=TeacherHFModelConfig)
+    teacher2: TeacherHFModelConfig = field(default_factory=TeacherHFModelConfig)
+    teacher3: TeacherHFModelConfig = field(default_factory=TeacherHFModelConfig)
     num_teachers: int = -1
+
+    def get_teacher_config(self, teacher_id: int, raise_error: bool = True) -> TeacherHFModelConfig:
+        teacher_config_key = f"teacher{teacher_id}"
+        if not hasattr(self, teacher_config_key):
+            if raise_error:
+                raise ValueError(f"Teacher model with id {teacher_id} does not exist.")
+            else:
+                return None
+        return getattr(self, teacher_config_key)
 
     def __post_init__(self):
         max_num_teachers = 4
-
-        # teacher configs are named like teacher0, teacher1, ...
-        pattern = r'^teacher\d+$'
-        teacher_config_keys = [k.name for k in fields(self) if re.match(pattern, k.name)]
-        num_teacher_keys = len(teacher_config_keys)
-        if num_teacher_keys != max_num_teachers:
-            raise ValueError(f"Got {teacher_config_keys=}. When adding/removing teacher model configs, please also update {max_num_teachers=} (for config validation purposes)")
+        num_teacher_configs = 0
+        while self.get_teacher_config(num_teacher_configs, raise_error=False) is not None:
+            num_teacher_configs += 1
+        if num_teacher_configs != max_num_teachers:
+            raise ValueError(f"Got {num_teacher_configs=}. When adding/removing teacher model configs, please also update {max_num_teachers=} (for config validation purposes)")
         if self.num_teachers > max_num_teachers or self.num_teachers < 1:
             raise ValueError(f"num_teachers must be between 1 and {max_num_teachers}, got {self.num_teachers}")
-        self._mutable_fields = self._mutable_fields.union({*[f"teacher{k}" for k in range(max_num_teachers)]})
-        for k in range(self.num_teachers):
-            if k < self.num_teachers and getattr(self, f"teacher{k}").path is None:
-                raise ValueError(f"teacher{k} must be specified when num_teachers is {self.num_teachers}")
-            elif k >= self.num_teachers and getattr(self, f"teacher{k}").path is not None:
-                raise ValueError(f"teacher{k} must be None when num_teachers is {self.num_teachers}")
+        for k in range(max_num_teachers):
+            if k < self.num_teachers and self.get_teacher_config(k).path is None:
+                raise ValueError(f"teacher {k} must be specified when num_teachers is {self.num_teachers}")
+            elif k >= self.num_teachers and self.get_teacher_config(k).path is not None:
+                raise ValueError(f"teacher {k} must not be specified when num_teachers is {self.num_teachers}")
 
 @dataclass
 class VeOmniActorConfig(ActorConfig):
