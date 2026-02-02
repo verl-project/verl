@@ -119,22 +119,16 @@ Last updated: 12/20/2025.
                      discrete: True  # Agent Loop 模式下必须开启离散模式
          # ref follow actor settings
 
-**Agent Loop 场景说明**：
+**Agent Loop 模式说明**：
 
-当 Rollout 运行在 `Agent Loop <../advance/agent_loop.rst>`_ 模式时，Rollout 阶段的性能数据 **必须使用离散模式** 采集。此时 Profiler 由推理引擎后端触发。
+在 `Agent Loop <../advance/agent_loop.rst>`_ 模式下，Rollout 阶段的性能数据 **必须使用离散模式** 采集，此时 Profiler 由推理引擎后端触发。
 
-1. **Rank 含义**：Rollout 配置中的 ``ranks`` 指代 **Replica Rank**（实例索引），而非全局 Rank。
-2. **推理引擎说明**：
+1. Rank 定义：Rollout 配置中的 ranks 指代 Replica Rank（推理实例索引），而非全局 Rank。
 
-   vLLM 和 SGLang 引擎均自动读取配置文件中的 Profiler 配置，无需额外设置。
+2. 推理引擎支持：当前支持vLLM和SGLang引擎，无需额外设置。具体说明如下：
 
-   - **vLLM 引擎**
-      - 自动采集 Profiler 数据，包括 ``AsyncLLM`` 的 Python 调用栈以及推理进程的性能数据。
-
-   - **SGLang 引擎**
-      - 自动读取配置文件中的配置。
-      - 注意：SGLang 当前不支持 ``contents`` 中的 ``memory`` 配置项。
-
+   - vLLM 引擎：自动采集 AsyncLLM 调度栈及推理进程性能数据。不支持设置 analysis（默认不解析，需离线解析）和 profiler_level（默认 level1）。
+   - SGLang 引擎：自动采集推理进程性能数据。不支持 contents 中的 memory 配置项。不支持设置 analysis（默认解析）和 profiler_level（默认 level0）。
 
 可视化
 ------

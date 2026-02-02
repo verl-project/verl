@@ -46,7 +46,7 @@ class TorchProfilerToolConfig(BaseConfig):
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
-        __support_contents = ["cuda", "cpu", "memory", "shapes", "stack", "profile-by-stage", "merge-profiles"]
+        __support_contents = ["cuda", "cpu", "memory", "shapes", "stack"]
         for content in self.contents:
             assert content in __support_contents, (
                 f"Profiler contents only supports {__support_contents}, but gets {content}"

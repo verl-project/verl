@@ -89,18 +89,16 @@ actor_rollout_ref:
   # ref follow actor settings
 ```
 
-**Agent Loop Scenario Description**
+**Agent Loop Mode Description**
 
-When Rollout runs in Agent Loop mode, performance data for the Rollout phase **must be collected using discrete mode**. At this time, the Profiler is triggered by the inference engine backend.
+When Rollout runs in [Agent Loop](../advance/agent_loop.rst) mode, performance data for the Rollout phase **must be collected using discrete mode**. In this case, the Profiler is triggered by the inference engine backend.
 
-1. **Rank Meaning**: `ranks` in the Rollout config refers to the **Replica Rank** (instance index), not the global rank.
-2. **Inference Engine Description**:
+1. Rank Definition: ranks in the Rollout configuration refers to Replica Rank (inference instance index), not Global Rank.
 
-   Both vLLM and SGLang engines automatically read profiler configuration from the configuration file. No additional setup is required.
+2. Inference Engine Support: Currently, vLLM and SGLang engines are supported without additional settings. Specific details are as follows:
 
-   *   **vLLM Engine**: Automatically collects profiler data including Python call stacks from `AsyncLLM` and inference operations.
-
-   *   **SGLang Engine**: Automatically uses the settings from the configuration file. Note: SGLang currently does not support `memory` in the `contents` configuration.
+   *   **vLLM Engine**: Automatically collects AsyncLLM scheduling stacks and inference process performance data.
+   *   **SGLang Engine**: Automatically collects inference process performance data. Does not support the memory option in contents.
 
 ## Visualization
 
