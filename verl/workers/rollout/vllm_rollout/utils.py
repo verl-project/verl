@@ -235,6 +235,8 @@ class vLLMColocateWorkerExtension:
         if shm is not None:
             shm.close()
             del shm
+        # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
+        self.model_runner.encoder_cache.clear()
         gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
