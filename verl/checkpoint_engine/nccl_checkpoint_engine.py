@@ -240,9 +240,6 @@ class NCCLCheckpointEngine(CheckpointEngine):
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         for name, weight in weights:
-            # model parameters are in fp32 full precsion
-            weight = weight.to(self.rollout_dtype)
-
             # fill the tensor bucket
             if offset + weight.nbytes > self.bucket_size:
                 torch.cuda.synchronize()

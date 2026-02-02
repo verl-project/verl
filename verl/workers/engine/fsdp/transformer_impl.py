@@ -664,8 +664,14 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = params
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
             per_tensor_param = (
-                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
+                (
+                    name,
+                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    if isinstance(param, DTensor)
+                    else param,
+                )
                 for name, param in params.items()
             )
         return per_tensor_param, peft_config
