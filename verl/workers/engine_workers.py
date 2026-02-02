@@ -774,6 +774,5 @@ class TeacherWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="teacher"))
     @DistProfiler.annotate(color="olive", role="acquire_teacher_knowledge")
     def acquire_teacher_knowledge(self, data: TensorDict) -> TensorDict:
-        dev_name = get_device_name()
         output = self.teacher.infer_batch(data=data)
         return output.cpu() if output is not None else None
