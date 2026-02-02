@@ -235,6 +235,7 @@ class vLLMColocateWorkerExtension:
         if shm is not None:
             shm.close()
             del shm
+        get_torch_device().synchronize()
         gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
