@@ -36,7 +36,7 @@ import zmq
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl.third_party.vllm_omni import VLLM_OMNI_SLEEP_LEVEL
-from verl.utils.device import get_device_id
+from verl.utils.device import get_device_id, is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 from verl.workers.rollout.vllm_rollout.vllm_rollout import ServerAdapter
@@ -80,6 +80,15 @@ class vLLMOmniServerAdapter(ServerAdapter):
         self.device_uuid = get_device_uuid(get_device_id())
         self.zmq_context = zmq.Context()
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+
+        self.use_shm = not is_support_ipc()
+        if self.use_shm:
+            logger.warning(
+                "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
+                "which may cause performance degradation. If you are using Ascend NPUs, please ensure that "
+                "your software and CANN toolkit versions meet the requirements for IPC support. (Ascend HDK version "
+                ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
+            )
 
     async def _execute_method(
         self,
