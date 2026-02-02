@@ -149,6 +149,7 @@ jobs:
         run: |
           ray stop --force
           CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+      # TODO 
       # vllm0.11.0 not support them, will be opened until vllm0.13.0 ok
       # - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
       #   run: |
@@ -164,72 +165,72 @@ jobs:
       #   run: |
       #     ray stop --force
       #     ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-
-  e2e_ppo_trainer_fsdp-qwen2_5vl-3b_ascend:
-    if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2-8
-    timeout-minutes: 60 # Increase this timeout value as needed
-    container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
-      options: >-
-        --shm-size 16g
-    env:
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
-      - name: Check initial pip list from image
-        run: |
-          pip list
-      - name: Checkout verl-project/verl repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: true
-      - name: Install the current repository
-        run: |
-          pip install -r requirements-npu.txt
-          pip install --no-deps -e .
-          pip install trl
-      - name: Check final pip list
-        run: |
-          pip list
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/models ~/models
-      # Geo3k
-      - name: Prepare GEO3K dataset
-        run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
-      - name: Running GEO3K VLM GRPO E2E training tests on 8 L20 GPUs with rmpad using function rm
-        run: |
-          ray stop --force
-          TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
-            MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
-            SP_SIZE=2 \
-            bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-
-      - name: Running GEO3K VLM PPO E2E training tests on 8 L20 GPUs with rmpad using function rm
-        run: |
-          ray stop --force
-          TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
-            MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
-            SP_SIZE=2 \
-            bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
-        run: |
-          ray stop --force
-          TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
-            MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
-            SP_SIZE=2 \
-            LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
-            bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+  #     TODO
+  #     vllm0.11 not support them, will be open after vllm0.13
+  # e2e_ppo_trainer_fsdp-qwen2_5vl-3b_ascend:
+  #   if: github.repository_owner == 'verl-project'
+  #   runs-on: linux-aarch64-a2-8
+  #   timeout-minutes: 60 # Increase this timeout value as needed
+  #   container:
+  #     image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+  #     options: >-
+  #       --shm-size 16g
+  #   env:
+  #     HF_ENDPOINT: "https://hf-mirror.com"
+  #     HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+  #   steps:
+  #     - name: Check npu and CANN info
+  #       run: |
+  #         cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+  #         npu-smi info
+  #     - name: Check initial pip list from image
+  #       run: |
+  #         pip list
+  #     - name: Checkout verl-project/verl repo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #         clean: true
+  #     - name: Install the current repository
+  #       run: |
+  #         pip install -r requirements-npu.txt
+  #         pip install --no-deps -e .
+  #         pip install trl
+  #     - name: Check final pip list
+  #       run: |
+  #         pip list
+  #     - name: Prepare weights
+  #       run: |
+  #         ln -s /root/.cache/models ~/models
+  #     # Geo3k
+  #     - name: Prepare GEO3K dataset
+  #       run: |
+  #         python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+  #     - name: Running GEO3K VLM GRPO E2E training tests on 8 L20 GPUs with rmpad using function rm
+  #       run: |
+  #         ray stop --force
+  #         TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+  #           MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
+  #           MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+  #           ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+  #           SP_SIZE=2 \
+  #           bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+  #     - name: Running GEO3K VLM PPO E2E training tests on 8 L20 GPUs with rmpad using function rm
+  #       run: |
+  #         ray stop --force
+  #         TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+  #           MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
+  #           MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+  #           ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+  #           SP_SIZE=2 \
+  #           bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+  #     - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
+  #       run: |
+  #         ray stop --force
+  #         TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+  #           MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
+  #           MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+  #           ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+  #           SP_SIZE=2 \
+  #           LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
+  #           bash tests/special_e2e/ppo_trainer/run_function_reward.sh
