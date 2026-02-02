@@ -1,0 +1,17 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.TeacherModelsConfig
+
+# specify the default per-component configs
+defaults:
+  # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
+  # Model config for each teacher model
+  - /distillation/teacher_model@teacher0: model
+
+
+  # load the default config, then apply the fields in the current yaml
+  # self config override anything above
+  - _self_
+
+# Number of teacher models
+# Make sure the first `num_teachers` model configs have model path specified.
+num_teachers: 1

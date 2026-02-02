@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
 from omegaconf import MISSING
@@ -38,6 +39,8 @@ __all__ = [
     "DistillationConfig" 
     "QATConfig",
     "TorchTitanActorConfig",
+    "TeacherHFModelConfig",
+    "TeacherModelsConfig",
 ]
 
 
@@ -323,6 +326,55 @@ class FSDPActorConfig(ActorConfig):
                     "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
                 )
 
+@dataclass
+class TeacherHFModelConfig(HFModelConfig):
+    """Configuration for a teacher model used in distillation.
+
+    Args:
+        domain (Optional[str]): Domain or task associated with this teacher model.
+    """
+    domain: Optional[str] = None
+
+    def __post_init__(self):
+        if self.path:
+            super().__post_init__()
+
+
+@dataclass
+class TeacherModelsConfig(BaseConfig):
+    """Configuration for multiple teacher models used in distillation.
+
+    Args:
+        teacher0 (TeacherModelConfig): Configuration for the first teacher model.
+        teacher1 (Optional[TeacherModelConfig]): Configuration for the second teacher model.
+        teacher2 (Optional[TeacherModelConfig]): Configuration for the third teacher model.
+        teacher3 (Optional[TeacherModelConfig]): Configuration for the fourth teacher model.
+        num_teachers (int): Number of teacher models specified.
+    """
+
+    teacher0: TeacherHFModelConfig = field(default_factory=TeacherHFModelConfig)
+    teacher1: Optional[TeacherHFModelConfig] = None
+    teacher2: Optional[TeacherHFModelConfig] = None
+    teacher3: Optional[TeacherHFModelConfig] = None
+    num_teachers: int = -1
+
+    def __post_init__(self):
+        max_num_teachers = 4
+
+        # teacher configs are named like teacher0, teacher1, ...
+        pattern = r'^teacher\d+$'
+        teacher_config_keys = [k.name for k in fields(self) if re.match(pattern, k.name)]
+        num_teacher_keys = len(teacher_config_keys)
+        if num_teacher_keys != max_num_teachers:
+            raise ValueError(f"Got {teacher_config_keys=}. When adding/removing teacher model configs, please also update {max_num_teachers=} (for config validation purposes)")
+        if self.num_teachers > max_num_teachers or self.num_teachers < 1:
+            raise ValueError(f"num_teachers must be between 1 and {max_num_teachers}, got {self.num_teachers}")
+        self._mutable_fields = self._mutable_fields.union({*[f"teacher{k}" for k in range(max_num_teachers)]})
+        for k in range(self.num_teachers):
+            if k < self.num_teachers and getattr(self, f"teacher{k}").path is None:
+                raise ValueError(f"teacher{k} must be specified when num_teachers is {self.num_teachers}")
+            elif k >= self.num_teachers and getattr(self, f"teacher{k}").path is not None:
+                raise ValueError(f"teacher{k} must be None when num_teachers is {self.num_teachers}")
 
 @dataclass
 class VeOmniActorConfig(ActorConfig):
@@ -390,8 +442,8 @@ class DistillationConfig(ActorConfig):
         jsd_beta (float):
             Interpolation weight for JSD loss. When beta=0, behaves like forward KL.
             When beta=1, behaves like reverse KL.
-        teacher_model (HFModelConfig):
-            Configuration for the teacher model.
+        teacher_models: TeacherModelsConfig:
+            Configuration for the teacher models.
         loss_max_clamp (float, optional):
             Maximum value to clamp distillation loss. If None, no clamping is applied.
         log_prob_min_clamp (float, optional):
@@ -407,7 +459,7 @@ class DistillationConfig(ActorConfig):
     use_policy_loss: bool = True
     distillation_loss_coef: float = 1.0
     jsd_beta: float = 0.5
-    teacher_model: HFModelConfig = field(default_factory=BaseConfig)
+    teacher_models: TeacherModelsConfig = field(default_factory=TeacherModelsConfig)
     loss_max_clamp: Optional[float] = 10.0
     log_prob_min_clamp: Optional[float] = -10.0
 
