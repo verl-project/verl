@@ -106,6 +106,11 @@ class ServerAdapter(BaseRollout):
                 ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
             )
 
+        # QAT configuration
+        # Note: qat_config may be OmegaConf DictConfig, not plain dict
+        qat_config = getattr(config, "qat", {}) or {}
+        self._qat_enabled = qat_config.get("enable", False) if hasattr(qat_config, "get") else False
+
     async def _execute_method(
         self,
         method: str,

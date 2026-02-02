@@ -406,12 +406,22 @@ class DataParallelPPOActor(BasePPOActor):
         if self.scaler is not None:
             self.scaler.step(self.actor_optimizer)
             self.scaler.update()
+            step_taken = True
         else:
             if not torch.isfinite(grad_norm):
                 print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
                 self.actor_optimizer.zero_grad()
+                step_taken = False
             else:
                 self.actor_optimizer.step()
+                step_taken = True
+
+        # Clear cached weight scales for QAT (weights changed)
+        if step_taken and getattr(self.actor_module, "_qat_fuse_enabled", False):
+            from verl.utils.qat import invalidate_all_scales
+
+            invalidate_all_scales(self.actor_module)
+
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
