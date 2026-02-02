@@ -2,7 +2,7 @@
 eval "$(conda shell.bash hook)"
 conda activate verl
 export PATH=$CONDA_PREFIX/bin:$PATH
-# export NCCL_P2P_DISABLE=1
+export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=4,5
 export DATA_PATH=$PWD/../verlData
@@ -30,11 +30,11 @@ PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
 EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-coding-${TEACHER_MODEL_CODING}/teacher-math-${TEACHER_MODEL_MATH}/loss-${DISTILLATION_LOSS_MODE}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
 
 MAX_PROMPT=256
-MAX_RESPONSE_LENGTH=512
-TRAIN_PROMPT_BSZ=128
-STUDENT_MICRO_BATCH_SIZE_PER_GPU=32
+MAX_RESPONSE_LENGTH=128
+TRAIN_PROMPT_BSZ=8
+STUDENT_MICRO_BATCH_SIZE_PER_GPU=2
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
-TEACHER_MICRO_BATCH_SIZE_PER_GPU=32
+TEACHER_MICRO_BATCH_SIZE_PER_GPU=2
 TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 
 WORLD_SIZE=2
@@ -124,7 +124,7 @@ TRAINER=(
     trainer.save_freq=200
     trainer.test_freq=5
     trainer.total_epochs=15
-    trainer.val_before_train=True
+    trainer.val_before_train=False
     trainer.use_legacy_worker_impl=disable
     trainer.resume_mode=disable
 )

@@ -39,7 +39,7 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
-from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.single_controller.ray.base import create_colocated_worker_cls, split_resource_pool
 from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation import extract_distillation_inputs
 from verl.trainer.ppo import core_algos
@@ -291,7 +291,8 @@ class RayPPOTrainer:
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = need_reference_policy(self.config) or need_distillation_policy(self.config)
+        self.use_reference_policy = need_reference_policy(self.config)
+        self.use_distillation_policy = need_distillation_policy(self.config)
         # legacy reward model implementation
         self.use_rm = need_reward_model(self.role_worker_mapping)
         self.use_reward_loop = self.config.reward_model.use_reward_loop
@@ -816,6 +817,60 @@ class RayPPOTrainer:
 
         if self.use_rm and not self.use_reward_loop:
             raise RuntimeError("Reward model worker group is not supported, please set use_reward_loop=True")
+        # create distillation policy if needed
+        if self.use_distillation_policy:
+            assert Role.TeacherPolicy in self.role_worker_mapping
+
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherPolicy)
+            num_teachers = self.config.actor_rollout_ref.distillation.teacher_models.num_teachers
+            world_size = resource_pool.world_size
+            teacher_world_size = world_size // num_teachers
+            if teacher_world_size == 0:
+                raise ValueError(
+                    f"World is not big enough for distillation teachers: {world_size} for {num_teachers} teachers"
+                )
+            sub_resource_pools = split_resource_pool(resource_pool, teacher_world_size)
+            teacher_policy_role = str(Role.TeacherPolicy)
+            for i, sub_pool in enumerate(sub_resource_pools):
+                teacher_policy_cls = RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.TeacherPolicy],
+                    config=self.config.actor_rollout_ref,
+                    teacher_id=i,
+                )
+                self.resource_pool_to_cls[sub_pool] = {f"{teacher_policy_role}_{i}": teacher_policy_cls}
+
+
+        # create a reward model if reward_fn is None
+        # for legacy discriminative reward model, we create a reward model worker here
+        # for reward loop discriminative reward model, we create a reward loop manager here
+        if not self.use_reward_loop:
+            # legacy reward model only handle reward-model based scenario
+            if self.use_rm:
+                # we create a RM here
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+                rm_cls = RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model
+                )
+                self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
+        else:
+            # reward loop handle hybrid reward scenario (rule, disrm, genrm, ...)
+            # Note: mode is always "async" since sync mode is deprecated
+            can_reward_loop_parallelize = not self.use_rm or self.config.reward_model.enable_resource_pool
+            # judge if we can asynchronously parallelize reward model with actor rollout
+            # two condition that we can parallelize reward model with actor rollout:
+            # 1. reward model is not enabled (rule-based reward can parallelize)
+            # 2. reward model is enabled but extra resource pool is enabled
+            # If we cannot parallelize, we should enable synchronous mode here, and launch a reward loop manager here
+            # else for parallelize mode, we launch a reward worker for each rollout worker (in agent loop, not here)
+            if not can_reward_loop_parallelize:
+                from verl.experimental.reward_loop import RewardLoopManager
+
+                self.config.reward_model.n_gpus_per_node = self.config.trainer.n_gpus_per_node
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+                self.reward_loop_manager = RewardLoopManager(
+                    config=self.config,
+                    rm_resource_pool=resource_pool,
+                )
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -871,6 +926,14 @@ class RayPPOTrainer:
                 # Model engine: ActorRolloutRefWorker
                 assert str(Role.ActorRolloutRef) in all_wg, f"{all_wg.keys()=}"
                 self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
+
+        if self.use_distillation_policy:
+            self.teacher_policy_wgs = dict()
+            for teacher_id in range(num_teachers):
+                teacher_role = f"{str(Role.TeacherPolicy)}_{teacher_id}"
+                teacher_wg = all_wg[teacher_role]
+                teacher_wg.init_model()
+                self.teacher_policy_wgs[teacher_role] = teacher_wg
 
         self.rm_wg = None
         # initalization of rm_wg will be deprecated in the future
@@ -1220,6 +1283,39 @@ class RayPPOTrainer:
 
         return ref_log_prob
 
+
+    def _acquire_teacher_knowledge(self, batch: DataProto) -> DataProto:
+        if self.use_legacy_worker_impl == "disable":
+            # step 1: convert dataproto to tensordict.
+            batch_td = batch.to_tensordict()
+            # step 2: convert from padding to nopadding
+            batch_td = left_right_2_no_padding(batch_td)
+            # step 3: add meta info
+            metadata = {"calculate_entropy": False, "compute_loss": False, "stage": Stage.REF_LOG_PROB}
+            tu.assign_non_tensor(batch_td, **metadata)
+            for i in range(self.config.actor_rollout_ref.distillation.teacher_models.num_teachers):
+                print("\n\n\n")
+                print("Acquiring knowledge from teacher model:", i)
+                print("\n\n\n")
+                teacher_role = f"{str(Role.TeacherPolicy)}_{i}"
+                teacher_wg = self.teacher_policy_wgs[teacher_role]
+                output = teacher_wg.acquire_teacher_knowledge(batch_td)
+
+            # gather output
+            log_probs = tu.get(output, "log_probs")
+            distillation_inputs = extract_distillation_inputs(
+                stage=Stage.REF_LOG_PROB, output=output, config=self.config.actor_rollout_ref.distillation
+            )
+            # step 4. No padding to padding
+            log_probs = no_padding_2_padding(log_probs, batch_td)
+            # step 5: rebuild a tensordict and convert to dataproto
+            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float(), **distillation_inputs})
+            ref_log_prob = DataProto.from_tensordict(ref_log_prob)
+        else:
+            raise NotImplementedError
+
+        return ref_log_prob
+
     def _compute_old_log_prob(self, batch: DataProto):
         if self.use_legacy_worker_impl == "disable":
             # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
@@ -1548,6 +1644,11 @@ class RayPPOTrainer:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                    if self.use_distillation_policy:
+                        with marked_timer(str(Role.TeacherPolicy), timing_raw, color="teal"):
+                            distillation_inputs = self._acquire_teacher_knowledge(batch)
+                            batch = batch.union(distillation_inputs)
 
                     # compute values
                     if self.use_critic:
