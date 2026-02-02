@@ -124,6 +124,8 @@ class ProfilerConfig(BaseConfig):
 
     tool: Optional[str] = MISSING
     enable: bool = False
+    all_replicas: bool = False
+    replicas: list[int] = field(default_factory=list)
     all_ranks: bool = False
     ranks: list[int] = field(default_factory=list)
     save_path: Optional[str] = MISSING
@@ -135,6 +137,8 @@ class ProfilerConfig(BaseConfig):
         return ProfilerConfig(
             tool=self.tool,
             enable=self.enable or other.enable,
+            all_replicas=self.all_replicas or other.all_replicas,
+            replicas=list(set(self.replicas or []) | set(other.replicas or [])),
             all_ranks=self.all_ranks or other.all_ranks,
             ranks=list(set(self.ranks or []) | set(other.ranks or [])),
             save_path=self.save_path,
@@ -149,6 +153,8 @@ class ProfilerConfig(BaseConfig):
         return ProfilerConfig(
             tool=self.tool,
             enable=self.enable and other.enable,
+            all_replicas=self.all_replicas and other.all_replicas,
+            replicas=list(set(self.replicas or []) & set(other.replicas or [])),
             all_ranks=self.all_ranks and other.all_ranks,
             ranks=list(set(self.ranks or []) & set(other.ranks or [])),
             save_path=self.save_path,
