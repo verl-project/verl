@@ -41,7 +41,7 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
         checkpoint_config: CheckpointConfig,
         distillation_config: Optional[DistillationConfig],
     ):
-        super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+        super().__init__(model_config, engine_config, optimizer_config, checkpoint_config, distillation_config)
 
         repatch_config = self.engine_config.get("override_transformer_config", {})
         repatch_config["use_flash_attn"] = True
