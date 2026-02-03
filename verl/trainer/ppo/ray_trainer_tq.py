@@ -65,9 +65,9 @@ from verl.utils.transferqueue_utils import create_transferqueue_client, get_tran
 from verl.workers.config import FSDPEngineConfig
 
 
-@tqbridge(put_data=True)
+@tqbridge(put_data=True, convert_type="TensorDict")
 def compute_advantage(
-    data: DataProto,
+    data: DataProto|TensorDict,
     adv_estimator: AdvantageEstimator,
     gamma: float = 1.0,
     lam: float = 1.0,
@@ -96,12 +96,19 @@ def compute_advantage(
     # Back-compatible with trainers that do not compute response mask in fit
 
     # prepare response group
+    if isinstance(data, DataProto):
+        tensor_batch = data.batch
+        non_tensor_batch = data.non_tensor_batch
+    else:
+        tensor_batch = deepcopy(data)
+        non_tensor_batch = deepcopy(data)
+
     if adv_estimator == AdvantageEstimator.GAE:
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
         advantages, returns = core_algos.compute_gae_advantage_return(
-            token_level_rewards=data.batch["token_level_rewards"],
-            values=data.batch["values"],
-            response_mask=data.batch["response_mask"],
+            token_level_rewards=tensor_batch["token_level_rewards"],
+            values=tensor_batch["values"],
+            response_mask=tensor_batch["response_mask"],
             gamma=gamma,
             lam=lam,
         )
@@ -110,7 +117,7 @@ def compute_advantage(
             # the below code will resample the full data, for TQ adaption, we will return the resampled index
             # which will be read and used for resample later in fit func
             pf_ppo_reweight_idx = core_algos.compute_pf_ppo_reweight_data_tq(
-                data.batch["token_level_rewards"],
+                tensor_batch["token_level_rewards"],
                 config.pf_ppo.get("reweight_method"),
                 config.pf_ppo.get("weight_pow"),
             )
@@ -123,36 +130,53 @@ def compute_advantage(
                 batch_size=advantages.size(0),
             )
             non_tensor_batch = {"pf_ppo_reweight_idx": pf_ppo_reweight_idx}
-            return DataProto(batch=advantages_td, non_tensor_batch=non_tensor_batch)
+            if isinstance(data, DataProto):
+                return DataProto(batch=advantages_td, non_tensor_batch=non_tensor_batch)
+            else:
+                tu.assign_non_tensor_data(advantages_td, "pf_ppo_reweight_idx", pf_ppo_reweight_idx)
+                return advantages_td
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
-        grpo_calculation_mask = data.batch["response_mask"]
+        grpo_calculation_mask = tensor_batch["response_mask"]
 
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
-            token_level_rewards=data.batch["token_level_rewards"],
+            token_level_rewards=tensor_batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
-            index=data.non_tensor_batch["uid"],
+            index=non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         )
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
         adv_kwargs = {
-            "token_level_rewards": data.batch["token_level_rewards"],
-            "response_mask": data.batch["response_mask"],
+            "token_level_rewards": tensor_batch["token_level_rewards"],
+            "response_mask": tensor_batch["response_mask"],
             "config": config,
         }
-        if "uid" in data.non_tensor_batch:  # optional
-            adv_kwargs["index"] = data.non_tensor_batch["uid"]
-        if "reward_baselines" in data.batch:  # optional
-            adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        if "uid" in non_tensor_batch:  # optional
+            adv_kwargs["index"] = non_tensor_batch["uid"]
+        if "reward_baselines" in tensor_batch:  # optional
+            adv_kwargs["reward_baselines"] = tensor_batch["reward_baselines"]
+        if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
+            # Check if sum_pi_squared is available
+            assert "sum_pi_squared" in tensor_batch, (
+                "Step-dependent optimal baseline requires sum_pi_squared from actor. "
+                "Please set actor.calculate_sum_pi_squared=True in config."
+            )
+            adv_kwargs["sum_pi_squared"] = tensor_batch["sum_pi_squared"]
+            # Get pre-computed rollout IS weights if available
+            rollout_is_weights = tensor_batch.get("rollout_is_weights", None)
+            adv_kwargs["rollout_is_weights"] = rollout_is_weights
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
 
     advantages_td = TensorDict({"advantages": advantages, "returns": returns}, batch_size=advantages.size(0))
-    return DataProto(batch=advantages_td)
+    if isinstance(data, DataProto):
+        return DataProto(batch=advantages_td)
+    else:
+        return advantages_td
 
 
 # TODO: dispatch these decorated functions from single-controller
