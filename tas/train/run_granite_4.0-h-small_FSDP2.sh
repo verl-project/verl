@@ -8,6 +8,7 @@ YOUR_RUN_NAME=r1-training_grpo-upstream
 TRAIN_PATH="$(cd "$(dirname "$0")"; pwd)"
 export TRAIN_PATH=$TRAIN_PATH
 export HF_HOME="/wekafs/0_public/huggingface"
+# export HF_HOME="/mnt/apps_proxy/tas/0_public/data/huggingface"
 export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 echo "TRAIN_PATH: $TRAIN_PATH"
 
@@ -22,7 +23,8 @@ export VLLM_ROCM_USE_AITER=0
 export USE_ROCM_AITER_ROPE_BACKEND=0
 
 # choose your model
-MODEL_PATH=ibm-granite/granite-4.0-h-small
+# MODEL_PATH="ibm-granite/granite-4.0-h-micro" # 3B parameter
+MODEL_PATH=ibm-granite/granite-4.0-h-small # 32B parameter
 # MODEL_PATH=ibm-granite/granite-4.0-h-tiny-base
 # MODEL_PATH=Qwen/Qwen2.5-0.5B-Instruct
 # MODEL_PATH=Qwen/Qwen2-7B-Instruct
@@ -47,8 +49,8 @@ ray stop --force
 HYDRA_FULL_ERROR=1 python3 -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_trainer.yaml' \
     algorithm.adv_estimator=grpo \
-    data.train_files="${TRAIN_PATH}/../data/gsm8k/train.parquet" \
-    data.val_files="${TRAIN_PATH}/../data/gsm8k/test.parquet" \
+    data.train_files="${TRAIN_PATH}/data/gsm8k/train.parquet" \
+    data.val_files="${TRAIN_PATH}/data/gsm8k/test.parquet" \
     data.train_batch_size=4 \
     data.max_prompt_length=256 \
     data.max_response_length=512 \

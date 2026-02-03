@@ -27,13 +27,6 @@ RUN pip install ray && \
 
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
-    git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git && \
-    cd Megatron-Bridge && \
-    git checkout 9577b1280eaadd60b9d7b0ce6df09ac80e87e323 && \
-    pip install -e . --no-deps
-
-WORKDIR /opt
-RUN mkdir -p /opt && cd /opt && \
     rm -rf aiter && pip uninstall -y aiter && \
     git clone https://github.com/ROCm/aiter.git && \
     cd aiter && \
@@ -83,6 +76,33 @@ RUN mkdir -p /opt && cd /opt && \
     pip install -e .
 
 RUN pip install git+https://github.com/ISEEKYAN/mbridge.git --no-deps
+
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git && \
+    cd Megatron-Bridge && \
+    git checkout 9577b1280eaadd60b9d7b0ce6df09ac80e87e323 && \
+    pip install -e . --no-deps
+
+# required by granite mamba model training
+RUN pip install https://download.pytorch.org/whl/nightly/pytorch_triton_rocm-3.4.0%2Bgitae848267-cp310-cp310-linux_x86_64.whl
+
+# required by megatron-bridge
+RUN pip install \
+  onnx==1.20.0rc1 \
+  -U nvidia-modelopt \
+  -U nvidia_resiliency_ext \
+  "datasets>=2.14.0" \
+  transformers==4.57.6 \
+  qwen-vl-utils \
+  timm \
+  "open-clip-torch>=3.2.0" \
+  flash-linear-attention \
+  megatron-energon \
+  bitstring \
+  filetype
+
+
 
 # Set the default working directory
 WORKDIR /opt
