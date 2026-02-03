@@ -14,7 +14,6 @@
 
 
 import torch
-import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
@@ -23,6 +22,7 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.utils.padding import _slice_response_from_unpad_output
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -52,45 +52,6 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         loss = -masked_sum(log_prob, response_mask) / batch_num_tokens * dp_size
 
     return loss, {}
-
-
-def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
-    """Slice response from unpad model output.
-
-    Args:
-        tensor: model output tensor of shape [bsz, 1]
-        data: TensorDict with "prompt_ids", "response_ids", "attention_mask"
-
-    Returns:
-        tensor: sliced response tensor of shape [bsz, max_response_len]
-    """
-    values = tensor.values() if tensor.is_nested else tensor
-    prompt_ids = data["prompts"]
-    response_ids = data["responses"]
-    attention_mask = data["attention_mask"]
-
-    if prompt_ids.is_nested:
-        prompt_lens = prompt_ids.offsets().diff()
-        response_lens = response_ids.offsets().diff()
-        max_response_len = response_ids.offsets().max().item()
-    else:
-        assert not attention_mask.is_nested
-        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
-        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
-        max_response_len = response_ids.shape[1]
-
-    sequence_lens = prompt_lens + response_lens
-    sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0]
-
-    response_list = []
-    for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
-        pad_size = max_response_len - resp_len
-        # left-shift model output by one token for log_probs/values
-        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
-
-    output = torch.stack(response_list, dim=0)
-    return output
 
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
