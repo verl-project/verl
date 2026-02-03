@@ -77,8 +77,9 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     """Slice response from unpad model output.
 
     Args:
-        tensor: model output tensor of shape [bsz, 1]
-        data: TensorDict with "prompt_ids", "response_ids", "attention_mask"
+        tensor: a nested tensor or a 1D tensor in shape (total_nnz,),
+            total_nnz is the total number of tokens across all sequences in the batch
+        data: TensorDict with "prompts", "responses", "attention_mask"
 
     Returns:
         tensor: sliced response tensor of shape [bsz, max_response_len]

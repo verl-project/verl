@@ -462,29 +462,6 @@ class DataProto:
             message = f"{prefix}, " + message
         print(message)
 
-    def print_summary(self, desc: str):
-        """Print a summary of the DataProto"""
-        print(f"--- start of {desc} ---")
-        if self.meta_info is not None:
-            for key, val in self.meta_info.items():
-                if isinstance(val, list):
-                    print(f"meta_info: {key}: {len(val)=}, {val[:10]=}")
-                else:
-                    print(f"meta_info: {key}: {val}")
-
-        if self.batch is not None:
-            for key, tensor in self.batch.items():
-                print(f"batch field(tensor): {key=}, tensor_size: {tensor.size()}, dtype: {tensor.dtype}")
-
-        if self.non_tensor_batch is not None:
-            for key, numpy_array in self.non_tensor_batch.items():
-                print(
-                    f"non_tensor_batch field (numpy array): {key=}, array (size: {numpy_array.shape}), "
-                    f"type: {type(numpy_array[0])}"
-                )
-
-        print(f"--- end of {desc} ---")
-
     def check_consistency(self):
         """Check the consistency of the DataProto. Mainly for batch and non_tensor_batch
         We expose this function as a public one so that user can call themselves directly

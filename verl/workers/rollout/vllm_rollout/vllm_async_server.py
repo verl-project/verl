@@ -358,7 +358,7 @@ class vLLMHttpServer:
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
-            if self.config.lora.get("fully_sharded_loras", False):
+            if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
 
