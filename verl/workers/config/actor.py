@@ -14,7 +14,7 @@
 
 import re
 from dataclasses import dataclass, field, fields
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from omegaconf import MISSING
 
@@ -335,9 +335,19 @@ class TeacherHFModelConfig(HFModelConfig):
         domain (Optional[str]): Domain or task associated with this teacher model.
     """
     path: Optional[str] = None
-    domain: Optional[str] = None
+    domain: Optional[Union[str, list[str], set[str]]] = None
 
     def __post_init__(self):
+        self._mutable_fields.add("domain")
+        if self.domain is not None:
+            if isinstance(self.domain, str):
+                self.domain = {self.domain}
+            elif isinstance(self.domain, list):
+                if len(self.domain) != len(set(self.domain)):
+                    raise ValueError(f"TeacherHFModelConfig domain list contains duplicate entries: {self.domain}")
+                self.domain = set(self.domain)
+        else:
+            self.domain = set()
         if self.path:
             super().__post_init__()
 
@@ -360,7 +370,20 @@ class TeacherModelsConfig(BaseConfig):
     teacher3: TeacherHFModelConfig = field(default_factory=TeacherHFModelConfig)
     num_teachers: int = -1
 
+    def get_teacher_config_list(self) -> dict[str, TeacherHFModelConfig]:
+        """TODO"""
+        teacher_configs = []
+        for teacher_id in range(self.num_teachers):
+            teacher_config = self.get_teacher_config(teacher_id)
+            teacher_domain = teacher_config.domain
+            if not teacher_domain and self.num_teachers != 1:
+                raise ValueError(f"Teacher model {teacher_id} must have a specified domain.")
+            teacher_configs.append(teacher_config)
+        return teacher_configs
+                
+
     def get_teacher_config(self, teacher_id: int, raise_error: bool = True) -> TeacherHFModelConfig:
+        """TODO"""
         teacher_config_key = f"teacher{teacher_id}"
         if not hasattr(self, teacher_config_key):
             if raise_error:
@@ -370,6 +393,7 @@ class TeacherModelsConfig(BaseConfig):
         return getattr(self, teacher_config_key)
 
     def __post_init__(self):
+        """TODO"""
         max_num_teachers = 4
         num_teacher_configs = 0
         while self.get_teacher_config(num_teacher_configs, raise_error=False) is not None:
@@ -378,11 +402,23 @@ class TeacherModelsConfig(BaseConfig):
             raise ValueError(f"Got {num_teacher_configs=}. When adding/removing teacher model configs, please also update {max_num_teachers=} (for config validation purposes)")
         if self.num_teachers > max_num_teachers or self.num_teachers < 1:
             raise ValueError(f"num_teachers must be between 1 and {max_num_teachers}, got {self.num_teachers}")
-        for k in range(max_num_teachers):
-            if k < self.num_teachers and self.get_teacher_config(k).path is None:
-                raise ValueError(f"teacher {k} must be specified when num_teachers is {self.num_teachers}")
-            elif k >= self.num_teachers and self.get_teacher_config(k).path is not None:
-                raise ValueError(f"teacher {k} must not be specified when num_teachers is {self.num_teachers}")
+        allow_empty_domain = self.num_teachers == 1
+        id_set = set()
+        for teacher_id in range(max_num_teachers):
+            teacher_config = self.get_teacher_config(teacher_id)
+            if teacher_id < self.num_teachers:
+                if id_set.intersection(teacher_config.domain):
+                    raise ValueError(f"teacher {teacher_id} has overlapping domain with previous teachers: {teacher_config.domain} intersects with {id_set}")
+                id_set = id_set.union(teacher_config.domain)
+                if teacher_config.path is None:
+                    raise ValueError(f"teacher {teacher_id} must be specified when num_teachers is {self.num_teachers}")
+                if len(teacher_config.domain) == 0 and not allow_empty_domain:
+                    raise ValueError(f"teacher {teacher_id} missing domain. When num_teachers > 1, all teacher models must have a specified domain.")
+            elif teacher_id >= self.num_teachers and teacher_config.path is not None:
+                raise ValueError(f"teacher {teacher_id} must not be specified when num_teachers is {self.num_teachers}")
+        if self.num_teachers == 1:
+            teacher_config = self.get_teacher_config(0)
+            teacher_config.domain = {"all"}
 
 @dataclass
 class VeOmniActorConfig(ActorConfig):
