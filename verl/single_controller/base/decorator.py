@@ -170,7 +170,7 @@ def _concat_data_proto_or_future(output: list):
         # turn the tuples in batchmeta back as lists
         for key, val in concat_batchmeta.extra_info.items():
             if isinstance(val, tuple):
-                concat_batchmeta.set_extra_info(key, list(val))
+                concat_batchmeta.extra_info[key] = list(val)
         return concat_batchmeta
     elif isinstance(o, TensorDict):
         return concat_tensordict(output)

@@ -34,7 +34,6 @@ from verl.utils import tensordict_utils as tu
 
 try:
     from transfer_queue import (
-        AsyncTransferQueueClient,
         BatchMeta,
         TransferQueueClient,
     )
@@ -58,20 +57,16 @@ is_transferqueue_enabled = os.environ.get("TRANSFER_QUEUE_ENABLE", False)
 def create_transferqueue_client(
     client_id: str,
     config,
-    sync: bool = False,
-) -> "AsyncTransferQueueClient | TransferQueueClient":
+) -> "TransferQueueClient":
     global _TRANSFER_QUEUE_CLIENT
     if _TRANSFER_QUEUE_CLIENT is None:
-        if sync:
-            _TRANSFER_QUEUE_CLIENT = TransferQueueClient(client_id, config.controller_info)
-        else:
-            _TRANSFER_QUEUE_CLIENT = AsyncTransferQueueClient(client_id, config.controller_info)
+        _TRANSFER_QUEUE_CLIENT = TransferQueueClient(client_id, config.controller_info)
         _TRANSFER_QUEUE_CLIENT.initialize_storage_manager(manager_type=config.storage_backend, config=config)
 
     return _TRANSFER_QUEUE_CLIENT
 
 
-def get_transferqueue_client() -> "AsyncTransferQueueClient | TransferQueueClient":
+def get_transferqueue_client() -> "TransferQueueClient":
     return _TRANSFER_QUEUE_CLIENT
 
 
@@ -217,7 +212,7 @@ async def _async_update_batchmeta_with_output(
     else:
         raise TypeError(f"Only support DataProto|TensorDict format of output, but got {type(output)}")
 
-    batchmeta.update_extra_info(meta_data)
+    batchmeta.extra_info.update(meta_data)
 
     # process tensordict containing data to be put into TQ. meta_info should not be saved
     if not is_empty:
@@ -227,7 +222,7 @@ async def _async_update_batchmeta_with_output(
         # turn the lists in batchmeta into tuples to avoid concating them when collecting from remote workers
         for key, val in updated_batch_meta.extra_info.items():
             if isinstance(val, list):
-                updated_batch_meta.set_extra_info(key, tuple(val))
+                updated_batch_meta.extra_info[key] = tuple(val)
         return updated_batch_meta
     else:
         return batchmeta

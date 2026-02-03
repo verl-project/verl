@@ -278,7 +278,7 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
         self.config = OmegaConf.merge(tq_config, self.config)
 
         # 4. create client
-        create_transferqueue_client(client_id="Trainer", config=self.config.transfer_queue, sync=True)
+        create_transferqueue_client(client_id="Trainer", config=self.config.transfer_queue)
         tq_client = get_transferqueue_client()
         return tq_client
 
@@ -286,7 +286,7 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
     #       default option, we can let dataloader to directly produce unpadded NestedTensor batches.
     def _compute_values(self, batch_meta: BatchMeta) -> BatchMeta:
         if self.use_legacy_worker_impl == "disable":
-            batch_meta.set_extra_info("compute_loss", False)
+            batch_meta.extra_info["compute_loss"] = False
             values_meta = self.critic_wg.infer_batch(batch_meta)
         else:
             values_meta = self.critic_wg.compute_values(batch_meta)
@@ -294,10 +294,10 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
 
     def _compute_ref_log_prob(self, batch_meta: BatchMeta) -> BatchMeta:
         if self.use_legacy_worker_impl == "disable":
-            batch_meta.set_extra_info("compute_loss", False)
-            batch_meta.set_extra_info("calculate_entropy", False)
+            batch_meta.extra_info["compute_loss"] = False
+            batch_meta.extra_info["calculate_entropy"] = False
             if self.ref_in_actor:
-                batch_meta.set_extra_info("no_lora_adapter", True)
+                batch_meta.extra_info["no_lora_adapter"] = True
 
             if self.ref_in_actor:
                 # output contains log_probs and ref_log_prob
@@ -310,8 +310,8 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
 
     def _compute_old_log_prob(self, batch_meta: BatchMeta) -> tuple[BatchMeta, Any]:
         if self.use_legacy_worker_impl == "disable":
-            batch_meta.set_extra_info("compute_loss", False)
-            batch_meta.set_extra_info("calculate_entropy", True)
+            batch_meta.extra_info["compute_loss"] = False
+            batch_meta.extra_info["calculate_entropy"] = True
             output_meta = self.actor_rollout_wg.compute_log_prob(batch_meta)
             # metrics originally is saved in tensordict as a NonTensorData
             # after tqbridge, metrics should be turned into batchmeta extra_info
@@ -323,9 +323,9 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
 
     def _update_actor(self, batch_meta: BatchMeta) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
-        batch_meta.set_extra_info("multi_turn", rollout_config.multi_turn.enable)
+        batch_meta.extra_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
-        batch_meta.set_extra_info("temperature", rollout_config.temperature)
+        batch_meta.extra_info["temperature"] = rollout_config.temperature
         # update actor
         if self.use_legacy_worker_impl == "disable":
             calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
@@ -823,8 +823,8 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
                 del repeated_batch_dict
 
                 batch_meta = self.tq_client.put(data=batch, partition_id=f"train_{self.global_steps - 1}")
-                batch_meta.set_extra_info("temperature", self.config.actor_rollout_ref.rollout.temperature)
-                batch_meta.set_extra_info("global_steps", self.global_steps)  # pass global_steps to trace
+                batch_meta.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                batch_meta.extra_info["global_steps"] = self.global_steps  # pass global_steps to trace
 
                 gen_batch_fields = self._get_gen_batch_fields(tu.get_non_tensor_keys(batch))
                 del batch
@@ -847,7 +847,7 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
 
                         with marked_timer("gen_max", timing_raw, color="purple"):
                             gen_baseline_meta = deepcopy(gen_meta)
-                            gen_baseline_meta.set_extra_info("do_sample", False)
+                            gen_baseline_meta.extra_info["do_sample"] = False
                             if not self.async_rollout_mode:
                                 gen_baseline_output_meta = self.actor_rollout_wg.generate_sequences(gen_baseline_meta)
                             else:
@@ -1343,7 +1343,7 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
 
                 compute_throughout_metrics_meta = BatchMeta(
                     samples=[],
-                    extra_info={"global_token_num": batch_meta.get_extra_info("global_token_num")},
+                    extra_info={"global_token_num": batch_meta.extra_info.get("global_token_num")},
                 )
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()

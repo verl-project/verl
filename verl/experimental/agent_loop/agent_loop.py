@@ -17,7 +17,7 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 import hydra
@@ -29,7 +29,6 @@ from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from tensordict import NonTensorData, NonTensorStack, TensorDict
-from transfer_queue import BatchMeta
 from transformers import AutoProcessor, AutoTokenizer
 
 import verl.utils.tensordict_utils as tu
@@ -49,11 +48,8 @@ from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
 )
+from verl.utils.transferqueue_utils import BatchMeta
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
-
-if TYPE_CHECKING:
-    # TODO (TQ): this fix is temporary. Remove once TransferQueue is default dependency.
-    from verl.utils.transferqueue_utils import BatchMeta
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -724,7 +720,7 @@ class AgentLoopWorker:
         keys_to_pop = []
         for key, val in data.items():
             if isinstance(val, NonTensorData):
-                batch_meta.set_extra_info(key, val.data)
+                batch_meta.extra_info[key] = val.data
                 if key not in keys_to_pop:
                     keys_to_pop.append(key)
 
@@ -1180,7 +1176,6 @@ class AgentLoopManager:
         self.tq_client = create_transferqueue_client(
             client_id=f"AgentLoopManager_{client_name}",
             config=self.config.transfer_queue,
-            sync=True,
         )
 
     def generate_sequences(self, prompts: "DataProto|BatchMeta") -> "DataProto|BatchMeta":
@@ -1230,8 +1225,8 @@ class AgentLoopManager:
             metrics = [output.extra_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
             timing = self._performance_metrics(metrics, output)
 
-            output.update_extra_info({"timing": timing, **outputs[0].get_all_extra_info()})
-            output.remove_extra_info("metrics")
+            output.extra_info.update({"timing": timing, **outputs[0].get_all_extra_info()})
+            output.extra_info.pop("metrics")
             return output
 
     def _performance_metrics(
