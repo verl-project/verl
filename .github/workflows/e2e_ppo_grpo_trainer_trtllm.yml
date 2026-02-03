@@ -116,7 +116,6 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      TRTLLM_TEST_MODEL_PATH_ROOT: "${HOME}/models"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -128,6 +127,7 @@ jobs:
           pip3 install --no-deps -e .
       - name: Run TRTLLM unit tests
         run: |
+          export TRTLLM_TEST_MODEL_PATH_ROOT="${HOME}/models"
           pytest -v -s \
             tests/workers/rollout/rollout_trtllm/test_adapter.py \
             tests/workers/rollout/rollout_trtllm/test_async_server.py
