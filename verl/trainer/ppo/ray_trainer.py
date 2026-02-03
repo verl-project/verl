@@ -740,8 +740,12 @@ class RayPPOTrainer:
         # create distillation policy if needed
         if self.use_distillation_policy:
             assert Role.TeacherPolicy in self.role_worker_mapping
-
+            from verl.workers.config import TeacherModelsConfig
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherPolicy)
+            distillation_config = self.config.actor_rollout_ref.distillation
+            teacher_models_config: TeacherModelsConfig = omega_conf_to_dataclass(distillation_config.teacher_models)
+            self.teacher_config_list = teacher_models_config.get_teacher_config_list()
+            
             num_teachers = self.config.actor_rollout_ref.distillation.teacher_models.num_teachers
             world_size = resource_pool.world_size
             teacher_world_size = world_size // num_teachers
@@ -1160,30 +1164,69 @@ class RayPPOTrainer:
         if self.use_legacy_worker_impl == "disable":
             # step 1: convert dataproto to tensordict.
             batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = left_right_2_no_padding(batch_td)
-            # step 3: add meta info
-            metadata = {"calculate_entropy": False, "compute_loss": False, "stage": Stage.ACQUIRE_TEACHER_KNOWLEDGE}
-            tu.assign_non_tensor(batch_td, **metadata)
-            for i in range(self.config.actor_rollout_ref.distillation.teacher_models.num_teachers):
+            data_source_key = self.config.data.reward_fn_key
+            data_sources = batch_td.get(data_source_key)
+            if data_sources is None:
+                raise ValueError(f"Data source key {data_source_key} not found in batch non-tensor data.")
+            data_sources = data_sources.tolist()
+            domain_batch_list = [[] for _ in range(len(self.teacher_config_list))]
+            domain_batch_idx = [[] for _ in range(len(self.teacher_config_list))]
+            for k, example_domain in enumerate(data_sources):
+                example_td = batch_td[k : k + 1]
+                for i, teacher_config in enumerate(self.teacher_config_list):
+                    if example_domain in teacher_config.domain or teacher_config.domain == {"all"}:
+                        domain_batch_list[i].append(example_td)
+                        domain_batch_idx[i].append(k)
+                        break
+                    if i == len(self.teacher_config_list) - 1:
+                        raise ValueError(f"Example domain {example_domain} not found in any teacher config domain.")
+            domain_batch_td_list = [tu.concat_tensordict(domain_batch_ls) if domain_batch_ls else [] for domain_batch_ls in domain_batch_list]
+            output_nested_tensors_ls = dict()
+            for i, domain_batch_td in enumerate(domain_batch_td_list):
+                if len(domain_batch_td) == 0:
+                    continue
+                # step 2: convert from padding to nopadding
+                domain_batch_td = left_right_2_no_padding(domain_batch_td)
+                # step 3: add meta info
+                metadata = {"calculate_entropy": False, "compute_loss": False, "stage": Stage.ACQUIRE_TEACHER_KNOWLEDGE}
+                tu.assign_non_tensor(domain_batch_td, **metadata)
                 teacher_role = f"{str(Role.TeacherPolicy)}_{i}"
                 teacher_wg = self.teacher_policy_wgs[teacher_role]
-                output = teacher_wg.acquire_teacher_knowledge(batch_td)
+                output = teacher_wg.acquire_teacher_knowledge(domain_batch_td)
 
-            # gather output
-            log_probs = tu.get(output, "log_probs")
-            distillation_inputs = extract_distillation_inputs(
-                stage=Stage.ACQUIRE_TEACHER_KNOWLEDGE, output=output, config=self.config.actor_rollout_ref.distillation
-            )
-            # step 4. No padding to padding
-            log_probs = no_padding_2_padding(log_probs, batch_td)
+                # gather output
+                if not output_nested_tensors_ls:
+                    output_nested_tensors_ls = {key: [None] * len(batch_td) for key in distillation_inputs}
+                distillation_inputs = extract_distillation_inputs(
+                    stage=Stage.ACQUIRE_TEACHER_KNOWLEDGE, output=output, config=self.config.actor_rollout_ref.distillation
+                )
+
+                for key, distillation_input_nested in distillation_inputs.items():
+                    distillation_input_ls = distillation_input_nested.values().split_with_sizes(tuple(distillation_input_nested.offsets().diff()))
+                    for k, distillation_input in zip(domain_batch_idx[i], distillation_input_ls, strict=True):
+                        output_nested_tensors_ls[key][k] = distillation_input                
+            
+            batch_td_nested = left_right_2_no_padding(batch_td)
+            pre_split_offsets = batch_td_nested['input_ids'].offsets()
+            output_nested_tensors = dict()
+            for key, nested_tensor_ls in output_nested_tensors_ls.items():
+                nested_tensor = torch.nested.as_nested_tensor(nested_tensor_ls, layout=torch.jagged)
+                nested_tensor_offsets = nested_tensor.offsets()
+                output_nested_tensors[key] = nested_tensor
+                if not nested_tensor_offsets.equal(pre_split_offsets):
+                    raise ValueError(
+                        f"Distillation input {key} offsets do not match original batch offsets."
+                        f" Expected {pre_split_offsets}, got {nested_tensor_offsets}."
+                    )
+
+
             # step 5: rebuild a tensordict and convert to dataproto
-            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float(), **distillation_inputs})
-            ref_log_prob = DataProto.from_tensordict(ref_log_prob)
+            distillation_td = tu.get_tensordict(output_nested_tensors)
+            output_proto = DataProto.from_tensordict(distillation_td)
         else:
             raise NotImplementedError
 
-        return ref_log_prob
+        return output_proto
 
     def _compute_old_log_prob(self, batch: DataProto):
         if self.use_legacy_worker_impl == "disable":
