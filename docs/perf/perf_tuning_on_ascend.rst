@@ -13,18 +13,18 @@ Author:  `Xiaobo Hu <https: //github.com/tardis-key>`_, `Haozhe Li <https: //git
 常用融合算子列表
 **********************************
 
-融合算子的优化原理为，通过数学意义上的等价替换，将多个算子融为一个算子的计算，减少冗余计算，同时减少下发次数，从而提高性能。几个典型的NPU融合算子列举如下，目前均已在 npu_patch.py 中对Qwen2、Qwen3系列模型完成替换。
+融合算子的优化原理为，通过数学意义上的等价替换，将多个算子融为一个算子的计算，减少冗余计算，同时减少下发次数，从而提高性能。几个典型的NPU融合算子列举如下，目前均已在 npu_patch.py 中对 Qwen2、Qwen3 系列模型完成替换。
 
 当前verl中使用的全量融合算子请查阅 `npu_patch.py <https: //github.com/verl-project/verl/blob/main/verl/models/transformers/npu_patch.py>`_ 
 
 Matrix Computation-Communication operator fusion (MC2) 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-MC2是CANN中一系列计算通信融合算子的统称，这些算子将原本串行的通信和计算操作融合在一起，通过内部的切分和流水线并行执行来优化性能。在 vllm-ascend 中，可以通过指定环境变量 ``VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE=1``，在前向计算的 ``RowParallelLinear`` 中使能 ``torch_npu.npu_mm_all_reduce_base`` ，将分离的 ``mat mul`` 和 ``allreduce`` 合并为一个融合算子。
+MC2 是 CANN 中一系列计算通信融合算子的统称，这些算子将原本串行的通信和计算操作融合在一起，通过内部的切分和流水线并行执行来优化性能。在 vllm-ascend 中，可以通过指定环境变量 ``VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE=1``，在前向计算的 ``RowParallelLinear`` 中使能 ``torch_npu.npu_mm_all_reduce_base`` ，将分离的 ``matmul`` 和 ``allreduce`` 合并为一个融合算子。
 
 `RotaryMul&RotaryMulGrad <https: //www.hiascend.com/document/detail/zh/Pytorch/730/ptmoddevg/trainingmigrguide/performance_tuning_0030.html>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-torch_npu接口:  ``torch_npu.npu_rotary_mul(x, r1, r2)``
+torch_npu 接口:  ``torch_npu.npu_rotary_mul(x, r1, r2)``
 
 参数说明: 
 
@@ -37,7 +37,7 @@ torch_npu接口:  ``torch_npu.npu_rotary_mul(x, r1, r2)``
 `RmsNorm&RmsNormGrad <https: //www.hiascend.com/document/detail/zh/Pytorch/730/ptmoddevg/trainingmigrguide/performance_tuning_0031.html>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-torch_npu接口:  ``torch_npu.npu_rms_norm(self, gamma, epsilon=1e-06) -> (Tensor, Tensor)`` 
+torch_npu 接口:  ``torch_npu.npu_rms_norm(self, gamma, epsilon=1e-06) -> (Tensor, Tensor)`` 
 参数说明: 
 
 - self: Tensor 类型，shape 支持 1-8 维。
@@ -48,14 +48,14 @@ torch_npu接口:  ``torch_npu.npu_rms_norm(self, gamma, epsilon=1e-06) -> (Tenso
 
 输出说明: 
 
-- 第1个输出为 Tensor，计算公式的最终输出y。
+- 第 1 个输出为 Tensor，计算公式的最终输出y。
 
-- 第2个输出为 Tensor， rms_norm 的中间结果 rstd ，用于反向计算。
+- 第 2 个输出为 Tensor， rms_norm 的中间结果 rstd ，用于反向计算。
 
 `Swiglu <https: //www.hiascend.com/document/detail/zh/Pytorch/730/ptmoddevg/trainingmigrguide/performance_tuning_0035.html>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-torch_npu接口:  ``torch_npu.npu_swiglu(Tensor self, int dim=-1) -> (Tensor)`` 
+torch_npu 接口:  ``torch_npu.npu_swiglu(Tensor self, int dim=-1) -> (Tensor)`` 
 
 参数说明: 
 
@@ -127,7 +127,7 @@ Megatron 的融合算子集成在 MindSpeed 中，需要添加特定参数开启
 `算子下发 <https: //www.hiascend.com/document/detail/zh/Pytorch/730/comref/Envvariables/docs/zh/environment_variable_reference/TASK_QUEUE_ENABLE.md>`_
 ************************************************************************************************************************************************************************************************************
 
-通过 ``TASK_QUEUE_ENABLE`` 可配置 task_queue 算子下发队列优化等级，默认为 Level1 优化。
+通过 ``TASK_QUEUE_ENABLE`` 可配置 task_queue 算子下发队列优化等级，默认为 Level 1 优化。
 
 .. image :: https://github.com/ZLiao097/verl-data/blob/perf_tuning/images/ascend/perf_tuning_task_queue.png
     :width: 500px
@@ -142,20 +142,20 @@ Level 2 : \ 基于 Level 1 的优化进一步平衡了一、二级流水的任�
 ************************************************************************************************************************************************************************************************************
 使用环境变量 ``HCCL_OP_EXPANSION_MODE=AIV`` 用于配置通信算法的编排展开位置，支持如下取值: 
 
-- **AI_CPU:** 代表通信算法的编排展开位置在Device侧的AI CPU，Device侧根据硬件型号自动选择相应的调度器。
+- **AI_CPU:** 代表通信算法的编排展开位置在 Device 侧的 AI CPU，Device 侧根据硬件型号自动选择相应的调度器。
 
-- **AIV:** 代表通信算法的编排展开位置在Device侧的Vector Core，执行也在Vector Core。
+- **AIV:** 代表通信算法的编排展开位置在 Device 侧的 Vector Core，执行也在 Vector Core。
 
-- **HOST:** 代表通信算法的编排展开位置为Host侧CPU，Device侧根据硬件型号自动选择相应的调度器。
+- **HOST:** 代表通信算法的编排展开位置为 Host 侧 CPU，Device 侧根据硬件型号自动选择相应的调度器。
 
-- **HOST_TS:** 代表通信算法的编排展开位置为Host侧CPU，Host向Device的Task Scheduler下发任务，Device的Task Scheduler进行任务调度执行。
+- **HOST_TS:** 代表通信算法的编排展开位置为 Host 侧 CPU，Host 向 Device 的 Task Scheduler 下发任务，Device 的 Task Scheduler 进行任务调度执行。
 
 推理阶段调优
 --------------------------
 
 Chunked Prefill in V1
 ***************************
-Vllm 当前版本已默认启用vllm V1，使用 ``actor_rollout_ref.rollout.enable_chunked_prefill=True`` 来启用 Chunked Prefill ，原理参考 `vllm 官方文档 <https://docs.vllm.ai/en/v0.4.2/models/performance.html>`_
+VLLM 当前版本已默认启用 VLLM V1，使用 ``actor_rollout_ref.rollout.enable_chunked_prefill=True`` 来启用 Chunked Prefill ，原理参考 `VLLM 官方文档 <https://docs.vllm.ai/en/v0.4.2/models/performance.html>`_
 
 Graph Mode 
 **********************************
@@ -179,22 +179,22 @@ FSDP
    "2D device_mesh+ HYBRID_SHARD_ZERO2","/","HSDP的Zero2版本"
    NO_SHARD,/,DDP
 
-FSDP不支持Zero-1， VeRL中会根据卡数和 ``actor_rollout_ref.actor.fsdp_config.fsdp_size``  来决定 device mesh 的取值，默认使用 Zero-3 进行切分；如果模型较小（建议小于7B时），可以通过控制参数 ``actor_rollout_ref.actor.fsdp_config.reshard_after_forward`` 为 ``True`` 在FSDP/FSDP2上使用Zero-2来优化性能.
+FSDP 不支持 Zero-1， VeRL中会根据卡数和 ``actor_rollout_ref.actor.fsdp_config.fsdp_size``  来决定 device mesh 的取值，默认使用 Zero-3 进行切分；如果模型较小（建议小于 7B 时），可以通过控制参数 ``actor_rollout_ref.actor.fsdp_config.reshard_after_forward`` 为 ``True`` 在 FSDP/FSDP2 上使用 Zero-2 来优化性能.
 
 Megatron
 **********************************
 
-在模型较大时，使用megatron作为训练后端可以更灵活的进行性能调优。
+在模型较大时，使用 Megatron 作为训练后端可以更灵活的进行性能调优。
 
-当DP并行显存无法容纳模型时，优先开启TP来切分模型权重，如果模型仍然过大，再开启PP来进一步切分；如果序列过长导致激活太大，则可以开启CP和SP来进行优化；在MoE模型中则可以额外开启EP来控制对专家的切分，如果专家过小，为了避免将权重切的果味细碎，则可以开启ETP来避免MoE部分的TP切分，而将多个完整的专家分布到DP和TP上。
+当 DP 并行显存无法容纳模型时，优先开启 TP 来切分模型权重，如果模型仍然过大，再开启 PP 来进一步切分；如果序列过长导致激活太大，则可以开启 CP 和 SP 来进行优化；在 MoE 模型中则可以额外开启 EP 来控制对专家的切分，如果专家过小，为了避免将权重切的果味细碎，则可以开启 ETP 来避免 MoE 部分的 TP 切分，而将多个完整的专家分布到 DP 和 TP 上。
 
-TP、PP、EP、ETP和megatron使用方式一样，CP和SP在NPU上开启方式: 
+TP、PP、EP、ETP和 Megatron 使用方式一样，CP 和 SP 在 NPU 上开启方式: 
 
-- SP: ``Sequence Parallel`` 在 Tensor Parallel的基础上进一步提高计算效率，是一种通过将输入数据的序列维度进行切分的并行计算方式。在 NPU 上通过 MindSpeed 来调用SP: ``actor_rollout_ref.actor.megatron.override_transformer_config.sequence_parallel=True``
+- SP: ``Sequence Parallel`` 在 Tensor Parallel 的基础上进一步提高计算效率，是一种通过将输入数据的序列维度进行切分的并行计算方式。在 NPU 上通过 MindSpeed 来调用SP: ``actor_rollout_ref.actor.megatron.override_transformer_config.sequence_parallel=True``
 
-- CP: ``Context Parallel`` 是一种在多个GPU上并行处理神经网络激活值的方法，他通过在序列维度上对输入张量进行划分来实现。在 NPU 上通过 MindSpeed 来调用 CP （两个参数必须同时添加）: \ ``actor_rollout_ref.actor.megatron.context_parallel_size`` \ ``actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size``
+- CP: ``Context Parallel`` 是一种在多个 GPU/NPU 上并行处理神经网络激活值的方法，他通过在序列维度上对输入张量进行划分来实现。在 NPU 上通过 MindSpeed 来调用 CP （两个参数必须同时添加）: \ ``actor_rollout_ref.actor.megatron.context_parallel_size`` \ ``actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size``
 
 Megatron-distributed optimizer
 **********************************
 
-在面对较大尺寸模型时，通常需要将优化器分片到一个DP域内的每张卡上来节省显存。Megatron 后端下在 NPU 上开启分布式优化器: \ ``+actor_rollout_ref.actor.megatron.override_transformer_config.use_distributed_optimizer=True``
+在面对较大尺寸模型时，通常需要将优化器分片到一个 DP 域内的每张卡上来节省显存。Megatron 后端下在 NPU 上开启分布式优化器: \ ``+actor_rollout_ref.actor.megatron.override_transformer_config.use_distributed_optimizer=True``
