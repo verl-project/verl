@@ -37,7 +37,7 @@ MODEL_PATH=ibm-granite/granite-4.0-h-small
 # python3 ../../examples/data_preprocess/gsm8k.py --local_save_dir data/gsm8k
 # python3 -c "import transformers; transformers.pipeline('text-generation', model='$MODEL_PATH')"
 
-export GPUS_PER_NODE=1
+export GPUS_PER_NODE=8
 export ENGINE=vllm #sglang
 
 ray stop --force
