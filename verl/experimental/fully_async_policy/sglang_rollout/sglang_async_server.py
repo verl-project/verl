@@ -89,7 +89,8 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         if video_data is not None and len(video_data) > 0:
             logger.warning(
                 f"Request {request_id} received video_data but it is not used. "
-                "This is to keep consistency with the implementation in verl/workers/rollout/sglang_rollout/async_sglang_server.py. "
+                "This is to keep consistency with the implementation in "
+                "verl/workers/rollout/sglang_rollout/async_sglang_server.py. "
                 "Video data will be ignored."
             )
 
