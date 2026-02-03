@@ -2,9 +2,9 @@
 eval "$(conda shell.bash hook)"
 conda activate verl
 export PATH=$CONDA_PREFIX/bin:$PATH
-export NCCL_P2P_DISABLE=1
+# export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=6,7,8,9
+export CUDA_VISIBLE_DEVICES=6,7
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
 export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
@@ -18,7 +18,7 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
 # TEACHER_MODEL=Qwen2.5-7B-Instruct
-TEACHER_MODEL=Qwen2.5-Coder-7B-Instruct
+TEACHER_MODEL=Qwen2.5-Coder-1.5B-Instruct
 DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="forward_kl_topk"
 
@@ -36,8 +36,9 @@ STUDENT_MICRO_BATCH_SIZE_PER_GPU=1
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 TEACHER_MICRO_BATCH_SIZE_PER_GPU=1
 TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
+USE_DYNAMIC_BSZ=False
 
-WORLD_SIZE=4
+WORLD_SIZE=2
 SP_SIZE=1
 
 ############################ Paths ############################
@@ -75,7 +76,7 @@ DISTILLATION=(
     actor_rollout_ref.distillation.use_policy_loss=False
     actor_rollout_ref.distillation.loss_max_clamp=$DISTILLATION_LOSS_MAX_CLAMP
     actor_rollout_ref.distillation.log_prob_min_clamp=$DISTILLATION_LOG_PROB_MIN_CLAMP
-    actor_rollout_ref.distillation.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.distillation.log_prob_use_dynamic_bsz=$USE_DYNAMIC_BSZ
     actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu=$TEACHER_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.distillation.log_prob_max_token_len_per_gpu=$TEACHER_MAX_TOKEN_LEN_PER_GPU
     actor_rollout_ref.distillation.fsdp_config.param_offload=True
@@ -89,7 +90,7 @@ ACTOR=(
     actor_rollout_ref.actor.ppo_mini_batch_size=$TRAIN_PROMPT_BSZ
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
-    actor_rollout_ref.actor.use_dynamic_bsz=True
+    actor_rollout_ref.actor.use_dynamic_bsz=$USE_DYNAMIC_BSZ
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP_SIZE
@@ -98,7 +99,7 @@ ACTOR=(
 ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$STUDENT_MAX_TOKEN_LEN_PER_GPU
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=$USE_DYNAMIC_BSZ
     actor_rollout_ref.rollout.tensor_model_parallel_size=1
     actor_rollout_ref.rollout.name=$ROLLOUT_NAME
     actor_rollout_ref.rollout.gpu_memory_utilization=0.3
@@ -122,6 +123,7 @@ TRAINER=(
     trainer.val_before_train=True
     trainer.use_legacy_worker_impl=disable
     trainer.resume_mode=disable
+    trainer.log_val_generations=5
 )
 
 
