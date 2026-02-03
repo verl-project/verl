@@ -641,7 +641,7 @@ class RayPPOTrainer:
             else:
                 reward_tensor = test_batch.batch["rm_scores"]
                 reward_extra_keys = test_batch.meta_info.get("reward_extra_keys", [])
-                reward_extra_info = {key: test_batch.batch[key] for key in reward_extra_keys}
+                reward_extra_info = {key: test_batch.non_tensor_batch[key] for key in reward_extra_keys}
 
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
