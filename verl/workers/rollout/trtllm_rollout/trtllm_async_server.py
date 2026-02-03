@@ -110,15 +110,23 @@ class TRTLLMHttpServer:
 
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
-        from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig
+        from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig, SchedulerConfig, CapacitySchedulerPolicy
         from tensorrt_llm.serve import OpenAIServer
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
         kv_cache_config = KvCacheConfig(
             enable_block_reuse=True,
             free_gpu_memory_fraction=self.config.gpu_memory_utilization,
+            host_cache_size=256*1024*1024*1024,  # 256 GB
         )
-
+        cuda_graph_config = CudaGraphConfig(
+            enable_padding=True,
+            batch_sizes=self.config.cudagraph_capture_sizes,
+            max_batch_size=0 if self.config.cudagraph_capture_sizes else self.config.max_num_seqs,
+        )
+        scheduler_config = SchedulerConfig(
+            capacity_scheduler_policy=CapacitySchedulerPolicy.MAX_UTILIZATION,
+        )
         per_worker_gpu_share = 1.0 / self.max_colocate_count
 
         llm_kwargs = {
@@ -127,6 +135,8 @@ class TRTLLMHttpServer:
             "orchestrator_type": "ray",
             "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
             "kv_cache_config": kv_cache_config,
+            "cuda_graph_config": cuda_graph_config,
+            "scheduler_config": scheduler_config,
             "max_seq_len": self.config.max_model_len,
             "max_batch_size": self.config.max_num_seqs,
             "max_num_tokens": self.config.max_num_batched_tokens,
