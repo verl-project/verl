@@ -14,6 +14,7 @@
 
 import logging
 import os
+from typing import Optional
 
 try:
     from mindspeed.megatron_adaptor import repatch
@@ -21,7 +22,7 @@ except ImportError:
     repatch = None
 
 from verl.trainer.config import CheckpointConfig
-from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
+from verl.workers.config import DistillationConfig, HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
 from ..base import EngineRegistry
 from ..megatron import MegatronEngineWithLMHead
@@ -38,6 +39,7 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
         engine_config: McoreEngineConfig,
         optimizer_config: McoreOptimizerConfig,
         checkpoint_config: CheckpointConfig,
+        distillation_config: Optional[DistillationConfig],
     ):
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
 
