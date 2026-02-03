@@ -344,13 +344,13 @@ class vLLMHttpServer:
 
         # update lora-related args
         lora_rank = self.model_config.lora.get("rank", 0)
-        megatron_lora = True
-        merge_lora = self.model_config.lora.get("merge", False)
-        if merge_lora:
-            lora_rank = 0
         if lora_rank <= 0:
-            megatron_lora = False
-            lora_rank = self.model_config.lora_rank if not merge_lora else 0
+            lora_rank = (
+                self.model_config.lora_rank
+            )  # FIXME: fallback to lora_rank for now, we should unify lora settings.
+
+        if self.model_config.lora.get("merge", False):
+            lora_rank = 0
 
         if lora_rank > 0:
             lora_args = {
@@ -358,7 +358,7 @@ class vLLMHttpServer:
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
-            if megatron_lora:
+            if self.config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
 
