@@ -158,6 +158,7 @@ def compute_advantage(
             adv_kwargs["index"] = non_tensor_batch["uid"]
         if "reward_baselines" in tensor_batch:  # optional
             adv_kwargs["reward_baselines"] = tensor_batch["reward_baselines"]
+        # Add sum_pi_squared for Optimal Token Baseline
         if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
             # Check if sum_pi_squared is available
             assert "sum_pi_squared" in tensor_batch, (
@@ -763,6 +764,7 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
         self.async_rollout_manager = AgentLoopManager(
             config=self.config,
             worker_group=self.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
             rm_resource_pool=rm_resource_pool,
         )
 
