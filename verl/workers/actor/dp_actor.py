@@ -37,6 +37,7 @@ from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_b
 from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.precision_debugger import precision_start, precision_stop
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
 
@@ -546,6 +547,8 @@ class DataParallelPPOActor(BasePPOActor):
             "actor/pg_loss": 0.0,
             "actor/kl_loss": 0.0,
         }
+        precision_cfg = getattr(self, "precision_debugger_cfg", None)
+        global_step = data.meta_info.get("global_steps", None)
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
@@ -578,9 +581,11 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_scale_factor = 1 / self.gradient_accumulation
 
                     # all return: (bsz, response_length)
+                    handle = precision_start(precision_cfg, "train_fwd", global_step, self.actor_module)
                     outputs = self._forward_micro_batch(
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                     )
+                    precision_stop(handle)
                     log_prob = outputs["log_probs"]
                     entropy = outputs["entropys"] if calculate_entropy else None
 
@@ -654,15 +659,19 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * loss_scale_factor
                     else:
                         loss = policy_loss * loss_scale_factor
+                    handle = precision_start(precision_cfg, "train_bwd", global_step, self.actor_module)
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
+                    precision_stop(handle)
 
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
+                handle = precision_start(precision_cfg, "update_actor", global_step, self.actor_module)
                 grad_norm = self._optimizer_step()
+                precision_stop(handle)
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()

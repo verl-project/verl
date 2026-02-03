@@ -237,6 +237,14 @@ global_profiler:
       # devices, record_context etc.
       kw_args: {}
 
+precision_debugger:
+  enable: False
+  config_path: null
+  data_dir: "outputs/precision_debug"
+  steps: null
+  stages: ["rollout", "train_fwd", "train_bwd", "update_actor", "ref_model"]
+  fail_open: True
+
 # configs for TransferQueue
 transfer_queue:
   # Whether to enable transfer queue

@@ -54,6 +54,7 @@ from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import broadcast_dict_tensor
+from verl.utils.precision_debugger import precision_start, precision_stop
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import MtpConfig
 
@@ -768,7 +769,9 @@ class MegatronPPOActor(BasePPOActor):
 
         """
         metrics = {}
+        precision_cfg = getattr(self, "precision_debugger_cfg", None)
         for data in dataloader:
+            global_step = data.meta_info.get("global_steps", None)
             if self.config.router_replay.mode in ["R2", "R3"]:
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
             self.actor_optimizer.zero_grad()
@@ -785,6 +788,7 @@ class MegatronPPOActor(BasePPOActor):
             max_token_len = None
             if self.config.use_dynamic_bsz:
                 max_token_len = self.config.ppo_max_token_len_per_gpu * self.config.megatron.context_parallel_size
+            handle = precision_start(precision_cfg, "train_fwd", global_step, self.actor_module)
             metric_micro_batch = self.forward_backward_batch(
                 data,
                 calculate_entropy=calculate_entropy,
@@ -793,6 +797,7 @@ class MegatronPPOActor(BasePPOActor):
                 max_token_len=max_token_len,
                 mini_batch_size=self.config.ppo_mini_batch_size,
             )
+            precision_stop(handle)
 
             mtp_losses = metric_micro_batch.get("mtp_losses", None)
             if mtp_losses is not None:
@@ -805,7 +810,11 @@ class MegatronPPOActor(BasePPOActor):
                 # Note that o[0] is metrics, o[1] is entropy, o[2] is response_mask
                 append_to_dict(metrics, metric[0])  # append the metric from this micro-batch to global metrics.
 
+            handle_bwd = precision_start(precision_cfg, "train_bwd", global_step, self.actor_module)
+            handle_update = precision_start(precision_cfg, "update_actor", global_step, self.actor_module)
             update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
+            precision_stop(handle_bwd)
+            precision_stop(handle_update)
             data = {"actor/grad_norm": grad_norm}
             append_to_dict(metrics, data)
 

@@ -301,6 +301,27 @@ global_profiler:
       # devices, record_context etc.
       kw_args: {}
 
+# precision debugger configs
+precision_debugger:
+
+  # Whether to enable precision debugger
+  enable: False
+
+  # Path to msprobe config.json
+  config_path: null
+
+  # Dump root directory
+  data_dir: "outputs/precision_debug"
+
+  # Steps to collect, null means all
+  steps: null
+
+  # Stages to collect
+  stages: ["rollout", "train_fwd", "train_bwd", "update_actor", "ref_model"]
+
+  # Fail open on errors
+  fail_open: True
+
 # configs for TransferQueue
 transfer_queue:
 

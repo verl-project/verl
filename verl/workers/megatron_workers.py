@@ -64,6 +64,7 @@ from verl.utils.megatron_utils import (
 )
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
+from verl.utils.precision_debugger import precision_start, precision_stop
 from verl.utils.profiler import (
     DistProfiler,
     DistProfilerExtension,
@@ -253,6 +254,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
         self.config = config
+        self.precision_debugger_cfg = config.get("precision_debugger", None)
         if repatch is not None:
             # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
             repatch(self.config.actor.megatron.get("override_transformer_config", {}))
@@ -612,6 +614,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 actor_optimizer=self.actor_optimizer,
                 mtp_config=self.config.model.mtp if self.config.model.mtp.enable else None,
             )
+            self.actor.precision_debugger_cfg = self.precision_debugger_cfg
             print(f"routing replay layers: {len(RouterReplay.router_instances)}")
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
 
@@ -808,8 +811,12 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             loop.run_until_complete(self.rollout_mode())
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
+        global_step = prompts.meta_info.get("global_steps", None)
+        model_for_debug = getattr(self, "actor_module", None)
+        handle = precision_start(self.precision_debugger_cfg, "rollout", global_step, model_for_debug)
         with simple_timer("generate_sequences", timing_generate):
             output = self.rollout.generate_sequences(prompts=prompts)
+        precision_stop(handle)
 
         if self._is_actor:
             loop.run_until_complete(self.trainer_mode())
@@ -851,9 +858,13 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        global_step = data.meta_info.get("global_steps", None)
+        model_for_debug = getattr(self, "ref_module", None) or getattr(self, "actor_module", None)
+        handle = precision_start(self.precision_debugger_cfg, "ref_model", global_step, model_for_debug)
         output, _, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
         output = DataProto.from_dict(tensors={"ref_log_prob": output})
         output = output.to("cpu")
+        precision_stop(handle)
         if self._ref_is_offload_param:
             offload_megatron_model_to_cpu(self.ref_module)
             log_gpu_memory_usage("After offload ref params and grad during compute_ref_log_prob", logger=logger)
