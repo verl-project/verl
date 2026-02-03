@@ -61,6 +61,6 @@ except ImportError:
 try:
     from .mooncake_checkpoint_engine import MooncakeCheckpointEngine
 
-    __all__ += ["MoonCakeCheckpointEngine"]
+    __all__ += ["MooncakeCheckpointEngine"]
 except ImportError:
     MooncakeCheckpointEngine = None
