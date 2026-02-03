@@ -86,6 +86,13 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         return_logprob = True
         from sglang.srt.managers.io_struct import GenerateReqInput
 
+        if video_data is not None and len(video_data) > 0:
+            logger.warning(
+                f"Request {request_id} received video_data but it is not used. "
+                "This is to keep consistency with the implementation in verl/workers/rollout/sglang_rollout/async_sglang_server.py. "
+                "Video data will be ignored."
+            )
+
         request = GenerateReqInput(
             rid=request_id,
             input_ids=prompt_ids,
@@ -95,6 +102,7 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
             # TODO: support video input for sglang
             # video_data=video_data,
         )
+
         generator = self.tokenizer_manager.generate_request(request, None)
         async for output in generator:
             self.req_output[request_id] = output
