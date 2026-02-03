@@ -50,13 +50,14 @@ class RewardLoopWorker:
         -> rm is not enabled: use default rule-based reward function
         -> rm is disrm: compute reward score using disrm
         -> rm is genrm: raise error (user-costomized reward func must be provided)
-
-    Args:
-        config: DictConfig, the config for reward loop worker.
-        reward_router_address: str, the address of reward router.
     """
 
     def __init__(self, config: DictConfig, reward_router_address: str = None):
+        """
+        Args:
+            config: DictConfig, the config for reward loop worker.
+            reward_router_address: str, the address of reward router.
+        """
         self.config = config
         self.reward_router_address = reward_router_address
         self._init_reward_fn()

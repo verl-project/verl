@@ -27,7 +27,6 @@ from verl.experimental.agent_loop.agent_loop import get_trajectory_info
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
-from verl.trainer.ppo.reward import compute_reward, load_reward_manager
 from verl.utils import hf_tokenizer
 
 
@@ -77,10 +76,6 @@ def test_single_turn(init_config):
     )
 
     agent_loop_manager = init_agent_loop_manager(init_config)
-    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    reward_fn = load_reward_manager(
-        init_config, tokenizer, num_examine=0, **init_config.reward_model.get("reward_kwargs", {})
-    )
 
     raw_prompts = [
         [
@@ -115,7 +110,9 @@ def test_single_turn(init_config):
 
     # check compute score
     assert result.batch["rm_scores"].shape == result.batch["responses"].shape
-    reward_tensor, reward_extra_info = compute_reward(result, reward_fn)
+    reward_tensor = result.batch["rm_scores"]
+    reward_extra_keys = result.meta_info.get("reward_extra_keys", [])
+    reward_extra_info = {key: result.non_tensor_batch[key] for key in reward_extra_keys}
     assert reward_tensor.shape == result.batch["responses"].shape
     assert "acc" in reward_extra_info, f"reward_extra_info {reward_extra_info} should contain 'acc'"
     assert reward_extra_info["acc"].shape == (len(result),), f"invalid acc: {reward_extra_info['acc']}"
