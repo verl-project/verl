@@ -43,7 +43,7 @@ FSDP Backend Usage Guide
    If provided, loads existing adapter instead of creating new one. Enables multi-stage training from previously saved adapters.
    Directory need contain `adapter_model.safetensors` and `adapter_config.json`.
 - `actor_rollout_ref.model.lora.merge`: bool, whether to merge LoRA adapters into the base model weights before transferring to vLLM. 
-   If True, it will merge LoRA adapters into the base model weights before transferring to vLLM. If False, it will transfer only adapters to vLLM. Currently it only support engine workers.
+   If True, it will merge LoRA adapters into the base model weights before transferring to vLLM. If False, it will transfer only adapters to vLLM. This option is currently supported **only for engine-based rollout workers** (i.e. vLLM engine workers using the new worker implementation with ``trainer.use_legacy_worker_impl`` disabled) and is not available when using the legacy worker implementation.
 
 5. Recommend options:
 
