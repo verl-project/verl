@@ -23,7 +23,13 @@ from ...utils.profiler import ProfilerConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["FSDPEngineConfig", "McoreEngineConfig", "TrainingWorkerConfig", "VeOmniEngineConfig", "EngineConfig"]
+__all__ = [
+    "FSDPEngineConfig",
+    "McoreEngineConfig",
+    "TrainingWorkerConfig",
+    "VeOmniEngineConfig",
+    "EngineConfig",
+]
 
 
 @dataclass
@@ -36,8 +42,8 @@ class EngineConfig(BaseConfig):
         "infer_micro_batch_size_per_gpu",
         "use_fused_kernels",
         "use_remove_padding",
+        "router_replay_mode",
     }
-
     # whether to offload param
     param_offload: bool = False
     # whether to offload optimizer
@@ -66,6 +72,7 @@ class EngineConfig(BaseConfig):
     seed: int = 42
 
     full_determinism: bool = False
+    router_replay_mode: str = "disabled"
 
     def __post_init__(self):
         pass

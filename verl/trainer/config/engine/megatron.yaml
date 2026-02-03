@@ -95,3 +95,5 @@ forward_only: False
 
 # Mixed precision training param dtype
 dtype: bfloat16 # ["bfloat16", "float16"]
+
+router_replay_mode: disabled

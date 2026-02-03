@@ -35,7 +35,7 @@ ppo_mini_batch_size=8
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 
-
+USE_LEGACY_WORKER_IMPL="enable" # disable, enable
 exper_name=Node${NODES}_bs${bs}_${PP}${TP}${EP}${ETP}_${VLLM_INFER_TP}_minbs${ppo_mini_batch_size}_micro_bs${micro_bs}
 
 python3 -m verl.trainer.main_ppo --config-path=config \
@@ -50,6 +50,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     data.truncation='error' \
     actor_rollout_ref.model.use_fused_kernels=True \
     actor_rollout_ref.model.path=$HF_MODEL_PATH \
+    actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
     actor_rollout_ref.actor.router_replay.mode=${ROUTING_REPLAY_MODE} \
@@ -107,4 +108,5 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.test_freq=10 \
     trainer.total_training_steps=50000 \
     trainer.balance_batch=False \
+    trainer.use_legacy_worker_impl=${USE_LEGACY_WORKER_IMPL} \
     trainer.val_before_train=False 2>&1

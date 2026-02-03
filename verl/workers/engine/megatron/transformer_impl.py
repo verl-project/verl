@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import logging
 import os
 from functools import partial
@@ -33,6 +32,11 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
+from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
+from verl.utils.megatron.router_replay_utils import (
+    RouterReplayHelper,
+    set_router_replay_data,
+)
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
@@ -45,6 +49,7 @@ from verl.utils.megatron_utils import (
     offload_megatron_optimizer,
     patch_engine_mtp,
     register_megatron_training_hooks,
+    unwrap_model,
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
@@ -88,6 +93,11 @@ class MegatronEngine(BaseEngine):
         }
         self.weight_converter = None
 
+        # Router replay configuration for MoE models
+        self.enable_routing_replay = self.engine_config.router_replay_mode != "disabled"
+        if self.enable_routing_replay:
+            self.mini_layer_topk_idx_list = []
+
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
         if mpu.is_initialized():
@@ -114,6 +124,8 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self.enable_routing_replay:
+            override_transformer_config["enable_routing_replay"] = True
 
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
@@ -231,6 +243,9 @@ class MegatronEngine(BaseEngine):
 
         if torch.distributed.get_rank() == 0:
             print_model_size(module[0])
+
+        if self.enable_routing_replay:
+            print(f"routing replay layers: {len(RouterReplay.router_instances)}")
 
         return module
 
@@ -565,9 +580,9 @@ class MegatronEngine(BaseEngine):
                 losses_reduced[0]["metrics"] = {}
             losses_reduced[0]["metrics"].update(metrics)
 
-        # loss_reduces contains the stats returned from loss_func
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            return postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
+            output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
+            return output
         else:
             return {}
 
@@ -639,10 +654,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
         loss_mask = batch["loss_mask"].to(bool)
         multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
 
+        routed_experts = batch.get("routed_experts", [])
+        attention_mask = batch.get("attention_mask", None)
+
         return {
             "input_ids": input_ids,
             "loss_mask": loss_mask,
             "multi_modal_inputs": multi_modal_inputs,
+            "routed_experts": routed_experts,
+            "attention_mask": attention_mask,
         }
 
     def prepare_model_outputs(self, output: dict, data: TensorDict):
@@ -666,7 +686,24 @@ class MegatronEngineWithLMHead(MegatronEngine):
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
+        attention_mask = model_inputs["attention_mask"].to(bool)
         loss_mask = model_inputs["loss_mask"]
+
+        unwrapped_model = unwrap_model(model)
+        if hasattr(unwrapped_model, "vp_stage"):
+            vp_rank = unwrapped_model.vp_stage
+        else:
+            vp_rank = 0
+
+        if RouterReplayHelper.is_replay_backward_action(self.tf_config, vp_rank):
+            router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank)
+            for router in router_instance_list:
+                router.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+
+        if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
+            layers_topk_idx = model_inputs["routed_experts"]
+            set_router_replay_data(layers_topk_idx, attention_mask, self.tf_config, vp_rank)
+
 
         if pad_mode == DatasetPadMode.NO_PADDING:
             label = input_ids.clone()
@@ -752,6 +789,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             enable_mtp=self.model_config.mtp.enable_train,
         )
+
+        # Router replay: switch to backward replay mode for next backward pass
+        if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
+            router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank)
+            for router in router_instance_list:
+                router.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
 
         return output, partial(postprocess_micro_batch_func, data=batch)
 
