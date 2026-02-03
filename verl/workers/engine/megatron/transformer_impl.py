@@ -25,7 +25,7 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 import verl.utils.torch_functional as verl_F
-from verl.models.mcore import get_mcore_weight_converter
+from verl.models.mcore import get_mcore_forward_fused_no_padding_fn, get_mcore_weight_converter
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -234,6 +234,22 @@ class MegatronEngine(BaseEngine):
 
         return module
 
+    def _maybe_enable_fused_kernels(self):
+        if not self.engine_config.use_fused_kernels:
+            return
+
+        if self.is_value_model or self.model_config.mtp.enable:
+            logger.warning_once(
+                "Fused kernels are not supported for value models or when MTP is enabled in Megatron engine; disabling."
+            )
+            self.engine_config.use_fused_kernels = False
+            return
+
+        from verl.models.mcore.model_forward_fused import patch_fused_forward
+
+        for model in self.module:
+            patch_fused_forward(model)
+
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
 
@@ -273,6 +289,8 @@ class MegatronEngine(BaseEngine):
         self._build_tf_config()
 
         self.module = self._build_megatron_module()
+
+        self._maybe_enable_fused_kernels()
 
         if self.model_config.mtp.enable:
             patch_engine_mtp(self.module, self.model_config)
@@ -650,13 +668,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         loss_mask = model_inputs["loss_mask"]
 
-        if not isinstance(temperature, torch.Tensor):
-            temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
-
-        temperature = temperature.to(torch.float32)
-        assert temperature.shape[0] == input_ids.shape[0]
-        temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
-
         if pad_mode == DatasetPadMode.NO_PADDING:
             label = input_ids.clone()
         else:
@@ -665,7 +676,41 @@ class MegatronEngineWithLMHead(MegatronEngine):
         from verl.models.mcore import get_mcore_forward_no_padding_fn
 
         if use_fused_kernels:
-            raise NotImplementedError("Fused kernels are not supported for megatron engine")
+            if not self.engine_config.use_remove_padding:
+                logger.warning_once(
+                    "Fused kernels require `use_remove_padding=True` for Megatron engine. Falling back to non-fused."
+                )
+                use_fused_kernels = False
+            elif isinstance(temperature, torch.Tensor):
+                if temperature.numel() != 1:
+                    logger.warning_once(
+                        "Fused kernels do not support per-sample temperature. Falling back to non-fused."
+                    )
+                    use_fused_kernels = False
+                else:
+                    temperature_value = float(temperature.item())
+            else:
+                temperature_value = float(temperature)
+
+        if use_fused_kernels:
+            fused_forward_fn = get_mcore_forward_fused_no_padding_fn(self.model_config.hf_config)
+            output = fused_forward_fn(
+                model=model,
+                input_ids=input_ids,
+                labels=label,
+                multi_modal_inputs=multi_modal_inputs,
+                temperature=temperature_value,
+                calculate_entropy=calculate_entropy,
+                pad_token_id=self.model_config.tokenizer.pad_token_id,
+            )
+            return output, partial(postprocess_micro_batch_func, data=batch)
+
+        if not isinstance(temperature, torch.Tensor):
+            temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
+
+        temperature = temperature.to(torch.float32)
+        assert temperature.shape[0] == input_ids.shape[0]
+        temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
 
         forward_fn = get_mcore_forward_no_padding_fn(self.model_config.hf_config)
 
