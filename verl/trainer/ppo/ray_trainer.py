@@ -1194,7 +1194,7 @@ class RayPPOTrainer:
             attention_mask = batch["attention_mask"]
             batch_size = attention_mask.shape[0]
             global_seqlen_lst = attention_mask.sum(-1)
-            uid_container = deepcopy(batch)
+            uid_container = batch  # will not modify batch inplace
             is_dataproto = False
 
         workload_lst = calculate_workload(global_seqlen_lst)

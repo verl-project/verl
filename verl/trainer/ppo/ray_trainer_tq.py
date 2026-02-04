@@ -593,13 +593,13 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
         transferqueue_config = TransferQueueConfig.from_dict(tq_config)
 
         if self.hybrid_engine:
-            resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
+            actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
                 config=actor_rollout_ref_config,
                 role=str(actor_role),
             )
-            self.resource_pool_to_cls[resource_pool][str(actor_role)] = actor_rollout_cls
+            self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
         else:
             raise NotImplementedError
 
