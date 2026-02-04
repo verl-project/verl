@@ -562,15 +562,7 @@ class MegatronEngine(BaseEngine):
         enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
 
         if enable_routing_replay:
-            router_replay_mode = self.engine_config.router_replay.mode
-            if forward_only:  # compute_log_probs
-                if router_replay_mode == "R2":
-                    RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
-                if router_replay_mode == "R3":
-                    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-            else:  # train batch
-                if router_replay_mode in ["R2", "R3"]:
-                    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+            RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
         # batch should be a list of batches inside micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.module))
