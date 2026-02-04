@@ -24,11 +24,17 @@ from verl.trainer.distillation.fsdp import utils as fsdp_utils
 from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.utils.stages import Stage
-from verl.workers.config import DistillationConfig
+from verl.workers.config import DistillationConfig, DistillationLossConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
+# Estimator distillation key
+TEACHER_LOG_PROBS_KEY = "teacher_log_probs"
+
+# Top-k distillation keys
 TEACHER_TOPK_LOG_PROBS_KEY = "teacher_topk_log_probs"
 TEACHER_TOPK_INDICES_KEY = "teacher_topk_indices"
+
+
 STUDENT_LOGITS_KEY = "student_logits"
 
 
@@ -68,13 +74,30 @@ def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
     return config.enabled
 
 
+def distillation_requires_logits(config: DistillationConfig) -> bool:
+    """Check if distillation loss requires logits based on the provided configuration."""
+    loss_config: DistillationLossConfig = config.distillation_loss
+    distillation_settings: DistillationLossSettings = loss_config.loss_settings
+    return distillation_settings.use_topk or distillation_settings.use_full
+
+
 def compute_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: Optional[DistillationConfig]
 ) -> dict[str, torch.Tensor]:
     """Compute the distillation inputs for a given stage of training."""
     if not is_distillation_enabled(config):
         return {}
-    distillation_settings: DistillationLossSettings = config.loss_settings
+    loss_config: DistillationLossConfig = config.distillation_loss
+    distillation_settings: DistillationLossSettings = loss_config.loss_settings
+    if distillation_settings.use_estimator:
+        return {}
+    if logits is None:
+        raise ValueError(f"logits must be provided for distillation loss computation with {loss_config.loss_mode=}.")
+    if cu_seqlens is None:
+        if not logits.is_nested:
+            raise ValueError("cu_seqlens must be provided if logits is not a nested tensor.")
+        cu_seqlens = logits.offsets()
+        logits = logits.values()
     if distillation_settings.use_full:
         return NotImplementedError  # TODO: JacobHelwig
     elif distillation_settings.use_estimator:
@@ -89,7 +112,8 @@ def extract_distillation_inputs(
     stage: Stage, output: TensorDict, config: DistillationConfig
 ) -> dict[str, torch.Tensor]:
     """Extract distillation loss inputs from model output for a given stage. Used in trainer."""
-    distillation_settings = get_distillation_loss_settings(config.loss_mode)
+    loss_config: DistillationLossConfig = config.distillation_loss
+    distillation_settings = get_distillation_loss_settings(loss_config.loss_mode)
     if isinstance(stage, Stage):
         stage = stage.value
     if distillation_settings.use_full:
@@ -97,7 +121,7 @@ def extract_distillation_inputs(
             "Full log probs are not currently supported for distillation loss. Please use top-k log probs instead."
         )
     elif distillation_settings.use_estimator:
-        return {}
+        return {TEACHER_LOG_PROBS_KEY: output["log_probs"]}
     elif distillation_settings.use_topk:
         if stage == Stage.ACQUIRE_TEACHER_KNOWLEDGE.value:
             return {
@@ -107,20 +131,21 @@ def extract_distillation_inputs(
         else:
             raise ValueError(f"Unexpected stage: {stage}")
     else:
-        raise ValueError
+        raise ValueError(f"Unexpected distillation settings: {distillation_settings}")
 
 
 def prepare_distillation_inputs(
     log_prob: torch.Tensor, data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig
 ) -> DistillationLossInputs:
     """Prepare distillation loss inputs for loss computation. Called in ppo_loss before computing distillation loss."""
-    distillation_settings: DistillationLossSettings = config.loss_settings
+    loss_config: DistillationLossConfig = config.distillation_loss
+    distillation_settings: DistillationLossSettings = loss_config.loss_settings
     if distillation_settings.use_full:
         raise NotImplementedError(
             "Full log probs are not currently supported for distillation loss. Please use top-k log probs instead."
         )
     elif distillation_settings.use_estimator:
-        return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data["ref_log_prob"])
+        return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data[TEACHER_LOG_PROBS_KEY])
     elif distillation_settings.use_topk:
         teacher_topk_log_probs = no_padding_2_padding(data[TEACHER_TOPK_LOG_PROBS_KEY], data)
         teacher_topk_indices = no_padding_2_padding(data[TEACHER_TOPK_INDICES_KEY], data)
