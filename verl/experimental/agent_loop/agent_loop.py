@@ -153,6 +153,15 @@ class AgentLoopOutput(BaseModel):
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
+    def as_dict(self) -> dict[str, Any]:
+        """Convert agent loop output to a dictionary."""
+        output = self.model_dump(exclude_unset=True)
+        for k in ["prompt_ids", "response_ids", "response_mask", "response_logprobs", "routed_experts"]:
+            v = output.pop(k, None)
+            if v is not None:
+                output[k] = torch.Tensor(v)
+        return output
+
 
 class _InternalAgentLoopOutput(AgentLoopOutput):
     """Internal agent loop output with padded sequences."""

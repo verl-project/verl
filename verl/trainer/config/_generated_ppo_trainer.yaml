@@ -678,7 +678,12 @@ global_profiler:
       stacks: all
       kw_args: {}
 transfer_queue:
-  enable: false
+  enable: true
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
 ray_kwargs:
   ray_init:
     num_cpus: null

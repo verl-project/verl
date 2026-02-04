@@ -1,0 +1,681 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+Main PPO trainer differs from original PPO trainer in main_ppo.py:
+1. Use TransferQueue to transfer data between components.
+2. Support multiple agent loop outputs.
+"""
+
+import asyncio
+import logging
+import os
+import threading
+import time
+import uuid
+from collections import defaultdict
+from functools import partial
+from pprint import pprint
+
+import hydra
+import numpy as np
+import ray
+import torch
+import transfer_queue as tq
+from omegaconf import DictConfig, OmegaConf, open_dict
+from tensordict import NonTensorData, NonTensorStack, TensorDict
+from torchdata.stateful_dataloader import StatefulDataLoader
+from tqdm import tqdm
+
+from verl.checkpoint_engine import CheckpointEngineManager
+from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
+from verl.experimental.reward_loop import RewardLoopManager
+from verl.single_controller.ray import (
+    RayClassWithInitArgs,
+    RayWorkerGroup,
+    ResourcePoolManager,
+    create_colocated_worker_cls,
+)
+from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.utils import hf_processor, hf_tokenizer
+from verl.utils import tensordict_utils as tu
+from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from verl.utils.config import omega_conf_to_dataclass, validate_config
+from verl.utils.dataset.rl_dataset import collate_fn
+from verl.utils.device import auto_set_device
+from verl.utils.fs import copy_to_local
+from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.tracking import Tracking
+from verl.workers.config import CriticConfig
+from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
+from verl.workers.utils.losses import value_loss
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+class ReplayBuffer:
+    """Replay buffer periodically polls metadata from transfer queue.
+
+    Args:
+        poll_interval (float, optional): Poll interval in seconds. Defaults to 1.0.
+    """
+
+    def __init__(self, poll_interval: float = 1.0):
+        # partition_id => {key: tags}
+        self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
+
+        self.poll_interval = poll_interval
+        self.poll_thread = threading.Thread(target=self._poll_from_transfer_queue, daemon=True)
+        self.poll_thread.start()
+
+    def _poll_from_transfer_queue(self):
+        """Periodically poll metadata from transfer queue."""
+        while True:
+            data = tq.kv_list()
+            if data is not None:
+                for partition_id, items in data.items():
+                    self.partitions[partition_id].update(items)
+            time.sleep(self.poll_interval)
+
+    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> list[str]:
+        """Sample a batch of data from the replay buffer.
+
+        Args:
+            partition_id (str): Partition of transfer queue, e.g. "train" or "valid".
+            global_steps (int, optional): Global training steps. Defaults to None.
+            batch_size (int, optional): Batch size. Defaults to None.
+
+        Returns:
+            TensorDict: A batch of data.
+        """
+        pass
+
+
+@ray.remote
+class AgentLoopWorkerTQ(AgentLoopWorker):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        tq.init()
+        self.background_tasks = set()
+
+    async def generate_sequences(self, batch: TensorDict) -> None:
+        """Spawn agent loop for each sample in the batch without waiting for the results."""
+        validate = batch["validate"] if "validate" in batch else False
+        config = self.config.actor_rollout_ref.rollout
+        sampling_params = dict(
+            temperature=config.temperature,
+            top_p=config.top_p,
+            top_k=config.top_k,
+            repetition_penalty=1.0,
+            logprobs=config.calculate_log_probs,
+        )
+
+        # override sampling params for validation
+        if validate:
+            sampling_params["top_p"] = config.val_kwargs.top_p
+            sampling_params["top_k"] = config.val_kwargs.top_k
+            sampling_params["temperature"] = config.val_kwargs.temperature
+
+        # by default, we assume it's a single turn agent
+        if "agent_name" not in batch:
+            default_agent_loop = config.agent.default_agent_loop
+            batch["agent_name"] = NonTensorData(default_agent_loop)
+
+        trajectory_info = await get_trajectory_info(batch["global_steps"], batch["index"], validate)
+
+        # create background tasks for each sample in the batch
+        for i in range(len(batch)):
+            # TODO(wuxibin): add trace support
+            trace_this_sample = False
+            prompt = {}
+            for k, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    prompt[k] = v[i]
+                elif isinstance(v, NonTensorStack):
+                    prompt[k] = v[i].data
+                elif isinstance(v, NonTensorData):
+                    prompt[k] = v.data
+                else:
+                    logger.exception(f"Unsupported type {type(v)} for key {k}")
+
+            # “fire-and-forget” background tasks
+            task = asyncio.create_task(
+                self._run_prompt(prompt, sampling_params, trajectory=trajectory_info[i], trace=trace_this_sample)
+            )
+            self.background_tasks.add(task)
+            task.add_done_callback(self.background_tasks.discard)
+
+    async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
+        """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
+        try:
+            config = self.config.actor_rollout_ref.rollout
+            n = config.n if not prompt.get("validate", False) else config.val_kwargs.n
+            tasks = []
+            for i in range(n):
+                # mark session_id as running
+                # await tq.async_kv_put(
+                #     key=f"{prompt['uid']}_{i}_0",  # {uid}_{session_id}_{index}
+                #     fields=prompt,
+                #     tags={"global_steps": prompt["global_steps"], "status": "running"},
+                #     partition_id="train" if not prompt.get("validate", False) else "val",
+                # )
+                task = asyncio.create_task(
+                    self._run_agent_loop(sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt)
+                )
+                tasks.append(task)
+            await asyncio.gather(*tasks)
+        except Exception as e:
+            logger.exception(f"Error in _run_prompt: {e}")
+            raise e
+
+    async def _agent_loop_postprocess(self, output: AgentLoopOutput | list[AgentLoopOutput], **kwargs) -> None:
+        """Put agent loop outputs into TransferQueue."""
+        uid, session_id = kwargs["uid"], kwargs["session_id"]
+        outputs = output if isinstance(output, list) else [output]
+
+        # if no output, mark session_id as failed to let user know
+        if not outputs:
+            await tq.async_kv_put(f"{uid}_{session_id}_0", tags={"status": "failed"})
+            return
+
+        # NOTE: agent loop may has multiple outputs, put each output into TransferQueue.
+        # key format: {uid}_{session_id}_{index}
+        # - uid: raw prompt uid from dataset
+        # - session_id: session id for rollout.n sampling
+        # - index: index of agent loop output
+        keys, fields = [], []
+        for i, output in enumerate(outputs):
+            keys.append(f"{uid}_{session_id}_{i}")
+            fields.append(output.as_dict())
+
+        breakpoint()
+        await tq.async_kv_batch_put(
+            keys=keys,
+            fields=fields,
+            tags=[{"status": "success"}] * len(keys),
+            partition_id="train" if not kwargs.get("validate", False) else "val",
+        )
+
+
+class AgentLoopManagerTQ(AgentLoopManager):
+    def __init__(self, *args, **kwargs):
+        self.agent_loop_workers_class = AgentLoopWorkerTQ
+        super().__init__(*args, **kwargs)
+
+    def generate_sequences(self, prompts: TensorDict) -> None:
+        """
+        Dispatch input batch to agent loop workers without blocking. Workers should put agent loop outputs
+        into TransferQueue once an agent loop finished.
+
+        Args:
+            prompts (TensorDict): Input batch from train or validation dataset.
+        """
+        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        ray.get(
+            [
+                worker.generate_sequences.remote(chunk)
+                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+            ]
+        )
+
+
+class PPOTrainer:
+    """PPO Trainer with TransferQueue and ReplayBuffer.
+
+    Args:
+        config: DictConfig from yaml config file.
+        role_worker_mapping: dict[Role, WorkerType]
+        resource_pool_manager: ResourcePoolManager
+    """
+
+    def __init__(
+        self,
+        config: DictConfig,
+        role_worker_mapping: dict[Role, WorkerType],
+        resource_pool_manager: ResourcePoolManager,
+    ):
+        self.config = config
+        self.role_worker_mapping = role_worker_mapping
+        self.resource_pool_manager = resource_pool_manager
+        self.use_rm = need_reward_model(self.role_worker_mapping)
+        self.use_critic = need_critic(self.config)
+        self.use_reference_policy = need_reference_policy(self.config)
+        self.replay_buffer = ReplayBuffer()
+
+        self._init_tokenizer()
+        self._init_dataloader()
+
+    def _init_tokenizer(self):
+        """Initialize tokenizer."""
+        # Download the checkpoint from HDFS to the local machine.
+        # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
+        local_path = copy_to_local(
+            self.config.actor_rollout_ref.model.path, use_shm=self.config.actor_rollout_ref.model.get("use_shm", False)
+        )
+        trust_remote_code = self.config.data.get("trust_remote_code", False)
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        # Used for multimodal LLM, could be None
+        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+
+    def _init_dataloader(self):
+        """Initialize train and validate dataloader."""
+        self.train_dataset = create_rl_dataset(
+            self.config.data.train_files,
+            self.config.data,
+            self.tokenizer,
+            self.processor,
+            is_train=True,
+            max_samples=self.config.data.get("train_max_samples", -1),
+        )
+        self.val_dataset = create_rl_dataset(
+            self.config.data.val_files,
+            self.config.data,
+            self.tokenizer,
+            self.processor,
+            is_train=False,
+            max_samples=self.config.data.get("val_max_samples", -1),
+        )
+
+        self.train_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+            num_workers=self.config.data["dataloader_num_workers"],
+            drop_last=True,
+            collate_fn=collate_fn,
+            sampler=create_rl_sampler(self.config.data, self.train_dataset),
+        )
+        self.val_dataloader = StatefulDataLoader(
+            dataset=self.val_dataset,
+            batch_size=self.config.data.val_batch_size or len(self.val_dataset),
+            num_workers=self.config.data["dataloader_num_workers"],
+            shuffle=self.config.data.get("validation_shuffle", True),
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+        logger.info(
+            f"train and validate dataloader initialized, train dataset size: "
+            f"{len(self.train_dataset)}, val dataset size: {len(self.val_dataset)}"
+        )
+
+        # adjust total_training_steps
+        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        if self.config.trainer.total_training_steps is not None:
+            total_training_steps = self.config.trainer.total_training_steps
+        self.total_training_steps = total_training_steps
+        logger.info(f"Total training steps: {self.total_training_steps}")
+
+        try:
+            OmegaConf.set_struct(self.config, True)
+            with open_dict(self.config):
+                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+                if OmegaConf.select(self.config, "critic.optim"):
+                    self.config.critic.optim.total_training_steps = total_training_steps
+        except Exception as e:
+            logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
+    def init_workers(self, rollout_only: bool = False):
+        """Initialize distributed training workers using Ray backend.
+
+        Creates:
+        1. Ray resource pools from configuration
+        2. Worker groups for each role (actor, critic, etc.)
+
+        Args:
+            rollout_only (bool, optional): Whether to initialize only rollout workers to debug. Defaults to False.
+        """
+        if rollout_only:
+            self.agent_loop_manager = AgentLoopManagerTQ(self.config)
+            logger.info("agent loop manager initialized")
+            return
+
+        self.resource_pool_manager.create_resource_pool()
+        self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+
+        # 1. define actor and rollout class
+        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+        actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
+        actor_rollout_cls = RayClassWithInitArgs(
+            cls=self.role_worker_mapping[actor_role],
+            config=self.config.actor_rollout_ref,
+            role=str(actor_role),
+        )
+        self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
+
+        # 2. define critic class
+        if self.use_critic:
+            critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
+            worker_cfg = TrainingWorkerConfig(
+                model_type="value_model",
+                model_config=critic_cfg.model_config,
+                engine_config=critic_cfg.engine,
+                optimizer_config=critic_cfg.optim,
+                checkpoint_config=critic_cfg.checkpoint,
+            )
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
+            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=worker_cfg)
+            self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
+
+        # 3. create worker group for actor rollout and critic
+        all_wg = {}
+        wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
+        if OmegaConf.select(self.config.global_profiler, "steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
+            # Only require nsight worker options when tool is nsys
+            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
+                assert (
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                    is not None
+                ), "worker_nsight_options must be set when using nsys with profile_steps"
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                )
+        wg_kwargs["device_name"] = self.config.trainer.device
+        logger.info(f"worker group kwargs: {wg_kwargs}")
+
+        for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            wg_dict = RayWorkerGroup(
+                resource_pool=resource_pool,
+                ray_cls_with_init=worker_dict_cls,
+                **wg_kwargs,
+            )
+            spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
+            all_wg.update(spawn_wg)
+            logger.info(f"create worker group {spawn_wg.keys()}")
+
+        # 5. initiliaze critic model engine
+        if self.use_critic:
+            self.critic_wg = all_wg[str(Role.Critic)]
+            self.critic_wg.reset()
+            value_loss_ = partial(value_loss, config=critic_cfg)
+            self.critic_wg.set_loss_fn(value_loss_)
+            logger.info("critic model engine initialized")
+
+        # 6. initialize actor and ref model engine
+        self.actor_rollout_wg = all_wg[str(actor_role)]
+        self.actor_rollout_wg.init_model()
+        logger.info("actor and ref model engine initialized")
+
+        # if ref_in_actor is True, the reference policy will be actor without lora applied
+        lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
+        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        if self.use_reference_policy:
+            self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
+
+        # 7. initialize reward loop manager
+        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        self.reward_loop_manager = RewardLoopManager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+        )
+        logger.info("reward loop manager initialized")
+
+        # 8. initialize agent loop manager
+        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        if manager_class_fqn:
+            agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        else:
+            agent_loop_manager_cls = AgentLoopManagerTQ
+        self.agent_loop_manager = agent_loop_manager_cls(
+            config=self.config,
+            worker_group=self.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
+            reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+        )
+        logger.info("agent loop manager initialized")
+
+        # 9. initialize checkpoint engine manager
+        self.checkpoint_manager = CheckpointEngineManager(
+            backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+            trainer=self.actor_rollout_wg,
+            replicas=self.agent_loop_manager.rollout_replicas,
+        )
+        logger.info("checkpoint engine manager initialized")
+
+        # sleep all replicas to load checkpoint
+        self.checkpoint_manager.sleep_replicas()
+
+        logger.info("all initialize finished, ready to fit")
+
+    def _load_checkpoint(self):
+        self.global_steps = 0
+
+        # 1. find latest checkpoint folder
+        if self.config.trainer.resume_mode == "disable":
+            return
+        elif self.config.trainer.resume_mode == "auto":
+            checkpoint_folder = self.config.trainer.default_local_dir
+            if not os.path.isabs(checkpoint_folder):
+                working_dir = os.getcwd()
+                checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
+            global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
+            if global_step_folder is None:
+                logger.info("Training from scratch")
+                return
+        elif self.config.trainer.resume_mode == "resume_path":
+            assert isinstance(self.config.trainer.resume_from_path, str), "resume ckpt must be str type"
+            assert "global_step_" in self.config.trainer.resume_from_path, "resume ckpt must specify the global_steps"
+            global_step_folder = self.config.trainer.resume_from_path
+            if not os.path.isabs(global_step_folder):
+                working_dir = os.getcwd()
+                global_step_folder = os.path.join(working_dir, global_step_folder)
+        else:
+            logger.exception(f"Unknown resume mode {self.config.trainer.resume_mode}")
+
+        # set global step
+        self.global_steps = int(global_step_folder.split("global_step_")[-1])
+        logger.info(f"Resuming from {global_step_folder}, setting global step to {self.global_steps}")
+
+        # 2. load actor checkpoint
+        self.actor_rollout_wg.load_checkpoint(
+            local_path=os.path.join(global_step_folder, "actor"),
+            del_local_after_load=self.config.trainer.del_local_ckpt_after_load,
+        )
+
+        # 3. load critic checkpoint
+        if self.use_critic:
+            self.critic_wg.load_checkpoint(
+                local_path=os.path.join(global_step_folder, str(Role.Critic)),
+                del_local_after_load=self.config.trainer.del_local_ckpt_after_load,
+            )
+
+        # 4. load dataloader checkpoint
+        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
+        if os.path.exists(dataloader_local_path):
+            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+            self.train_dataloader.load_state_dict(dataloader_state_dict)
+        else:
+            logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+    def _start_profiling(self) -> None:
+        """Start profiling for all worker groups if profiling is enabled."""
+        do_profile = (
+            not self.prev_step_profile and self.curr_step_profile
+            if self.config.global_profiler.profile_continuous_steps
+            else self.curr_step_profile
+        )
+
+        if do_profile:
+            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            if self.use_reference_policy:
+                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+            if self.use_critic:
+                self.critic_wg.start_profile(profile_step=self.global_steps)
+
+    def _stop_profiling(self) -> None:
+        """Stop profiling for all worker groups if profiling is enabled."""
+        self.next_step_profile = (
+            self.global_steps + 1 in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        do_profile = (
+            self.curr_step_profile and not self.next_step_profile
+            if self.config.global_profiler.profile_continuous_steps
+            else self.curr_step_profile
+        )
+        self.prev_step_profile = self.curr_step_profile
+        self.curr_step_profile = self.next_step_profile
+
+        if do_profile:
+            self.actor_rollout_wg.stop_profile()
+            if self.use_reference_policy:
+                self.ref_policy_wg.stop_profile()
+            if self.use_critic:
+                self.critic_wg.stop_profile()
+
+    def fit(self):
+        self.logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
+
+        # load checkpoint and update weights before doing anything
+        self._load_checkpoint()
+        # self.checkpoint_manager.update_weights()
+
+        # TODO(wuxibin): validate before train
+
+        current_epoch = self.global_steps // len(self.train_dataloader)
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+
+        # we start from step 1
+        self.global_steps += 1
+        self.prev_step_profile = False
+        self.curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        self.next_step_profile = False
+
+        for epoch in range(current_epoch, self.config.trainer.total_epochs):
+            for batch_dict in self.train_dataloader:
+                self._start_profiling()
+                metrics = self.step(batch_dict)
+                self._stop_profiling()
+                self.logger.log(data=metrics, step=self.global_steps)
+                progress_bar.update(1)
+                self.global_steps += 1
+
+    def step(self, batch_dict: dict) -> dict:
+        # 1. put batch to agent loop manager
+        batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
+        batch = tu.get_tensordict(batch_dict)
+        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        self.agent_loop_manager.generate_sequences(batch)
+        breakpoint()
+
+        # 2. get batch from replay buffer
+        batch = self.replay_buffer.sample(global_steps=self.global_steps)
+
+
+@ray.remote
+class TaskRunner:
+    def __init__(self) -> None:
+        # role => worker class
+        self.role_worker_mapping = {}
+        # role => resource pool
+        self.mapping = {}
+
+    def add_actor_rollout_worker(self, config):
+        """Add actor rollout worker to mapping."""
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+
+        role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
+        self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)
+        self.mapping[role] = "global_pool"
+
+    def add_critic_worker(self, config):
+        """Add critic worker to mapping."""
+        if need_critic(config):
+            self.role_worker_mapping[Role.Critic] = ray.remote(TrainingWorker)
+            self.mapping[Role.Critic] = "global_pool"
+
+    def init_resource_pool_mgr(self, config):
+        """Initialize resource pool manager."""
+
+        # Global resource pool is used for actor, rollout, critic, ref
+        global_pool_id = "global_pool"
+        resource_pool_spec = {
+            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        }
+
+        # Add separate resource pool for reward model if enabled
+        if config.reward_model.enable_resource_pool:
+            assert config.reward_model.n_gpus_per_node > 0 and config.reward_model.nnodes > 0
+            reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
+            resource_pool_spec["reward_pool"] = reward_pool
+            self.mapping[Role.RewardModel] = "reward_pool"
+        else:
+            self.mapping[Role.RewardModel] = "global_pool"
+
+        # TODO(wuxibin): Add separate resource pool for disaggregated rollout
+
+        self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+
+    def run(self, config):
+        pprint(OmegaConf.to_container(config, resolve=True))
+        OmegaConf.resolve(config)
+
+        # initialize transfer queue
+        tq.init(config.transfer_queue)
+
+        self.add_actor_rollout_worker(config)
+        self.add_critic_worker(config)
+        self.init_resource_pool_mgr(config)
+
+        trainer = PPOTrainer(
+            config=config,
+            role_worker_mapping=self.role_worker_mapping,
+            resource_pool_manager=self.resource_pool_manager,
+        )
+        trainer.init_workers(rollout_only=True)
+        trainer.fit()
+
+
+@hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
+def main(config):
+    """Main entry point for PPO training with Hydra configuration management.
+
+    Args:
+        config: Hydra configuration dictionary containing training parameters.
+    """
+    # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
+    auto_set_device(config)
+
+    config.transfer_queue.enable = True
+    config.reward_model.use_reward_loop = True
+
+    # validate config
+    validate_config(
+        config=config,
+        use_reference_policy=need_reference_policy(config),
+        use_critic=need_critic(config),
+    )
+
+    run_ppo(config, task_runner_class=TaskRunner)
+
+
+if __name__ == "__main__":
+    main()
