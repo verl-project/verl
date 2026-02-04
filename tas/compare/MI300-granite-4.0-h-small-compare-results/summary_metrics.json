@@ -1,0 +1,17 @@
+{
+  "mae_logprob": 0.005711098201572895,
+  "rmse_logprob": 0.019798297435045242,
+  "pearson_r": 0.9996067170575882,
+  "kl_divergence": 0.00011840177838754282,
+  "rollout_probs_diff_mean": -5.319448203151526e-05,
+  "rollout_probs_diff_std": 0.006290234320259911,
+  "avg_completion_length": 885.9333333333333,
+  "min_completion_length": 481,
+  "max_completion_length": 1024,
+  "n_tokens": 79734,
+  "timing": {
+    "generation_seconds": 146.77,
+    "prefill_scoring_seconds": 143.43,
+    "end_to_end_seconds": 533.91
+  }
+}

@@ -10,5 +10,6 @@ python compare.py \
     --dtype float16 \
     --n 1 \
     --out out \
-    --profile-trace \
+    --prefill-batch-size 1 \
+    --batch-size 16 \
     2>&1 | tee log.txt
