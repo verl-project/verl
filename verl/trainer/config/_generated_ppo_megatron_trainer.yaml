@@ -60,7 +60,7 @@ actor_rollout_ref:
       forward_only: false
       dtype: bfloat16
       router_replay:
-        _target_: verl.workers.config.RouterReplayConfig
+        _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
         record_file: null
         replay_file: null
@@ -205,7 +205,7 @@ actor_rollout_ref:
       forward_only: true
       dtype: bfloat16
       router_replay:
-        _target_: verl.workers.config.RouterReplayConfig
+        _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
         record_file: null
         replay_file: null
@@ -494,7 +494,7 @@ critic:
     forward_only: false
     dtype: bfloat16
     router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
+      _target_: verl.workers.config.EngineRouterReplayConfig
       mode: disabled
       record_file: null
       replay_file: null
