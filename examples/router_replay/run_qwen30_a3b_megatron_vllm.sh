@@ -6,7 +6,9 @@ NODES=1
 # R2: enable routing replay
 # R3: enable rollout routing replay
 # If enabling R3, please set actor_rollout_ref.rollout.enable_rollout_routing_replay=True
-# R3 example is based on vllm related pr https://github.com/vllm-project/vllm/pull/5322
+# R3 example is based on vllm related pr:
+#   - https://github.com/vllm-project/vllm/pull/28284
+#   - https://github.com/vllm-project/vllm/pull/33013
 
 ROUTING_REPLAY_MODE="R2" 
 

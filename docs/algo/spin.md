@@ -118,7 +118,7 @@ The following steps outline how to set up the environment and run the SPIN recip
     python3 examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k # Adjusted path
 
     # Download the base model (Example: Qwen2.5-3B-Instruct)
-    huggingface-cli download Qwen/Qwen2.5-3B-Instruct --local-dir $HOME/models/Qwen2.5-3B-Instruct
+    hf download Qwen/Qwen2.5-3B-Instruct --local-dir $HOME/models/Qwen2.5-3B-Instruct
     ```
 
 4.  **Configure:**

@@ -42,13 +42,14 @@ verl is fast with:
 - **Efficient actor model resharding with 3D-HybridEngine**: Eliminates memory redundancy and significantly reduces communication overhead during transitions between training and generation phases.
 
 <div align="center">
- <img src="https://github.com/wuxibin89/verl/blob/wuxibin/doc_images/docs/_static/verl-arch.png?raw=true" width="400" alt="verl-arch.png">
+ <img src="https://github.com/verl-project/verl-data/blob/main/images/verl-arch.png?raw=true" width="400" alt="verl-arch.png">
 </div>
 
 </p>
 
 ## News
 
+- [2026/01] verl has been migrated to the [verl-project](https://github.com/verl-project)
 - [2026/01] verl first meetup was successfully held in Shanghai on 01/10, hosted by Volcengine and NVIDIA, the slides has been uploaded to [verl-data](https://github.com/verl-project/verl-data).
 - [2026/01] The `recipe` directory has been migrated to a dedicated repository: [verl-recipe](https://github.com/verl-project/verl-recipe) and added as a submodule. See https://github.com/volcengine/verl/pull/4795. It can be used as it was after `git submodule update --init --recursive recipe`. Note that [`transfer_queue`](verl/experimental/transfer_queue), [`fully_async_policy`](verl/experimental/fully_async_policy), [`one_step_off_policy`](verl/experimental/one_step_off_policy) and [`vla`](verl/experimental/vla) are kept under [`verl/experimental`](verl/experimental) since they are planned to be merged into the main library. Use them through `verl.experimental.{module}`.
 - [2025/12] [Mind Lab](https://macaron.im/mindlab) successfully used [verl](https://github.com/volcengine/verl) and [Megatron-bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) to train GRPO Lora for Trillion-parameter model on 64 H800 - See their [techblog](https://macaron.im/mindlab/research/building-trillion-parameter-reasoning-rl-with-10-gpus).
@@ -281,6 +282,8 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [deepscaler](https://github.com/agentica-project/rllm/tree/deepscaler): iterative context scaling with GRPO ![GitHub Repo stars](https://img.shields.io/github/stars/agentica-project/deepscaler)
 - [DAPO](https://dapo-sia.github.io/): the fully open source SOTA RL algorithm that beats DeepSeek-R1-zero-32B ![GitHub Repo stars](https://img.shields.io/github/stars/volcengine/verl)
 - [NoisyRollout](https://github.com/NUS-TRAIL/NoisyRollout): Reinforcing Visual Reasoning with Data Augmentation ![GitHub Repo stars](https://img.shields.io/github/stars/NUS-TRAIL/NoisyRollout)
+- [SPEAR](https://github.com/TencentYoutuResearch/SPEAR): **Self-imitation** with **Progressive Exploration** for Agentic Reinforcement Learning (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/TencentYoutuResearch/SPEAR)
+- [RuleReasoner](https://github.com/bigai-nlco/RuleReasoner): **RuleReasoner:** Reinforced Rule-based Reasoning via **Domain-aware Dynamic Sampling** (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/bigai-nlco/RuleReasoner)
 
 ## Contribution Guide
 

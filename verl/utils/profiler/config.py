@@ -36,6 +36,8 @@ class NsightToolConfig(BaseConfig):
 class TorchProfilerToolConfig(BaseConfig):
     """Torch profiler tool config."""
 
+    step_start: int = 0
+    step_end: int = -1
     # options: cuda, cpu, memory, shapes, stack
     contents: list[str] = field(default_factory=list)
     discrete: bool = False
@@ -43,9 +45,10 @@ class TorchProfilerToolConfig(BaseConfig):
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
+        __support_contents = ["cuda", "cpu", "memory", "shapes", "stack", "profile-by-stage", "merge-profiles"]
         for content in self.contents:
-            assert content in ["cuda", "cpu", "memory", "shapes", "stack"], (
-                f"Profiler contents only supports cuda, cpu, memory, shapes, stack, but gets {content}"
+            assert content in __support_contents, (
+                f"Profiler contents only supports {__support_contents}, but gets {content}"
             )
         assert isinstance(self.contents, list), f"Profiler contents must be of type list, got {type(self.contents)}"
 

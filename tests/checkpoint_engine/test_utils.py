@@ -34,9 +34,9 @@ class TrainingWorkerTest(TrainingWorker):
         backend = checkpoint_engine_config.backend
         bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
         engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
-        if torch.distributed.get_rank() == 0 and backend in ["nccl", "hccl"]:
-            engine_kwargs["is_master"] = True
-        self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
+        self.checkpoint_engine = CheckpointEngineRegistry.new(
+            backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
+        )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):

@@ -23,6 +23,10 @@ from omegaconf import DictConfig, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
+try:
+    from verl.workers.engine.mindspeed.transformer_impl import repatch
+except ImportError:
+    repatch = None
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
@@ -66,8 +70,26 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.checkpoint_config = self.config.checkpoint_config
         self.device_name = get_device_name()
 
+        if self.engine_config is None:
+            assert self.optimizer_config is None
+            if self.config.auto_select_engine_optim_fn is None:
+                raise ValueError(
+                    "engine_config is not provided and auto_select_engine_optim_fn is not set. "
+                    "Cannot determine engine backend."
+                )
+            # Support automatically select engine backend given model config
+            self.engine_config, self.optimizer_config = self.config.auto_select_engine_optim_fn(
+                self.model_config, self.device_name
+            )
+
         # we use the one defined in model
+        # TODO: this is not elegant and should refactor later
         self.engine_config.use_remove_padding = self.model_config.use_remove_padding
+        self.engine_config.use_fused_kernels = self.model_config.use_fused_kernels
+
+        if repatch is not None:
+            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
+            repatch(self.engine_config.get("override_transformer_config", {}))
 
         # TODO: add DistProfilerExtension
         self.profiler_config = self.config.profiler_config
@@ -157,6 +179,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_metrics["grad_norm"] = grad_norm
         if lr is not None:
             final_metrics["lr"] = lr
+
+        # TODO: confirm the mtp loss IS same across dp
+        for k, v in final_metrics.items():
+            if k.startswith("mtp_losses"):
+                flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
+                final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
         if global_token_num is not None:
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
@@ -515,9 +543,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             backend = checkpoint_engine_config.backend
             bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
             engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
-            if torch.distributed.get_rank() == 0 and backend in ["nccl", "hccl"]:
-                engine_kwargs["is_master"] = True
-            self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
+            self.checkpoint_engine = CheckpointEngineRegistry.new(
+                backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
+            )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
@@ -565,6 +593,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return
 
         set_expandable_segments(False)
+        log_gpu_memory_usage("Before resume weights", logger=logger)
+
         # 1. resume weights and update weights
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])

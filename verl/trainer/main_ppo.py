@@ -314,13 +314,24 @@ class TaskRunner:
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
+        use_reward_loop = config.reward_model.use_reward_loop
+        if not use_reward_loop:
+            print(
+                "WARNING: Init reward manager in single controller will be deprecated. "
+                "Please set config.reward_model.use_reward_loop to use distributed reward manager."
+            )
+            # Load the reward manager for training and validation.
+            reward_fn = load_reward_manager(
+                config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
+            )
+            val_reward_fn = load_reward_manager(
+                config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
+            )
+        else:
+            # reward_loop will use init a reward loop manager in ray_trainer
+            # and use it to compute reward score
+            reward_fn = None
+            val_reward_fn = None
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 

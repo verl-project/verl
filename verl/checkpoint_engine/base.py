@@ -211,8 +211,9 @@ class ColocatedCheckpointEngine(CheckpointEngine):
     >>> server_adapter.update_weights(engine.receive_weights())
     """
 
-    def __init__(self, bucket_size: int) -> None:
+    def __init__(self, bucket_size: int, is_master: bool = False) -> None:
         self.bucket_size = bucket_size
+        self.is_master = is_master
 
     def prepare(self):
         raise NotImplementedError

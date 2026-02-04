@@ -22,9 +22,10 @@ try:
         compute_routing_scores_for_aux_loss,
         group_limited_topk,
     )
+    from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
 except ImportError:
     warnings.warn("NPU not support router replay for now.", stacklevel=2)
-    pass
+    MoEAlltoAllTokenDispatcher = None
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 
@@ -83,6 +84,7 @@ class RouterReplay:
         self.recorded_topk_idx = None  # For recording
         self.router_replay_action = None  # Router replay action for this layer
         self.replay_backward_list = []  # List of tensors for backward pass replay
+        self.layer_number = None  # Global layer index if available
         RouterReplay.router_instances.append(self)
 
     def set_target_indices(self, topk_indices: torch.Tensor):
@@ -235,7 +237,7 @@ def _patched_topk_routing_with_score_function(
     return routing_probs, routing_map
 
 
-def patched_routing(self, logits: torch.Tensor):
+def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     """Top-k routing function
 
     Args:
@@ -335,6 +337,12 @@ def apply_router_replay_patch():
         return
 
     original_init = TopKRouter.__init__
+    original_set_layer_number = TopKRouter.set_layer_number
+
+    def patched_set_layer_number(self, layer_number: int):
+        original_set_layer_number(self, layer_number)
+        if self.router_replay is not None:
+            self.router_replay.layer_number = layer_number
 
     # Step 3: Define the new __init__ method
     def patched_init(self, *args, **kwargs):
@@ -343,7 +351,35 @@ def apply_router_replay_patch():
         if self.config.enable_routing_replay:
             self.router_replay = RouterReplay()
 
-    # Step 4: Apply the patches
+    # Step 4: Patch MoEAlltoAllTokenDispatcher.preprocess to handle router replay
+    # When router replay is enabled, duplicate indices in top_indices can cause
+    # routing_map.sum() < num_tokens * topk, leading to split size mismatch in alltoall.
+    if MoEAlltoAllTokenDispatcher is not None and not hasattr(MoEAlltoAllTokenDispatcher, "_preprocess_patched"):
+        original_preprocess = MoEAlltoAllTokenDispatcher.preprocess
+
+        def patched_preprocess(self, routing_map):
+            """Patched preprocess that handles router replay correctly for alltoall dispatcher."""
+            # Call original preprocess
+            result = original_preprocess(self, routing_map)
+
+            # Fix num_out_tokens when router replay is enabled
+            if (
+                getattr(self.config, "enable_routing_replay", False)
+                and not self.drop_and_pad
+                and self.config.moe_expert_capacity_factor is None
+                and not self.config.moe_router_padding_for_quantization
+            ):
+                # With router replay, duplicate indices can reduce the actual routed
+                # token count, so derive it from the routing map instead.
+                self.num_out_tokens = int(routing_map.sum().item())
+
+            return result
+
+        MoEAlltoAllTokenDispatcher.preprocess = patched_preprocess
+        MoEAlltoAllTokenDispatcher._preprocess_patched = True
+
+    # Step 5: Apply the patches
     TopKRouter.__init__ = patched_init
     TopKRouter.routing = patched_routing
+    TopKRouter.set_layer_number = patched_set_layer_number
     TopKRouter._router_replay_patched = True

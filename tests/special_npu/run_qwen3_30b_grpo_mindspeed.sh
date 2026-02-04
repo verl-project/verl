@@ -95,6 +95,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=2 \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=2 \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=2 \

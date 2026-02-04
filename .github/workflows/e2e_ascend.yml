@@ -65,7 +65,7 @@ permissions:
 
 jobs:
   non_rl_job:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for non-RL algorithm scenarios
     runs-on: linux-aarch64-a2-4
     timeout-minutes: 60
@@ -114,7 +114,7 @@ jobs:
           mode=ray bash tests/special_npu/run_qwen2_5_05b_sft_peft_sp2.sh
 
   llm_rl_job:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models
     runs-on: linux-aarch64-a2-8
     timeout-minutes: 60
@@ -177,7 +177,7 @@ jobs:
           USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
 
   vlm_rl_job:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
     runs-on: linux-aarch64-a2-8
     timeout-minutes: 60
@@ -223,7 +223,7 @@ jobs:
           rm -rf $HOME/ckpts
 
   experimental_job:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for experimental features
     runs-on: linux-aarch64-a2-4
     timeout-minutes: 60

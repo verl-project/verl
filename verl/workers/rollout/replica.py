@@ -115,7 +115,6 @@ class RolloutReplica(ABC):
         self.servers: list[ActorHandle] = []
         self._server_address: str = None
         self._server_handle: ActorHandle = None
-        self.worker_group: RayWorkerGroup = None
 
     async def init_hybrid(self, worker_group: RayWorkerGroup):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
@@ -124,7 +123,6 @@ class RolloutReplica(ABC):
             worker_group: RayWorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
         """
         self.rollout_mode = RolloutMode.HYBRID
-        self.worker_group = worker_group
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
         ]
@@ -138,7 +136,6 @@ class RolloutReplica(ABC):
             resource_pool: RayResourcePool, ray placement group where hybrid engine processes have been launched.
             bundle_indices: list[int], bundle indices for this rollout replica.
         """
-        self.worker_group = worker_group
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
@@ -167,6 +164,7 @@ class RolloutReplica(ABC):
             if not self.is_reward_model
             else f"rollout_reward_colocate_{self.replica_rank}",
             use_gpu=use_gpu,
+            device_name=get_device_name(),
         )
         self.workers = worker_group.workers
         await self.launch_servers()
@@ -189,7 +187,6 @@ class RolloutReplica(ABC):
 
         # create worker group for this rollout
         use_gpu = self.rollout_worker_use_gpu()
-        print(f"[debug] self.get_ray_class_with_init_args()={self.get_ray_class_with_init_args()}")
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
@@ -252,7 +249,7 @@ class RolloutReplica(ABC):
 
     async def start_profile(self, **kwargs):
         """Start profiling on the replica."""
-        await asyncio.gather(*[server.start_profile.remote() for server in self.servers])
+        await asyncio.gather(*[server.start_profile.remote(**kwargs) for server in self.servers])
 
     async def stop_profile(self):
         """Stop profiling on the replica."""

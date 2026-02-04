@@ -248,11 +248,13 @@ class NIXLCheckpointEngine(CheckpointEngine):
         bucket_size: int,
         device: str = "cuda",
         rollout_dtype: torch.dtype = torch.bfloat16,
+        is_master: bool = False,
     ):
         self.bucket_size = bucket_size
         self.device = device
         self.rollout_dtype = rollout_dtype
         self.agent = NixlAgent()
+        self.is_master = is_master
 
     def prepare(self) -> NixlAgentMetadata:
         """Prepare send and recv bucket.
@@ -383,9 +385,6 @@ class NIXLCheckpointEngine(CheckpointEngine):
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         for name, weight in weights:
-            # model parameters are in fp32 full precision
-            weight = weight.to(self.rollout_dtype)
-
             # fill the tensor bucket
             if offset + weight.nbytes > self.bucket_size:
                 torch.cuda.synchronize()

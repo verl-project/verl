@@ -38,6 +38,8 @@ from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.device import auto_set_device, get_device_name
 from verl.utils.distributed import destroy_global_process_group
 from verl.utils.logger import log_with_rank
+from verl.utils.memory_utils import aggressive_empty_cache
+from verl.utils.profiler import log_gpu_memory_usage
 from verl.utils.tracking import Tracking
 from verl.workers.engine_workers import TrainingWorker
 
@@ -51,6 +53,8 @@ class SFTTrainer:
         config,
     ):
         self.config = config
+
+        log_gpu_memory_usage(f"rank {torch.distributed.get_rank()}: Before SFTTrainer init", logger=logger)
 
         self.rank = torch.distributed.get_rank()
 
@@ -72,6 +76,8 @@ class SFTTrainer:
 
         if self.rank == 0:
             print(self.config)
+
+        log_gpu_memory_usage(f"rank {self.rank}: After SFTTrainer init", logger=logger)
 
     def _build_ckpt_handler(self):
         resume_mode = getattr(self.config.trainer, "resume_mode", "auto")
@@ -200,7 +206,7 @@ class SFTTrainer:
             batch_size=self.train_batch_size_per_dp,
             sampler=self.train_sampler,
             collate_fn=self.collate_fn,
-            num_workers=8,
+            num_workers=self.config.data.num_workers,
             pin_memory=False,
             drop_last=True,
             pin_memory_device=device_name,
@@ -215,7 +221,7 @@ class SFTTrainer:
                 batch_size=self.train_batch_size_per_dp,
                 sampler=self.val_sampler,
                 collate_fn=self.collate_fn,
-                num_workers=8,
+                num_workers=self.config.data.num_workers,
                 pin_memory=False,
                 drop_last=True,
                 pin_memory_device=device_name,
@@ -298,6 +304,9 @@ class SFTTrainer:
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             self.train_sampler.set_epoch(epoch=epoch)
 
+            aggressive_empty_cache(force_sync=True)
+            log_gpu_memory_usage(f"rank {self.rank}: At start of epoch {epoch}", logger=logger)
+
             for step_in_epoch, data in enumerate(
                 tqdm(
                     self.train_dataloader,
@@ -330,10 +339,11 @@ class SFTTrainer:
                     metrics = tu.get(output, "metrics")
 
                     # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
-                    metrics["train/loss"] = metrics.pop("loss")
-                    metrics["train/grad_norm"] = metrics.pop("grad_norm")
-                    metrics["train/lr"] = metrics.pop("lr")
-                    metrics["train/mfu"] = metrics.pop("mfu")
+                    for k in ["loss", "grad_norm", "lr", "mfu"]:
+                        if k in metrics.keys():
+                            value = metrics.pop(k)
+                            metrics[f"train/{k}"] = value
+
                     metrics["train/global_tokens"] = torch.sum(
                         torch.tensor(batch_seqlens, device=self.device_name)
                     ).item()
@@ -373,6 +383,7 @@ class SFTTrainer:
                     torch.distributed.barrier()
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
+                    aggressive_empty_cache(force_sync=True)
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
                 if is_last_step:

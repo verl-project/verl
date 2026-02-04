@@ -242,11 +242,24 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
             dim=0
         )  # layer_num, dynamic_bs_all, topk
+        num_layers_in_data = layers_topk_idx_reshape.shape[0]
+        use_global_layer_index = getattr(tf_config, "num_layers", None) == num_layers_in_data
         local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
         offset, _ = local_rank_info["start"], local_rank_info["end"]
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
         for i, router in enumerate(router_instances_list):
-            router.set_target_indices(layers_topk_idx_reshape[i + offset].to(torch.int64))
+            layer_idx = None
+            if use_global_layer_index:
+                layer_number = getattr(router, "layer_number", None)
+                if layer_number is not None:
+                    layer_idx = layer_number - 1
+            if layer_idx is None:
+                layer_idx = i + offset
+            if layer_idx < 0 or layer_idx >= num_layers_in_data:
+                raise ValueError(
+                    f"router replay layer index {layer_idx} out of range for data with {num_layers_in_data} layers"
+                )
+            router.set_target_indices(layers_topk_idx_reshape[layer_idx].to(torch.int64))
 
 
 def reorder_and_merge_vpp_layers(

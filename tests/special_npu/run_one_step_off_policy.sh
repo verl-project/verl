@@ -10,7 +10,7 @@ ACTOR_STRATEGY="fsdp2"
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 # Algorithm parameters
 adv_estimator=grpo
@@ -88,6 +88,7 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.name=vllm \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
     reward_model.reward_manager=dapo
     +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
     +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}

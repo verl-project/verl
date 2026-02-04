@@ -14,7 +14,7 @@
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
@@ -23,7 +23,7 @@ from ...utils.profiler import ProfilerConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["FSDPEngineConfig", "McoreEngineConfig", "TrainingWorkerConfig", "VeOmniEngineConfig"]
+__all__ = ["FSDPEngineConfig", "McoreEngineConfig", "TrainingWorkerConfig", "VeOmniEngineConfig", "EngineConfig"]
 
 
 @dataclass
@@ -97,6 +97,8 @@ class McoreEngineConfig(EngineConfig):
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
         use_dist_checkpointing (bool): Whether to use distributed checkpointing.
         dist_checkpointing_path (Optional[str]): Path for distributed checkpointing.
+        dist_ckpt_optim_fully_reshardable (bool): Use fully reshardable optimizer checkpoints.
+        distrib_optim_fully_reshardable_mem_efficient (bool): Use memory-efficient fully reshardable format.
         seed (int): Random seed for reproducibility.
         override_ddp_config (dict[str, Any]): Override configuration for DDP.
         override_transformer_config (dict[str, Any]): Override configuration for transformer.
@@ -118,6 +120,8 @@ class McoreEngineConfig(EngineConfig):
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""
+    dist_ckpt_optim_fully_reshardable: bool = False
+    distrib_optim_fully_reshardable_mem_efficient: bool = False
     override_ddp_config: dict[str, Any] = field(default_factory=dict)
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
@@ -288,3 +292,7 @@ class TrainingWorkerConfig(BaseConfig):
     optimizer_config: OptimizerConfig = None
     checkpoint_config: CheckpointConfig = None
     profiler_config: ProfilerConfig = None
+    # automatically select engine and optimizer function.
+    # This function takes model config and the device name as parameter.
+    # Users can pass in a higher-order function to take more parameters
+    auto_select_engine_optim_fn: Callable[["HFModelConfig", str], tuple["EngineConfig", "OptimizerConfig"]] = None
