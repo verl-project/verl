@@ -697,7 +697,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
-        attention_mask = model_inputs["attention_mask"].to(bool)
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
@@ -713,6 +712,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
             layers_topk_idx = model_inputs["routed_experts"]
+            attention_mask = model_inputs["attention_mask"].to(bool)
             set_router_replay_data(layers_topk_idx, attention_mask, self.tf_config, vp_rank)
 
         if pad_mode == DatasetPadMode.NO_PADDING:
