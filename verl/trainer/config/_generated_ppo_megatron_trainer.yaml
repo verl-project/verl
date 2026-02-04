@@ -555,63 +555,17 @@ critic:
   load_weight: true
 reward_model:
   enable: false
-  enable_resource_pool: false
-  n_gpus_per_node: 8
-  nnodes: 0
-  strategy: megatron
-  model:
-    input_tokenizer: ${actor_rollout_ref.model.path}
-    path: ~/models/FsfairX-LLaMA3-RM-v0.1
-    external_lib: ${actor_rollout_ref.model.external_lib}
-    trust_remote_code: false
-    override_config: {}
-  micro_batch_size: null
-  micro_batch_size_per_gpu: null
-  max_length: null
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
-  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
+  use_reward_loop: true
+  num_workers: 8
   reward_manager: naive
+  enable_resource_pool: false
+  n_gpus_per_node: 0
+  nnodes: 0
   reward_loop_source: register
   reward_loop_module_path: null
   reward_loop_class_name: null
   launch_reward_fn_async: false
-  sandbox_fusion:
-    url: null
-    max_concurrent: 64
-    memory_limit_mb: 1024
-  profiler:
-    _target_: verl.utils.profiler.ProfilerConfig
-    tool: ${oc.select:global_profiler.tool,null}
-    enable: false
-    all_ranks: false
-    ranks: []
-    save_path: ${oc.select:global_profiler.save_path,null}
-    tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
-  nccl_timeout: 600
-  megatron:
-    _target_: verl.workers.config.MegatronEngineConfig
-    param_offload: false
-    tensor_model_parallel_size: 1
-    expert_model_parallel_size: 1
-    expert_tensor_parallel_size: null
-    pipeline_model_parallel_size: 1
-    virtual_pipeline_model_parallel_size: null
-    context_parallel_size: 1
-    sequence_parallel: true
-    use_distributed_optimizer: false
-    use_dist_checkpointing: false
-    dist_checkpointing_path: null
-    dist_checkpointing_prefix: ''
-    seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
-    override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
-    use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
-    vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
-    use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
-    dtype: bfloat16
-  load_weight: true
-  use_reward_loop: true
-  num_workers: 8
-  rollout:
+  inference:
     _target_: verl.workers.config.RolloutConfig
     name: ???
     dtype: bfloat16
@@ -634,6 +588,10 @@ reward_model:
     skip_tokenizer_init: false
     prompt_length: 2048
     response_length: 2048
+  sandbox_fusion:
+    url: null
+    max_concurrent: 64
+    memory_limit_mb: 1024
 algorithm:
   rollout_correction:
     rollout_is: null
