@@ -181,7 +181,7 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     Returns:
         value loss
     """
-    vpreds = _slice_response_from_unpad_output(model_output["values"], data)  # (bsz, response_length)
+    vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
 
     values = data["values"]
     returns = data["returns"]

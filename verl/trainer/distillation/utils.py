@@ -25,7 +25,7 @@ from verl.trainer.distillation.losses import DistillationLossSettings, get_disti
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.utils.stages import Stage
 from verl.workers.config import DistillationConfig
-from verl.workers.utils.padding import _slice_response_from_unpad_output
+from verl.workers.utils.padding import no_padding_2_padding
 
 TEACHER_TOPK_LOG_PROBS_KEY = "teacher_topk_log_probs"
 TEACHER_TOPK_INDICES_KEY = "teacher_topk_indices"
@@ -122,9 +122,9 @@ def prepare_distillation_inputs(
     elif distillation_settings.use_estimator:
         return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data["ref_log_prob"])
     elif distillation_settings.use_topk:
-        teacher_topk_log_probs = _slice_response_from_unpad_output(data[TEACHER_TOPK_LOG_PROBS_KEY], data)
-        teacher_topk_indices = _slice_response_from_unpad_output(data[TEACHER_TOPK_INDICES_KEY], data)
-        student_logits = _slice_response_from_unpad_output(model_output[STUDENT_LOGITS_KEY], data)
+        teacher_topk_log_probs = no_padding_2_padding(data[TEACHER_TOPK_LOG_PROBS_KEY], data)
+        teacher_topk_indices = no_padding_2_padding(data[TEACHER_TOPK_INDICES_KEY], data)
+        student_logits = no_padding_2_padding(model_output[STUDENT_LOGITS_KEY], data)
         return DistillationLossInputs(
             student_logits=student_logits,
             teacher_topk_log_probs=teacher_topk_log_probs,
