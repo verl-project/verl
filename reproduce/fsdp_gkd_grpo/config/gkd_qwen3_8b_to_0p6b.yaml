@@ -1,0 +1,141 @@
+# GKD (Generalized Knowledge Distillation) Configuration
+#
+# Usage:
+#   bash train_gkd_fsdp2.sh
+#
+# Or with overrides:
+#   bash train_gkd_fsdp2.sh trainer.n_gpus_per_node=4 actor_rollout_ref.actor.optim.lr=5e-7
+ 
+defaults:
+  # Inherit from base PPO trainer config (found via hydra.searchpath)
+  - /ppo_trainer@_here_
+ 
+# ============================================================
+# Sequence Length Configuration
+# ============================================================
+# For thinking models like Qwen3, response can be very long
+_seq_config:
+  max_prompt_length: 512
+  max_response_length: 16384
+  max_total_length: 16896  # prompt + response
+ 
+# ============================================================
+# Data Configuration
+# ============================================================
+data:
+  train_files: /workspace/mlf2/verl/reproduce/data/openthoughts3/local_parquet_dir/train.parquet
+  val_files: /workspace/mlf2/verl/reproduce/data/openthoughts3/local_parquet_dir/validation.parquet
+  off_policy_files: /workspace/mlf2/verl/reproduce/data/openthoughts3/local_parquet_dir/train.parquet
+  train_batch_size: 6
+  val_batch_size: 12
+  max_prompt_length: ${_seq_config.max_prompt_length}
+  max_response_length: ${_seq_config.max_response_length}
+  filter_overlong_prompts: true
+  truncation: left
+  train_max_samples: 4860
+  val_max_samples: 400
+  prompt_key: prompt
+  answer_key: extra_info.answer  # Ground truth answer/solution string for off-policy distillation
+  reward_fn_key: data_source
+ 
+# ============================================================
+# Model Configuration
+# ============================================================
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen3-0.6B
+    # GKD needs logits for KL loss computation, must disable remove_padding
+    use_remove_padding: false
+    enable_gradient_checkpointing: true
+ 
+  # ============================================================
+  # Actor (Student) Configuration
+  # ============================================================
+  actor:
+    # FSDP2 backend for memory efficiency
+    strategy: fsdp2
+ 
+    fsdp_config:
+      model_dtype: bf16
+      # Memory optimization: offload params and optimizer to CPU
+      param_offload: true
+      optimizer_offload: true
+ 
+    # GKD-specific settings
+    use_teacher_kl_loss: true
+    gkd_only_mode: true  # Pure distillation, no RL reward
+    teacher_kl_coef: 1.0
+    teacher_kl_temperature: 1.0
+ 
+    # Memory optimization for long sequences
+    use_chunked_teacher_kl: true
+    teacher_kl_chunk_size: 1024
+ 
+    # Dynamic batch size for variable sequence lengths
+    use_dynamic_bsz: true
+    ulysses_sequence_parallel_size: 1
+ 
+    # PPO batch sizes (used for actor update even in GKD mode)
+    ppo_mini_batch_size: 4
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: ${_seq_config.max_total_length}
+ 
+    # Optimizer settings
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: 20
+      lr_scheduler: cosine      
+ 
+  # ============================================================
+  # Teacher Server Configuration
+  # ============================================================
+  teacher:
+    server_ip: "127.0.0.1"
+    server_port: 15555
+    n_server_workers: 1
+    temperature: 1.0
+    # Only compute log probs for response tokens (memory optimization)
+    only_response: true
+ 
+  # ============================================================
+  # Rollout (vLLM) Configuration
+  # ============================================================
+  rollout:
+    name: vllm
+    mode: sync
+    enable_chunked_prefill: true
+    max_num_batched_tokens: ${_seq_config.max_total_length}
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.75
+    # GKD only: single response per prompt
+    n: 1
+    temperature: 0.6
+    top_p: 0.95
+    # Qwen3 stop token IDs (end_of_turn=151645, end_of_sentence=151643)
+    # Comment out or remove for Qwen2 models
+    stop_token_ids: [151645, 151643]
+ 
+# ============================================================
+# Critic Configuration (not used in GKD-only mode, but required)
+# ============================================================
+critic:
+  model:
+    path: Qwen/Qwen3-0.6B
+ 
+# ============================================================
+# Trainer Configuration
+# ============================================================
+trainer:
+  critic_warmup: 0
+  logger: ["console", "wandb"]
+  project_name: mw_verl_recipe_reasoning
+  experiment_name: gkd_only_qwen3_8b_to_0p6b_lambda1p0_gsm8k_fsdp2
+  n_gpus_per_node: 3
+  nnodes: 1
+  save_freq: 400
+  test_freq: 200
+  total_epochs: 1
+  val_before_train: true
+  # GKD-specific settings
+  gkd_lambda: 1.0
+  enable_off_policy: false
