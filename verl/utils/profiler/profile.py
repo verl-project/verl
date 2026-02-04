@@ -17,6 +17,10 @@ from typing import Callable, Optional
 
 from ..memory_utils import MemorySnapshotSampler, enable_memory_visualize
 from .config import ProfilerConfig, TorchMemoryToolConfig
+import os
+import threading
+
+_precision_lock = threading.Lock()
 
 
 def mark_start_range(
@@ -150,6 +154,97 @@ class DistProfiler:
         if self.check_enable() and self.check_this_rank():
             self._this_step = False
             return getattr(self._impl, "stop", lambda: None)()
+
+    def precision_start(self, precision_cfg, stage: str, global_step: Optional[int], model=None) -> bool:
+        if not precision_cfg or not precision_cfg.get("enable", False):
+            return False
+        stages = precision_cfg.get("stages", None)
+        if stages is not None and stage not in set(stages):
+            return False
+        steps = precision_cfg.get("steps", None)
+        if steps is not None and global_step is not None:
+            if int(global_step) not in set(steps):
+                return False
+        config_path = precision_cfg.get("config_path", None)
+        data_dir = precision_cfg.get("data_dir", None)
+        if not config_path or not data_dir:
+            return False
+        dump_path = os.path.join(data_dir, str(global_step) if global_step is not None else "unknown", stage)
+        os.makedirs(dump_path, exist_ok=True)
+        with _precision_lock:
+            from msprobe.pytorch import PrecisionDebugger
+
+            debugger = PrecisionDebugger._instance
+            if debugger is None:
+                PrecisionDebugger(config_path=config_path, dump_path=dump_path)
+                debugger = PrecisionDebugger._instance
+            if debugger is None:
+                return False
+            debugger.service.config.dump_path = dump_path
+        debugger.start(model)
+        return True
+
+    def precision_stop(self, precision_cfg, stage: str, started: bool) -> None:
+        if not started:
+            return
+        from msprobe.pytorch import PrecisionDebugger
+
+        debugger = PrecisionDebugger._instance
+        if debugger is None:
+            return
+        debugger.stop()
+        if stage == "update_actor":
+            debugger.step()
+
+    @classmethod
+    def precision(
+        cls,
+        stage: str,
+        model_attr: Optional[object] = None,
+    ) -> Callable:
+        def _get_model(self_instance):
+            if model_attr is None:
+                return None
+            if isinstance(model_attr, (list, tuple)):
+                for attr in model_attr:
+                    val = getattr(self_instance, attr, None)
+                    if val is not None:
+                        return val
+                return None
+            return getattr(self_instance, model_attr, None)
+
+        def _get_global_step(args, kwargs):
+            for val in list(args) + list(kwargs.values()):
+                if hasattr(val, "meta_info"):
+                    meta = getattr(val, "meta_info")
+                    if isinstance(meta, dict) and "global_steps" in meta:
+                        return meta.get("global_steps")
+                if hasattr(val, "get"):
+                    try:
+                        step = val.get("global_steps", None)
+                        if step is not None:
+                            return step
+                    except Exception:
+                        pass
+            return None
+
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(self_instance, *args, **kwargs):
+                profiler = getattr(self_instance, "profiler", None)
+                precision_cfg = getattr(self_instance, "precision_debugger_cfg", None)
+                if not profiler or not precision_cfg:
+                    return func(self_instance, *args, **kwargs)
+                global_step = _get_global_step(args, kwargs)
+                model = _get_model(self_instance)
+                started = profiler.precision_start(precision_cfg, stage, global_step, model)
+                result = func(self_instance, *args, **kwargs)
+                profiler.precision_stop(precision_cfg, stage, started)
+                return result
+
+            return wrapper
+
+        return decorator
 
     @classmethod
     def annotate(

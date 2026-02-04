@@ -317,7 +317,7 @@ precision_debugger:
   steps: null
 
   # Stages to collect
-  stages: ["rollout", "train_fwd", "train_bwd", "update_actor", "ref_model"]
+  stages: ["rollout", "train", "update_actor", "ref_model"]
 
   # Fail open on errors
   fail_open: True

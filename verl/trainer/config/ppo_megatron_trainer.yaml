@@ -242,7 +242,7 @@ precision_debugger:
   config_path: null
   data_dir: "outputs/precision_debug"
   steps: null
-  stages: ["rollout", "train_fwd", "train_bwd", "update_actor", "ref_model"]
+  stages: ["rollout", "train", "update_actor", "ref_model"]
   fail_open: True
 
 # configs for TransferQueue

@@ -718,8 +718,7 @@ precision_debugger:
   steps: null
   stages:
   - rollout
-  - train_fwd
-  - train_bwd
+  - train
   - update_actor
   - ref_model
   fail_open: true

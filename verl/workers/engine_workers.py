@@ -37,7 +37,6 @@ from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
-from verl.utils.precision_debugger import precision_start, precision_stop
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
@@ -554,15 +553,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
+    @DistProfiler.precision(stage="ref_model", model_attr="ref")
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        global_step = data.get("global_steps", None)
-        handle = precision_start(
-            self.precision_debugger_cfg, "ref_model", global_step, getattr(self, "ref", None)
-        )
         output = self.ref.infer_batch(data=data)
-        output = output.cpu() if output is not None else None
-        precision_stop(handle)
-        return output
+        return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
@@ -572,15 +566,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
+    @DistProfiler.precision(stage="update_actor", model_attr="actor")
     def update_actor(self, data: TensorDict) -> TensorDict:
-        global_step = data.get("global_steps", None)
-        handle = precision_start(
-            self.precision_debugger_cfg, "update_actor", global_step, getattr(self, "actor", None)
-        )
         output = self.actor.train_mini_batch(data=data)
-        output = output.cpu() if output is not None else None
-        precision_stop(handle)
-        return output
+        return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
