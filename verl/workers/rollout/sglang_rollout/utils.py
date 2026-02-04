@@ -28,16 +28,11 @@ SGLANG_LORA_NAME = "verl_actor_lora_name"
 
 def get_max_lora_rank(lora_rank: int):
     """
-    For vLLM, the smallest `max_lora_rank` is 8, and allowed values are (8, 16, 32, 64, 128, 256, 320, 512)
-    This function automatically adjusts the `max_lora_rank` to the nearest allowed value.
-    Reference: https://github.com/vllm-project/vllm/blob/8a297115e2367d463b781adb86b55ac740594cf6/vllm/config/lora.py#L27
+    same with vllm, allowed values are (8, 16, 32, 64, 128, 256, 320, 512)
     """
-    assert lora_rank > 0, f"lora_rank must be greater than 0 to invoke this function, get {lora_rank}"
-    max_lora_ranks = [8, 16, 32, 64, 128, 256, 320, 512]
-    for rank in max_lora_ranks:
-        if lora_rank <= rank:
-            return rank
-    raise ValueError(f"lora_rank must be less than or equal to {max_lora_ranks[-1]}, but got {lora_rank}")
+    import verl.workers.rollout.vllm_rollout.utils as lora_utils
+
+    return lora_utils.get_vllm_max_lora_rank(lora_rank)
 
 def broadcast_pyobj(
     data: list[Any],
