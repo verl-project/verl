@@ -152,6 +152,12 @@ USE_LEGACY_WORKER_IMPL=${USE_LEGACY_WORKER_IMPL:-auto}
 USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-False}
 ROUTING_REPLAY_MODE=${ROUTING_REPLAY_MODE:-"disabled"}
 
+if [ "$ROUTING_REPLAY_MODE" = "R3" ]; then
+    ENABLE_ROLLOUT_ROUTING_REPLAY=True
+else
+    ENABLE_ROLLOUT_ROUTING_REPLAY=False
+fi
+
 python3 -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_megatron_trainer.yaml'\
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
@@ -207,6 +213,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     ++actor_rollout_ref.rollout.quantization=${ROLLOUT_QUANTIZATION} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     actor_rollout_ref.ref.megatron.use_mbridge=${USE_MBRIDGE} \
     actor_rollout_ref.ref.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \

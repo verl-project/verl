@@ -35,7 +35,6 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.flops_counter import FlopsCounter
-from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
@@ -122,13 +121,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.flops_counter = FlopsCounter(self.model_config.hf_config)
 
         self.loss_fn = None
-
-        self.enable_routing_replay = (
-            self.engine_config.strategy == "megatron" and self.engine_config.router_replay_mode != "disabled"
-        )
-        logger.info(f"enable_routing_replay in TrainingWorker: {self.enable_routing_replay}")
-        if self.enable_routing_replay:
-            apply_router_replay_patch()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
@@ -253,8 +245,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
-                if self.engine_config.router_replay_mode in ["R2", "R3"]:
-                    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
                 # add global token num
                 global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
                 # allgather from dp rank
@@ -271,9 +261,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 )
                 actor_output = self.train_batch(mini_batch_td)
                 output_lst.append(actor_output)
-                if self.engine_config.router_replay_mode in ["R2", "R3"]:
-                    RouterReplay.clear_global_router_replay_action()
-                    RouterReplay.clear_global_indices()
 
             if self.engine.is_mp_src_rank_with_outputs():
                 actor_output = [tu.get(output, "metrics") for output in output_lst]
@@ -430,6 +417,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             tool_config = None
 
+        self.enable_routing_replay = (
+            self.config.actor.strategy == "megatron" and self.config.actor.router_replay.mode != "disabled"
+        )
+
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
@@ -565,24 +556,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
+        if self.enable_routing_replay:
+            tu.assign_non_tensor_data(data, "enable_routing_replay", False)
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        if self.config.actor.router_replay.mode == "R3":
-            RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+        if self.enable_routing_replay:
+            tu.assign_non_tensor_data(data, "enable_routing_replay", True)
+
         output = self.actor.infer_batch(data)
 
-        if self.config.actor.router_replay.mode in ["R2", "R3"]:
-            RouterReplay.clear_global_indices()
-            RouterReplay.clear_global_router_replay_action()
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: TensorDict) -> TensorDict:
+        if self.enable_routing_replay:
+            tu.assign_non_tensor_data(data, "enable_routing_replay", True)
+
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 

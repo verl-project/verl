@@ -32,7 +32,7 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
-from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
+from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     set_router_replay_data,
@@ -95,6 +95,9 @@ class MegatronEngine(BaseEngine):
 
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay_mode != "disabled"
+        logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
+        if self.enable_routing_replay:
+            apply_router_replay_patch()
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
@@ -556,6 +559,19 @@ class MegatronEngine(BaseEngine):
 
         forward_step = partial(self.forward_step, postprocess_micro_batch_func=postprocess_micro_batch_func)
 
+        enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
+
+        if enable_routing_replay:
+            router_replay_mode = self.engine_config.router_replay_mode
+            if forward_only:  # compute_log_probs
+                if router_replay_mode == "R2":
+                    RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
+                if router_replay_mode == "R3":
+                    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+            else:  # train batch
+                if router_replay_mode in ["R2", "R3"]:
+                    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+
         # batch should be a list of batches inside micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.module))
 
@@ -570,6 +586,11 @@ class MegatronEngine(BaseEngine):
             micro_batch_size=1,  # the communication shape is obtained via p2p comm
             forward_only=forward_only,
         )
+
+        if enable_routing_replay:
+            if self.engine_config.router_replay_mode in ["R2", "R3"]:
+                RouterReplay.clear_global_indices()
+                RouterReplay.clear_global_router_replay_action()
 
         if self.model_config.mtp.enable and self.is_mp_src_rank_with_outputs():
             # add mtp_losses
