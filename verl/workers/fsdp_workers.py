@@ -22,7 +22,6 @@ import os
 import warnings
 from dataclasses import asdict
 
-import numpy as np
 import psutil
 import torch
 import torch.distributed
@@ -41,7 +40,6 @@ try:
 except ImportError:
     from torch.distributed._tensor import DTensor
 
-import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
@@ -79,7 +77,7 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
-from verl.utils.model import compute_position_id_with_mask, convert_weight_keys
+from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
@@ -1756,7 +1754,7 @@ class CriticWorker(Worker, DistProfilerExtension):
 #                 device_mesh=self.device_mesh,
 #             )
 #         elif config.strategy == "fsdp2":
-#             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+#             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"  # noqa: E501
 #             cpu_offload = CPUOffloadPolicy(pin_memory=True)
 #             fsdp_kwargs = {
 #                 "mesh": fsdp_mesh,

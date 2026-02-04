@@ -78,7 +78,6 @@ from verl.utils.torch_functional import use_original_torch_compile
 from verl.workers.actor.megatron_actor import MegatronPPOActor
 from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
-from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
 from verl.workers.rollout import get_rollout_class
 
 logger = logging.getLogger(__file__)
@@ -119,8 +118,7 @@ class MegatronWorker(Worker):
         from transformers import AutoConfig
 
         from verl.models.mcore import hf_to_mcore_config
-        from verl.utils import hf_processor, hf_tokenizer
-        from verl.utils.fs import copy_to_local
+        from verl.utils import hf_processor
         from verl.utils.model import update_model_config
 
         # Step 1: initialize the tokenizer
