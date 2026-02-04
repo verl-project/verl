@@ -10,7 +10,7 @@ NODES=1
 #   - https://github.com/vllm-project/vllm/pull/28284
 #   - https://github.com/vllm-project/vllm/pull/33013
 
-ROUTING_REPLAY_MODE="R2" 
+ROUTING_REPLAY_MODE="R3" 
 
 if [ "$ROUTING_REPLAY_MODE" = "R3" ]; then
     ENABLE_ROLLOUT_ROUTING_REPLAY=True

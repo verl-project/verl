@@ -418,7 +418,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             tool_config = None
 
         self.enable_routing_replay = (
-            self.config.actor.strategy == "megatron" and self.config.actor.megatron.router_replay.mode != "disabled"
+            self.config.actor.strategy == "megatron" and self.config.actor.megatron.router_replay.mode == "R3"
         )
 
         DistProfilerExtension.__init__(

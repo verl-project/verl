@@ -94,7 +94,7 @@ class MegatronEngine(BaseEngine):
         self.weight_converter = None
 
         # Router replay configuration for MoE models
-        self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
+        self.enable_routing_replay = self.engine_config.router_replay.mode == "R3"
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
         if self.enable_routing_replay:
             apply_router_replay_patch()
@@ -580,7 +580,7 @@ class MegatronEngine(BaseEngine):
         )
 
         if enable_routing_replay:
-            if self.engine_config.router_replay.mode in ["R2", "R3"]:
+            if self.engine_config.router_replay.mode in ["R3"]:
                 RouterReplay.clear_global_indices()
                 RouterReplay.clear_global_router_replay_action()
 
