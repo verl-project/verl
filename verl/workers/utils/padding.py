@@ -87,12 +87,13 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     """Slice response from unpad model output.
 
     Args:
-        tensor: a nested tensor or a 1D tensor in shape (total_nnz,),
+        tensor: a nested tensor or a tensor of shape (total_nnz,*),
             total_nnz is the total number of tokens across all sequences in the batch
+
         data: TensorDict with "prompts", "responses", "attention_mask"
 
     Returns:
-        tensor: sliced response tensor of shape [bsz, max_response_len]
+        tensor: sliced response tensor of shape [bsz, max_response_len, *]
     """
     values = tensor.values() if tensor.is_nested else tensor
     prompt_ids = data["prompts"]
@@ -118,10 +119,12 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
 
     response_list = []
+    # Skip padding dimensions after sequence dimensions, if any.
+    skip_padding = (0, 0) * (values.ndim - 1)
     for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
         pad_size = max_response_len - resp_len
         # left-shift model output by one token for log_probs/values
-        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
+        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (*skip_padding, 0, pad_size)))
 
     output = torch.stack(response_list, dim=0)
     return output
