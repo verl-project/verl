@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
-from dataclasses import dataclass, field, fields
-from typing import Any, Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 from omegaconf import MISSING
 
@@ -39,6 +38,7 @@ __all__ = [
     "DistillationConfig" 
     "QATConfig",
     "TorchTitanActorConfig",
+    "DistillationLossConfig",
     "TeacherHFModelConfig",
     "TeacherModelsConfig",
 ]
@@ -326,16 +326,20 @@ class FSDPActorConfig(ActorConfig):
                     "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
                 )
 
+
 @dataclass
 class TeacherHFModelConfig(HFModelConfig):
     """Configuration for a teacher model used in distillation.
 
     Args:
         path (Optional[str]): Path to the pre-trained teacher model.
+        num_gpus_per_node (Optional[int]): Number of GPUs per node to use for this teacher model.
         domain (Optional[str]): Domain or task associated with this teacher model.
     """
+
     path: Optional[str] = None
-    domain: Optional[Union[str, list[str], set[str]]] = None
+    num_gpus_per_node: Optional[int] = None
+    domain: Optional[str | list[str] | set[str]] = None
 
     def __post_init__(self):
         self._mutable_fields.add("domain")
@@ -380,7 +384,6 @@ class TeacherModelsConfig(BaseConfig):
                 raise ValueError(f"Teacher model {teacher_id} must have a specified domain.")
             teacher_configs.append(teacher_config)
         return teacher_configs
-                
 
     def get_teacher_config(self, teacher_id: int, raise_error: bool = True) -> TeacherHFModelConfig:
         """TODO"""
@@ -399,7 +402,10 @@ class TeacherModelsConfig(BaseConfig):
         while self.get_teacher_config(num_teacher_configs, raise_error=False) is not None:
             num_teacher_configs += 1
         if num_teacher_configs != max_num_teachers:
-            raise ValueError(f"Got {num_teacher_configs=}. When adding/removing teacher model configs, please also update {max_num_teachers=} (for config validation purposes)")
+            raise ValueError(
+                f"Got {num_teacher_configs=}. When adding/removing teacher model configs, "
+                f"please also update {max_num_teachers=} (for config validation purposes)"
+            )
         if self.num_teachers > max_num_teachers or self.num_teachers < 1:
             raise ValueError(f"num_teachers must be between 1 and {max_num_teachers}, got {self.num_teachers}")
         allow_empty_domain = self.num_teachers == 1
@@ -408,17 +414,64 @@ class TeacherModelsConfig(BaseConfig):
             teacher_config = self.get_teacher_config(teacher_id)
             if teacher_id < self.num_teachers:
                 if id_set.intersection(teacher_config.domain):
-                    raise ValueError(f"teacher {teacher_id} has overlapping domain with previous teachers: {teacher_config.domain} intersects with {id_set}")
+                    raise ValueError(
+                        f"teacher {teacher_id} has overlapping domain with previous teachers: "
+                        f"{teacher_config.domain} intersects with {id_set}"
+                    )
                 id_set = id_set.union(teacher_config.domain)
                 if teacher_config.path is None:
                     raise ValueError(f"teacher {teacher_id} must be specified when num_teachers is {self.num_teachers}")
                 if len(teacher_config.domain) == 0 and not allow_empty_domain:
-                    raise ValueError(f"teacher {teacher_id} missing domain. When num_teachers > 1, all teacher models must have a specified domain.")
+                    raise ValueError(
+                        f"teacher {teacher_id} missing domain. "
+                        f"When num_teachers > 1, all teacher models must have a specified domain."
+                    )
             elif teacher_id >= self.num_teachers and teacher_config.path is not None:
                 raise ValueError(f"teacher {teacher_id} must not be specified when num_teachers is {self.num_teachers}")
         if self.num_teachers == 1:
             teacher_config = self.get_teacher_config(0)
             teacher_config.domain = {"all"}
+
+
+@dataclass
+class DistillationLossConfig(BaseConfig):
+    """Configuration for distillation loss settings.
+
+    loss_mode (str):
+        Distillation loss function to use.
+    topk (int, optional):
+        Number of top tokens to consider for top-k distillation losses.
+    use_policy_loss (bool):
+        Whether to include policy gradient loss alongside distillation loss.
+    distillation_loss_coef (float):
+        Coefficient for distillation loss when combined with policy loss.
+    jsd_beta (float):
+        Interpolation weight for JSD loss. When beta=0, behaves like forward KL.
+        When beta=1, behaves like reverse KL.
+    loss_max_clamp (float, optional):
+        Maximum value to clamp distillation loss. If None, no clamping is applied.
+    log_prob_min_clamp (float, optional):
+        Minimum value to clamp log probabilities for stability, e.g., log q - log p where p or q are
+        very close to zero. If None, no clamping is applied.
+    loss_settings (DistillationLossSettings, optional):
+        Runtime-populated settings based on loss_mode. Not set by user.
+    """
+
+    loss_mode: str = "k3"
+    topk: Optional[int] = 128
+    use_policy_loss: bool = True
+    distillation_loss_coef: float = 1.0
+    jsd_beta: float = 0.5
+    loss_max_clamp: Optional[float] = 10.0
+    log_prob_min_clamp: Optional[float] = -10.0
+
+    # Store distillation loss settings for computing the specified loss_mode
+    # Not set by user, populated at runtime
+    loss_settings: Optional[dict] = None
+
+    def __post_init__(self):
+        self._mutable_fields.add("loss_settings")
+
 
 @dataclass
 class VeOmniActorConfig(ActorConfig):
@@ -475,45 +528,24 @@ class DistillationConfig(ActorConfig):
     Args:
         enabled (bool):
             Whether distillation is enabled.
-        loss_mode (str):
-            Distillation loss function to use.
-        topk (int, optional):
-            Number of top tokens to consider for top-k distillation losses.
-        use_policy_loss (bool):
-            Whether to include policy gradient loss alongside distillation loss.
-        distillation_loss_coef (float):
-            Coefficient for distillation loss when combined with policy loss.
-        jsd_beta (float):
-            Interpolation weight for JSD loss. When beta=0, behaves like forward KL.
-            When beta=1, behaves like reverse KL.
+        enable_resource_pool (bool):
+            Whether to enable separate resource pool for teacher model(s).
+        n_gpus_per_node (int):
+            Number of GPUs per node to use for distillation teacher model(s).
+        nnodes (int):
+            Number of nodes to use for distillation teacher model(s).
         teacher_models: TeacherModelsConfig:
             Configuration for the teacher models.
-        loss_max_clamp (float, optional):
-            Maximum value to clamp distillation loss. If None, no clamping is applied.
-        log_prob_min_clamp (float, optional):
-            Minimum value to clamp log probabilities for stability, e.g., log q - log p where p or q are
-            very close to zero. If None, no clamping is applied.
-        loss_settings (DistillationLossSettings, optional):
-            Runtime-populated settings based on loss_mode. Not set by user.
+        distillation_loss: DistillationLossConfig:
+            Configuration for distillation loss settings.
     """
 
     enabled: bool = False
-    loss_mode: str = "k3"
-    topk: Optional[int] = 128
-    use_policy_loss: bool = True
-    distillation_loss_coef: float = 1.0
-    jsd_beta: float = 0.5
+    enable_resource_pool: bool = False
+    n_gpus_per_node: int = 8
+    nnodes: int = 0
     teacher_models: TeacherModelsConfig = field(default_factory=TeacherModelsConfig)
-    loss_max_clamp: Optional[float] = 10.0
-    log_prob_min_clamp: Optional[float] = -10.0
-
-    # Store distillation loss settings for computing the specified loss_mode
-    # Not set by user, populated at runtime
-    loss_settings: Optional[dict] = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        self._mutable_fields.add("loss_settings")
+    distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
 
 @dataclass

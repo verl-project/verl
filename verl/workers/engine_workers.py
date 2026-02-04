@@ -46,6 +46,7 @@ from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.workers.config import (
     ActorConfig,
     DistillationConfig,
+    DistillationLossConfig,
     HFModelConfig,
     RolloutConfig,
     TrainingWorkerConfig,
@@ -424,16 +425,21 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
+
 def prepare_ref_config(target_config: ActorConfig, actor_config: ActorConfig):
     """TODO"""
     with open_dict(target_config):
         target_config.ppo_mini_batch_size = actor_config.ppo_mini_batch_size
-        target_config.ppo_micro_batch_size = target_config.pop("log_prob_micro_batch_size", None)
-        target_config.ppo_micro_batch_size_per_gpu = target_config.pop(
-            "log_prob_micro_batch_size_per_gpu", None
+        target_config.ppo_micro_batch_size = (
+            target_config.pop("log_prob_micro_batch_size", None) or actor_config.ppo_micro_batch_size
+        )
+        target_config.ppo_micro_batch_size_per_gpu = (
+            target_config.pop("log_prob_micro_batch_size_per_gpu", None) or actor_config.ppo_micro_batch_size_per_gpu
         )
         target_config.use_dynamic_bsz = target_config.pop("log_prob_use_dynamic_bsz", False)
-        target_config.ppo_max_token_len_per_gpu = target_config.pop("log_prob_max_token_len_per_gpu", None)
+        target_config.ppo_max_token_len_per_gpu = (
+            target_config.pop("log_prob_max_token_len_per_gpu", None) or actor_config.ppo_max_token_len_per_gpu
+        )
 
 
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
@@ -531,7 +537,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if is_distillation_enabled(distillation_config):
                 prepare_ref_config(distillation_config, actor_config)
                 distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
-                distillation_config.loss_settings = get_distillation_loss_settings(distillation_config.loss_mode)
+                loss_config: DistillationLossConfig = distillation_config.distillation_loss
+                distillation_config.loss_settings = get_distillation_loss_settings(loss_config.loss_mode)
 
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",
@@ -717,7 +724,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         """
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
-    
+
 
 class TeacherWorker(Worker, DistProfilerExtension):
     """TODO"""
@@ -740,12 +747,12 @@ class TeacherWorker(Worker, DistProfilerExtension):
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
 
-
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         prepare_ref_config(self.config.distillation, self.config.actor)
         distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
-        distillation_config.loss_settings = get_distillation_loss_settings(distillation_config.loss_mode)
+        distillation_loss_config: DistillationLossConfig = distillation_config.distillation_loss
+        distillation_config.loss_settings = get_distillation_loss_settings(distillation_loss_config.loss_mode)
         model_config = distillation_config.teacher_models.get_teacher_config(self.teacher_id)
         distillation_config.model_config = model_config
 
@@ -756,12 +763,14 @@ class TeacherWorker(Worker, DistProfilerExtension):
             engine_config=distillation_config.engine,
             optimizer_config=distillation_config.optim,
             checkpoint_config=distillation_config.checkpoint,
-            distillation_config=distillation_config
+            distillation_config=distillation_config,
         )
 
         # assign engine configs
         distillation_training_config.engine_config.use_dynamic_bsz = self.config.distillation.use_dynamic_bsz
-        distillation_training_config.engine_config.infer_max_token_len_per_gpu = self.config.distillation.ppo_max_token_len_per_gpu
+        distillation_training_config.engine_config.infer_max_token_len_per_gpu = (
+            self.config.distillation.ppo_max_token_len_per_gpu
+        )
         distillation_training_config.engine_config.infer_micro_batch_size_per_gpu = (
             self.config.distillation.ppo_micro_batch_size_per_gpu
         )

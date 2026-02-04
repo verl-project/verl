@@ -19,23 +19,39 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
-# Loss function mode for distillation
-loss_mode: k3
+# Whether to enable separate resource pool for teacher model(s)
+enable_resource_pool: false
 
-# If distillation loss requires top-k logits, this is the value of k
-topk: 32
+# Number of GPUs per node to use for distillation teacher model(s)
+n_gpus_per_node: 8
 
-# Whether the loss should just be the distillation loss or a combination of the distillation loss and the policy loss
-use_policy_loss: true
+# Number of nodes to use for distillation teacher model(s)
+nnodes: 0
 
-# The coef of the distillation loss when use_policy_loss is true
-distillation_loss_coef: 1.0
+# distillation loss config
+distillation_loss:
 
-# Jensen-Shannon Divergence beta for jsd loss mode.
-jsd_beta: 0.5
+  # # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.DistillationLossConfig
 
-# Optional max clamp value for distillation loss. If null, no clamping is applied.
-loss_max_clamp: null
 
-# Optional min clamp value for log probabilities for stability, e.g., log q - log p where p or q are very close to zero.
-log_prob_min_clamp: null
+  # Loss function mode for distillation
+  loss_mode: k3
+
+  # If distillation loss requires top-k logits, this is the value of k
+  topk: 32
+
+  # Whether the loss should just be the distillation loss or a combination of the distillation loss and the policy loss
+  use_policy_loss: true
+
+  # The coef of the distillation loss when use_policy_loss is true
+  distillation_loss_coef: 1.0
+
+  # Jensen-Shannon Divergence beta for jsd loss mode.
+  jsd_beta: 0.5
+
+  # Optional max clamp value for distillation loss. If null, no clamping is applied.
+  loss_max_clamp: null
+
+  # Optional min clamp value for log probabilities for stability, e.g., log q - log p where p or q are very close to zero.
+  log_prob_min_clamp: null
