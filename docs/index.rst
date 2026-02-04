@@ -144,14 +144,16 @@ verl is fast with:
 
    amd_tutorial/amd_build_dockerfile_page.rst
    amd_tutorial/amd_vllm_page.rst
+   ascend_tutorial/ascend_ci_guide_zh.rst
    ascend_tutorial/ascend_quick_start.rst
    ascend_tutorial/ascend_consistency.rst
    ascend_tutorial/ascend_profiling_zh.rst
    ascend_tutorial/ascend_profiling_en.rst
    ascend_tutorial/dockerfile_build_guidance.rst
    ascend_tutorial/ascend_sglang_quick_start.rst
-   ascend_tutorial/ascend_optimization_pratice/gspo_optimization_practice.md
-   ascend_tutorial/ascend_best_practice/dapo_multi_model_optimization_practice.md
+   ascend_tutorial/examples/gspo_optimization_practice.md
+   ascend_tutorial/examples/dapo_multi_model_optimization_practice.md
+   ascend_tutorial/examples/ascend_sglang_best_practices.rst
 
 .. toctree::
    :maxdepth: 1

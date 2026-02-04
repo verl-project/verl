@@ -21,11 +21,14 @@ import torch
 import torch.distributed
 
 from verl.protocol import DataProto, all_gather_data_proto
+from verl.utils.device import get_device_name
 from verl.utils.distributed import initialize_global_process_group
 
 
 def test_all_gather_data_proto():
-    device_mesh = torch.distributed.device_mesh.init_device_mesh("cuda", mesh_shape=[2, 2], mesh_dim_names=["dp", "tp"])
+    device_mesh = torch.distributed.device_mesh.init_device_mesh(
+        get_device_name(), mesh_shape=[2, 2], mesh_dim_names=["dp", "tp"]
+    )
 
     global_rank = torch.distributed.get_rank()
 
@@ -38,16 +41,16 @@ def test_all_gather_data_proto():
     all_gather_data_proto(data=data, process_group=device_mesh.get_group("dp"))
 
     if global_rank == 0:
-        expected_obs = torch.tensor([[0, 1], [0, 1], [2, 5], [6, 9]], device="cuda")
+        expected_obs = torch.tensor([[0, 1], [0, 1], [2, 5], [6, 9]], device=get_device_name())
         expected_labels = ["a", "b", "a", "b"]
     elif global_rank == 1:
-        expected_obs = torch.tensor([[1, 3], [3, 5], [3, 7], [9, 13]], device="cuda")
+        expected_obs = torch.tensor([[1, 3], [3, 5], [3, 7], [9, 13]], device=get_device_name())
         expected_labels = ["b", "a", "b", "a"]
     elif global_rank == 2:
-        expected_obs = torch.tensor([[0, 1], [0, 1], [2, 5], [6, 9]], device="cuda")
+        expected_obs = torch.tensor([[0, 1], [0, 1], [2, 5], [6, 9]], device=get_device_name())
         expected_labels = ["a", "b", "a", "b"]
     elif global_rank == 3:
-        expected_obs = torch.tensor([[1, 3], [3, 5], [3, 7], [9, 13]], device="cuda")
+        expected_obs = torch.tensor([[1, 3], [3, 5], [3, 7], [9, 13]], device=get_device_name())
         expected_labels = ["b", "a", "b", "a"]
 
     torch.testing.assert_close(data.batch["obs"], expected_obs, atol=0, rtol=0)
@@ -70,8 +73,10 @@ def test_vocab_parallel_entropy():
     seqlen = 128
     vocab_size = 155136
 
-    logits = torch.randn(batch_size * seqlen, vocab_size, device="cuda", requires_grad=True)
-    target = torch.randint(low=0, high=vocab_size, size=(batch_size * seqlen,), device="cuda", dtype=torch.int64)
+    logits = torch.randn(batch_size * seqlen, vocab_size, device=get_device_name(), requires_grad=True)
+    target = torch.randint(
+        low=0, high=vocab_size, size=(batch_size * seqlen,), device=get_device_name(), dtype=torch.int64
+    )
 
     # broadcast across tp
     torch.distributed.broadcast(

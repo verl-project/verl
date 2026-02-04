@@ -43,6 +43,13 @@ dist_checkpointing_path: null
 # distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
 dist_checkpointing_prefix: ''
 
+# Make optimizer distributed checkpoint fully reshardable (TP/PP/EP/DP) as opposed to plain DP reshardability
+dist_ckpt_optim_fully_reshardable: True
+
+# Use as little memory as possible during save and load by using Gloo.
+# Has effect only when `dist_ckpt_optim_fully_reshardable` is enabled
+distrib_optim_fully_reshardable_mem_efficient: False
+
 # oc.select: default val for ref.megatron.seed
 seed: 42
 

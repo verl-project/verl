@@ -62,10 +62,13 @@ if _VLLM_VERSION > version.parse("0.11.0"):
     if _VLLM_VERSION == version.parse("0.12.0"):
         from vllm.entrypoints.harmony_utils import get_encoding
 
-        get_encoding()
     elif _VLLM_VERSION >= version.parse("0.13.0"):
         from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 
+    else:
+        get_encoding = None
+
+    if get_encoding is not None and os.getenv("VERL_USE_GPT_OSS", "0") == "1":
         get_encoding()
 else:
     from vllm.utils import FlexibleArgumentParser
@@ -257,9 +260,9 @@ class vLLMHttpServer:
             hf_overrides["quantization_config"] = fp8_block_quant_kwargs
         compilation_config = engine_kwargs.get("compilation_config", None)
         if compilation_config is None:
-            compilation_config = json.dumps({"cudagraph_mode": "FULL_DECODE_ONLY"})
+            compilation_config = json.dumps({"cudagraph_mode": "FULL_AND_PIECEWISE"})
         else:
-            cudagraph_mode = compilation_config.get("cudagraph_mode", "FULL_DECODE_ONLY")
+            cudagraph_mode = compilation_config.get("cudagraph_mode", "FULL_AND_PIECEWISE")
             compilation_config = json.dumps({"cudagraph_mode": cudagraph_mode})
         args = {
             "dtype": self.config.dtype,
@@ -279,7 +282,7 @@ class vLLMHttpServer:
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
-            "seed": self.config.get("seed", 0),
+            "seed": self.replica_rank + self.config.get("seed", 0),
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
             "hf_overrides": hf_overrides,
@@ -409,11 +412,21 @@ class vLLMHttpServer:
             method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
         )
 
-        app = build_app(args)
-        if _VLLM_VERSION > version.parse("0.11.0"):
-            await init_app_state(engine_client, app.state, args)
+        build_app_sig = inspect.signature(build_app)
+        supported_tasks: tuple[Any, ...] = ()
+        if "supported_tasks" in build_app_sig.parameters:
+            supported_tasks = await engine_client.get_supported_tasks()
+            app = build_app(args, supported_tasks)
         else:
+            app = build_app(args)
+
+        init_app_sig = inspect.signature(init_app_state)
+        if "vllm_config" in init_app_sig.parameters:
             await init_app_state(engine_client, vllm_config, app.state, args)
+        elif "supported_tasks" in init_app_sig.parameters:
+            await init_app_state(engine_client, app.state, args, supported_tasks)
+        else:
+            await init_app_state(engine_client, app.state, args)
         if self.replica_rank == 0 and self.node_rank == 0:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
@@ -567,6 +580,9 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here
             await self.engine.collective_rpc("sleep", kwargs={"level": 2})
+
+            # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
+            # await self.engine.reset_encoder_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             await self.engine.sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:

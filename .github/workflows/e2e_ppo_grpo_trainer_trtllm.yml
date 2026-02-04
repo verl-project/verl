@@ -106,6 +106,32 @@ jobs:
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
 
+  trtllm_unit_tests:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 30 # Increase this timeout value as needed
+    env:
+      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install pytest-asyncio
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+      - name: Run TRTLLM unit tests
+        run: |
+          export TRTLLM_TEST_MODEL_PATH_ROOT="${HOME}/models"
+          pytest -v -s \
+            tests/workers/rollout/rollout_trtllm/test_adapter.py \
+            tests/workers/rollout/rollout_trtllm/test_async_server.py
+
   e2e_grpo_trainer_fsdp-qwen2:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
@@ -179,7 +205,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2]
+    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2]
     if: always()
     steps:
       - id: destroy-runner

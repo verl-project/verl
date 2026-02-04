@@ -5,7 +5,7 @@ NUM_GPUS=${NUM_GPUS:-8}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 TRAIN_FILES=${TRAIN_FILES:-$HOME/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-$HOME/data/gsm8k/test.parquet}
