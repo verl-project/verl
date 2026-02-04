@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import copy
 import logging
 import os
 from typing import Any, Optional
@@ -83,8 +82,9 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
 
     async def _init_agent_data(self, kwargs: dict, param_version: int) -> AgentData:
         messages = list(kwargs["raw_prompt"])
-        image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
-        video_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("video", None))
+        multi_modal_data = await self.process_vision_info(messages)
+        image_data = multi_modal_data.get("images")
+        video_data = multi_modal_data.get("videos")
         metrics = {}
         request_id = uuid4().hex
         tools_kwargs = kwargs.get("tools_kwargs", {})
@@ -176,6 +176,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                     prompt_ids=agent_data.prompt_ids,
                     sampling_params=sampling_params,
                     image_data=agent_data.image_data,
+                    video_data=agent_data.video_data,
                 )
 
                 if is_cancel:
@@ -198,6 +199,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                     prompt_ids=agent_data.prompt_ids,
                     sampling_params=sampling_params,
                     image_data=agent_data.image_data,
+                    video_data=agent_data.video_data,
                 )
                 response_ids = output.token_ids
                 log_probs = output.log_probs
@@ -239,7 +241,12 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         """build completed output"""
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
-        multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
+        multi_modal_data = {}
+        if agent_data.image_data is not None:
+            multi_modal_data["image"] = agent_data.image_data
+        if agent_data.video_data is not None:
+            multi_modal_data["video"] = agent_data.video_data
+
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],

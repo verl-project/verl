@@ -105,7 +105,7 @@ jobs:
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_reward_model_disrm.py
       - name: Running vllm agent loop with reward manager tests on 8 NPUs
         run: |
-          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_loop_reward_manager.py
+          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_standalone.py
       - name: Running vllm agent loop with reward model colocate tests on 8 NPUs
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto

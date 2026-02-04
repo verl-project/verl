@@ -42,6 +42,8 @@ actor_rollout_ref:
       use_dist_checkpointing: false
       dist_checkpointing_path: null
       dist_checkpointing_prefix: ''
+      dist_ckpt_optim_fully_reshardable: true
+      distrib_optim_fully_reshardable_mem_efficient: false
       seed: 42
       override_ddp_config: {}
       override_transformer_config:
@@ -186,6 +188,8 @@ actor_rollout_ref:
       use_dist_checkpointing: false
       dist_checkpointing_path: null
       dist_checkpointing_prefix: ''
+      dist_ckpt_optim_fully_reshardable: true
+      distrib_optim_fully_reshardable_mem_efficient: false
       seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
       override_ddp_config: {}
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
@@ -289,7 +293,17 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
-      tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
+      tool_config:
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+          level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+          analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
@@ -452,6 +466,8 @@ critic:
     use_dist_checkpointing: false
     dist_checkpointing_path: null
     dist_checkpointing_prefix: ''
+    dist_ckpt_optim_fully_reshardable: true
+    distrib_optim_fully_reshardable_mem_efficient: false
     seed: 42
     override_ddp_config: {}
     override_transformer_config:
@@ -604,7 +620,7 @@ reward_model:
     dtype: bfloat16
   load_weight: true
   use_reward_loop: true
-  num_workers: 1
+  num_workers: 8
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???

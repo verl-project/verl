@@ -424,3 +424,6 @@ class ServerAdapter(BaseRollout):
             # Finalize update weights
             await self._adapter.update_weights(None)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+
+    def _get_attribute(self, name: str):
+        return getattr(self, name)

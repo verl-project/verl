@@ -15,7 +15,7 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 
 
 rollout_mode="async"
-rollout_name="vllm" # sglang or vllm
+rollout_name="sglang" # sglang or vllm
 if [ "$rollout_mode" = "async" ]; then
     export VLLM_USE_V1=1
     return_raw_chat="True"
