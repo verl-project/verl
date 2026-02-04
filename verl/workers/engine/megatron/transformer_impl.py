@@ -715,7 +715,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
             layers_topk_idx = model_inputs["routed_experts"]
             set_router_replay_data(layers_topk_idx, attention_mask, self.tf_config, vp_rank)
 
-
         if pad_mode == DatasetPadMode.NO_PADDING:
             label = input_ids.clone()
         else:
