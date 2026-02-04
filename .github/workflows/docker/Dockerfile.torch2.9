@@ -49,10 +49,11 @@ RUN mkdir -p /opt && cd /opt && \
     pip install --no-build-isolation .
 
 WORKDIR /opt
+# megatron-core-0.16.0rc0
 RUN mkdir -p /opt && cd /opt && \
     git clone https://github.com/NVIDIA/Megatron-LM.git && \
     cd Megatron-LM && \
-    git checkout 847781764fe468c90caec16309deded245c1022c && \
+    git checkout 76e81893449d69e54c3d43bdf6fca1accb9ce6e9 && \
     pip install -e . --no-deps
 
 WORKDIR /opt
@@ -87,8 +88,15 @@ RUN mkdir -p /opt && cd /opt && \
 # required by granite mamba model training
 RUN pip install https://download.pytorch.org/whl/nightly/pytorch_triton_rocm-3.4.0%2Bgitae848267-cp310-cp310-linux_x86_64.whl
 
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/AndreasKaratzas/mamba.git && \
+    cd mamba && \
+    git checkout enable-primus-hybrid-models && \
+    python setup.py install
+
 # required by megatron-bridge
-RUN pip install \
+RUN pip uninstall triton -y && \
+  pip install triton==3.4.0 \
   onnx==1.20.0rc1 \
   -U nvidia-modelopt \
   -U nvidia_resiliency_ext \
@@ -98,9 +106,9 @@ RUN pip install \
   timm \
   "open-clip-torch>=3.2.0" \
   flash-linear-attention \
-  megatron-energon \
+  megatron-energon\
   bitstring \
-  filetype
+  filetype --no-deps 
 
 
 
