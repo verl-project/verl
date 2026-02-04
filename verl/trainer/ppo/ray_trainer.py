@@ -1075,7 +1075,7 @@ class RayPPOTrainer:
                 self.rm_wg.stop_profile()
 
     def _propagate_precision_debugger_config(self) -> None:
-        precision_cfg = OmegaConf.select(self.config, "precision_debugger")
+        precision_cfg = OmegaConf.select(self.config, "global_profiler.global_tool_config.precision_debugger")
         if precision_cfg is None:
             return
         with open_dict(self.config):

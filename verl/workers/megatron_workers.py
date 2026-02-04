@@ -756,6 +756,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         dataloader = self.actor.make_minibatch_iterator(data=data)
+        self.actor.precision_global_step = data.meta_info.get("global_steps", None)
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(dataloader=dataloader)
         delta_time = timer.last

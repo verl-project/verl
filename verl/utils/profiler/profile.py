@@ -213,7 +213,7 @@ class DistProfiler:
                 return None
             return getattr(self_instance, model_attr, None)
 
-        def _get_global_step(args, kwargs):
+        def _get_global_step(self_instance, args, kwargs):
             for val in list(args) + list(kwargs.values()):
                 if hasattr(val, "meta_info"):
                     meta = getattr(val, "meta_info")
@@ -226,6 +226,8 @@ class DistProfiler:
                             return step
                     except Exception:
                         pass
+            if hasattr(self_instance, "precision_global_step"):
+                return getattr(self_instance, "precision_global_step")
             return None
 
         def decorator(func):
@@ -235,7 +237,7 @@ class DistProfiler:
                 precision_cfg = getattr(self_instance, "precision_debugger_cfg", None)
                 if not profiler or not precision_cfg:
                     return func(self_instance, *args, **kwargs)
-                global_step = _get_global_step(args, kwargs)
+                global_step = _get_global_step(self_instance, args, kwargs)
                 model = _get_model(self_instance)
                 started = profiler.precision_start(precision_cfg, stage, global_step, model)
                 result = func(self_instance, *args, **kwargs)

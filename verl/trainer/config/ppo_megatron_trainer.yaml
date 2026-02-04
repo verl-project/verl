@@ -236,14 +236,13 @@ global_profiler:
       stacks: "all"
       # devices, record_context etc.
       kw_args: {}
-
-precision_debugger:
-  enable: False
-  config_path: null
-  data_dir: "outputs/precision_debug"
-  steps: null
-  stages: ["rollout", "train", "update_actor", "ref_model"]
-  fail_open: True
+    precision_debugger:
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+      enable: False
+      config_path: null
+      data_dir: "outputs/precision_debug"
+      steps: null
+      stages: ["rollout", "train", "update_actor", "ref_model"]
 
 # configs for TransferQueue
 transfer_queue:

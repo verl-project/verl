@@ -300,27 +300,26 @@ global_profiler:
 
       # devices, record_context etc.
       kw_args: {}
+    # precision debugger config
+    precision_debugger:
 
-# precision debugger configs
-precision_debugger:
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
 
-  # Whether to enable precision debugger
-  enable: False
+      # Whether to enable precision debugger
+      enable: False
 
-  # Path to msprobe config.json
-  config_path: null
+      # Path to msprobe config.json
+      config_path: null
 
-  # Dump root directory
-  data_dir: "outputs/precision_debug"
+      # Dump root directory
+      data_dir: "outputs/precision_debug"
 
-  # Steps to collect, null means all
-  steps: null
+      # Steps to collect, null means all
+      steps: null
 
-  # Stages to collect
-  stages: ["rollout", "train", "update_actor", "ref_model"]
-
-  # Fail open on errors
-  fail_open: True
+      # Stages to collect
+      stages: ["rollout", "train", "update_actor", "ref_model"]
 
 # configs for TransferQueue
 transfer_queue:
