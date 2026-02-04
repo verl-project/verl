@@ -333,7 +333,14 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
 
                 with init_empty_weights():
-                    save_model = auto_model_cls.from_config(model_config, torch_dtype=torch.bfloat16)
+                    # infer trust_remote_code from model structure
+                    has_remote_code = hasattr(model_config, "auto_map") and any(
+                        model_config.architectures[0] in val for val in model_config.auto_map.values()
+                    )
+                    save_model = auto_model_cls.from_config(
+                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=has_remote_code
+                    )
+
                 save_model.to_empty(device="cpu")
 
                 if save_model.can_generate():
