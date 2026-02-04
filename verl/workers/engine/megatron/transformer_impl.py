@@ -95,8 +95,6 @@ class MegatronEngine(BaseEngine):
 
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay_mode != "disabled"
-        if self.enable_routing_replay:
-            self.mini_layer_topk_idx_list = []
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
