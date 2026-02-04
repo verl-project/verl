@@ -119,7 +119,7 @@ async def test_nixl_checkpoint_engine(
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(backend="nixl", trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()

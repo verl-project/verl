@@ -107,9 +107,11 @@ class MockReplica(RolloutReplica):
 
 
 class CheckpointEngineWorkerTest(CheckpointEngineWorker):
-    def __init__(self, rollout_config: RolloutConfig, model_config: HFModelConfig, check_allclose: bool = True) -> None:
+    def __init__(
+        self, rollout_config: RolloutConfig, model_config: HFModelConfig, check_allclose: bool = True, *args, **kwargs
+    ) -> None:
         server_adapter = MockServerAdapter(rollout_config, model_config, check_allclose)
-        super().__init__(rollout_config, model_config, server_adapter)
+        super().__init__(rollout_config, model_config, server_adapter, *args, **kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def check_weights(self):
@@ -156,6 +158,9 @@ async def create_rollout_worker_group(
         model_config=model_config,
         rollout_config=rollout_config,
         check_allclose=check_allclose,
+        replica_rank=0,
+        world_size=resource_pool.world_size,
+        ngpus_per_node=resource_pool.n_gpus_per_node,
     )
     wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name())
 

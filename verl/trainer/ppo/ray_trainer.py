@@ -917,8 +917,9 @@ class RayPPOTrainer:
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
 
+        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
-            backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+            config=checkpoint_engine_config,
             trainer=self.actor_rollout_wg,
             replicas=self.async_rollout_manager.rollout_replicas,
         )

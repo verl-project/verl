@@ -265,10 +265,11 @@ class CheckpointEngineWorker(Worker):
         self.rollout_config = rollout_config
         self.model_config = model_config
         self.rank_offset = kwargs.get("rank_offset", 0)
-        # rebuild rank as global rollout rank and world size
+        # Rebuild rank as global rollout rank and world size
         rollout_rank = int(os.environ["RANK"])
+        # Keep the original RANK if no kwargs received.
         replica_rank = kwargs.get("replica_rank", 0)
-        world_size = kwargs.get("world_size", 1)
+        world_size = kwargs.get("world_size", os.environ["WORLD_SIZE"])
         gpus_per_node = kwargs.get("gpus_per_node", 8)
         rank = replica_rank * world_size + rollout_rank
         local_rank = rank % gpus_per_node
@@ -278,7 +279,7 @@ class CheckpointEngineWorker(Worker):
 
         # sglang and trt-llm need device_mesh for internal communication
         # TODO initialize_global_process_group_ray stucked, some environment variables are not right
-        # TODO We should avoid abuse env variables
+        # TODO We should avoid abusing env variables
         # initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
         self.server_adapter: BaseRollout = server_adapter or get_rollout_class(
             rollout_config.name, rollout_config.mode
