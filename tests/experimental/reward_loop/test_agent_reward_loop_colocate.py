@@ -68,7 +68,7 @@ def test_agent_reward_loop_standalone():
     config.reward_model.enable = True
     config.reward_model.enable_resource_pool = False
     config.reward_model.n_gpus_per_node = 8
-    config.reward_model.path = reward_model_path
+    config.reward_model.model_path = reward_model_path
     config.reward_model.inference.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.reward_model.inference.gpu_memory_utilization = 0.8
     config.reward_model.inference.tensor_model_parallel_size = 2

@@ -58,7 +58,7 @@ class RewardModelManager:
 
         rollout_replica_class = get_rollout_replica_class(self.config.inference.name)
         rollout_config = self.config.inference
-        model_config = HFModelConfig(path=self.config.path)
+        model_config = HFModelConfig(path=self.config.model_path)
         self.tokenizer = model_config.get_processor()
         self.rollout_replicas = [
             rollout_replica_class(

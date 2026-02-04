@@ -500,7 +500,7 @@ reward_model:
   reward_loop_module_path: null
   reward_loop_class_name: null
   launch_reward_fn_async: false
-  model_path: null
+  path: null
   inference:
     _target_: verl.workers.config.RolloutConfig
     name: ???
