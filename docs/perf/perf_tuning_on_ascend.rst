@@ -19,7 +19,15 @@ Author:  `Xiaobo Hu <https: //github.com/tardis-key>`_, `Haozhe Li <https: //git
 
 Matrix Computation-Communication operator fusion (MC2) 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-MC2 是 CANN 中一系列计算通信融合算子的统称，这些算子将原本串行的通信和计算操作融合在一起，通过内部的切分和流水线并行执行来优化性能。在 vllm-ascend 中，可以通过指定环境变量 ``VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE=1``，在前向计算的 ``RowParallelLinear`` 中使能 ``torch_npu.npu_mm_all_reduce_base`` ，将分离的 ``matmul`` 和 ``allreduce`` 合并为一个融合算子。
+MC2 是 CANN 中一系列计算通信融合算子的统称，这些算子将原本串行的通信和计算操作融合在一起，通过内部的切分和流水线并行执行来优化性能。
+
+在 vllm-ascend 中，可以通过指定环境变量：
+
+.. code-block:: sh
+
+    export VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE=1
+
+在前向计算的 ``RowParallelLinear`` 中使能 ``torch_npu.npu_mm_all_reduce_base`` ，将分离的 ``matmul`` 和 ``allreduce`` 合并为一个融合算子。
 
 `RotaryMul&RotaryMulGrad <https: //www.hiascend.com/document/detail/zh/Pytorch/730/ptmoddevg/trainingmigrguide/performance_tuning_0030.html>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -107,26 +115,42 @@ Megatron后端融合算子使用方法
 
 Megatron 的融合算子集成在 MindSpeed 中，需要添加特定参数开启: 
 
-1. **Flash Attention（必须开启）:** 
-    ``+actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True`` \ ``++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True``
+1. **Flash Attention（必须开启）**
+   ::
 
-2. **RotaryMul:**
-    ``+actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True`` \ ``+actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rotary_pos_emb=True``
+       +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+       ++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True
 
-3. **RMSNorm:**
-    ``+actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rmsnorm=True``
+2. **RotaryMul**
+   ::
 
-4. **GroupMatMul:**
-    ``+actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True``
+       +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True
+       +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rotary_pos_emb=True
 
-5. **Swiglu:**
-    ``+actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu=True``
+3. **RMSNorm**
+   ::
 
-6. **Permute/Unpermute:**
-    ``+actor_rollout_ref.actor.megatron.override_transformer_config.fused_permute_unpermute=True``
+       +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rmsnorm=True
 
-7. **MC2:**
-    ``+actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_mc2``
+4. **GroupMatMul**
+   ::
+
+       +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True
+
+5. **Swiglu**
+   ::
+
+       +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu=True
+
+6. **Permute/Unpermute**
+   ::
+
+       +actor_rollout_ref.actor.megatron.override_transformer_config.fused_permute_unpermute=True
+
+7. **MC2**
+   ::
+
+       +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_mc2=True
 
 昇腾通用配置
 --------------------------
@@ -134,7 +158,7 @@ Megatron 的融合算子集成在 MindSpeed 中，需要添加特定参数开启
 `算子下发 <https: //www.hiascend.com/document/detail/zh/Pytorch/730/comref/Envvariables/docs/zh/environment_variable_reference/TASK_QUEUE_ENABLE.md>`_
 ************************************************************************************************************************************************************************************************************
 
-通过 ``TASK_QUEUE_ENABLE`` 可配置 task_queue 算子下发队列优化等级，默认为 Level 1 优化。
+通过 ``TASK_QUEUE_ENABLE`` 可配置 task_queue 算子下发队列优化等级，默认为 Level 1 优化。该配置可以减少host下发时间，可用于缓解由下发导致的整体free过大问题。
 
 .. image :: https://github.com/verl-project/verl-data/blob/main/images/ascend/perf_tuning_task_queue.png
     :width: 500px
@@ -162,12 +186,28 @@ Level 2 : \ 基于 Level 1 的优化进一步平衡了一、二级流水的任�
 
 Chunked Prefill in V1
 ***************************
-VLLM 当前版本已默认启用 VLLM V1，使用 ``actor_rollout_ref.rollout.enable_chunked_prefill=True`` 来启用 Chunked Prefill ，原理参考 `VLLM 官方文档 <https://docs.vllm.ai/en/v0.4.2/models/performance.html>`_
 
-Graph Mode 
-**********************************
+VLLM 当前版本已默认启用 VLLM V1，使用以下配置启用 Chunked Prefill：
 
-与 CUDA 一样，NPU通过 ``actor_rollout_ref.rollout.enforce_eager=False`` 来启用 `ACL Graph <https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/feature_guide/ACL_Graph.html>`_，注意由于其原理与 taskqueue Level2 存在冲突，二者无法同时开启。
+.. code-block:: sh
+
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+
+原理参考 `VLLM 官方文档 <https://docs.vllm.ai/en/v0.4.2/models/performance.html>`_。
+
+Graph Mode
+***************************
+
+与 CUDA 类似，NPU 通过以下配置启用 **ACL Graph**：
+
+.. code-block:: sh
+
+    actor_rollout_ref.rollout.enforce_eager=False
+
+文档：`ACL Graph <https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/feature_guide/ACL_Graph.html>`_
+
+.. note::
+    ACL Graph 与 ``taskqueue Level 2`` 原理冲突，**二者无法同时开启**。
 
 训练阶段调优
 --------------------------
@@ -197,9 +237,16 @@ Megatron
 
 TP、PP、EP、ETP和 Megatron 使用方式一样，CP 和 SP 在 NPU 上开启方式: 
 
-- SP: ``Sequence Parallel`` 在 Tensor Parallel 的基础上进一步提高计算效率，是一种通过将输入数据的序列维度进行切分的并行计算方式。在 NPU 上通过 MindSpeed 来调用SP: ``actor_rollout_ref.actor.megatron.override_transformer_config.sequence_parallel=True``
+- SP: ``Sequence Parallel`` 在 Tensor Parallel 的基础上进一步提高计算效率，是一种通过将输入数据的序列维度进行切分的并行计算方式。在 NPU 上通过 MindSpeed 来调用SP:
+  ::
 
-- CP: ``Context Parallel`` 是一种在多个 GPU/NPU 上并行处理神经网络激活值的方法，他通过在序列维度上对输入张量进行划分来实现。在 NPU 上通过 MindSpeed 来调用 CP （两个参数必须同时添加）: \ ``actor_rollout_ref.actor.megatron.context_parallel_size`` \ ``actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size``
+      actor_rollout_ref.actor.megatron.override_transformer_config.sequence_parallel=True
+
+- CP: ``Context Parallel`` 是一种在多个 GPU/NPU 上并行处理神经网络激活值的方法，他通过在序列维度上对输入张量进行划分来实现。在 NPU 上通过 MindSpeed 来调用 CP （两个参数必须同时添加）:
+  ::
+
+      actor_rollout_ref.actor.megatron.context_parallel_size
+      actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size
 
 Megatron-distributed optimizer
 **********************************
