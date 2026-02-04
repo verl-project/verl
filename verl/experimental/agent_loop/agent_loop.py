@@ -632,103 +632,27 @@ class AgentLoopWorker:
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
 
-            if self.tq_client is not None:
-                return await self._agent_loop_postprocess_tq(output, **kwargs)
-            else:
+            if self.tq_client is None:
                 return await self._agent_loop_postprocess(output, **kwargs)
-
-    async def _agent_loop_postprocess_tq(self, output: AgentLoopOutput, **kwargs) -> BatchMeta:
-        """
-        This function merges the original _agent_loop_postprocess and _postprocess and returns BatchMeta.
-        """
-        # from here is what the original _agent_loop_postprocess does
-        batch_meta = kwargs.pop("batch_meta", None)
-        output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
-
-        prompt_ids = torch.tensor(output.prompt_ids)
-        response_ids = torch.tensor(output.response_ids)
-        response_mask = torch.tensor(output.response_mask)
-
-        response_logprobs = None
-        if output.response_logprobs is not None:
-            response_logprobs = torch.tensor(output.response_logprobs)
-
-        if prompt_ids.dim() == 1:
-            prompt_ids = prompt_ids.unsqueeze(0)
-            response_ids = response_ids.unsqueeze(0)
-            response_mask = response_mask.unsqueeze(0)
-            if response_logprobs is not None:
-                response_logprobs = response_logprobs.unsqueeze(0)
-
-        input_ids = torch.cat([prompt_ids, response_ids], dim=1)
-        attention_mask = torch.cat([torch.ones_like(prompt_ids), torch.ones_like(response_ids)], dim=1)
-
-        routed_experts = None
-        if output.routed_experts is not None:
-            total_length = input_ids.shape[1]
-            length, layer_num, topk_num = output.routed_experts.shape
-            if isinstance(output.routed_experts, np.ndarray):
-                experts_tensor = torch.from_numpy(output.routed_experts)
-            elif isinstance(output.routed_experts, torch.Tensor):
-                experts_tensor = output.routed_experts
             else:
-                raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
-            routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
+                # below operation = self._postprocess + tq.put
+                batch_meta = kwargs.pop("batch_meta", None)
+                postprocessed_output: _InternalAgentLoopOutput = await self._agent_loop_postprocess(output, **kwargs)
+                postprocessed_output = postprocessed_output.to_tensordict()  # Note what the original _postprocess does has been merged into .to_tensordict()
 
-            start_pos = 0  # there is no padding when using TransferQueue
-            end_pos = min(start_pos + length, total_length)
+                keys_to_pop = []
+                for key, val in postprocessed_output.items():
+                    if isinstance(val, NonTensorData):
+                        batch_meta.set_extra_info(key, val.data)
+                        if key not in keys_to_pop:
+                            keys_to_pop.append(key)
 
-            # Add boundary checks for robustness
-            if start_pos < 0 or end_pos > total_length:
-                raise ValueError(
-                    f"Invalid position range: start_pos={start_pos}, end_pos={end_pos}, total_length={total_length}"
-                )
+                for key in keys_to_pop:
+                    del postprocessed_output[key]
 
-            routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
-
-        multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
-        position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
-
-        await self._compute_score(
-            output,
-            prompts=prompt_ids,
-            responses=response_ids,
-            attention_mask=attention_mask,
-            input_ids=input_ids,
-            position_ids=position_ids,
-            kwargs=kwargs,
-        )
-
-        data = _InternalAgentLoopOutput(
-            prompt_ids=prompt_ids,
-            response_ids=response_ids,
-            input_ids=input_ids,
-            position_ids=position_ids,
-            response_mask=response_mask,
-            attention_mask=attention_mask,
-            response_logprobs=response_logprobs,
-            routed_experts=routed_experts,
-            multi_modal_inputs=multi_modal_inputs,
-            multi_modal_data=output.multi_modal_data,
-            reward_score=output.reward_score,
-            num_turns=output.num_turns,
-            metrics=output.metrics,
-            extra_fields=output.extra_fields,
-        ).to_tensordict()  # Note what the original _postprocess does has been merged into .to_tensordict()
-
-        keys_to_pop = []
-        for key, val in data.items():
-            if isinstance(val, NonTensorData):
-                batch_meta.extra_info[key] = val.data
-                if key not in keys_to_pop:
-                    keys_to_pop.append(key)
-
-        for key in keys_to_pop:
-            del data[key]
-
-        # TODO(TQ): we do not need to put everything into TQ, skip the unchanged input variables
-
-        return await self.tq_client.async_put(data=data, metadata=batch_meta)
+                # TODO(TQ): we do not need to put everything into TQ
+                # skip the unchanged input variables to reduce data transfer time
+                return await self.tq_client.async_put(data=postprocessed_output, metadata=batch_meta)
 
     async def _agent_loop_postprocess(self, output: AgentLoopOutput, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
