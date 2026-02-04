@@ -87,11 +87,23 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
 
 
 @ray.remote
-def get_master_addr_port() -> tuple[str, str]:
+def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
     addr = ray.util.get_node_ip_address().strip("[]")
-    with socket.socket() as sock:
-        sock.bind(("", 0))
-        port = sock.getsockname()[1]
+
+    if master_port_range is None:
+        with socket.socket() as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+    else:
+        port = master_port_range[0]
+        while port < master_port_range[1]:
+            try:
+                with socket.socket() as s:
+                    s.bind(("", port))
+                    break
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d", port - 1, port)
     return addr, str(port)
 
 
@@ -495,7 +507,7 @@ class RayWorkerGroup(WorkerGroup):
         self._workers = workers
         self._world_size = len(workers)
 
-    def _get_master_addr_port(self, pg, bundle_index=0):
+    def _get_master_addr_port(self, pg, bundle_index=0, master_port_range=None):
         """Get master addr and port for this worker group"""
         if self._master_addr is None and self._master_port is None:
             self._master_addr, self._master_port = ray.get(
@@ -503,6 +515,7 @@ class RayWorkerGroup(WorkerGroup):
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg, placement_group_bundle_index=bundle_index
                     ),
+                    master_port_range=master_port_range,
                 ).remote()
             )
         elif self._master_addr is not None and self._master_port is not None:
@@ -513,7 +526,9 @@ class RayWorkerGroup(WorkerGroup):
                 "or neither should be provided to use Ray's default assignment."
             )
 
-    def _init_with_resource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None):
+    def _init_with_resource_pool(
+        self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None, master_port_range=None
+    ):
         """Initialize the worker group by creating new workers from a resource pool.
 
         Args:
@@ -523,7 +538,7 @@ class RayWorkerGroup(WorkerGroup):
             detached: Whether workers should be detached
         """
         self.resource_pool = resource_pool
-
+        self.master_port_range = master_port_range
         strategy = "PACK"
         if bin_pack:
             strategy = "STRICT_PACK"
