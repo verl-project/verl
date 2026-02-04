@@ -12,6 +12,12 @@ NODES=1
 
 ROUTING_REPLAY_MODE="R2" 
 
+if [ "$ROUTING_REPLAY_MODE" = "R3" ]; then
+    ENABLE_ROLLOUT_ROUTING_REPLAY=True
+else
+    ENABLE_ROLLOUT_ROUTING_REPLAY=False
+fi
+
 DIST_CKPT_PATH=""
 HF_MODEL_PATH=""
 TRAIN_DATA_PATH=""
@@ -53,7 +59,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
-    actor_rollout_ref.actor.router_replay.mode=${ROUTING_REPLAY_MODE} \
+    actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE} \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=flex \
     +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True \
@@ -89,6 +95,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$micro_bs \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=$PP \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=$TP \

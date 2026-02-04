@@ -94,7 +94,7 @@ class MegatronEngine(BaseEngine):
         self.weight_converter = None
 
         # Router replay configuration for MoE models
-        self.enable_routing_replay = self.engine_config.router_replay_mode != "disabled"
+        self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
         if self.enable_routing_replay:
             apply_router_replay_patch()
@@ -562,7 +562,7 @@ class MegatronEngine(BaseEngine):
         enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
 
         if enable_routing_replay:
-            router_replay_mode = self.engine_config.router_replay_mode
+            router_replay_mode = self.engine_config.router_replay.mode
             if forward_only:  # compute_log_probs
                 if router_replay_mode == "R2":
                     RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
@@ -588,7 +588,7 @@ class MegatronEngine(BaseEngine):
         )
 
         if enable_routing_replay:
-            if self.engine_config.router_replay_mode in ["R2", "R3"]:
+            if self.engine_config.router_replay.mode in ["R2", "R3"]:
                 RouterReplay.clear_global_indices()
                 RouterReplay.clear_global_router_replay_action()
 

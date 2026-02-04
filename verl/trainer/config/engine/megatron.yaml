@@ -96,4 +96,8 @@ forward_only: False
 # Mixed precision training param dtype
 dtype: bfloat16 # ["bfloat16", "float16"]
 
-router_replay_mode: disabled
+router_replay:
+  _target_: verl.workers.config.RouterReplayConfig
+  mode: disabled
+  record_file: null
+  replay_file: null
