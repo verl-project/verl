@@ -21,8 +21,8 @@ from typing import Any, Callable
 
 import numpy as np
 import torch
-from tensordict import TensorDict
 
+from tensordict import TensorDict
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.utils.import_utils import deprecated
@@ -49,7 +49,7 @@ def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
     return reduce_metrics(metrics)
 
 
-def _compute_response_info(batch: DataProto | TensorDict) -> dict[str, Any]:
+def _compute_response_info(batch: DataProto|TensorDict) -> dict[str, Any]:
     """
     Computes information about prompts and responses from a batch.
 
@@ -65,19 +65,17 @@ def _compute_response_info(batch: DataProto | TensorDict) -> dict[str, Any]:
             - response_length: Tensor of response lengths for each item in the batch
     """
     if isinstance(batch, DataProto):
-        response_length = batch.batch["responses"].shape[-1]
-
-        prompt_mask = batch.batch["attention_mask"][:, :-response_length]
-        response_mask = batch.batch["attention_mask"][:, -response_length:]
-
-        prompt_length = prompt_mask.sum(-1).float()
-        response_length = response_mask.sum(-1).float()  # (batch_size,)
+        tensor_batch = batch.batch
     else:
-        response_length = torch.tensor([len(i) for i in batch["responses"]])
-        response_mask = None
-        prompt_length = torch.tensor(
-            [len(i) - len(j) for i, j in zip(batch["attention_mask"], batch["responses"], strict=False)]
-        )
+        tensor_batch = batch
+    response_length = tensor_batch["responses"].shape[-1]
+
+    prompt_mask = tensor_batch["attention_mask"][:, :-response_length]
+    response_mask = tensor_batch["attention_mask"][:, -response_length:]
+
+    prompt_length = prompt_mask.sum(-1).float()
+    response_length = response_mask.sum(-1).float()  # (batch_size,)
+
     return dict(
         response_mask=response_mask,
         prompt_length=prompt_length,
@@ -85,7 +83,7 @@ def _compute_response_info(batch: DataProto | TensorDict) -> dict[str, Any]:
     )
 
 
-def compute_data_metrics(batch: DataProto | TensorDict, use_critic: bool = True) -> dict[str, Any]:
+def compute_data_metrics(batch: DataProto|TensorDict, use_critic: bool = True) -> dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -112,23 +110,25 @@ def compute_data_metrics(batch: DataProto | TensorDict, use_critic: bool = True)
     if isinstance(batch, DataProto):
         tensor_batch = batch.batch
         non_tensor_batch = batch.non_tensor_batch
-        max_response_length = tensor_batch["responses"].shape[-1]
-        prompt_mask = tensor_batch["attention_mask"][:, :-max_response_length].bool()
-        max_prompt_length = prompt_mask.size(-1)
     else:
         tensor_batch = batch
         non_tensor_batch = batch
-        max_response_length = max([len(i) for i in tensor_batch["responses"]])
-        max_prompt_length = max(
-            [len(i) - len(j) for i, j in zip(tensor_batch["attention_mask"], tensor_batch["responses"], strict=False)]
-        )
+    max_response_length = tensor_batch["responses"].shape[-1]
+    prompt_mask = tensor_batch["attention_mask"][:, :-max_response_length].bool()
+    max_prompt_length = prompt_mask.size(-1)
 
     sequence_score = tensor_batch["token_level_scores"].sum(-1)
     sequence_reward = tensor_batch["token_level_rewards"].sum(-1)
 
     advantages = tensor_batch["advantages"]
     returns = tensor_batch["returns"]
+
+    max_response_length = tensor_batch["responses"].shape[-1]
+
+    prompt_mask = tensor_batch["attention_mask"][:, :-max_response_length].bool()
     response_mask = tensor_batch["response_mask"].bool()
+
+    max_prompt_length = prompt_mask.size(-1)
 
     response_info = _compute_response_info(batch)
     prompt_length = response_info["prompt_length"]
@@ -148,19 +148,12 @@ def compute_data_metrics(batch: DataProto | TensorDict, use_critic: bool = True)
     reward_max = torch.max(non_aborted_sequence_reward).detach().item()
     reward_min = torch.min(non_aborted_sequence_reward).detach().item()
 
-    if isinstance(batch, DataProto):
-        valid_adv = torch.masked_select(advantages, response_mask)
-        valid_returns = torch.masked_select(returns, response_mask)
-    else:
-        valid_adv = advantages
-        valid_returns = returns
+    valid_adv = torch.masked_select(advantages, response_mask)
+    valid_returns = torch.masked_select(returns, response_mask)
 
     if use_critic:
-        values = batch.batch["values"]
-        if isinstance(batch, DataProto):
-            valid_values = torch.masked_select(values, response_mask)
-        else:
-            valid_values = values
+        values = tensor_batch["values"]
+        valid_values = torch.masked_select(values, response_mask)
         return_diff_var = torch.var(valid_returns - valid_values)
         return_var = torch.var(valid_returns)
 
@@ -170,7 +163,7 @@ def compute_data_metrics(batch: DataProto | TensorDict, use_critic: bool = True)
 
     non_aborted_response_length = response_length[non_aborted_mask]
     if non_aborted_response_length.numel() > 0:
-        non_aborted_response_length_mean = torch.mean(non_aborted_response_length.float()).detach().item()
+        non_aborted_response_length_mean = torch.mean(non_aborted_response_length).detach().item()
         non_aborted_response_length_max = torch.max(non_aborted_response_length).detach().item()
         non_aborted_response_length_min = torch.min(non_aborted_response_length).detach().item()
         non_aborted_response_length_clip_ratio = (
@@ -209,7 +202,7 @@ def compute_data_metrics(batch: DataProto | TensorDict, use_critic: bool = True)
             else {}
         ),
         # response length
-        "response_length/mean": torch.mean(response_length.float()).detach().item(),
+        "response_length/mean": torch.mean(response_length).detach().item(),
         "response_length/max": torch.max(response_length).detach().item(),
         "response_length/min": torch.min(response_length).detach().item(),
         "response_length/clip_ratio": torch.mean(torch.eq(response_length, max_response_length).float())
@@ -225,7 +218,7 @@ def compute_data_metrics(batch: DataProto | TensorDict, use_critic: bool = True)
         # Fraction of samples whose response length is zero
         "response/aborted_ratio": aborted_ratio,
         # prompt length
-        "prompt_length/mean": torch.mean(prompt_length.float()).detach().item(),
+        "prompt_length/mean": torch.mean(prompt_length).detach().item(),
         "prompt_length/max": torch.max(prompt_length).detach().item(),
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
@@ -233,21 +226,21 @@ def compute_data_metrics(batch: DataProto | TensorDict, use_critic: bool = True)
 
     # multi-turn conversation
     if "__num_turns__" in non_tensor_batch:
-        num_turns = torch.tensor(list(non_tensor_batch["__num_turns__"]))
+        num_turns = non_tensor_batch["__num_turns__"]
         metrics["num_turns/min"] = num_turns.min()
         metrics["num_turns/max"] = num_turns.max()
-        metrics["num_turns/mean"] = num_turns.float().mean()
+        metrics["num_turns/mean"] = num_turns.mean()
 
     if "tool_call_counts" in non_tensor_batch:
-        tool_call_counts = torch.tensor(list(non_tensor_batch["tool_call_counts"]))
+        tool_call_counts = non_tensor_batch["tool_call_counts"]
         metrics["tool_call_counts/min"] = tool_call_counts.min()
         metrics["tool_call_counts/max"] = tool_call_counts.max()
-        metrics["tool_call_counts/mean"] = tool_call_counts.float().mean()
+        metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
     return metrics
 
 
-def compute_timing_metrics(batch: DataProto | TensorDict, timing_raw: dict[str, float]) -> dict[str, Any]:
+def compute_timing_metrics(batch: DataProto|TensorDict, timing_raw: dict[str, float]) -> dict[str, Any]:
     """
     Computes timing metrics for different processing stages in PPO training.
 
@@ -289,9 +282,7 @@ def compute_timing_metrics(batch: DataProto | TensorDict, timing_raw: dict[str, 
     }
 
 
-def compute_throughout_metrics(
-    batch: DataProto | TensorDict, timing_raw: dict[str, float], n_gpus: int
-) -> dict[str, Any]:
+def compute_throughout_metrics(batch: DataProto|TensorDict, timing_raw: dict[str, float], n_gpus: int) -> dict[str, Any]:
     """
     Computes throughput metrics for PPO training.
 
