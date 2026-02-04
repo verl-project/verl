@@ -16,13 +16,13 @@
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.distillation import get_distillation_loss_fn, prepare_distillation_inputs
+from verl.trainer.distillation import compute_distillation_loss, prepare_distillation_inputs
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
-from verl.workers.config import ActorConfig, CriticConfig, DistillationConfig
+from verl.workers.config import ActorConfig, CriticConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
 
@@ -63,6 +63,7 @@ def ppo_loss(
     dp_group=None,
 ):
     distillation_enabled = distillation_config.enabled
+    loss_config: DistillationLossConfig = distillation_config.distillation_loss
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
@@ -93,7 +94,7 @@ def ppo_loss(
     loss_agg_mode = config.loss_agg_mode
 
     # compute policy loss
-    if not distillation_enabled or distillation_config.use_policy_loss:
+    if not distillation_enabled or loss_config.use_policy_loss:
         old_log_prob = data["old_log_probs"]
         advantages = data["advantages"]
         rollout_is_weights = data.get("rollout_is_weights", None)
@@ -122,7 +123,7 @@ def ppo_loss(
         policy_loss = 0
 
     # add entropy loss
-    if entropy is not None and (not distillation_enabled or distillation_config.use_policy_loss):
+    if entropy is not None and (not distillation_enabled or loss_config.use_policy_loss):
         entropy_loss = agg_loss(
             loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
         )
@@ -131,7 +132,7 @@ def ppo_loss(
         metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
 
     # add kl loss
-    if config.use_kl_loss and not distillation_enabled:
+    if config.use_kl_loss and (not distillation_enabled or loss_config.use_policy_loss):
         ref_log_prob = data["ref_log_prob"]
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
@@ -152,17 +153,14 @@ def ppo_loss(
         distillation_inputs = prepare_distillation_inputs(
             log_prob=log_prob, data=data, model_output=model_output, config=distillation_config
         )
-        distillation_loss_fn = get_distillation_loss_fn(distillation_config.loss_mode)
-        distillation_loss, distillation_metrics = distillation_loss_fn(
+        distillation_loss, distillation_metrics = compute_distillation_loss(
             inputs=distillation_inputs,
             response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
             config=distillation_config,
         )
         metrics.update(distillation_metrics)
-        distillation_loss_coef = (
-            distillation_config.distillation_loss_coef if distillation_config.use_policy_loss else 1.0
-        )
+        distillation_loss_coef = loss_config.distillation_loss_coef if loss_config.use_policy_loss else 1.0
         policy_loss += distillation_loss * distillation_loss_coef
         metrics["distillation/loss"] = Metric(value=distillation_loss, aggregation=metric_aggregation)
 

@@ -22,7 +22,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.metric import AggregationType, Metric
-from verl.workers.config import DistillationConfig
+from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 DistillationLossFn = Callable[
     [
@@ -112,6 +112,53 @@ def compute_distillation_loss_range(
     }
 
 
+def compute_distillation_loss(
+    inputs: DistillationLossInputs,
+    response_mask: torch.Tensor,
+    config: DistillationConfig,
+    loss_agg_mode: str = "token-mean",
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """
+    Compute the distillation loss and related metrics.
+
+    Args:
+        inputs (DistillationLossInputs):
+            Inputs containing probabilities from teacher and student policies.
+        response_mask (torch.Tensor):
+            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        config (DistillationConfig):
+            Distillation configuration.
+        loss_agg_mode (str, optional):
+            Aggregation mode for `agg_loss`.
+
+    Returns:
+        tuple[torch.Tensor, dict[str, Any]]: A tuple containing:
+            - distillation_loss: Aggregated distillation loss scalar.
+            - distillation_metrics: Dictionary of metrics.
+    """
+    assert config is not None
+    loss_config: DistillationLossConfig = config.distillation_loss
+    distillation_loss_fn = get_distillation_loss_fn(loss_config.loss_mode)
+    distillation_losses, distillation_metrics = distillation_loss_fn(
+        inputs=inputs,
+        response_mask=response_mask,
+        config=config,
+        loss_agg_mode=loss_agg_mode,
+    )
+
+    distillation_metrics.update(
+        compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
+    )
+    if loss_config.loss_max_clamp is not None:
+        distillation_losses = distillation_losses.clamp_max(loss_config.loss_max_clamp)
+
+    distillation_loss = agg_loss(
+        loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+
+    return distillation_loss, distillation_metrics
+
+
 @register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
 def compute_forward_kl_topk(
     inputs: DistillationLossInputs,
@@ -138,9 +185,6 @@ def compute_forward_kl_topk(
             - distillation_loss: Aggregated distillation loss scalar.
             - distillation_metrics: Dictionary of metrics.
     """
-    assert config is not None
-    distillation_metrics = {}
-
     teacher_topk_log_probs = inputs.teacher_topk_log_probs
     teacher_topk_indices = inputs.teacher_topk_indices
     student_logits = inputs.student_logits
@@ -174,19 +218,11 @@ def compute_forward_kl_topk(
         "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
     }
-    distillation_metrics.update(
-        compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
-    )
-    if config.loss_max_clamp is not None:
-        distillation_losses = distillation_losses.clamp_max(config.loss_max_clamp)
 
     # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
     distillation_losses = distillation_losses.clamp_min(0.0)
-    distillation_loss = agg_loss(
-        loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
-    )
 
-    return distillation_loss, distillation_metrics
+    return distillation_losses, distillation_metrics
 
 
 @register_distillation_loss(
@@ -220,21 +256,12 @@ def compute_distillation_loss_reverse_kl_estimator(
             - distillation_loss: Aggregated distillation loss scalar.
             - distillation_metrics: Dictionary of metrics.
     """
-    assert config is not None
     student_log_probs = inputs.student_log_probs
     teacher_log_probs = inputs.teacher_log_probs
     if student_log_probs is None or teacher_log_probs is None:
         raise ValueError("Expected student_log_probs and teacher_log_probs to be provided in inputs.")
+    loss_config: DistillationLossConfig = config.distillation_loss
     distillation_losses = kl_penalty(
-        logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=config.loss_mode
+        logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=loss_config.loss_mode
     )
-    distillation_metrics = compute_distillation_loss_range(
-        distillation_losses=distillation_losses, response_mask=response_mask
-    )
-    if config.loss_max_clamp is not None:
-        distillation_losses = distillation_losses.clamp_max(config.loss_max_clamp)
-
-    distillation_loss = agg_loss(
-        loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
-    )
-    return distillation_loss, distillation_metrics
+    return distillation_losses, {}

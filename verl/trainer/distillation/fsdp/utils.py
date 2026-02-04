@@ -14,10 +14,11 @@
 
 import torch
 
-from verl.workers.config import DistillationConfig
+from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 
 def compute_topk_log_probs(logits: torch.Tensor, config: DistillationConfig) -> dict[str, torch.Tensor]:
     """Compute top-k log probabilities."""
+    loss_config: DistillationLossConfig = config.distillation_loss
     log_probs = torch.log_softmax(logits, dim=-1)
-    return log_probs.topk(k=config.topk, dim=-1)
+    return log_probs.topk(k=loss_config.topk, dim=-1)
