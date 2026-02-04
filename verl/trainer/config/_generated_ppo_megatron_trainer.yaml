@@ -449,8 +449,8 @@ actor_rollout_ref:
         detach_encoder: false
         mtp_loss_scaling_factor: 0.1
         speculative_algorithm: EAGLE
-        speculative_num_steps: 2
-        speculative_eagle_topk: 2
+        speculative_num_steps: 3
+        speculative_eagle_topk: 1
         speculative_num_draft_tokens: 4
         method: mtp
         num_speculative_tokens: 1
@@ -479,6 +479,8 @@ actor_rollout_ref:
       use_dist_checkpointing: false
       dist_checkpointing_path: null
       dist_checkpointing_prefix: ''
+      dist_ckpt_optim_fully_reshardable: true
+      distrib_optim_fully_reshardable_mem_efficient: false
       seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
       override_ddp_config: {}
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}

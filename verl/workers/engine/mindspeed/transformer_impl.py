@@ -16,14 +16,11 @@ import logging
 import os
 from typing import Optional
 
-from verl.workers.config.actor import DistillationConfig
-
 try:
     from mindspeed.megatron_adaptor import repatch
 except ImportError:
     repatch = None
 
-from typing import Optional
 
 from verl.trainer.config import CheckpointConfig
 from verl.workers.config import DistillationConfig, HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
