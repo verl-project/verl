@@ -75,24 +75,24 @@ torch_npu 接口:  ``torch_npu.npu_swiglu(Tensor self, int dim=-1) -> (Tensor)``
 .. code:: python
 
     npu_grouped_matmul(
-    x, 
-    weight, 
-    *, 
-    bias=None, 
-    scale=None, 
-    offset=None, 
-    antiquant_scale=None, 
-    antiquant_offset=None, 
-    per_token_scale=None, 
-    group_list=None, 
-    activation_input=None, 
-    activation_quant_scale=None, 
-    activation_quant_offset=None, 
-    split_item=0, group_type=None, 
-    group_list_type=0, 
-    act_type=0, 
-    output_dtype=None, 
-    tuning_config=None
+        x, 
+        weight, 
+        *, 
+        bias=None, 
+        scale=None, 
+        offset=None, 
+        antiquant_scale=None, 
+        antiquant_offset=None, 
+        per_token_scale=None, 
+        group_list=None, 
+        activation_input=None, 
+        activation_quant_scale=None, 
+        activation_quant_offset=None, 
+        split_item=0, group_type=None, 
+        group_list_type=0, 
+        act_type=0, 
+        output_dtype=None, 
+        tuning_config=None
     ) -> List[Tensor]
 
 详细使用方法见标题文档链接
