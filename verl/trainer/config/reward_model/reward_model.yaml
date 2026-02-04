@@ -20,7 +20,7 @@ reward_manager: naive
 # Whether to deploy the model to a separate resource pool.
 # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
 enable_resource_pool: False
-n_gpus_per_node: 0
+n_gpus_per_node: 8
 nnodes: 0
 
 # Reward Loop Loading Configuration (for experimental reward system)
