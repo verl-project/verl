@@ -12,7 +12,14 @@ defaults:
   # self config override anything above
   - _self_
 
+# Domain of the teacher; corresponds to the reward_fn_key for the data that the teacher will be used to acquire knowledge on.
+
+# Domain(s) of the teacher; corresponds to the reward_fn_key(s) for data corresponding to the teacher.
+# Does not need to be specified in single-teacher setups.
 domain: null
 
 # Huggingface model path; if null, the teacher is considered inactive
 path: null
+
+# Number of GPUs per node to use for this teacher model; if null, the teacher resource pool will be split evenly across all active teachers
+num_gpus_per_node: null
