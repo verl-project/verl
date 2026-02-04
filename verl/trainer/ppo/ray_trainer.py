@@ -741,21 +741,49 @@ class RayPPOTrainer:
 
         # create distillation policy if needed
         if self.use_distillation_policy:
+            # TODO: add docs
             assert Role.TeacherPolicy in self.role_worker_mapping
-            from verl.workers.config import TeacherModelsConfig
+            from verl.workers.config import TeacherHFModelConfig, TeacherModelsConfig
+
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherPolicy)
             distillation_config = self.config.actor_rollout_ref.distillation
             teacher_models_config: TeacherModelsConfig = omega_conf_to_dataclass(distillation_config.teacher_models)
             self.teacher_config_list = teacher_models_config.get_teacher_config_list()
-            
-            num_teachers = self.config.actor_rollout_ref.distillation.teacher_models.num_teachers
+
+            teacher_world_sizes = []
+            teacher_cfg: TeacherHFModelConfig
+            found_none_num_gpus = False
+            found_non_none_num_gpus = False
             world_size = resource_pool.world_size
-            teacher_world_size = world_size // num_teachers
-            if teacher_world_size == 0:
+            uniform_teacher_world_size = world_size // teacher_models_config.num_teachers
+            for teacher_cfg in self.teacher_config_list:
+                num_gpus_teacher = teacher_cfg.num_gpus_per_node
+                if num_gpus_teacher is None:
+                    found_none_num_gpus = True
+                    teacher_world_sizes.append(uniform_teacher_world_size)
+                else:
+                    found_non_none_num_gpus = True
+                    teacher_world_sizes.append(num_gpus_teacher)
+
+            if found_none_num_gpus and found_non_none_num_gpus:
                 raise ValueError(
-                    f"World is not big enough for distillation teachers: {world_size} for {num_teachers} teachers"
+                    f"Either specify num_gpus_per_node for all teachers or none of them: {teacher_world_sizes=}"
                 )
-            sub_resource_pools = split_resource_pool(resource_pool, teacher_world_size)
+            if found_non_none_num_gpus:
+                total_required_world_size = sum(teacher_world_sizes)
+                if total_required_world_size != world_size:
+                    raise ValueError(
+                        f"If num_gpus_per_node is specified for all teachers, the total required world size {total_required_world_size} "
+                        f"must equal to available world size {world_size}."
+                    )
+            else:
+                if sum(teacher_world_sizes) != world_size:
+                    raise ValueError(
+                        f"The world size {world_size} is not divisible by number of teachers {teacher_models_config.num_teachers}; "
+                        f" Tried {uniform_teacher_world_size=}"
+                    )
+
+            sub_resource_pools = split_resource_pool(resource_pool, uniform_teacher_world_size)
             teacher_policy_role = str(Role.TeacherPolicy)
             for i, sub_pool in enumerate(sub_resource_pools):
                 teacher_policy_cls = RayClassWithInitArgs(
@@ -765,6 +793,10 @@ class RayPPOTrainer:
                 )
                 self.resource_pool_to_cls[sub_pool] = {f"{teacher_policy_role}_{i}": teacher_policy_cls}
 
+            if distillation_config.enable_resource_pool:
+                # remove the original teacher resource pool since it's been split into sub-pools
+                del self.resource_pool_to_cls[resource_pool]
+                
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -824,7 +856,7 @@ class RayPPOTrainer:
 
         if self.use_distillation_policy:
             self.teacher_policy_wgs = dict()
-            for teacher_id in range(num_teachers):
+            for teacher_id in range(teacher_models_config.num_teachers):
                 teacher_role = f"{str(Role.TeacherPolicy)}_{teacher_id}"
                 teacher_wg = all_wg[teacher_role]
                 teacher_wg.init_model()
@@ -1162,7 +1194,6 @@ class RayPPOTrainer:
 
         return ref_log_prob
 
-
     def _acquire_teacher_knowledge(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
             # step 1: convert dataproto to tensordict.
@@ -1183,15 +1214,24 @@ class RayPPOTrainer:
                         break
                     if i == len(self.teacher_config_list) - 1:
                         raise ValueError(f"Example domain {example_domain} not found in any teacher config domain.")
-            domain_batch_td_list = [tu.concat_tensordict(domain_batch_ls) if domain_batch_ls else [] for domain_batch_ls in domain_batch_list]
+            domain_batch_td_list = [
+                tu.concat_tensordict(domain_batch_ls) if domain_batch_ls else []
+                for domain_batch_ls in domain_batch_list
+            ]
+
+            # step 3: acquire teacher knowledge for each domain.
             output_nested_tensors_ls = dict()
             for i, domain_batch_td in enumerate(domain_batch_td_list):
                 if len(domain_batch_td) == 0:
                     continue
-                # step 2: convert from padding to nopadding
+
+                # convert from padding to no padding.
                 domain_batch_td = left_right_2_no_padding(domain_batch_td)
-                # step 3: add meta info
+
+                # add meta info.
                 metadata = {"calculate_entropy": False, "compute_loss": False, "stage": Stage.ACQUIRE_TEACHER_KNOWLEDGE}
+
+                # teacher knowledge acquisition.
                 tu.assign_non_tensor(domain_batch_td, **metadata)
                 teacher_role = f"{str(Role.TeacherPolicy)}_{i}"
                 teacher_wg = self.teacher_policy_wgs[teacher_role]
@@ -1201,16 +1241,22 @@ class RayPPOTrainer:
                 if not output_nested_tensors_ls:
                     output_nested_tensors_ls = {key: [None] * len(batch_td) for key in distillation_inputs}
                 distillation_inputs = extract_distillation_inputs(
-                    stage=Stage.ACQUIRE_TEACHER_KNOWLEDGE, output=output, config=self.config.actor_rollout_ref.distillation
+                    stage=Stage.ACQUIRE_TEACHER_KNOWLEDGE,
+                    output=output,
+                    config=self.config.actor_rollout_ref.distillation,
                 )
 
                 for key, distillation_input_nested in distillation_inputs.items():
-                    distillation_input_ls = distillation_input_nested.values().split_with_sizes(tuple(distillation_input_nested.offsets().diff()))
+                    distillation_input_ls = distillation_input_nested.values().split_with_sizes(
+                        tuple(distillation_input_nested.offsets().diff())
+                    )
                     for k, distillation_input in zip(domain_batch_idx[i], distillation_input_ls, strict=True):
-                        output_nested_tensors_ls[key][k] = distillation_input                
-            
+                        output_nested_tensors_ls[key][k] = distillation_input
+
+            # step 4: re-merge outputs from different teachers.
+            # perform a sanity check to check that the ordering of outputs matches the original batch.
             batch_td_nested = left_right_2_no_padding(batch_td)
-            pre_split_offsets = batch_td_nested['input_ids'].offsets()
+            pre_split_offsets = batch_td_nested["input_ids"].offsets()
             output_nested_tensors = dict()
             for key, nested_tensor_ls in output_nested_tensors_ls.items():
                 nested_tensor = torch.nested.as_nested_tensor(nested_tensor_ls, layout=torch.jagged)
@@ -1221,7 +1267,6 @@ class RayPPOTrainer:
                         f"Distillation input {key} offsets do not match original batch offsets."
                         f" Expected {pre_split_offsets}, got {nested_tensor_offsets}."
                     )
-
 
             # step 5: rebuild a tensordict and convert to dataproto
             distillation_td = tu.get_tensordict(output_nested_tensors)

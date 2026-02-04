@@ -235,6 +235,16 @@ class TaskRunner:
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
+        distillation_config = config.actor_rollout_ref.distillation
+        if distillation_config.enabled and distillation_config.enable_resource_pool:
+            if distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+            if distillation_config.nnodes <= 0:
+                raise ValueError("config.distillation.nnodes must be greater than 0")
+
+            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
+
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
@@ -277,8 +287,12 @@ class TaskRunner:
                     "Please set trainer.use_legacy_worker_impl to 'disable' to use distillation."
                 )
             from verl.workers.engine_workers import TeacherWorker
+
             self.role_worker_mapping[Role.TeacherPolicy] = ray.remote(TeacherWorker)
-            self.mapping[Role.TeacherPolicy] = "global_pool"
+            if config.actor_rollout_ref.distillation.enable_resource_pool:
+                self.mapping[Role.TeacherPolicy] = "teacher_pool"
+            else:
+                self.mapping[Role.TeacherPolicy] = "global_pool"
 
     def run(self, config):
         """Execute the main PPO training workflow.

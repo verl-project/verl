@@ -538,7 +538,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 prepare_ref_config(distillation_config, actor_config)
                 distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
                 loss_config: DistillationLossConfig = distillation_config.distillation_loss
-                distillation_config.distillation_loss.loss_settings = get_distillation_loss_settings(loss_config.loss_mode)
+                distillation_config.distillation_loss.loss_settings = get_distillation_loss_settings(
+                    loss_config.loss_mode
+                )
 
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",
@@ -752,7 +754,9 @@ class TeacherWorker(Worker, DistProfilerExtension):
         prepare_ref_config(self.config.distillation, self.config.actor)
         distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
         distillation_loss_config: DistillationLossConfig = distillation_config.distillation_loss
-        distillation_config.distillation_loss.loss_settings = get_distillation_loss_settings(distillation_loss_config.loss_mode)
+        distillation_config.distillation_loss.loss_settings = get_distillation_loss_settings(
+            distillation_loss_config.loss_mode
+        )
         model_config = distillation_config.teacher_models.get_teacher_config(self.teacher_id)
         distillation_config.model_config = model_config
 
