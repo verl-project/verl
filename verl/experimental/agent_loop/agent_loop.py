@@ -237,8 +237,7 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
 
         # 4. extra_fields
         extra_fields = {}
-        all_keys = set(key for key in self.extra_fields)
-        for key in all_keys:
+        for key in self.extra_fields.keys():
             extra_fields[key] = [self.extra_fields.get(key)]
         non_tensor_data.update(extra_fields)
 
