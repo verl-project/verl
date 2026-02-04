@@ -12,10 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .agent_loop import AgentLoopBase, AgentLoopManager, AgentLoopWorker, AsyncLLMServerManager
+from .agent_loop import (
+    AgentLoopBase,
+    AgentLoopManager,
+    AgentLoopOutput,
+    AgentLoopWorker,
+    AsyncLLMServerManager,
+    get_trajectory_info,
+)
 from .single_turn_agent_loop import SingleTurnAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
 _ = [SingleTurnAgentLoop, ToolAgentLoop]
 
-__all__ = ["AgentLoopBase", "AgentLoopManager", "AsyncLLMServerManager", "AgentLoopWorker"]
+__all__ = [
+    "AgentLoopBase",
+    "AgentLoopManager",
+    "AsyncLLMServerManager",
+    "AgentLoopWorker",
+    "AgentLoopOutput",
+    "get_trajectory_info",
+]
