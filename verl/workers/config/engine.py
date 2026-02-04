@@ -29,13 +29,12 @@ __all__ = [
     "TrainingWorkerConfig",
     "VeOmniEngineConfig",
     "EngineConfig",
-    "EngineRouterReplayConfig",
+    "RouterReplayConfig",
 ]
 
 
-# TODO: rename to RouterReplayConfig after removing the legacy implementation
 @dataclass
-class EngineRouterReplayConfig(BaseConfig):
+class RouterReplayConfig(BaseConfig):
     """Configuration for router replay in MoE models.
 
     This configuration controls the routing behavior for Mixture of Experts (MoE) models,
@@ -103,7 +102,7 @@ class EngineConfig(BaseConfig):
     seed: int = 42
 
     full_determinism: bool = False
-    router_replay: EngineRouterReplayConfig = field(default_factory=EngineRouterReplayConfig)
+    router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
 
     def __post_init__(self):
         pass
