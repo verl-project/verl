@@ -128,15 +128,6 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
-    extra_npu_args=()
-    
-    if [ "$device_name" == "npu" ]; then
-        echo "Detect NPU device, enabling FULL_AND_PIECEWISE..."
-        extra_npu_args+=(
-            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE"
-        )
-    fi
-
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.strategy=fsdp2 \
@@ -153,7 +144,6 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
         actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
-        "${extra_npu_args[@]}" \
         actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
 
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
@@ -165,14 +155,11 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
-
-
     extra_flash_args=()
 
     if [ "$device_name" == "npu" ]; then
         echo "Detect NPU device, enabling FlashAttention..."
         extra_flash_args+=(
-            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
             ++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
         )
     fi
