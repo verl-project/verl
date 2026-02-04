@@ -43,12 +43,12 @@ class RewardModelManager:
         self.resource_pool = resource_pool
         self._initialize_llm_servers()
         self._initialize_router()
-        assert self.config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
-        if self.config.rollout.free_cache_engine:
+        assert self.config.inference.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
+        if self.config.inference.free_cache_engine:
             self.sleep()
 
     def _initialize_llm_servers(self):
-        rollout_world_size = self.config.rollout.tensor_model_parallel_size
+        rollout_world_size = self.config.inference.tensor_model_parallel_size
         world_size = (
             self.resource_pool.world_size
             if self.resource_pool  # colocate mode
@@ -56,13 +56,9 @@ class RewardModelManager:
         )
         num_replicas = world_size // rollout_world_size
 
-        rollout_replica_class = get_rollout_replica_class(self.config.rollout.name)
-        rollout_config = self.config.rollout
-        model_config = HFModelConfig(
-            path=self.config.model.path,
-            external_lib=self.config.model.external_lib,
-            trust_remote_code=self.config.model.trust_remote_code,
-        )
+        rollout_replica_class = get_rollout_replica_class(self.config.inference.name)
+        rollout_config = self.config.inference
+        model_config = HFModelConfig(path=self.config.path)
         self.tokenizer = model_config.get_processor()
         self.rollout_replicas = [
             rollout_replica_class(
@@ -92,7 +88,7 @@ class RewardModelManager:
         worker_urls = [f"http://{server_address}" for server_address in self.server_addresses]
 
         # TODO (dyy): sglang router is not ready yet.
-        # if self.config.rollout.name == "sglang":
+        # if self.config.inference.name == "sglang":
         #     from .router.inner_sglang_router import launch_router_process
         # else:
         #     from .router.naive_router import launch_router_process

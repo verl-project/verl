@@ -81,10 +81,10 @@ python3 -m verl.trainer.main_ppo \
     reward_model.enable=True \
     reward_model.model.path="${MODEL_PATH}" \
     reward_model.use_reward_loop=True \
-    reward_model.rollout.gpu_memory_utilization=0.8 \
-    reward_model.rollout.tensor_model_parallel_size=1 \
-    reward_model.rollout.prompt_length=1024 \
-    reward_model.rollout.response_length=512 \
+    reward_model.inference.gpu_memory_utilization=0.8 \
+    reward_model.inference.tensor_model_parallel_size=1 \
+    reward_model.inference.prompt_length=1024 \
+    reward_model.inference.response_length=512 \
     reward_model.num_workers=8 \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \

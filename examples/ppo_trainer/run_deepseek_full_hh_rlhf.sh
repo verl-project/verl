@@ -27,11 +27,11 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     reward_model.enable=True \
     reward_model.model.path=deepseek-ai/deepseek-llm-7b-chat \
     reward_model.use_reward_loop=True \
-    reward_model.rollout.name=vllm \
-    reward_model.rollout.gpu_memory_utilization=0.8 \
-    reward_model.rollout.tensor_model_parallel_size=4 \
-    reward_model.rollout.prompt_length=256 \
-    reward_model.rollout.response_length=128 \
+    reward_model.inference.name=vllm \
+    reward_model.inference.gpu_memory_utilization=0.8 \
+    reward_model.inference.tensor_model_parallel_size=4 \
+    reward_model.inference.prompt_length=256 \
+    reward_model.inference.response_length=128 \
     reward_model.num_workers=8 \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \

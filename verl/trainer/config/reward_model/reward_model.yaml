@@ -37,6 +37,8 @@ reward_loop_class_name: null
 # custom reward function executed async on CPU, during log_prob
 launch_reward_fn_async: False
 
+model_path: null
+
 # Inference config for reward models,
 # applicable to both discriminative and generative models
 
