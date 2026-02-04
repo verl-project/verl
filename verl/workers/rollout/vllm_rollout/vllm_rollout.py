@@ -228,6 +228,7 @@ class ServerAdapter(BaseRollout):
         # clean up
         s.close()
         del buffer
+        gc.collect()
         if shm is not None:
             shm.close()
             shm.unlink()

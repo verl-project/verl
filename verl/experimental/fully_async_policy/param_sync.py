@@ -19,7 +19,8 @@ import ray
 from ray.util.collective import collective
 
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.utils.device import get_device_name, get_nccl_backend
+from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import get_nccl_backend
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +52,11 @@ class ParameterSynchronizer:
         # Statistics
         self.current_version = 0
 
-        # self._init_weights_info()
-        # self._init_sync_group()
-
         if self.config.async_training.checkpoint_engine.enable:
-            backends_candi = {
-                "cuda": "nccl",
-                "npu": "hccl",
-            }
-            checkpoint_backend = backends_candi[get_device_name()]
             replicas = ray.get(rollouter.get_replicas.remote())
+            checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
             self.checkpoint_manager = CheckpointEngineManager(
-                backend=checkpoint_backend, trainer=self.actor_wg, replicas=replicas
+                config=checkpoint_engine_config, trainer=self.actor_wg, replicas=replicas
             )
 
     def get_current_param_version(self) -> int:

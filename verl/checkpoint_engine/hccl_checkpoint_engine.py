@@ -66,7 +66,6 @@ class BroadcastOperation:
         self.socket = socket
         self.topic = topic
 
-        # loop = asyncio.get_running_loop()
         self._run()
 
     def _run(self):

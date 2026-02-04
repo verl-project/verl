@@ -227,7 +227,6 @@ class DetachActorWorker(DetachNcclSync):
                     yield key, param.full_tensor()
 
         actor_params = self._get_actor_params()
-        # print(f'[debug] actor_params["model.embed_tokens.weight"]: {actor_params["model.embed_tokens.weight"]}')
         await self.checkpoint_engine.send_weights(actor_params_to_full(actor_params))
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

@@ -710,9 +710,6 @@ class vLLMReplica(RolloutReplica):
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
     ):
-        print(f"[debug] replica config: {config.checkpoint_engine}")
-        config.checkpoint_engine["backend"] = "hccl"
-        config.checkpoint_engine["engine_kwargs"] = {"hccl": {"rebuild_group": False}}
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(vLLMHttpServer)
 
@@ -723,6 +720,8 @@ class vLLMReplica(RolloutReplica):
             rollout_config=self.config,
             model_config=self.model_config,
             replica_rank=self.replica_rank,
+            world_size=self.world_size,
+            gpus_per_node=self.gpus_per_node,
         )
         return worker_dict_cls
 
