@@ -18,6 +18,9 @@ SFT dataset
 Each parquet file contains
 """
 
+import logging
+import os
+
 import numpy as np
 import pandas as pd
 import torch
@@ -28,6 +31,9 @@ from transformers import PreTrainedTokenizer
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class SFTDataset(Dataset):
@@ -94,7 +100,7 @@ class SFTDataset(Dataset):
         self.dataframe = pd.concat(dataframes)
 
         total = len(self.dataframe)
-        print(f"dataset len: {len(self.dataframe)}")
+        logger.info(f"dataset len: {len(self.dataframe)}")
 
         if self.max_samples > 0 and self.max_samples < total:
             if self.shuffle:
@@ -104,7 +110,7 @@ class SFTDataset(Dataset):
             else:
                 indices = np.arange(self.max_samples)
             self.dataframe = self.dataframe.iloc[indices.tolist()]
-            print(f"selected {self.max_samples} random samples out of {total}")
+            logger.info(f"selected {self.max_samples} random samples out of {total}")
 
         self.prompts = self.dataframe[self.prompt_key]
         for key in self.prompt_dict_keys:
@@ -114,7 +120,7 @@ class SFTDataset(Dataset):
             try:
                 self.prompts = self.prompts.apply(lambda x: series_to_item(x)[key], axis=1)  # noqa: B023
             except Exception:
-                print(f"self.prompts={self.prompts}")
+                logger.error(f"Error processing prompts: {self.prompts}")
                 raise
         if isinstance(self.prompts, pd.DataFrame):
             self.prompts = self.prompts.squeeze()
@@ -124,7 +130,7 @@ class SFTDataset(Dataset):
             try:
                 self.responses = self.responses.apply(lambda x: series_to_item(x)[key], axis=1)  # noqa: B023
             except Exception:
-                print(f"self.responses={self.responses}")
+                logger.error(f"Error processing responses: {self.responses}")
                 raise
         if isinstance(self.responses, pd.DataFrame):
             self.responses = self.responses.squeeze()

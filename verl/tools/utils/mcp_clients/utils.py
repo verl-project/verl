@@ -18,7 +18,7 @@ import time
 
 from mcp import Tool
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 
 
 class TokenBucket:

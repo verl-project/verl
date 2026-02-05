@@ -45,8 +45,8 @@ from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, Train
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class TrainingWorker(Worker, DistProfilerExtension):

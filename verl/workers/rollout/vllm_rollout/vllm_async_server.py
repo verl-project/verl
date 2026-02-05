@@ -17,7 +17,6 @@ import inspect
 import json
 import logging
 import os
-from pprint import pprint
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -74,7 +73,7 @@ else:
     from vllm.utils import FlexibleArgumentParser
 
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
@@ -381,7 +380,7 @@ class vLLMHttpServer:
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
 
         if self.replica_rank == 0:
-            pprint(server_args)
+            logger.info(f"Server args: {server_args}")
 
         CMD_MODULES = [vllm.entrypoints.cli.serve]
         parser = FlexibleArgumentParser(description="vLLM CLI")

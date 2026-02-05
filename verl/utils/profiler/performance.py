@@ -15,6 +15,7 @@
 import datetime
 import inspect
 import logging
+import os
 from contextlib import contextmanager
 from typing import Any, Optional
 
@@ -24,6 +25,9 @@ from codetiming import Timer
 
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.logger import DecoratorLoggerBase
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def _get_current_mem_info(unit: str = "GB", precision: int = 2) -> tuple[str]:
@@ -60,12 +64,12 @@ def _get_current_mem_info(unit: str = "GB", precision: int = 2) -> tuple[str]:
     return mem_allocated, mem_reserved, mem_used, mem_total
 
 
-def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging.DEBUG, rank: int = 0):
+def log_gpu_memory_usage(head: str, log: logging.Logger = None, level=logging.DEBUG, rank: int = 0):
     """Log GPU memory usage information.
 
     Args:
         head (str): A descriptive header for the memory usage log message.
-        logger (logging.Logger, optional): Logger instance to use for logging. If None, prints to stdout.
+        log (logging.Logger, optional): Logger instance to use for logging. If None, uses module logger.
         level: Logging level to use. Defaults to logging.DEBUG.
         rank (int): The rank of the process to log memory for. Defaults to 0.
     """
@@ -76,10 +80,9 @@ def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging
             f"device memory used/total (GB): {mem_used}/{mem_total}"
         )
 
-        if logger is None:
-            print(message)
-        else:
-            logger.log(msg=message, level=level)
+        if log is None:
+            log = logger
+        log.log(msg=message, level=level)
 
 
 class GPUMemoryLogger(DecoratorLoggerBase):
@@ -134,7 +137,7 @@ def log_print(ctn: Any):
     function_name = frame.f_code.co_name
     line_number = frame.f_lineno
     file_name = frame.f_code.co_filename.split("/")[-1]
-    print(f"[{current_time}-{file_name}:{line_number}:{function_name}]: {ctn}")
+    logger.info(f"[{current_time}-{file_name}:{line_number}:{function_name}]: {ctn}")
 
 
 def _timer(name: str, timing_raw: dict[str, float]):

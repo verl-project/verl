@@ -31,8 +31,8 @@ from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 # magic numbers that ensure we are using the same LoRA adapter during the rollout and training process
 VLLM_LORA_INT_ID = 123
@@ -281,7 +281,7 @@ class SuppressSignalInThread:
 
         def no_op_signal(sig, action):
             if threading.current_thread() is not threading.main_thread():
-                print(f"Ignored signal {sig} in thread {threading.current_thread().name}")
+                logger.debug(f"Ignored signal {sig} in thread {threading.current_thread().name}")
                 return
             return self.original_signal(sig, action)
 

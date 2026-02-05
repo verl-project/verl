@@ -17,9 +17,13 @@
 """File-system agnostic IO APIs"""
 
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 try:
     from hdfs_io import copy, exists, makedirs  # for internal use only
@@ -149,9 +153,8 @@ def copy_to_shm(src: str):
     dest = os.path.join(dest, os.path.basename(src_abs))
     if os.path.exists(dest) and verify_copy(src, dest):
         # inform user and depends on him
-        print(
-            f"[WARNING]: The memory model path {dest} already exists. If it is not you want, please clear it and "
-            f"restart the task."
+        logger.warning(
+            f"The memory model path {dest} already exists. If it is not you want, please clear it and restart the task."
         )
     else:
         if os.path.isdir(src):
@@ -221,7 +224,7 @@ def copy_to_local(
         except ImportError:
             pass
         except Exception as e:
-            print(f"WARNING: Failed to download model from Hugging Face: {e}")
+            logger.warning(f"Failed to download model from Hugging Face: {e}")
 
     # Load into shm to improve efficiency.
     if use_shm:
@@ -256,7 +259,7 @@ def copy_local_path_from_hdfs(
                     os.remove(local_path)
             if not os.path.exists(local_path):
                 if verbose:
-                    print(f"Copy from {src} to {local_path}")
+                    logger.info(f"Copy from {src} to {local_path}")
                 copy(src, local_path)
                 if os.path.isdir(local_path):
                     _record_directory_structure(local_path)
@@ -265,7 +268,7 @@ def copy_local_path_from_hdfs(
                 record_file = os.path.join(local_path, ".directory_record.txt")
                 if not _check_directory_structure(local_path, record_file):
                     if verbose:
-                        print(f"Recopy from {src} to {local_path} due to missing files or directories.")
+                        logger.info(f"Recopy from {src} to {local_path} due to missing files or directories.")
                     shutil.rmtree(local_path, ignore_errors=True)
                     copy(src, local_path)
                     _record_directory_structure(local_path)
@@ -298,7 +301,7 @@ def local_mkdir_safe(path):
             # make a new dir
             os.makedirs(path, exist_ok=True)
     except Exception as e:
-        print(f"Warning: Failed to acquire lock for {path}: {e}")
+        logger.warning(f"Failed to acquire lock for {path}: {e}")
         # Even if the lock is not acquired, try to create the directory
         os.makedirs(path, exist_ok=True)
 

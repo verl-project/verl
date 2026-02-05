@@ -15,11 +15,16 @@
 Apply monkey-patch function to models
 """
 
+import logging
+import os
 import sys
 from types import SimpleNamespace
 from typing import Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel
 
@@ -69,7 +74,7 @@ def apply_prefix_grouper_patch():
             patched.append(name)
 
     _PREFIX_GROUPER_PATCHED = True
-    print(f"[PrefixGrouper] Patched: {patched}")
+    logger.info(f"PrefixGrouper Patched: {patched}")
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -228,7 +233,7 @@ def patch_vlm_for_ulysses_input_slicing(model_class: type):
     original_forward = model_class.forward
     wrapped_forward = _create_ulysses_wrapped_decoder_forward(original_forward)
     model_class.forward = wrapped_forward
-    print(f"Monkey patch {model_class.__name__}.forward for Ulysses SP input slicing.")
+    logger.info(f"Monkey patch {model_class.__name__}.forward for Ulysses SP input slicing.")
 
 
 def patch_forward_with_backends(
@@ -244,7 +249,7 @@ def patch_forward_with_backends(
         fused_kernels_backend (str): The backend to use for fused kernels.
     """
     if not use_fused_kernels or fused_kernels_backend not in ["triton", "torch"]:
-        print(
+        logger.info(
             f"Skipping monkey patch for {model.__class__.__name__} as use_fused_kernels is "
             f"{use_fused_kernels} or fused_kernels_backend is {fused_kernels_backend}"
         )
@@ -275,10 +280,10 @@ def patch_forward_with_backends(
 
     if fused_kernels_backend == "triton":
         model.__class__.forward = forward_with_triton_backend_function
-        print(f"Using Triton backend for fused kernels in {model.__class__.__name__}")
+        logger.info(f"Using Triton backend for fused kernels in {model.__class__.__name__}")
     elif fused_kernels_backend == "torch":
         model.__class__.forward = forward_with_torch_backend_function
-        print(f"Using Torch backend for fused kernels in {model.__class__.__name__}")
+        logger.info(f"Using Torch backend for fused kernels in {model.__class__.__name__}")
     else:
         raise ValueError(f"Unsupported fused_kernels_backend: {fused_kernels_backend}. Choose 'triton' or 'torch'.")
 
@@ -346,7 +351,7 @@ def apply_monkey_patch(
             return torch.nn.Module.state_dict(self, *args, **kwargs)
 
         AutoModelForCausalLMWithValueHead.state_dict = state_dict
-        print("Monkey patch state_dict in AutoModelForCausalLMWithValueHead. ")
+        logger.info("Monkey patch state_dict in AutoModelForCausalLMWithValueHead.")
 
     # TODO: VLM models only, unify monkey patch to LLM models.
     if model.config.model_type in ["qwen2_5_vl", "qwen2_vl"]:
@@ -377,7 +382,7 @@ def apply_monkey_patch(
         Qwen2VLModel.forward = qwen2_vl_base_forward
         Qwen2_5_VLForConditionalGeneration.forward = forward_with_normal_backend
         Qwen2VLForConditionalGeneration.forward = forward_with_normal_backend
-        print(f"Monkey patch {model.__class__.__name__} model forward")
+        logger.info(f"Monkey patch {model.__class__.__name__} model forward")
 
         # Step 2: patch attention to support ulysses parallelism
         if is_transformers_version_in_range(min_version="4.54.0"):
@@ -396,7 +401,7 @@ def apply_monkey_patch(
 
             Qwen2_5_VLAttention.forward = qwen2_vl_attn_forward
             Qwen2VLAttention.forward = qwen2_vl_attn_forward
-            print(f"Monkey patch {model.__class__.__name__} attention layer")
+            logger.info(f"Monkey patch {model.__class__.__name__} attention layer")
 
         # Step 3: patch input for multimodal sequence parallelism
         if ulysses_sp_size > 1:
@@ -426,7 +431,7 @@ def apply_monkey_patch(
         Qwen3VLMoeModel.forward = qwen3_vl_base_forward
         Qwen3VLForConditionalGeneration.forward = forward_with_normal_backend
         Qwen3VLMoeForConditionalGeneration.forward = forward_with_normal_backend
-        print(f"Monkey patch {model.__class__.__name__} model forward")
+        logger.info(f"Monkey patch {model.__class__.__name__} model forward")
 
         # Step 1.5: patch Qwen3VLMoeTextSparseMoeBlock to fix transformers 4.57.3 bug
         if model.config.model_type == "qwen3_vl_moe" and is_transformers_version_in_range(max_version="4.57.3"):
@@ -451,14 +456,14 @@ def apply_monkey_patch(
 
         Glm4vModel.forward = glm4v_base_forward
         Glm4vForConditionalGeneration.forward = forward_with_normal_backend
-        print(f"Monkey patch {model.__class__.__name__} model forward")
+        logger.info(f"Monkey patch {model.__class__.__name__} model forward")
 
         # Step 2: patch attention to support ulysses parallelism
         if use_remove_padding or ulysses_sp_size > 1:
             from verl.models.transformers.glm4v import glm4v_attn_forward
 
             Glm4vTextAttention.forward = glm4v_attn_forward
-            print(f"Monkey patch {model.__class__.__name__} attention layer")
+            logger.info(f"Monkey patch {model.__class__.__name__} attention layer")
 
         # Step 3: patch input for multimodal sequence parallelism
         if ulysses_sp_size > 1:
@@ -470,24 +475,24 @@ def apply_monkey_patch(
             from verl.models.transformers.kimi_vl import _ulysses_flash_attn_forward
 
             module.DeepseekV3FlashAttention2.forward = _ulysses_flash_attn_forward
-            print("Monkey patch FlashAttention2.forward in KimiVL")
+            logger.info("Monkey patch FlashAttention2.forward in KimiVL")
 
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(module.DeepseekV3ForCausalLM)
 
         if use_fused_kernels:
-            print("Not support fused kernels for KimiVL")
+            logger.warning("Not support fused kernels for KimiVL")
 
         return
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
             module._flash_attention_forward = _ulysses_flash_attention_forward
-            print(f"Monkey patch _flash_attention_forward in {model.__module__}")
+            logger.info(f"Monkey patch _flash_attention_forward in {model.__module__}")
         else:
             from transformers.integrations import flash_attention
 
             flash_attention._flash_attention_forward = _ulysses_flash_attention_forward
-            print(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
+            logger.info(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
 
     patch_forward_with_backends(model, use_fused_kernels=use_fused_kernels, fused_kernels_backend=fused_kernels_backend)

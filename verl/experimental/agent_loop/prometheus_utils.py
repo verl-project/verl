@@ -21,8 +21,8 @@ import yaml
 
 from verl.workers.config.rollout import PrometheusConfig
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str], rollout_name: str | None = None):
@@ -71,11 +71,11 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
             reload_url = f"http://{ip_address}:{port}/-/reload"
 
             try:
-                subprocess.run(["curl", "-X", "POST", reload_url], capture_output=True, text=True, timeout=10)
-                print(f"Reloading Prometheus on node: {reload_url}")
-            except Exception:
+                result = subprocess.run(["curl", "-X", "POST", reload_url], capture_output=True, text=True, timeout=10)
+                logger.debug(f"Prometheus reload request sent to {reload_url}, return code: {result.returncode}")
+            except Exception as e:
                 # Skip errors on non-master nodes
-                pass
+                logger.debug(f"Failed to reload Prometheus at {reload_url}: {e}")
 
         # Get all available nodes and schedule tasks on each node
         nodes = ray.nodes()
@@ -93,7 +93,9 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
         ray.get(write_tasks)
 
         server_type = rollout_name.upper() if rollout_name else "rollout"
-        print(f"Updated Prometheus configuration at {config.file} with {len(server_addresses)} {server_type} servers")
+        logger.info(
+            f"Updated Prometheus configuration at {config.file} with {len(server_addresses)} {server_type} servers"
+        )
 
         # Reload Prometheus on all nodes
         reload_tasks = []

@@ -13,11 +13,16 @@
 # limitations under the License.
 
 import inspect
+import logging
+import os
 
 import torch
 from transformers import PretrainedConfig
 
 from verl.utils.device import get_torch_device
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 _DEVICE_FLOPS = {
     "CPU": 448e9,
@@ -571,9 +576,9 @@ class FlopsCounter:
     def __init__(self, config: PretrainedConfig):
         VALID_CONFIG_TYPE = ESTIMATE_FUNC.keys()
         if config.model_type not in VALID_CONFIG_TYPE:
-            print(
-                f"Only support config type of {VALID_CONFIG_TYPE}, but got {config.model_type}. MFU will always be "
-                f"zero."
+            logger.warning(
+                f"Only support config type of {VALID_CONFIG_TYPE}, "
+                f"but got {config.model_type}. MFU will always be zero."
             )
 
         self.config = config

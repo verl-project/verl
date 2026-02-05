@@ -32,8 +32,8 @@ from verl.utils.fs import copy_to_local
 from .reward_manager import get_reward_manager_cls
 from .reward_model import RewardModelManager
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class RewardLoopWorker:

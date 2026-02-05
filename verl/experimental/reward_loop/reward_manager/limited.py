@@ -26,7 +26,7 @@ from verl.utils.ray_utils import get_event_loop
 from verl.utils.reward_score import default_compute_score
 from verl.workers.reward_manager import register as register_manager_legacy
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 
 
 class AsyncTokenBucket:

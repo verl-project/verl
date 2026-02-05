@@ -45,8 +45,8 @@ from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, McoreEngineConfig
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def get_model_config(model):
@@ -120,13 +120,11 @@ def get_model(
 
     # Print number of parameters.
     if mpu.get_data_parallel_rank() == 0:
-        print(
-            " > number of parameters on (tensor, pipeline) model parallel rank ({}, {}): {}".format(
-                mpu.get_tensor_model_parallel_rank(),
-                mpu.get_pipeline_model_parallel_rank(),
-                sum([sum([p.nelement() for p in model_module.parameters()]) for model_module in model]),
-            ),
-            flush=True,
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        pp_rank = mpu.get_pipeline_model_parallel_rank()
+        num_params = sum(sum(p.nelement() for p in m.parameters()) for m in model)
+        logger.info(
+            f" > number of parameters on (tensor, pipeline) model parallel rank ({tp_rank}, {pp_rank}): {num_params}"
         )
 
     # GPU allocation.
@@ -234,7 +232,7 @@ def make_megatron_module(
                     # Load adapter weights if adapter_path is specified
                     adapter_path = getattr(peft_config, "adapter_path", None)
                     if adapter_path is not None and adapter_path:
-                        print(f"Loading adapter weights from: {adapter_path}")
+                        logger.info(f"Loading adapter weights from: {adapter_path}")
                         load_adapter_checkpoint(transformed_model, adapter_path)
 
                     # Print PEFT statistics
@@ -344,9 +342,9 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
     """
 
     warnings.warn("[deprecated] use config converter for more model support", stacklevel=2)
-    print(f"megatron config {megatron_config}")
+    logger.debug(f"megatron config {megatron_config}")
     dt = PrecisionType.to_dtype(megatron_config.params_dtype)
-    print(f"pipeline_dtype=megatron_config {dt}")
+    logger.debug(f"pipeline_dtype=megatron_config {dt}")
     qkv_bias = True if "Qwen2ForCausalLM" in hf_config.architectures else getattr(hf_config, "attention_bias", False)
     overlap_p2p_comm = (
         mpu.get_virtual_pipeline_model_parallel_world_size() is not None
@@ -1337,7 +1335,7 @@ def patch_engine_mtp(module, model_config):
     logger.warning("Applying mtp patch...")
     from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings, patch_postprocess
 
-    print(module)
+    logger.debug(f"module: {module}")
     if isinstance(module, list):
         for m in module:
             patch_postprocess(m)

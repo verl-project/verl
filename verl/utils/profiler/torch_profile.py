@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import logging
 import os
 from typing import Callable, Optional
 
@@ -20,6 +21,9 @@ import torch
 
 from .config import ProfilerConfig, TorchProfilerToolConfig
 from .profile import DistProfiler
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def get_torch_profiler(
@@ -40,7 +44,7 @@ def get_torch_profiler(
     save_path = os.path.join(save_path, save_file_name)
 
     def _trace_handler(prof):
-        print(f"[Profiler] Saving trace to {save_path}")
+        logger.info(f"[Profiler] Saving trace to {save_path}")
         prof.export_chrome_trace(save_path)
 
     contents = set(contents) if contents else set()
@@ -112,7 +116,7 @@ class Profiler(DistProfiler):
                 save_file_prefix=self.save_file_prefix,
                 rank=self.rank,
             )
-            print(f"[Profiler] started for rank {self.rank}")
+            logger.info(f"[Profiler] started for rank {self.rank}")
             self.prof.start()
             Profiler._define_count += 1
 
@@ -123,7 +127,7 @@ class Profiler(DistProfiler):
     def stop(self):
         if not self.discrete and Profiler._define_count == 1:
             self.step()
-            print(f"[Profiler] stopped for rank {self.rank}")
+            logger.info(f"[Profiler] stopped for rank {self.rank}")
             self.prof.stop()
             Profiler._define_count -= 1
 

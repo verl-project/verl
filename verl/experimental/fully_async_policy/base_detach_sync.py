@@ -26,8 +26,8 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.device import get_torch_device, is_npu_available
 from verl.utils.distributed import stateless_init_process_group
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class BaseDetachNcclSync:
@@ -60,7 +60,7 @@ class BaseDetachNcclSync:
     def record_sync_metrics(cls, bucket_size_mb, sync_time):
         """Dynamically adjust the bucket size based on past synchronization times."""
         bucket_size_mb_value = bucket_size_mb[0] if isinstance(bucket_size_mb, list) else bucket_size_mb
-        print(f"[DetachNcclSync] sync_metrics: bucket_size_mb={bucket_size_mb_value:.2f}MB, sync_time={sync_time:.2f}s")
+        logger.info(f"sync_metrics: bucket_size_mb={bucket_size_mb_value:.2f}MB, sync_time={sync_time:.2f}s")
         cls._sync_history.append((bucket_size_mb_value, sync_time))
         if len(cls._sync_history) > cls._max_history_size:
             cls._sync_history.pop(0)

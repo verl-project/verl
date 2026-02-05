@@ -25,8 +25,8 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, Processor
 from verl.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema, ToolResponse
 from verl.utils.model import compute_position_id_with_mask
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 BASE_CHAT_HISTORY = [
     {"role": "system", "content": "You are a helpful assistant."},

@@ -198,7 +198,7 @@ def gptmodel_forward_no_padding(
             }
             model_kwargs["labels"] = args["label"].contiguous()
             model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
-        if logits_processor_args and 'loss_mask' in logits_processor_args:
+        if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
@@ -252,7 +252,7 @@ def gptmodel_forward_no_padding(
             }
             model_kwargs["labels"] = args["label"].contiguous()
             model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
-        if logits_processor_args and 'loss_mask' in logits_processor_args:
+        if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
 
         output_orig = model(

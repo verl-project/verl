@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:

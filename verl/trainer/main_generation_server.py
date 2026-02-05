@@ -15,6 +15,7 @@
 Generate responses given a dataset of prompts
 """
 
+import logging
 import os
 
 import aiohttp
@@ -27,7 +28,10 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 # os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
 import asyncio
-from pprint import pprint
+from pprint import pformat
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 import pandas as pd
 from omegaconf import OmegaConf
@@ -123,7 +127,9 @@ async def generate(
 def main(config):
     ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_USE_V1": "1"}})
 
-    pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
+    logger.info(
+        f"Config: {pformat(OmegaConf.to_container(config, resolve=True))}"
+    )  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
 
     n_samples = config.actor_rollout_ref.rollout.n
@@ -185,7 +191,7 @@ def main(config):
     # write to a new parquet
     output_dir = os.path.dirname(config.data.output_path)
     makedirs(output_dir, exist_ok=True)
-    print(f"Saving results to {config.data.output_path}")
+    logger.info(f"Saving results to {config.data.output_path}")
     dataset.to_parquet(config.data.output_path)
 
 

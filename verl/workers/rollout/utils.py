@@ -20,7 +20,7 @@ from fastapi import FastAPI
 
 from verl.utils.net_utils import get_free_port
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 
 
 def get_max_position_embeddings(hf_config) -> int:

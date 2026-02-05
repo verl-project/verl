@@ -23,8 +23,8 @@ from omegaconf import DictConfig
 from verl import DataProto
 from verl.single_controller.ray import RayWorkerGroup
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class EnvLoop:

@@ -15,6 +15,7 @@
 Generate responses given a dataset of prompts
 """
 
+import logging
 import os
 
 import hydra
@@ -25,7 +26,10 @@ os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 # os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
-from pprint import pprint
+from pprint import pformat
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 import pandas as pd
 from omegaconf import OmegaConf
@@ -53,7 +57,7 @@ def run_generation(config) -> None:
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
+        logger.info(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     ray.get(main_task.remote(config))
@@ -61,7 +65,9 @@ def run_generation(config) -> None:
 
 @ray.remote(num_cpus=1)
 def main_task(config):
-    pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
+    logger.info(
+        f"Config: {pformat(OmegaConf.to_container(config, resolve=True))}"
+    )  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
 
     local_path = copy_to_local(config.model.path)
@@ -99,7 +105,7 @@ def main_task(config):
     output_lst = [[] for _ in range(config.data.n_samples)]
 
     for batch_idx in range(num_batch):
-        print(f"[{batch_idx + 1}/{num_batch}] Start to process.")
+        logger.info(f"[{batch_idx + 1}/{num_batch}] Start to process.")
         batch_chat_lst = chat_lst[batch_idx * config_batch_size : (batch_idx + 1) * config_batch_size]
         inputs = tokenizer.apply_chat_template(
             batch_chat_lst,
@@ -121,7 +127,7 @@ def main_task(config):
         data_padded, pad_size = pad_dataproto_to_divisor(data, wg.world_size)
 
         # START TO GENERATE FOR n_samples TIMES
-        print(f"[{batch_idx + 1}/{num_batch}] Start to generate.")
+        logger.info(f"[{batch_idx + 1}/{num_batch}] Start to generate.")
         for n_sample in range(config.data.n_samples):
             output_padded = wg.generate_sequences(data_padded)
             output = unpad_dataproto(output_padded, pad_size=pad_size)

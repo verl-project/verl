@@ -25,7 +25,7 @@ from .rollout import RolloutConfig
 __all__ = ["SandboxFusionConfig", "RewardModelConfig"]
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @dataclass

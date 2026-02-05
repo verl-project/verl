@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 from typing import Optional
 
@@ -21,6 +22,9 @@ import torch
 from torch.utils.data import Dataset
 
 from verl.utils import hf_tokenizer
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def download_files_distributed(download_fn):
@@ -98,7 +102,7 @@ class RMDataset(Dataset):
         self.dataframe = pd.concat(dataframes)
 
         total = len(self.dataframe)
-        print(f"dataset len: {len(self.dataframe)}")
+        logger.info(f"dataset len: {len(self.dataframe)}")
 
         if self.max_samples > 0 and self.max_samples < total:
             if self.shuffle:
@@ -108,7 +112,7 @@ class RMDataset(Dataset):
             else:
                 indices = np.arange(self.max_samples)
             self.dataframe = self.dataframe.iloc[indices.tolist()]
-            print(f"selected {self.max_samples} random samples out of {total}")
+            logger.info(f"selected {self.max_samples} random samples out of {total}")
 
         self.prompts = self.dataframe[self.prompt_key].tolist()
         self.chosen_responses = self.dataframe[self.chosen_key].tolist()

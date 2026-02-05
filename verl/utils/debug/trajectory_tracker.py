@@ -18,6 +18,7 @@ Each process will have a client that first move all the tensors to CPU
 """
 
 import io
+import logging
 import os
 import tempfile
 from collections import deque
@@ -26,6 +27,9 @@ import ray
 import torch
 
 from verl.utils.hdfs_io import copy, makedirs
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 remote_copy = ray.remote(copy)
 
@@ -40,11 +44,11 @@ def save_to_hdfs(data: io.BytesIO, name, hdfs_dir, verbose):
         # upload to hdfs
 
         if verbose:
-            print(f"Saving {local_filepath} to {hdfs_dir}")
+            logger.info(f"Saving {local_filepath} to {hdfs_dir}")
         try:
             copy(local_filepath, hdfs_dir)
         except Exception as e:
-            print(e)
+            logger.error(f"Failed to copy to hdfs: {e}")
 
 
 @ray.remote

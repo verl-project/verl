@@ -50,7 +50,7 @@ from .utils import (
     offload_veomni_optimizer,
 )
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 
 
 class VeOmniEngine(FSDPEngine):
@@ -235,7 +235,7 @@ class VeOmniEngine(FSDPEngine):
 
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
+            logger.warning(f"grad_norm is not finite: {grad_norm}")
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()

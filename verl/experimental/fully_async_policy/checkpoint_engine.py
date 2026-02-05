@@ -17,6 +17,7 @@ This logic is largely copied from:
 """
 
 import concurrent.futures
+import logging
 import os
 import re
 import socket
@@ -27,6 +28,9 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict
 
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 import zmq
 from pydantic import BaseModel, PlainSerializer, PlainValidator, WithJsonSchema
 from ray.util.collective import collective
@@ -162,7 +166,7 @@ def get_ip() -> str:
             return s.getsockname()[0]
     except Exception as e:  # noqa: BLE001
         # fallback to get ip from hostname
-        print(f"fail to get ip from network interface, fallback to get ip from hostname: {e}")
+        logger.warning(f"fail to get ip from network interface, fallback to get ip from hostname: {e}")
         return socket.gethostbyname(socket.gethostname())
 
 
@@ -309,7 +313,7 @@ class CheckpointEngine:
         bucket_size = max(
             self.device_buffer_size_M << 20, max(_align_size(dtype, shape) for _, shape, dtype in weights_info)
         )
-        print(
+        logger.info(
             f"set checkpoint_engine device buffer size: {self.device_buffer_size_M}M, "
             f"and finally set it to {bucket_size >> 20}M considering the largest parameter tensor size"
         )
@@ -365,10 +369,10 @@ class CheckpointEngine:
                         f"buffer numel {buffer.numel()} should be equal to bucket size {local_buckets[idx].size}"
                     )
                     memory_buffers[idx].buffer = buffer
-                    print(
-                        f"[rank{self.current_rank}] register pin_memory for "
-                        f" bucket {idx + 1}/{len(local_buckets)} finished, "
-                        f"size {buffer.numel() / 1024 / 1024:.2f}MiB, start to copy tensors to buffer"
+                    logger.info(
+                        f"[rank{self.current_rank}] register pin_memory for bucket "
+                        f"{idx + 1}/{len(local_buckets)} finished, size "
+                        f"{buffer.numel() / 1024 / 1024:.2f}MiB, start to copy tensors to buffer"
                     )
                     offset = 0
                     for meta in local_buckets[idx].metas:
@@ -436,10 +440,9 @@ class CheckpointEngine:
                 device=get_torch_device().current_device(),
             )
         except Exception:
-            print(
+            logger.error(
                 "allocate buffer for update_checkpoint failed, "
-                "you may need to reduce "
-                "config.async_training.checkpoint_engine.device_buffer_size_M"
+                "you may need to reduce config.async_training.checkpoint_engine.device_buffer_size_M"
             )
             raise
 

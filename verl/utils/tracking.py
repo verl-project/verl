@@ -17,6 +17,7 @@ A unified tracking interface that supports logging data to different backend
 
 import dataclasses
 import json
+import logging
 import os
 from enum import Enum
 from functools import partial
@@ -24,6 +25,9 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class Tracking:
@@ -244,7 +248,7 @@ class FileLogger:
             directory = os.path.join(root_path, self.project_name)
             os.makedirs(directory, exist_ok=True)
             self.filepath = os.path.join(directory, f"{self.experiment_name}.jsonl")
-            print(f"Creating file logger at {self.filepath}")
+            logger.info(f"Creating file logger at {self.filepath}")
         self.fp = open(self.filepath, "wb", buffering=0)
 
     def log(self, data, step):
@@ -263,7 +267,7 @@ class _TensorboardAdapter:
 
         tensorboard_dir = os.environ.get("TENSORBOARD_DIR", f"tensorboard_log/{project_name}/{experiment_name}")
         os.makedirs(tensorboard_dir, exist_ok=True)
-        print(f"Saving tensorboard log to {tensorboard_dir}.")
+        logger.info(f"Saving tensorboard log to {tensorboard_dir}.")
         self.writer = SummaryWriter(tensorboard_dir)
 
     def log(self, data, step):
@@ -301,7 +305,7 @@ class _MlflowLoggingAdapter:
             sanitized = self._invalid_chars_pattern.sub("_", sanitized)
             if sanitized != key:
                 self.logger.warning(
-                    "[MLflow] Metric key '%s' sanitized to '%s' due to invalid characters.", key, sanitized
+                    f"[MLflow] Metric key '{key}' sanitized to '{sanitized}' due to invalid characters."
                 )
             return sanitized
 
@@ -438,7 +442,7 @@ class ValidationGenerationsLogger:
                     json.dump(row_data, file)
                 mlflow.log_artifact(validation_gen_step_file)
         except Exception as e:
-            print(f"WARNING: save validation generation file to mlflow failed with error {e}")
+            logger.warning(f"save validation generation file to mlflow failed with error {e}")
 
     def log_generations_to_clearml(self, samples, step):
         """Log validation generation to clearml as table"""

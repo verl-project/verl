@@ -20,7 +20,7 @@ import torch
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 

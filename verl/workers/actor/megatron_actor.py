@@ -60,8 +60,8 @@ from verl.workers.config import MtpConfig
 __all__ = ["MegatronPPOActor"]
 
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class MegatronPPOActor(BasePPOActor):
@@ -180,7 +180,7 @@ class MegatronPPOActor(BasePPOActor):
             self.mini_layer_topk_idx_list = []
 
         config = get_model_config(self.actor_module[0])
-        print(config)
+        logger.info(f"Model config: {config}")
         config.finalize_model_grads_func = finalize_model_grads
 
     def _validate_config(self, config) -> None:
@@ -189,7 +189,7 @@ class MegatronPPOActor(BasePPOActor):
         if config.get("shuffle", False):
             assert config.data_loader_seed is not None, "If shuffle dataloader, seed must be manually set"
         if config.megatron.tensor_model_parallel_size == 1:
-            print("[Warining] Because actor tp size == 1, set sp to False")
+            logger.warning("Because actor tp size == 1, set sp to False")
             config.megatron.sequence_parallel = False
         self.config = config
 

@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import time
 
 import torch
 import torch.distributed as dist
 
 from verl.utils.device import get_device_id, get_torch_device
+
+logger = logging.getLogger(__name__)
 
 
 def _megatron_calc_layer_map(config):
@@ -123,7 +126,7 @@ def load_state_dict_to_megatron_llama(
             if tensor is not None:
                 tensor.data.copy_(tensor_chunk[tp_rank])
         else:
-            print(f"tp_shard tensor:[{name}] not in state_dict, skip loading")
+            logger.warning(f"tp_shard tensor:[{name}] not in state_dict, skip loading")
 
     def _fetch_tp_shard_tensor(tensor, name, chunk_dim=0, mutate_func=None) -> torch.Tensor:
         """fetch tensor in tp shards"""
@@ -139,7 +142,7 @@ def load_state_dict_to_megatron_llama(
             if tensor is not None:
                 tensor.data.copy_(tensor_chunk[tp_rank])
         else:
-            print(f"tp_shard tensor:[{name}] not in state_dict, skip loading")
+            logger.warning(f"tp_shard tensor:[{name}] not in state_dict, skip loading")
 
     def _fetch_tp_shard_tensor_gate_up(tensor, gate_name, up_name) -> torch.Tensor:
         """fetch gate_up tensor in tp shards"""
@@ -165,7 +168,7 @@ def load_state_dict_to_megatron_llama(
             if tensor is not None:
                 tensor.data.copy_(tensor_chunk[tp_rank])
         else:
-            print(f"tp_shard tensor:[{gate_name}, {up_name}] not in state_dict, skip loading")
+            logger.warning(f"tp_shard tensor:[{gate_name}, {up_name}] not in state_dict, skip loading")
 
     def _fetch_tp_shard_tensor_qkv(tensor, q_name, k_name, v_name) -> torch.Tensor:
         """fetch tensor in tp shards across mp_group"""

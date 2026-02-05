@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import os
 from dataclasses import is_dataclass
 from typing import Any, Optional
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 __all__ = ["omega_conf_to_dataclass", "validate_config"]
 
@@ -178,7 +183,7 @@ def validate_config(
         )
 
     if config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:
-        print("NOTICE: You have both enabled in-reward kl and kl loss.")
+        logger.info("NOTICE: You have both enabled in-reward kl and kl loss.")
 
     # critic
     if use_critic:
@@ -186,10 +191,9 @@ def validate_config(
         critic_config.validate(n_gpus, config.data.train_batch_size)
 
     if config.data.get("val_batch_size", None) is not None:
-        print(
-            "WARNING: val_batch_size is deprecated."
-            + " Validation datasets are sent to inference engines as a whole batch,"
-            + " which will schedule the memory themselves."
+        logger.warning(
+            "val_batch_size is deprecated. Validation datasets are sent to inference engines as a whole batch, "
+            "which will schedule the memory themselves."
         )
 
     # check eval config
@@ -210,4 +214,4 @@ def validate_config(
 
         get_vllm_max_lora_rank(lora_rank)
 
-    print("[validate_config] All configuration checks passed successfully!")
+    logger.info("[validate_config] All configuration checks passed successfully!")

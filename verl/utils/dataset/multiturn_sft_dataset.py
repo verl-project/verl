@@ -37,8 +37,8 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def once(func):
@@ -160,7 +160,7 @@ class MultiTurnSFTDataset(Dataset):
         self.dataframe = pd.concat(dataframes)
 
         total = len(self.dataframe)
-        print(f"dataset len: {len(self.dataframe)}")
+        logger.info(f"dataset len: {len(self.dataframe)}")
 
         if self.max_samples > 0 and self.max_samples < total:
             if self.shuffle:
@@ -170,7 +170,7 @@ class MultiTurnSFTDataset(Dataset):
             else:
                 indices = np.arange(self.max_samples)
             self.dataframe = self.dataframe.iloc[indices.tolist()]
-            print(f"selected {self.max_samples} random samples out of {total}")
+            logger.info(f"selected {self.max_samples} random samples out of {total}")
 
         # Extract messages list from dataframe
         self.messages = self.dataframe[self.messages_key].apply(convert_nested_value_to_list_recursive).tolist()

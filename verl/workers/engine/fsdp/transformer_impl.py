@@ -70,8 +70,8 @@ from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import create_device_mesh, get_sharding_strategy
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 device_name = get_device_name()
 
@@ -258,7 +258,7 @@ class FSDPEngine(BaseEngine):
 
             from verl.utils.fs import copy_to_local
 
-            print(f"Loading pre-trained LoRA adapter to from: {lora_adapter_path}")
+            logger.info(f"Loading pre-trained LoRA adapter from: {lora_adapter_path}")
             # Copy adapter to local if needed
             local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.model_config.use_shm)
 
@@ -404,7 +404,7 @@ class FSDPEngine(BaseEngine):
             num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
         if self.rank == 0:
-            print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
+            logger.info(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
 
         if lr_scheduler_type == "constant":
             lr_scheduler = get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=num_warmup_steps)
@@ -548,7 +548,7 @@ class FSDPEngine(BaseEngine):
 
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
+            logger.warning(f"grad_norm is not finite: {grad_norm}")
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()

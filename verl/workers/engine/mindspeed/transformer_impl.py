@@ -26,8 +26,8 @@ from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizer
 from ..base import EngineRegistry
 from ..megatron import MegatronEngineWithLMHead
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @EngineRegistry.register(model_type="language_model", backend="megatron", device="npu")

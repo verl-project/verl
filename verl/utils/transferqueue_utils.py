@@ -43,7 +43,7 @@ except ImportError:
 from verl.protocol import DataProto
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 _TRANSFER_QUEUE_CLIENT = None
 

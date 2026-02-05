@@ -16,6 +16,7 @@ Utilities to create common models from huggingface
 """
 
 import json
+import logging
 import os
 import re
 import warnings
@@ -43,6 +44,9 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from verl.models.registry import ModelRegistry
 from verl.utils.import_utils import is_trl_available
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class LambdaLayer(nn.Module):
@@ -177,7 +181,7 @@ def print_model_size(model: nn.Module, name: str = None):
     n_params, scale = get_model_size(model, scale="auto")
     if name is None:
         name = model.__class__.__name__
-    print(f"{name} contains {n_params:.2f}{scale} parameters")
+    logger.info(f"{name} contains {n_params:.2f}{scale} parameters")
 
 
 def create_random_mask(
@@ -389,7 +393,7 @@ def _get_parallel_model_architecture_from_config(config: PretrainedConfig, value
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch, value)
-        print("after load model cls")
+        logger.debug("after load model cls")
         if model_cls is not None:
             return model_cls
     raise ValueError(
@@ -414,12 +418,12 @@ def _load_hf_model(config, model_config, is_value_model):
     if config.model.path.startswith("hdfs:"):
         from verl.utils.fs import copy_to_local
 
-        print(f"start download from {config.model.path}")
+        logger.info(f"start download from {config.model.path}")
         local_model_path = copy_to_local(src=config.model.path, use_shm=config.model.get("use_shm", False))
-        print("finish download")
+        logger.info("finish download")
     else:
         local_model_path = config.model.path
-        print(f"load from local dir {local_model_path}")
+        logger.info(f"load from local dir {local_model_path}")
 
     src_rank = _megatron_calc_global_rank(tp_rank=0, dp_rank=0, pp_rank=0, cp_rank=mpu.get_context_parallel_rank())
     cpu_init_weights = lambda: torch.device("cpu")
@@ -468,9 +472,9 @@ def load_megatron_model_weights(config, model_config, parallel_model, params_dty
 
     from verl.models.weight_loader_registry import get_weight_loader
 
-    print(f"before weight loader: architectures = {architectures}...")
+    logger.debug(f"before weight loader: architectures = {architectures}...")
     for arch in architectures:
-        print(f"call weight loader arch = {arch}, model config = {model.config}")
+        logger.debug(f"call weight loader arch = {arch}, model config = {model.config}")
         weight_loader = get_weight_loader(arch)
         weight_loader(
             state_dict=state_dict,

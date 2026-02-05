@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -18,6 +20,9 @@ from typing import Any, Optional
 
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 from verl import DataProto
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
@@ -119,7 +124,7 @@ def assemble_batch_from_rollout_samples(
     if not rollout_samples:
         raise ValueError("Empty rollout_samples provided for batch assembly")
 
-    print(f"[BatchUtils] Assembling batch from {len(rollout_samples)} RolloutSample objects")
+    logger.info(f"Assembling batch from {len(rollout_samples)} RolloutSample objects")
 
     rollout_samples_batch = []
     processing_times = []
@@ -189,7 +194,7 @@ def assemble_batch_from_rollout_samples(
         }
     )
 
-    print(f"[BatchUtils] Batch assembly completed in {time.time() - start_time:.2f}s")
+    logger.info(f"Batch assembly completed in {time.time() - start_time:.2f}s")
 
     return final_batch
 
@@ -322,7 +327,7 @@ class MetricsAggregator:
         # Aggregate special metrics
         aggregated = self._special_metrics_aggergate(aggregated)
 
-        print(f"aggregated metrics done. cost {time.time() - t}")
+        logger.info(f"aggregated metrics done. cost {time.time() - t:.2f}")
 
         return aggregated
 

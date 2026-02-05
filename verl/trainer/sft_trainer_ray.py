@@ -41,8 +41,8 @@ from verl.utils.logger import log_with_rank
 from verl.utils.tracking import Tracking
 from verl.workers.engine_workers import TrainingWorker
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "INFO"))
 
 
 class SFTTrainer:
@@ -64,7 +64,7 @@ class SFTTrainer:
 
         self.device_name = self.config.trainer.device
 
-        print(self.config)
+        logger.info(f"Config: {self.config}")
 
     def _build_ckpt_handler(self):
         resume_mode = getattr(self.config.trainer, "resume_mode", "auto")
@@ -344,8 +344,8 @@ class SFTTrainer:
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
                 if is_last_step:
-                    print(f"Total time for train steps: {train_time:.2f}s")
-                    print(f"Final validation metrics: {last_valid_metric}")
+                    logger.info(f"Total time for train steps: {train_time:.2f}s")
+                    logger.info(f"Final validation metrics: {last_valid_metric}")
                     return
 
 

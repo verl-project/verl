@@ -13,10 +13,11 @@
 # limitations under the License.
 
 import asyncio
+import logging
 import os
 import socket
 import threading
-from pprint import pprint
+from pprint import pformat
 
 import hydra
 import ray
@@ -28,6 +29,9 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueue, Mes
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils.fs import copy_to_local
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
@@ -140,16 +144,16 @@ class FullyAsyncTaskRunner:
         self.shutdown_event = threading.Event()
 
     def run(self, config):
-        print("[ASYNC MAIN] Starting fully async PPO training...")
+        logger.info("Starting fully async PPO training...")
         self._initialize_components(config)
         self._run_training_loop()
 
     def _initialize_components(self, config) -> None:
-        print(f"[ASYNC MAIN] TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
-        pprint(OmegaConf.to_container(config, resolve=True))
+        logger.info(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        logger.debug(f"Config: {pformat(OmegaConf.to_container(config, resolve=True))}")
         OmegaConf.resolve(config)
 
-        print("[ASYNC MAIN] Initializing model and tokenizer...")
+        logger.info("Initializing model and tokenizer...")
         local_path = copy_to_local(
             config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
         )
@@ -165,25 +169,25 @@ class FullyAsyncTaskRunner:
         self.components["processor"] = processor
         self.components["config"] = config
 
-        print("[ASYNC MAIN] Creating worker mapping and resource pools...")
+        logger.info("Creating worker mapping and resource pools...")
         role_worker_mapping, ray_worker_group_cls = create_role_worker_mapping(config)
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
+        logger.info("Creating FullyAsyncRollouter...")
         self._create_rollouter(config)
 
-        print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
+        logger.info("Creating FullyAsyncTrainer...")
         self._create_trainer(config)
 
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
-        print(f"total_train_steps {total_train_steps}")
+        logger.info(f"total_train_steps: {total_train_steps}")
         ray.get(self.components["trainer"].set_total_train_steps.remote(total_train_steps))
 
         # max_queue_size
         max_queue_size = ray.get(self.components["rollouter"].get_max_queue_size.remote())
-        print(f"[ASYNC MAIN] Creating MessageQueue... max_queue_size {max_queue_size}")
+        logger.info(f"Creating MessageQueue... max_queue_size: {max_queue_size}")
         message_queue = MessageQueue.remote(config, max_queue_size)
         message_queue_client = MessageQueueClient(message_queue)
         self.components["message_queue"] = message_queue
@@ -192,7 +196,7 @@ class FullyAsyncTaskRunner:
         ray.get(self.components["rollouter"].set_message_queue_client.remote(self.components["message_queue_client"]))
         ray.get(self.components["trainer"].set_message_queue_client.remote(self.components["message_queue_client"]))
 
-        print("[ASYNC MAIN] Setting up parameter synchronization...")
+        logger.info("Setting up parameter synchronization...")
         from verl.experimental.fully_async_policy.param_sync import ParameterSynchronizer
 
         param_synchronizer = ParameterSynchronizer.remote(
@@ -218,7 +222,7 @@ class FullyAsyncTaskRunner:
         ray.get(param_synchronizer.wait_last_valid.remote())
 
         self.components["param_synchronizer"] = param_synchronizer
-        print("[ASYNC MAIN] All components initialized successfully")
+        logger.info("All components initialized successfully")
 
     def _create_rollouter(self, config) -> None:
         rollouter = FullyAsyncRollouter.remote(
@@ -235,7 +239,7 @@ class FullyAsyncTaskRunner:
         ray.get(rollouter.set_max_required_samples.remote())
 
         self.components["rollouter"] = rollouter
-        print("[ASYNC MAIN] Rollouter created and initialized successfully")
+        logger.info("Rollouter created and initialized successfully")
 
     def _create_trainer(self, config) -> None:
         trainer_role_mapping = {
@@ -256,12 +260,12 @@ class FullyAsyncTaskRunner:
 
         ray.get(trainer.init_workers.remote())
         self.components["trainer"] = trainer
-        print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
+        logger.info("FullyAsyncTrainer created and initialized successfully")
 
     def _run_training_loop(self):
         self.running = True
 
-        print("[ASYNC MAIN] Starting Rollouter and Trainer...")
+        logger.info("Starting Rollouter and Trainer...")
         rollouter_future = self.components["rollouter"].fit.remote()
         trainer_future = self.components["trainer"].fit.remote()
 
@@ -275,9 +279,9 @@ class FullyAsyncTaskRunner:
                 for future in done_futures:
                     try:
                         ray.get(future)
-                        print("[ASYNC MAIN] One component completed successfully")
+                        logger.info("One component completed successfully")
                     except Exception as e:
-                        print(f"[ASYNC MAIN] Component failed with error: {e}")
+                        logger.error(f"Component failed with error: {e}")
                         for remaining_future in remaining_futures:
                             ray.cancel(remaining_future)
                         raise e
@@ -285,13 +289,13 @@ class FullyAsyncTaskRunner:
                 futures = remaining_futures
 
         except Exception as e:
-            print(f"[ASYNC MAIN] Training failed: {e}")
+            logger.error(f"Training failed: {e}")
             for future in futures:
                 ray.cancel(future)
             raise
         finally:
             asyncio.run(self.components["message_queue_client"].clear_queue())
-            print("[ASYNC MAIN] Training completed or interrupted")
+            logger.info("Training completed or interrupted")
 
 
 @hydra.main(config_path="config", config_name="fully_async_ppo_trainer", version_base=None)
@@ -305,7 +309,7 @@ def main(config):
 
     start_time = time()
     run_ppo(config, task_runner_class=FullyAsyncTaskRunner)
-    print(f"total time: {time() - start_time:.2f} seconds")
+    logger.info(f"total time: {time() - start_time:.2f} seconds")
 
 
 if __name__ == "__main__":

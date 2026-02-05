@@ -16,8 +16,8 @@ import logging
 import os
 import shutil
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "INFO"))
 
 _HDFS_PREFIX = "hdfs://"
 

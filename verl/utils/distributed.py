@@ -14,6 +14,7 @@
 """Utilities for distributed training."""
 
 import ctypes
+import logging
 import os
 import socket
 from datetime import timedelta
@@ -23,6 +24,9 @@ import torch.distributed
 
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device, is_npu_available
 from verl.utils.net_utils import is_ipv6
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def set_numa_affinity():
@@ -45,9 +49,9 @@ def set_numa_affinity():
         handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
         pynvml.nvmlDeviceSetCpuAffinity(handle)
     except ImportError:
-        print("Warning: pynvml not available, skipping NUMA affinity setup")
+        logger.warning("pynvml not available, skipping NUMA affinity setup")
     except Exception as e:
-        print(f"Warning: Failed to set NUMA affinity: {e}")
+        logger.warning(f"Failed to set NUMA affinity: {e}")
     finally:
         if initialized:
             pynvml.nvmlShutdown()

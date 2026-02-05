@@ -27,7 +27,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import is_torch_npu_available
 from verl.workers.config import HFModelConfig, RolloutConfig
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 
 
 class TokenOutput(BaseModel):
@@ -235,13 +235,13 @@ class RolloutReplica(ABC):
         """Partial rollout: abort and save all unfinished requests in each rollout server."""
         # TODO(wuxibin)
         # await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
-        print(f"abort all requests in rollout replica {self.replica_rank}")
+        logger.info(f"abort all requests in rollout replica {self.replica_rank}")
 
     async def resume_all_requests(self):
         """Partial rollout: resume all unfinished requests in each rollout server."""
         # TODO(wuxibin)
         # await asyncio.gather(*[server.resume_all_requests.remote() for server in self.servers])
-        print(f"resume all requests in rollout replica {self.replica_rank}")
+        logger.info(f"resume all requests in rollout replica {self.replica_rank}")
 
     async def clear_kv_cache(self):
         """reset kv cache in each rollout server."""

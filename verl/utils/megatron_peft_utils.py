@@ -13,11 +13,15 @@
 # limitations under the License.
 """Utilities for PEFT (Parameter-Efficient Fine-Tuning) of Megatron in VERL."""
 
+import logging
 import os
 from pathlib import Path
 from typing import Iterator
 
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 # Map megatron lora target modules to HF-style module names for vLLM
 MEGATRON_TO_HF_MODULES = {
@@ -147,7 +151,7 @@ def save_adapter_checkpoint(
 
     if not adapter_state:
         if rank == 0:
-            print("Warning: No adapter parameters found to save")
+            logger.warning("No adapter parameters found to save")
         return
 
     # Get rank-specific directory path
@@ -163,7 +167,7 @@ def save_adapter_checkpoint(
     )
 
     if rank == 0:
-        print(f"Saved {len(adapter_state)} adapter parameters to {checkpoint_path} (distributed)")
+        logger.info(f"Saved {len(adapter_state)} adapter parameters to {checkpoint_path} (distributed)")
 
 
 def load_adapter_checkpoint(
@@ -196,7 +200,7 @@ def load_adapter_checkpoint(
     adapter_state = checkpoint.get("adapter_state_dict", {})
 
     if not adapter_state:
-        print("Warning: No adapter parameters found in checkpoint")
+        logger.warning("No adapter parameters found in checkpoint")
         return
 
     if isinstance(model, list):
@@ -224,7 +228,7 @@ def load_adapter_checkpoint(
         and mpu.get_tensor_model_parallel_rank() == 0
         and mpu.get_pipeline_model_parallel_rank() == 0
     ):
-        print(f"Loaded {len(adapter_state)} adapter parameters from {checkpoint_path}")
+        logger.info(f"Loaded {len(adapter_state)} adapter parameters from {checkpoint_path}")
 
 
 def count_adapter_parameters(model):
@@ -260,12 +264,15 @@ def print_adapter_info(model):
     """Print information about adapter parameters in the model."""
     adapter_params, total_params, percentage = count_adapter_parameters(model)
 
-    print(f"\n{'=' * 60}")
-    print("PEFT Adapter Information:")
-    print(f"  Total parameters:     {total_params:,}")
-    print(f"  Adapter parameters:   {adapter_params:,}")
-    print(f"  Trainable percentage: {percentage:.2f}%")
-    print(f"{'=' * 60}\n")
+    sep = "=" * 60
+    logger.info(
+        f"\n{sep}\n"
+        f"PEFT Adapter Information:\n"
+        f"  Total parameters:     {total_params:,}\n"
+        f"  Adapter parameters:   {adapter_params:,}\n"
+        f"  Trainable percentage: {percentage:.2f}%\n"
+        f"{sep}"
+    )
 
 
 def convert_megatron_to_hf_target_modules(megatron_modules: list[str]) -> list[str]:
