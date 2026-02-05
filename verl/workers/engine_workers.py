@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 import logging
 import os
 from contextlib import nullcontext
@@ -47,6 +48,21 @@ from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _with_routing_replay_flag(enabled: bool):
+    """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, data: TensorDict, *args, **kwargs):
+            if self.enable_routing_replay:
+                tu.assign_non_tensor_data(data, "enable_routing_replay", enabled)
+            return func(self, data, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 class TrainingWorker(Worker, DistProfilerExtension):
@@ -554,28 +570,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
+    @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        if self.enable_routing_replay:
-            tu.assign_non_tensor_data(data, "enable_routing_replay", False)
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+    @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        if self.enable_routing_replay:
-            tu.assign_non_tensor_data(data, "enable_routing_replay", True)
-
         output = self.actor.infer_batch(data)
 
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
+    @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
-        if self.enable_routing_replay:
-            tu.assign_non_tensor_data(data, "enable_routing_replay", True)
-
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 
