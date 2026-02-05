@@ -229,13 +229,13 @@ def compute_data_metrics(batch: DataProto|TensorDict, use_critic: bool = True) -
         num_turns = torch.tensor(list(non_tensor_batch["__num_turns__"]))
         metrics["num_turns/min"] = num_turns.min()
         metrics["num_turns/max"] = num_turns.max()
-        metrics["num_turns/mean"] = num_turns.mean()
+        metrics["num_turns/mean"] = num_turns.float().mean()
 
     if "tool_call_counts" in non_tensor_batch:
         tool_call_counts = torch.tensor(list(non_tensor_batch["tool_call_counts"]))
         metrics["tool_call_counts/min"] = tool_call_counts.min()
         metrics["tool_call_counts/max"] = tool_call_counts.max()
-        metrics["tool_call_counts/mean"] = tool_call_counts.mean()
+        metrics["tool_call_counts/mean"] = tool_call_counts.float().mean()
 
     return metrics
 
