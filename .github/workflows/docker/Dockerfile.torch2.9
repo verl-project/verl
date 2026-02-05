@@ -70,10 +70,12 @@ RUN mkdir -p /opt && cd /opt && \
     pip install dist/*whl
 
 WORKDIR /opt
+COPY ./patch_verl.diff /opt/
 RUN mkdir -p /opt && cd /opt && \
     git clone https://github.com/volcengine/verl.git && \
-    cd verl && \
+    cd verl && mv ../patch_verl.diff . && \
     git checkout 74f322453634c07bd9cb2d67533d68e42eb37710 && \
+    git apply patch_verl.diff && \
     pip install -e .
 
 RUN pip install git+https://github.com/ISEEKYAN/mbridge.git --no-deps

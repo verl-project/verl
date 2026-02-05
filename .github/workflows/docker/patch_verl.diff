@@ -1,0 +1,15 @@
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index 0fb205e9..50e8aabb 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -1739,6 +1739,10 @@ class RayPPOTrainer:
+                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                     pprint(f"Final validation metrics: {last_val_metrics}")
+                     progress_bar.close()
++
++                    pprint("Will release dataloader")
++                    self.train_dataloader = None
++                    self.val_dataloader = None
+                     return
+ 
+                 # this is experimental and may be changed/removed in the future
