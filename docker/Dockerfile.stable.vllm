@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     git \
     wget \
     cmake \
+    vim \
     build-essential \
     libibverbs-dev \
     libnuma-dev \
@@ -27,17 +28,11 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && \
 RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
-# use torch2.9.1+cudnn9.16 to avoid conflict
-RUN pip install torch==2.9.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
-RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1+cu129.dist-info/METADATA
-RUN pip install --no-deps --force-reinstall nvidia-cudnn-cu12==9.16.0.29
+RUN pip install vllm==0.15.0
 
-RUN git clone --depth 1 -b v0.12.0 https://github.com/vllm-project/vllm.git && \
-    cd vllm && \
-    find requirements -name "*.txt" -print0 | xargs -0 sed -i '/torch/d' && \
-    pip install -r requirements/build.txt && \
-    pip install -e . --no-build-isolation --no-deps && \
-    pip install -r requirements/cuda.txt
+# use cudnn9.16 to avoid conflict
+RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1.dist-info/METADATA
+RUN pip install --no-deps --force-reinstall nvidia-cudnn-cu12==9.16.0.29
 
 RUN pip install pybind11
 
