@@ -120,6 +120,9 @@ def _check_backward_determinism(trainer: FSDPSFTTrainer, micro_batch: TensorDict
 
 
 def test_trainer_backward_determinism(trainer: FSDPSFTTrainer):
+    seed = 42
+    enable_full_determinism(seed=seed)
+
     """Test backward determinism for both ref and SP+rmpad modes on one micro-batch."""
     if trainer.device_mesh.get_rank() == 0:
         print("\nStarting backward determinism check...")
@@ -157,9 +160,6 @@ def create_trainer(config):
         FSDPSFTTrainer: Initialized trainer instance
     """
     local_rank, rank, world_size = initialize_global_process_group()
-
-    seed = 42
-    enable_full_determinism(seed=seed)
 
     device_mesh = init_device_mesh(device_type="cuda", mesh_shape=(world_size,), mesh_dim_names=("fsdp",))
 
