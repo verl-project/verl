@@ -137,7 +137,6 @@ class Metric:
 
     @classmethod
     def aggregate_dp(cls, metric_lists: list["Metric"]) -> float:
-        value_lists = [ml.values for ml in metric_lists]
         if not metric_lists:
             raise ValueError("Cannot aggregate an empty list of metrics.")
         value_lists = [ml.values for ml in metric_lists]
