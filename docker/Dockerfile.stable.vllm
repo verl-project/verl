@@ -28,7 +28,7 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && \
 RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
-RUN pip install vllm==0.15.0
+RUN pip install vllm==0.15.1
 
 # use cudnn9.16 to avoid conflict
 RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1.dist-info/METADATA
