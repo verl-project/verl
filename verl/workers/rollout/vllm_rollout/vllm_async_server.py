@@ -238,11 +238,17 @@ class vLLMHttpServer:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
             if quantization == "fp8":
+                # Ignore MoE router layers for FP8 quantization
+                all_mlp_gate_layers = []
+                for layer in range(self.model_config.hf_config.num_hidden_layers):
+                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
+                    "ignored_layers": all_mlp_gate_layers,
                 }
                 fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Apply vllm fp8 patches

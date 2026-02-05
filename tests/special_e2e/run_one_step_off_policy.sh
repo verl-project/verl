@@ -112,6 +112,13 @@ common_params=(
 
 )
 
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     echo "Running with FSDP2 strategy..."
     # FSDP2 specific parameters
@@ -148,6 +155,15 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
+    extra_flash_args=()
+
+    if [ "$device_name" == "npu" ]; then
+        echo "Detect NPU device, enabling FlashAttention..."
+        extra_flash_args+=(
+            ++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+        )
+    fi
+
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
         --config-name='one_step_off_ppo_megatron_trainer.yaml' \
@@ -165,6 +181,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
+        "${extra_flash_args[@]}" \
         actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
