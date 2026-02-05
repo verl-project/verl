@@ -144,7 +144,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         self.engine.initialize()
 
-    def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only):
+    def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_sqenlens):
         """
 
         Args:
@@ -187,7 +187,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
         if global_token_num is not None:
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(
+                global_token_num, delta_time, images_seqlens=images_seqlens
+                )
             final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
             if forward_only:
                 final_metrics["mfu"] /= 3.0
@@ -286,6 +288,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
+        images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         # inject engineering parameters if not specified
         default_keys = dict(
@@ -322,7 +325,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if lr is not None:
                 output["metrics"]["lr"] = lr
             final_output = self._postprocess_output(
-                output, global_token_num=global_token_num, delta_time=delta_time, forward_only=False
+                output, global_token_num=global_token_num, delta_time=delta_time, forward_only=False, images_seqlens=images_seqlens
             ).cpu()
         else:
             final_output = None
@@ -336,6 +339,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         compute_loss = tu.get(data, key="compute_loss", default=True)
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
+        images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         default_keys = dict(
             use_remove_padding=self.model_config.use_remove_padding,
@@ -363,7 +367,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if self.engine.is_mp_src_rank_with_outputs():
             final_output = self._postprocess_output(
-                output, global_token_num=global_token_num, delta_time=delta_time, forward_only=True
+                output, global_token_num=global_token_num, delta_time=delta_time, forward_only=True, images_seqlens=images_seqlens
             ).cpu()
         else:
             final_output = None
