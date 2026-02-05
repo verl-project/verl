@@ -32,7 +32,7 @@ RUN pip install torch==2.9.1 torchvision torchaudio --index-url https://download
 RUN pip install vllm==0.15.1
 
 # use cudnn9.16 to avoid conflict
-RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1.dist-info/METADATA
+RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1+cu129.dist-info/METADATA
 RUN pip install --no-deps --force-reinstall nvidia-cudnn-cu12==9.16.0.29
 
 RUN pip install pybind11
