@@ -4,7 +4,6 @@ set -xeuo pipefail
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 export VERL_USE_GPT_OSS=0
-export VERL_DISABLE_HARMONY=1
 export PYTHONPATH=/mnt/data/liuchonghan/verl_lao:${PYTHONPATH:-}
 
 ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.main_ppo"}
@@ -96,6 +95,5 @@ python3 $ENTRYPOINT --config-path=/mnt/data/liuchonghan/verl_lao/verl/trainer/co
     trainer.total_epochs=5 \
     +ray_kwargs.ray_init.address=$RAY_ADDRESS \
     +ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_GPT_OSS='"0"' \
-    +ray_kwargs.ray_init.runtime_env.env_vars.VERL_DISABLE_HARMONY='"1"' \
     custom_reward_function.path=/mnt/data/liuchonghan/verl_lao/recipes_custom/rlvr_72b/reward_function.py \
     custom_reward_function.name=char_count_reward_function

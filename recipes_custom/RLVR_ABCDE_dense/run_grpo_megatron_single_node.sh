@@ -7,48 +7,33 @@ export VERL_USE_GPT_OSS=0
 export PYTHONPATH=/llm-align/liuchonghan/verl_lao:${PYTHONPATH:-}
 
 ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.main_ppo"}
-TRAIN_FILES=${TRAIN_FILES:-/llm-alignment/liuchonghan/all_data_merged_rlhf.json}
+TRAIN_FILES=${TRAIN_FILES:-/llm-align/liuchonghan/all_data_merged_rlhf.json}
 MODEL_ID=${MODEL_ID:-/llm-align/liuchonghan/Qwen3-8B}
 PROJECT_NAME=${PROJECT_NAME:-rlvr_8b}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-rlvr_8b_grpo_megatron}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-rlvr_8b_grpo_megatron_single}
 
-NNODES=${PET_NNODES:-${WORLD_SIZE:-28}}
-NODE_RANK=${PET_NODE_RANK:-${RANK:-0}}
-MASTER_ADDR=${PET_MASTER_ADDR:-${MASTER_ADDR:-"127.0.0.1"}}
-MASTER_PORT=${PET_MASTER_PORT:-${MASTER_PORT:-23457}}
-N_GPUS_PER_NODE=${PET_NPROC_PER_NODE:-${NPROC_PER_NODE:-${N_GPUS_PER_NODE:-8}}}
+# Single node, 8 GPUs
+NNODES=1
+NODE_RANK=0
+MASTER_ADDR=127.0.0.1
+MASTER_PORT=${MASTER_PORT:-23457}
+N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
 
-TP_SIZE=${TP_SIZE:-8}
-PP_SIZE=${PP_SIZE:-1}
+TP_SIZE=1
+PP_SIZE=1
 
 rollout_mode=${ROLLOUT_MODE:-async}
 USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-True}
 RETURN_RAW_CHAT=${RETURN_RAW_CHAT:-True}
 
-RAY_PORT=${RAY_PORT:-6379}
-RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
-RAY_ADDRESS=${RAY_ADDRESS:-$MASTER_ADDR:$RAY_PORT}
-
-if [ "$NODE_RANK" -eq 0 ]; then
-  ray start --head \
-    --node-ip-address="$MASTER_ADDR" \
-    --port="$RAY_PORT" \
-    --dashboard-port="$RAY_DASHBOARD_PORT"
-else
-  ray start --address="$RAY_ADDRESS"
-  exit 0
-fi
-
-sleep 5
-
-python3 $ENTRYPOINT --config-path=/mnt/data/liuchonghan/verl_lao/verl/trainer/config \
+python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/config \
     --config-name='ppo_megatron_trainer.yaml' \
     algorithm.adv_estimator=grpo \
     data.train_files=$TRAIN_FILES \
     data.val_files=$TRAIN_FILES \
-    data.val_max_samples=512 \
+    data.val_max_samples=2048 \
     data.return_raw_chat=$RETURN_RAW_CHAT \
-    data.train_batch_size=224 \
+    data.train_batch_size=32 \
     data.max_prompt_length=1024 \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=False \
@@ -56,8 +41,8 @@ python3 $ENTRYPOINT --config-path=/mnt/data/liuchonghan/verl_lao/verl/trainer/co
     actor_rollout_ref.model.path=$MODEL_ID \
     actor_rollout_ref.model.use_fused_kernels=$USE_FUSED_KERNELS \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=224 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$PP_SIZE \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=$TP_SIZE \
     actor_rollout_ref.actor.use_kl_loss=False \
@@ -78,13 +63,12 @@ python3 $ENTRYPOINT --config-path=/mnt/data/liuchonghan/verl_lao/verl/trainer/co
     trainer.logger='["console","wandb"]' \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
     trainer.nnodes=$NNODES \
-    trainer.save_freq=100 \
-    trainer.test_freq=100 \
+    trainer.save_freq=300 \
+    trainer.test_freq=300 \
     trainer.total_epochs=5 \
-    +ray_kwargs.ray_init.address=$RAY_ADDRESS \
-    +ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_GPT_OSS='"0"' \
-    custom_reward_function.path=/mnt/data/liuchonghan/verl_lao/recipes_custom/rlvr_72b/reward_function.py \
+    +ray_kwargs.ray_init.num_cpus=32 \
+    custom_reward_function.path=/llm-align/liuchonghan/verl_lao/recipes_custom/RLVR_ABCDE_dense/reward_function.py \
     custom_reward_function.name=char_count_reward_function
