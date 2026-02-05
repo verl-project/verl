@@ -73,7 +73,6 @@ class EngineConfig(BaseConfig):
         "infer_micro_batch_size_per_gpu",
         "use_fused_kernels",
         "use_remove_padding",
-        "router_replay_mode",
     }
     # whether to offload param
     param_offload: bool = False

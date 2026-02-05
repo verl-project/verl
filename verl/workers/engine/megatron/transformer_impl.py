@@ -94,7 +94,7 @@ class MegatronEngine(BaseEngine):
         self.weight_converter = None
 
         # Router replay configuration for MoE models
-        self.enable_routing_replay = self.engine_config.router_replay.mode == "R3"
+        self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
         if self.enable_routing_replay:
             apply_router_replay_patch()
@@ -750,55 +750,54 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
             )
-            return output, partial(postprocess_micro_batch_func, data=batch)
+        else:
+            if not isinstance(temperature, torch.Tensor):
+                temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
 
-        if not isinstance(temperature, torch.Tensor):
-            temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
+            temperature = temperature.to(torch.float32)
+            assert temperature.shape[0] == input_ids.shape[0]
+            temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
 
-        temperature = temperature.to(torch.float32)
-        assert temperature.shape[0] == input_ids.shape[0]
-        temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
+            forward_fn = get_mcore_forward_no_padding_fn(self.model_config.hf_config)
 
-        forward_fn = get_mcore_forward_no_padding_fn(self.model_config.hf_config)
+            def logits_processor(logits, label, temperature):
+                assert logits.shape[:2] == label.shape[:2]
+                # avoid non-positive temperature such as padding
+                temperature[temperature <= 0] = 1e-8
+                assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
+                logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
+                ret = {}
+                if calculate_entropy:
+                    logits_bak = logits.clone()
+                    # # disable the hint until the fused_kernel is optimized for triton>=3.3
+                    # if torch.distributed.get_rank() == 0:
+                    #     logger.warning_once(
+                    #         "For memory-efficient computation, enable fused kernels via "
+                    #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
+                    #         "The current `clone()` operation ensures correctness but increases memory usage."
+                    #     )
+                    entropy = vocab_parallel_entropy(logits)
+                    ret["entropy"] = entropy
+                else:
+                    logits_bak = logits
 
-        def logits_processor(logits, label, temperature):
-            assert logits.shape[:2] == label.shape[:2]
-            # avoid non-positive temperature such as padding
-            temperature[temperature <= 0] = 1e-8
-            assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
-            logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
-            ret = {}
-            if calculate_entropy:
-                logits_bak = logits.clone()
-                # # disable the hint until the fused_kernel is optimized for triton>=3.3
-                # if torch.distributed.get_rank() == 0:
-                #     logger.warning_once(
-                #         "For memory-efficient computation, enable fused kernels via "
-                #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
-                #         "The current `clone()` operation ensures correctness but increases memory usage."
-                #     )
-                entropy = vocab_parallel_entropy(logits)
-                ret["entropy"] = entropy
-            else:
-                logits_bak = logits
+                log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
+                ret["log_probs"] = log_probs
+                return ret
 
-            log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
-            ret["log_probs"] = log_probs
-            return ret
+            logits_processor_args = {"label": label, "temperature": temperature, "loss_mask": loss_mask}
 
-        logits_processor_args = {"label": label, "temperature": temperature, "loss_mask": loss_mask}
-
-        output = forward_fn(
-            model,
-            input_ids,
-            multi_modal_inputs,
-            logits_processor=logits_processor,
-            logits_processor_args=logits_processor_args,
-            vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-            pad_token_id=self.model_config.tokenizer.pad_token_id,
-            data_format="thd" if self.engine_config.use_remove_padding else "bshd",
-            enable_mtp=self.model_config.mtp.enable_train,
-        )
+            output = forward_fn(
+                model,
+                input_ids,
+                multi_modal_inputs,
+                logits_processor=logits_processor,
+                logits_processor_args=logits_processor_args,
+                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+                pad_token_id=self.model_config.tokenizer.pad_token_id,
+                data_format="thd" if self.engine_config.use_remove_padding else "bshd",
+                enable_mtp=self.model_config.mtp.enable_train,
+            )
 
         # Router replay: switch to backward replay mode for next backward pass
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
