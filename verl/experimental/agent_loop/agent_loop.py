@@ -762,7 +762,7 @@ class AgentLoopWorker:
             keys_to_pop = []
             for key, val in output.items():
                 if isinstance(val, NonTensorData):
-                    batch_meta.set_extra_info(key, val.data)
+                    batch_meta.extra_info[key] = val.data
                     if key not in keys_to_pop:
                         keys_to_pop.append(key)
 

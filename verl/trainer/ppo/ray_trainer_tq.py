@@ -367,7 +367,7 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
                 "seed": seed,
                 "dataloader_kwargs": {"shuffle": shuffle},
             }
-            batch_meta.update_extra_info(extra_meta)
+            batch_meta.extra_info.update(extra_meta)
             output = self.actor_rollout_wg.update_actor(batch_meta)
             output = tu.get(output, "metrics")
             output = rename_dict(output, "actor/")
@@ -392,7 +392,7 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
                 "seed": seed,
                 "dataloader_kwargs": {"shuffle": shuffle},
             }
-            batch_meta.update_extra_info(extra_meta)
+            batch_meta.extra_info.update(extra_meta)
             output = self.critic_wg.train_mini_batch(batch_meta)
             output = tu.get(output, "metrics")
             output = rename_dict(output, "critic/")
@@ -448,7 +448,7 @@ class RayPPOTrainerTransferQueue(RayPPOTrainer):
 
             batch_meta = self.tq_client.put(data=test_batch, partition_id=f"val_{self.global_steps - 1}")
 
-            batch_meta.update_extra_info(
+            batch_meta.extra_info.update(
                 {
                     "eos_token_id": self.tokenizer.eos_token_id,
                     "pad_token_id": self.tokenizer.pad_token_id,
