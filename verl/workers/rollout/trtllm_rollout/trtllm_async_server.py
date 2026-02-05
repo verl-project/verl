@@ -223,6 +223,13 @@ class TRTLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
+    async def report_device_ids(self) -> list[str]:
+        """Report GPU device UUIDs from TRT-LLM workers."""
+        return await self.llm.collective_rpc(
+            "report_device_id",
+            unique_reply_rank=0,
+        )
+
 
 _rollout_worker_actor_cls = ray.remote(ServerAdapter)
 

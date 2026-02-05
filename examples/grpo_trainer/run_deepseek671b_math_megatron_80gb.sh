@@ -3,7 +3,7 @@ set -x
 # # 0. download HF checkpoint
 # # remove the `quantization_config` in the `config.json`
 # # set `num_nextn_predict_layers=0` to disable MTP, which is not currently supported
-# huggingface-cli download deepseek-ai/DeepSeek-V3-0324
+# hf download deepseek-ai/DeepSeek-V3-0324
 
 # no offline dist checkpoint needed, now with mbridge>=0.13.0, we can directly init model from huggingface downloaded fp8 weights
 # tested on docker://verlai/verl:app-verl0.5-transformers4.55.4-vllm0.10.0-mcore0.13.0-te2.2

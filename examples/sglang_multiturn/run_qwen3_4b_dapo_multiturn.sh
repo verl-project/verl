@@ -31,7 +31,7 @@ hf download \
 # If you still wish to perform SFT from scratch, follow the steps below:
 
 # Step 1: Download the SFT dataset
-#huggingface-cli download JoeYing/ReTool-SFT --repo-type dataset --local-dir ./ReTool-SFT
+#hf download JoeYing/ReTool-SFT --repo-type dataset --local-dir ./ReTool-SFT
 
 # Step 2: Preprocess the data for SFT
 #python3 recipe/retool/retool_sft_preprocess.py

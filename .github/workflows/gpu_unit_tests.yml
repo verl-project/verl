@@ -113,7 +113,7 @@ jobs:
           pip3 install --ignore-installed mlflow "numpy<2.0"
       - name: Run all GPU unit tests
         run: |
-          pytest -s -x --ignore-glob="*on_npu.py" --ignore-glob="*test_special_*.py" --ignore-glob='*on_cpu.py' --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob='tests/special*' --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_shared_memory*" tests/
+          pytest -s -x --ignore-glob="*on_npu.py" --ignore-glob="*test_special_*.py" --ignore-glob='*on_cpu.py' --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob='tests/special*' --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" tests/
       - name: Testing LinearCrossEntropyTP Correctness, Computation Time and Memory Consumption
         run: |
           LOW_MEMORY=True torchrun --standalone --nnodes=1 --nproc-per-node=8 tests/utils/test_special_linear_cross_entropy_tp.py

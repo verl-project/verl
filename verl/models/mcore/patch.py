@@ -33,7 +33,7 @@ def apply_patch():
     )
     from packaging import version
 
-    mcore_013 = version.parse(megatron.core.__version__) >= version.parse("0.13.0rc0")
+    mcore_ge_013 = version.parse(megatron.core.__version__) >= version.parse("0.13.0")
 
     def patch_get_query_key_value_tensors(
         self,
@@ -270,7 +270,7 @@ def apply_patch():
         # Adjust key, value for inference
         # ===================================================
         # rotary_pos_emb = None
-        if mcore_013:
+        if mcore_ge_013:
             query, key, value, _, attn_mask_type, _ = self._adjust_key_value_for_inference(
                 inference_context, query, key, value, rotary_pos_emb=None
             )

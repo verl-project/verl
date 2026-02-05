@@ -10,7 +10,7 @@ NUM_GPUS=${NUM_GPUS:-8}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 RM_MODEL_PATH=${RM_MODEL_PATH:-${HOME}/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 USE_DUMMY_MODEL=${USE_DUMMY_MODEL:-False}
 DUMMY_MODEL_PATH=${DUMMY_MODEL_PATH:-${HOME}/dummy_models/${MODEL_ID}}
@@ -165,6 +165,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.model.lora.alpha=${LORA_ALPHA} \
     actor_rollout_ref.model.lora.target_modules=${LORA_TARGET_MODULES} \
     actor_rollout_ref.model.lora.merge=${LORA_MERGE} \
+    +actor_rollout_ref.model.lora.fully_sharded_loras=True \
     actor_rollout_ref.actor.optim.lr_warmup_steps=$LR_WARMUP_STEPS \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=$OPTIM_MEMORY_EFFICIENT \
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=$OPTIM_MEMORY_EFFICIENT \

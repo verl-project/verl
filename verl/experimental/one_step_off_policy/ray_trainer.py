@@ -291,14 +291,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
         self.async_rollout_mode = True
 
-        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-            rm_resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-        else:
-            rm_resource_pool = None
-
-        self.async_rollout_manager = OneStepOffAgentLoopManager(
-            config=self.config, worker_group=self.rollout_wg, rm_resource_pool=rm_resource_pool
-        )
+        self.async_rollout_manager = OneStepOffAgentLoopManager(config=self.config, worker_group=self.rollout_wg)
 
     def sync_rollout_weights(self):
         self.actor_wg.sync_rollout_weights()
