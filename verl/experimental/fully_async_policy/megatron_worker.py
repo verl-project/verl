@@ -257,7 +257,10 @@ class DetachActorWorker(DetachNcclSync):
     def _get_actor_params_generator(self):
         assert self._is_actor
         if self.bridge is not None:
-            generator = self.bridge.export_weights(self.actor.actor_module)
+            if self.vanilla_bridge:
+                generator = self.bridge.export_weights(self.actor.actor_module)
+            else:
+                generator = self.bridge.export_hf_weights(self.actor.actor_module)
         else:
             generator = per_tensor_generator(
                 self.actor.actor_module,

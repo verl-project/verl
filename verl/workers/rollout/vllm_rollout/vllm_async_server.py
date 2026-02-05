@@ -39,7 +39,7 @@ from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
-from verl.utils.profiler.profile import DistProfiler
+from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -148,7 +148,6 @@ class vLLMHttpServer:
                 logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
                 profiler_config = None
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
-        self.server_profiler_dir = os.environ.pop("VLLM_TORCH_PROFILER_DIR", None)
 
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
@@ -291,6 +290,14 @@ class vLLMHttpServer:
             **engine_kwargs,
         }
 
+        # update profiler args
+        profiler_args = build_vllm_profiler_args(
+            self.profiler_controller.config, self.profiler_controller.tool_config, self.replica_rank
+        )
+        if _VLLM_VERSION >= version.parse("0.13.0"):
+            # vLLM >= 0.13.0 supports profiler config via CLI args; env vars still work but will be deprecated
+            args.update(profiler_args)
+
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
                 # Extract model name from path if it's a full path
@@ -344,19 +351,21 @@ class vLLMHttpServer:
 
         # update lora-related args
         lora_rank = self.model_config.lora.get("rank", 0)
-        megatron_lora = True
+        if lora_rank <= 0:
+            lora_rank = (
+                self.model_config.lora_rank
+            )  # FIXME: fallback to lora_rank for now, we should unify lora settings.
+
         if self.model_config.lora.get("merge", False):
             lora_rank = 0
-        if lora_rank <= 0:
-            megatron_lora = False
-            lora_rank = self.model_config.lora_rank
+
         if lora_rank > 0:
             lora_args = {
                 "enable_lora": True,
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
-            if megatron_lora:
+            if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
 
@@ -504,9 +513,9 @@ class vLLMHttpServer:
 
         # Add lora request
         lora_request = None
-        if self.model_config.lora_rank > 0 or (
-            self.model_config.lora.get("rank", 0) > 0 and not self.model_config.lora.get("merge", False)
-        ):
+        if (
+            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
+        ) and not self.model_config.lora.get("merge", False):
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
@@ -589,13 +598,10 @@ class vLLMHttpServer:
             logger.info("skip sleep in standalone mode")
 
     async def start_profile(self, **kwargs):
-        # TODO: Persist global_step to engine server-created file/path
-        kwargs.pop("global_step")
         if (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
-            and self.server_profiler_dir
         ):
             await self.engine.start_profile(**kwargs)
 
@@ -604,7 +610,6 @@ class vLLMHttpServer:
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
-            and self.server_profiler_dir
         ):
             await self.engine.stop_profile()
 

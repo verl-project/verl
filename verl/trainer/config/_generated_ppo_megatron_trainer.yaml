@@ -293,7 +293,17 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
-      tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
+      tool_config:
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+          level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+          analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
