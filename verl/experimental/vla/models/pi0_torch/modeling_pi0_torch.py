@@ -79,7 +79,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
                         hidden_dims=[1024, 512, 256],
                         output_dim=1,
                         activation="relu",
-                        init_method="normal",
+                        init_method="kaiming",
                     )
                     for _ in range(head_num)
                 ]
@@ -92,11 +92,13 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
                         hidden_dims=[1024, 512, 256],
                         output_dim=1,
                         activation="relu",
-                        init_method="normal",
+                        init_method="kaiming",
                     )
                     for _ in range(head_num)
                 ]
             )
+
+            self.target_network_heads.load_state_dict(self.critic_heads.state_dict())
 
     def _to(self, device: torch.device | str):
         self.state_normalize_transform.to(device)
@@ -456,6 +458,9 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
     @override
     @torch.no_grad()
     def sac_update_target_network(self, tau: float):
-        for target_head, head in zip(self.target_network_heads, self.critic_heads, strict=False):
-            for target_param, param in zip(target_head.parameters(), head.parameters(), strict=False):
-                target_param.data.mul_(1.0 - tau).add_(param.data, alpha=tau)
+        for t_head, head in zip(self.target_network_heads, self.critic_heads, strict=True):
+            t_sd = t_head.state_dict()
+            h_sd = head.state_dict()
+            for k in t_sd.keys():
+                t_sd[k].mul_(1.0 - tau).add_(h_sd[k], alpha=tau)
+            t_head.load_state_dict(t_sd, strict=True)

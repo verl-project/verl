@@ -30,6 +30,7 @@ class MLP(nn.Module):
             Options: 'relu', 'tanh', 'sigmoid', 'leaky_relu', 'elu', 'selu', 'none'.
         init_method (str): The weight initialization strategy.
             Options: 'kaiming', 'xavier', 'normal', 'orthogonal'.
+        output_init_scale (float): Scale for uniform initialization of output layer weights.
     """
 
     def __init__(
@@ -39,6 +40,7 @@ class MLP(nn.Module):
         output_dim: int,
         activation: str = "relu",
         init_method: str = "kaiming",
+        output_init_scale: float = 3e-3,
     ):
         super().__init__()
 
@@ -47,6 +49,7 @@ class MLP(nn.Module):
         self.output_dim = output_dim
         self.activation_name = activation.lower()
         self.init_method = init_method.lower()
+        self.output_init_scale = float(output_init_scale)
 
         layers = []
         current_dim = input_dim
@@ -57,43 +60,55 @@ class MLP(nn.Module):
             if act_layer is not None:
                 layers.append(act_layer)
             current_dim = h_dim
-        layers.append(nn.Linear(current_dim, output_dim))
 
+        layers.append(nn.Linear(current_dim, output_dim))
         self.network = nn.Sequential(*layers)
         self.apply(self.init_weights)
 
-    def _get_activation(self, name):
+    def _get_activation(self, name: str):
         """
-        Factory method to return the activation layer based on string name.
-        Available options: 'relu', 'tanh', 'sigmoid', 'leaky_relu', 'elu', 'selu'.
+        Factory method to return a *fresh* activation layer instance based on string name.
+        Available options: 'relu', 'tanh', 'sigmoid', 'leaky_relu', 'elu', 'selu', 'none'.
         """
-        activations = {
-            "relu": nn.ReLU(),
-            "tanh": nn.Tanh(),
-            "sigmoid": nn.Sigmoid(),
-            "leaky_relu": nn.LeakyReLU(0.2),
-            "elu": nn.ELU(),
-            "selu": nn.SELU(),
-            "none": None,
-        }
-        return activations.get(name, nn.ReLU())
+        name = name.lower()
+        if name == "relu":
+            return nn.ReLU()
+        if name == "tanh":
+            return nn.Tanh()
+        if name == "sigmoid":
+            return nn.Sigmoid()
+        if name == "leaky_relu":
+            return nn.LeakyReLU(0.2)
+        if name == "elu":
+            return nn.ELU()
+        if name == "selu":
+            return nn.SELU()
+        if name == "none":
+            return None
+        return nn.ReLU()
 
-    def init_weights(self, m):
+    def init_weights(self, m: nn.Module):
         """
-        Public method to initialize weights for Linear layers.
-        Can be used with self.apply(model.init_weights).
+        Initialize weights for Linear layers.
 
-        Supported methods:
-            - 'kaiming': Best for ReLU/LeakyReLU. Uses kaiming_normal_.
-            - 'xavier': Best for Tanh/Sigmoid. Uses xavier_normal_.
-            - 'normal': Standard normal distribution (std=0.02).
-            - 'orthogonal': Good for preventing gradient explosion in deep networks.
+        Hidden layers follow init_method.
+        Output layer uses small uniform init (±output_init_scale) to keep initial outputs near 0.
         """
-        if isinstance(m, nn.Linear):
+        if not isinstance(m, nn.Linear):
+            return
+
+        # Identify the output layer by matching out_features to the requested output_dim
+        # (works because only the last Linear has out_features == self.output_dim in this MLP)
+        is_output_layer = (m.out_features == self.output_dim)
+
+        if is_output_layer:
+            init.uniform_(m.weight, -self.output_init_scale, self.output_init_scale)
+        else:
             if self.init_method == "kaiming":
-                # Use 'relu' as default nonlinearity for Kaiming
-                nonlinearity = self.activation_name if self.activation_name in ["relu", "leaky_relu"] else "relu"
-                init.kaiming_normal_(m.weight, nonlinearity=nonlinearity)
+                if self.activation_name == "leaky_relu":
+                    init.kaiming_normal_(m.weight, a=0.2, nonlinearity="leaky_relu")
+                else:
+                    init.kaiming_normal_(m.weight, nonlinearity="relu")
             elif self.init_method == "xavier":
                 init.xavier_normal_(m.weight)
             elif self.init_method == "normal":
@@ -101,10 +116,8 @@ class MLP(nn.Module):
             elif self.init_method == "orthogonal":
                 init.orthogonal_(m.weight)
 
-            # Initialize bias to zero
-            if m.bias is not None:
-                init.constant_(m.bias, 0)
+        if m.bias is not None:
+            init.constant_(m.bias, 0.0)
 
     def forward(self, x):
-        """Defines the computation performed at every call."""
         return self.network(x)
