@@ -123,8 +123,8 @@ class Metric:
     def aggregate(self) -> float:
         return self._aggregate(self.values, self.aggregation)
 
-    @staticmethod
-    def _aggregate(values: list[Numeric], aggregation: AggregationType) -> float:
+    @classmethod
+    def _aggregate(cls, values: list[Numeric], aggregation: AggregationType) -> float:
         match aggregation:
             case AggregationType.MEAN:
                 return np.mean(values)
@@ -135,8 +135,8 @@ class Metric:
             case AggregationType.MAX:
                 return np.max(values)
 
-    @staticmethod
-    def aggregate_dp(metric_lists: list["Metric"]) -> float:
+    @classmethod
+    def aggregate_dp(cls, metric_lists: list["Metric"]) -> float:
         value_lists = [ml.values for ml in metric_lists]
         if not [len(ls) == len(value_lists[0]) for ls in value_lists]:
             raise ValueError(
@@ -146,11 +146,9 @@ class Metric:
         aggregation = metric_lists[0].aggregation
         match aggregation:
             case AggregationType.SUM | AggregationType.MEAN:
-                return Metric._aggregate(np.mean(value_arrays, axis=0), aggregation)  # mean over dp ranks
+                return cls._aggregate(np.mean(value_arrays, axis=0), aggregation)  # mean over dp ranks
             case AggregationType.MIN | AggregationType.MAX:
-                return Metric._aggregate(
-                    values=value_arrays.flatten(), aggregation=aggregation
-                )  # min/max over all values
+                return cls._aggregate(values=value_arrays.flatten(), aggregation=aggregation)  # min/max over all values
 
     @classmethod
     def from_dict(cls, data: dict[str, Numeric], aggregation: str | AggregationType) -> dict[str, "Metric"]:
