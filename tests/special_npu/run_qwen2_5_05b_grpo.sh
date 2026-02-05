@@ -3,6 +3,14 @@ set -x
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
+SAVE_PATH="your_path"
+LEVEL="level1"
+CONTENTS=['npu', 'cpu']
+ANALYSIS=True
+PROFILE_STEPS="[1]"
+PROFILE_RANKS_ALL=True
+DISCRETE=False
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
@@ -44,4 +52,23 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=1 $@
+    trainer.total_training_steps=1 \
+    actor_rollout_ref.actor.profiler.enable=True \
+    actor_rollout_ref.actor.profiler.all_ranks=$PROFILE_RANKS_ALL \
+    actor_rollout_ref.actor.profiler.all_tool_config.npu.discrete=$DISCRETE \
+    actor_rollout_ref.actor.profiler.all_tool_config.npu.contents=$CONTENTS \
+    actor_rollout_ref.actor.profiler.all_tool_config.npu.level=$LEVEL \
+    actor_rollout_ref.actor.profiler.all_tool_config.npu.analysis=$ANALYSIS \
+    actor_rollout_ref.ref.profiler.enable=True \
+    actor_rollout_ref.ref.profiler.all_ranks=$PROFILE_RANKS_ALL \
+    actor_rollout_ref.ref.profiler.all_tool_config.npu.discrete=$DISCRETE \
+    actor_rollout_ref.ref.profiler.all_tool_config.npu.contents=$CONTENTS \
+    actor_rollout_ref.ref.profiler.all_tool_config.npu.level=$LEVEL \
+    actor_rollout_ref.ref.profiler.all_tool_config.npu.analysis=$ANALYSIS \
+    global_profiler.tool=npu \
+    global_profiler.steps=$PROFILE_STEPS \
+    global_profiler.save_path=$SAVE_PATH \
+    trainer.device=npu $@
+
+
+
