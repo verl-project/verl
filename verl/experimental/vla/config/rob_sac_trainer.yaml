@@ -45,13 +45,13 @@ actor_rollout_ref:
       double_q: True
   actor:
     sac:
-      gamma: 0.998
-      tau: 0.005
-      initial_alpha: 0.01
-      auto_entropy: true
-      alpha_type: softplus
+      gamma: 0.95
+      tau: 0.95
+      initial_alpha: -10
+      auto_entropy: true 
+      alpha_type: exp
       alpha_lr: 0.0003
-      target_entropy: -32.0
+      target_entropy: -64.0
     critic_warmup_steps: 100
     replay_pool_save_interval: 30
     num_images_in_input: 1

@@ -331,7 +331,6 @@ class RobDataParallelSACActor(BaseSACActor):
             ]).batch)
 
         batch = self.replay_pool.sample_batch(self.config.ppo_mini_batch_size)
-        batch["rewards"] = batch["rewards"] * 100.0  # scale rewards
         micro_batches = batch.split(self.config.ppo_micro_batch_size_per_gpu)
         global_steps = data.meta_info["global_steps"]
         grad_accum_steps = len(micro_batches) * torch.distributed.get_world_size()
