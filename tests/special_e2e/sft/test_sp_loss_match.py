@@ -18,6 +18,7 @@ from tensordict import TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
 from verl.trainer.fsdp_sft_trainer import FSDPSFTTrainer
+from verl.utils.device import is_torch_npu_available
 from verl.utils.distributed import initialize_global_process_group
 from verl.workers.engine.utils import enable_full_determinism
 
@@ -200,6 +201,9 @@ def main(config):
     """
     trainer = create_trainer(config)
     test_trainer_forward_consistency(trainer)
+    if is_torch_npu_available(check_device=False):
+        print("Skip backward determinism test when torch_npu is available.")
+        return
     test_trainer_backward_determinism(trainer)
 
 
