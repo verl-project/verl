@@ -28,6 +28,7 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && \
 RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
+RUN pip install torch==2.9.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
 RUN pip install vllm==0.15.1
 
 # use cudnn9.16 to avoid conflict
