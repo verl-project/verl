@@ -334,12 +334,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 with init_empty_weights():
                     # infer trust_remote_code from model structure
-                    has_remote_code = hasattr(model_config, "auto_map") and any(
-                        model_config.architectures[0] in val for val in model_config.auto_map.values()
-                    )
-                    save_model = auto_model_cls.from_config(
-                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=has_remote_code
-                    )
+                    has_remote_code = hasattr(model_config, "auto_map") and model_config.auto_map and any(
+                            model_config.architectures[0] in val for val in model_config.auto_map.values()
+                        )
 
                 save_model.to_empty(device="cpu")
 
