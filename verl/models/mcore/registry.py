@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 
 from .model_forward import gptmodel_forward_no_padding, model_forward_gen
-from .model_forward_fused import fused_forward_model_gen
+from .model_forward_fused import fused_forward_model_gen, fused_forward_no_padding_gen
 
 
 class SupportedVLM(Enum):
@@ -65,6 +65,18 @@ def get_mcore_forward_fused_fn(hf_config) -> Callable:
     else:
         # default to language model
         return fused_forward_model_gen(False)
+
+
+def get_mcore_forward_fused_no_padding_fn(hf_config) -> Callable:
+    """
+    Get the fused forward function for no-padding inputs.
+    """
+    assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
+    if hf_config.architectures[0] in supported_vlm:
+        return fused_forward_no_padding_gen(True)
+    else:
+        # default to language model
+        return fused_forward_no_padding_gen(False)
 
 
 # ruff: noqa
