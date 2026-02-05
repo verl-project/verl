@@ -1749,6 +1749,31 @@ def compute_policy_loss_rollout_correction_wrapper(
 # =============================================================================
 # Teacher KL Loss for GKD (Generalized Knowledge Distillation)
 # =============================================================================
+# === Why we avoid F.log_softmax over the full vocabulary (teacher side) ===
+# --- Student side (training-time KL on teacher top-k support) ---
+# Inputs:
+#   We already have teacher_topk_idx and teacher_topk_logp from the teacher.
+# Goal:
+#   Compute KL(P_teacher || Q_student) using only the teacher top-k support.
+# Key idea:
+#   We do NOT need full student log_softmax [B, S, V]. We only need student
+#   logprobs at the teacher top-k indices:
+#     1) lse = logsumexp(student_logits, dim=-1)         # [B, S]
+#     2) student_topk_logits = gather(student_logits, teacher_topk_idx)  # [B,S,k]
+#     3) student_topk_logp = student_topk_logits - lse[..., None]        # [B,S,k]
+# Then KL is approximated on top-k:
+#   KL ≈ sum_{i in topk} P(i) * (log P(i) - log Q(i))
+# This reduces peak memory from O(B*S*V) to O(B*S*k) (or chunked O(B*chunk*k)).
+def _logsumexp_fp32(x: torch.Tensor, dim: int):
+    """
+    Compute logsumexp in fp32 without materializing a full fp32 copy of x if possible.
+    """
+    try:
+        # Newer PyTorch supports dtype=
+        return torch.logsumexp(x, dim=dim, dtype=torch.float32)
+    except TypeError:
+        # Fallback: compute in native dtype, cast result to fp32
+        return torch.logsumexp(x, dim=dim).to(torch.float32)
 
 
 def compute_teacher_kl_loss(
@@ -1759,90 +1784,40 @@ def compute_teacher_kl_loss(
     temperature: float = 1.0,
 ) -> torch.Tensor:
     """
-    Compute KL divergence loss between student and teacher distributions for GKD.
+    KL(P_teacher || Q_student) computed on teacher top-k support.
 
-    This computes KL(P_teacher || Q_student), which encourages the student to cover
-    all modes of the teacher distribution (mode-covering behavior).
-
-    Args:
-        student_logits: Student model logits, shape [batch, seq_len, vocab_size]
-        teacher_topk_logps: Teacher's top-k log probabilities, shape [batch, seq_len, top_k]
-        teacher_topk_indices: Indices of teacher's top-k tokens, shape [batch, seq_len, top_k]
-        response_mask: Mask for response tokens, shape [batch, seq_len]
-        temperature: Temperature for softmax, default 1.0
-
-    Returns:
-        per_token_kl_loss: KL loss for each token position, shape [batch, seq_len]
+    Memory-optimized: avoids F.log_softmax(student_logits) materializing [B,S,V].
     """
-    import torch.nn.functional as F
-
     # Apply temperature scaling
     if temperature != 1.0:
         student_logits = student_logits / temperature
 
-    # Compute student log probabilities over full vocabulary
-    student_log_probs = F.log_softmax(student_logits, dim=-1)  # [batch, seq_len, vocab_size]
+    # Ensure gather index dtype is int64 (small tensor; safe to cast)
+    if teacher_topk_indices.dtype != torch.int64:
+        teacher_topk_indices = teacher_topk_indices.to(torch.int64)
 
-    # Gather student log probs at teacher's top-k indices
-    # teacher_topk_indices: [batch, seq_len, topk]
-    student_topk_log_probs = torch.gather(
-        student_log_probs, dim=-1, index=teacher_topk_indices
-    )  # [batch, seq_len, topk]
+    # lse: [B,S] (fp32)
+    lse = _logsumexp_fp32(student_logits, dim=-1)  # [B, S]
 
-    # Teacher probabilities from log probs
-    teacher_topk_probs = torch.exp(teacher_topk_logps)  # [batch, seq_len, topk]
+    # Gather student logits at teacher's top-k indices: [B,S,K]
+    student_topk_logits = torch.gather(student_logits, dim=-1, index=teacher_topk_indices)
 
-    # KL(P||Q) = sum_i P(i) * (log P(i) - log Q(i))
-    # where P = teacher, Q = student
+    # student logprobs at top-k: [B,S,K] (fp32)
+    student_topk_log_probs = student_topk_logits.to(torch.float32) - lse.unsqueeze(-1)
+
+    # teacher probs/logps to fp32 for stable KL accumulation
+    teacher_topk_logps_f = teacher_topk_logps.to(torch.float32)
+    teacher_topk_probs = torch.exp(teacher_topk_logps_f)
+
+    # KL(P||Q) ≈ sum_{i in topk} P(i) * (log P(i) - log Q(i))
     per_token_kl = torch.sum(
-        teacher_topk_probs * (teacher_topk_logps - student_topk_log_probs),
+        teacher_topk_probs * (teacher_topk_logps_f - student_topk_log_probs),
         dim=-1,
-    )  # [batch, seq_len]
+    )  # [B,S] fp32
 
-    # Zero out non-response positions
-    per_token_kl = per_token_kl * response_mask.float()
+    per_token_kl = per_token_kl * response_mask.to(torch.float32)
 
-    return per_token_kl
-
-
-def compute_teacher_kl_loss_from_logprobs(
-    student_log_probs: torch.Tensor,
-    teacher_topk_logps: torch.Tensor,
-    teacher_topk_indices: torch.Tensor,
-    response_mask: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Compute KL divergence loss when student log_probs are already computed.
-
-    This is useful when we have pre-computed log_probs from the forward pass
-    and want to avoid recomputing them.
-
-    Args:
-        student_log_probs: Student model log probabilities, shape [batch, seq_len, vocab_size]
-        teacher_topk_logps: Teacher's top-k log probabilities, shape [batch, seq_len, top_k]
-        teacher_topk_indices: Indices of teacher's top-k tokens, shape [batch, seq_len, top_k]
-        response_mask: Mask for response tokens, shape [batch, seq_len]
-
-    Returns:
-        per_token_kl_loss: KL loss for each token position, shape [batch, seq_len]
-    """
-    # Gather student log probs at teacher's top-k indices
-    student_topk_log_probs = torch.gather(
-        student_log_probs, dim=-1, index=teacher_topk_indices
-    )  # [batch, seq_len, topk]
-
-    # Teacher probabilities from log probs
-    teacher_topk_probs = torch.exp(teacher_topk_logps)  # [batch, seq_len, topk]
-
-    # KL(P||Q) = sum_i P(i) * (log P(i) - log Q(i))
-    per_token_kl = torch.sum(
-        teacher_topk_probs * (teacher_topk_logps - student_topk_log_probs),
-        dim=-1,
-    )  # [batch, seq_len]
-
-    # Zero out non-response positions
-    per_token_kl = per_token_kl * response_mask.float()
-
+    # Return same dtype style as before? (your old code returned dtype of ops; usually fp32 is fine)
     return per_token_kl
 
 
@@ -1855,89 +1830,61 @@ def compute_teacher_kl_loss_chunked(
     chunk_size: int = 1024,
 ) -> torch.Tensor:
     """
-    Memory-efficient chunked KL divergence loss between student and teacher distributions.
+    Chunked version, also avoids F.log_softmax.
 
-    This function processes the sequence in chunks to reduce peak memory usage.
-    Instead of computing log_softmax over the full [batch, seq_len, vocab_size] tensor,
-    it processes chunk_size tokens at a time, significantly reducing memory footprint.
-
-    For a model with vocab_size=150k and seq_len=12k:
-    - Non-chunked: peak memory ~ batch * 12k * 150k * 4 bytes = ~7GB per sample
-    - Chunked (1k): peak memory ~ batch * 1k * 150k * 4 bytes = ~600MB per sample
-
-    Args:
-        student_logits: Student model logits, shape [batch, seq_len, vocab_size]
-        teacher_topk_logps: Teacher's top-k log probabilities, shape [batch, seq_len, top_k]
-        teacher_topk_indices: Indices of teacher's top-k tokens, shape [batch, seq_len, top_k]
-        response_mask: Mask for response tokens, shape [batch, seq_len]
-        temperature: Temperature for softmax, default 1.0
-        chunk_size: Number of sequence positions to process at once, default 1024
-
-    Returns:
-        per_token_kl_loss: KL loss for each token position, shape [batch, seq_len]
-
-    Note:
-        The chunk_size parameter controls the memory/compute trade-off:
-        - Smaller chunk_size = less memory but more kernel launches
-        - Larger chunk_size = more memory but fewer kernel launches
-        For long sequences (>4k tokens), chunk_size=1024 is recommended.
+    Peak extra memory becomes O(B * chunk_size * K) rather than O(B * chunk_size * V).
     """
-    import torch.nn.functional as F
-
-    batch_size, seq_len, vocab_size = student_logits.shape
+    batch_size, seq_len, _ = student_logits.shape
     device = student_logits.device
-    dtype = student_logits.dtype
 
-    # Pre-allocate output tensor
-    per_token_kl = torch.zeros(batch_size, seq_len, device=device, dtype=dtype)
+    # Output in fp32 (recommended for loss stability)
+    per_token_kl = torch.zeros(batch_size, seq_len, device=device, dtype=torch.float32)
 
-    # Apply temperature scaling if needed
+    # Precompute temp factor (avoid repeated division)
     if temperature != 1.0:
         temp_factor = 1.0 / temperature
     else:
         temp_factor = None
 
-    # Process in chunks along sequence dimension
+    # We only cast indices per-chunk (small)
     for start_idx in range(0, seq_len, chunk_size):
         end_idx = min(start_idx + chunk_size, seq_len)
 
-        # Get chunk of student logits
-        student_chunk = student_logits[:, start_idx:end_idx, :]  # [batch, chunk, vocab]
-
-        # Apply temperature if needed
+        student_chunk = student_logits[:, start_idx:end_idx, :]  # [B, chunk, V]
         if temp_factor is not None:
             student_chunk = student_chunk * temp_factor
 
-        # Compute log softmax for this chunk only (memory efficient)
-        student_log_probs_chunk = F.log_softmax(student_chunk, dim=-1)  # [batch, chunk, vocab]
+        teacher_indices_chunk = teacher_topk_indices[:, start_idx:end_idx, :]  # [B, chunk, K]
+        teacher_logps_chunk = teacher_topk_logps[:, start_idx:end_idx, :]      # [B, chunk, K]
+        mask_chunk = response_mask[:, start_idx:end_idx]                       # [B, chunk]
 
-        # Get corresponding teacher data
-        teacher_indices_chunk = teacher_topk_indices[:, start_idx:end_idx, :]  # [batch, chunk, topk]
-        teacher_logps_chunk = teacher_topk_logps[:, start_idx:end_idx, :]  # [batch, chunk, topk]
-        mask_chunk = response_mask[:, start_idx:end_idx]  # [batch, chunk]
+        if teacher_indices_chunk.dtype != torch.int64:
+            teacher_indices_chunk = teacher_indices_chunk.to(torch.int64)
 
-        # Gather student log probs at teacher's top-k indices
-        student_topk_log_probs = torch.gather(
-            student_log_probs_chunk, dim=-1, index=teacher_indices_chunk
-        )  # [batch, chunk, topk]
+        # lse over vocab: [B, chunk] fp32
+        lse = _logsumexp_fp32(student_chunk, dim=-1)
 
-        # Compute teacher probabilities from log probs
-        teacher_topk_probs = torch.exp(teacher_logps_chunk)  # [batch, chunk, topk]
+        # Gather top-k logits: [B, chunk, K]
+        student_topk_logits = torch.gather(student_chunk, dim=-1, index=teacher_indices_chunk)
 
-        # KL(P||Q) = sum_i P(i) * (log P(i) - log Q(i))
+        # student top-k logprobs: [B, chunk, K] fp32
+        student_topk_log_probs = student_topk_logits.to(torch.float32) - lse.unsqueeze(-1)
+
+        teacher_logps_f = teacher_logps_chunk.to(torch.float32)
+        teacher_probs = torch.exp(teacher_logps_f)
+
         chunk_kl = torch.sum(
-            teacher_topk_probs * (teacher_logps_chunk - student_topk_log_probs),
+            teacher_probs * (teacher_logps_f - student_topk_log_probs),
             dim=-1,
-        )  # [batch, chunk]
+        )  # [B, chunk] fp32
 
-        # Apply mask
-        chunk_kl = chunk_kl * mask_chunk.float()
+        chunk_kl = chunk_kl * mask_chunk.to(torch.float32)
 
-        # Store result
         per_token_kl[:, start_idx:end_idx] = chunk_kl
 
-        # Explicitly delete intermediate tensors to free memory
-        del student_chunk, student_log_probs_chunk, student_topk_log_probs
-        del teacher_topk_probs, chunk_kl
+        # help GC / reduce peak
+        del student_chunk, teacher_indices_chunk, teacher_logps_chunk
+        del lse, student_topk_logits, student_topk_log_probs
+        del teacher_probs, chunk_kl
 
     return per_token_kl

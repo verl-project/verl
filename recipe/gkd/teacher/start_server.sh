@@ -7,12 +7,12 @@ cd "$SCRIPT_DIR"
 export PROXY_FRONTEND_PORT=15555
 export PROXY_BACKEND_PORT=15556
 
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=6,7
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 BACKEND=vllm
-CKPT_PATH="Qwen/Qwen3-8B"
-
+# CKPT_PATH="Qwen/Qwen3-8B"
+CKPT_PATH="Qwen/Qwen2.5-14B-Instruct"
 
 ENABLE_PREFIX_CACHING=true
 GPU_MEMORY_UTIL=0.75
@@ -80,7 +80,7 @@ echo "teacher proxy is ready"
 # For Qwen3 Family, need to tune n-logprobs
 WORKER_CMD="python worker.py \
   --backend $BACKEND \
-  --tp-size 1 \
+  --tp-size 2 \
   --n-logprobs 64 \
   --ckpt-path $CKPT_PATH \
   --gpu-memory-utilization $GPU_MEMORY_UTIL"

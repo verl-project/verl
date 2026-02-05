@@ -116,9 +116,25 @@ def get_teacher_knowledge(batch: DataProto, teacher_client, n_server_workers=1, 
             teacher_topk_indices_padded.zero_()
 
         batch_size = attention_mask.size(0)
+        sequence_length = attention_mask.size(1)
         for i in range(batch_size):
-            teacher_topk_logps_padded[i][attention_mask[i]] = teacher_topk_logps[i]
-            teacher_topk_indices_padded[i][attention_mask[i]] = teacher_topk_indices[i]
+            num_valid_positions = attention_mask[i].sum().item()
+            teacher_seq_len = teacher_topk_logps[i].size(0)
+
+            if teacher_seq_len == num_valid_positions:
+                # only_response=False: teacher returns logprobs for full sequence
+                # Fill at all attention_mask positions (left-aligned)
+                teacher_topk_logps_padded[i][attention_mask[i]] = teacher_topk_logps[i]
+                teacher_topk_indices_padded[i][attention_mask[i]] = teacher_topk_indices[i]
+            else:
+                # only_response=True: teacher returns logprobs only for response tokens
+                # Need to right-align: place at the END of valid positions
+                # Find the valid positions and fill from the right
+                valid_positions = attention_mask[i].nonzero(as_tuple=True)[0]
+                # Take the last teacher_seq_len positions
+                response_positions = valid_positions[-teacher_seq_len:]
+                teacher_topk_logps_padded[i][response_positions] = teacher_topk_logps[i]
+                teacher_topk_indices_padded[i][response_positions] = teacher_topk_indices[i]
 
         output_batch = DataProto.from_single_dict(
             data={"real_seq_lens": real_seq_lens},

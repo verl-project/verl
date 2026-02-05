@@ -19,6 +19,15 @@ from typing import NamedTuple
 import torch
 from codetiming import Timer
 from transformers import AutoConfig
+
+# patch FIRST (before any vllm import)
+try:
+    from . import patch_vllm_logprobs
+except ImportError:
+    import patch_vllm_logprobs
+
+patch_vllm_logprobs.apply_patch()
+
 from vllm import LLM, SamplingParams
 
 # from vllm.v1.outputs import LogprobsTensors

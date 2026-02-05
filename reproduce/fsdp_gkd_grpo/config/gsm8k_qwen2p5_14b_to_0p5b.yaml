@@ -16,24 +16,24 @@ defaults:
 # For thinking models like Qwen3, response can be very long
 _seq_config:
   max_prompt_length: 512
-  max_response_length: 16384
-  max_total_length: 16896  # prompt + response
+  max_response_length: 512
+  max_total_length: 1024  # prompt + response
  
 # ============================================================
 # Data Configuration
 # ============================================================
 data:
-  train_files: /workspace/mlf2/verl/reproduce/data/openthoughts3/local_parquet_dir/train.parquet
-  val_files: /workspace/mlf2/verl/reproduce/data/openthoughts3/local_parquet_dir/validation.parquet
-  off_policy_files: /workspace/mlf2/verl/reproduce/data/openthoughts3/local_parquet_dir/train.parquet
-  train_batch_size: 6
-  val_batch_size: 12
+  train_files: /workspace/mlf2/verl/reproduce/data/gsm8k/local_parquet_dir/train.parquet
+  val_files: /workspace/mlf2/verl/reproduce/data/gsm8k/local_parquet_dir/test.parquet
+  off_policy_files: /workspace/mlf2/verl/reproduce/data/gsm8k/local_parquet_dir/train.parquet
+  train_batch_size: 8
+  # val_batch_size: 18
   max_prompt_length: ${_seq_config.max_prompt_length}
   max_response_length: ${_seq_config.max_response_length}
   filter_overlong_prompts: true
   truncation: left
-  train_max_samples: 4860
-  val_max_samples: 400
+  # train_max_samples: 4860
+  # val_max_samples: 400
   prompt_key: prompt
   answer_key: extra_info.answer  # Ground truth answer/solution string for off-policy distillation
   reward_fn_key: data_source
@@ -43,7 +43,7 @@ data:
 # ============================================================
 actor_rollout_ref:
   model:
-    path: Qwen/Qwen3-0.6B
+    path: Qwen/Qwen2.5-0.5B-Instruct
     # GKD needs logits for KL loss computation, must disable remove_padding
     use_remove_padding: false
     enable_gradient_checkpointing: true
@@ -56,7 +56,7 @@ actor_rollout_ref:
     strategy: fsdp2
  
     fsdp_config:
-      model_dtype: bf16
+      # model_dtype: bf16
       # Memory optimization: offload params and optimizer to CPU
       param_offload: true
       optimizer_offload: true
@@ -68,8 +68,8 @@ actor_rollout_ref:
     teacher_kl_temperature: 1.0
  
     # Memory optimization for long sequences
-    use_chunked_teacher_kl: true
-    teacher_kl_chunk_size: 1024
+    # use_chunked_teacher_kl: true
+    # teacher_kl_chunk_size: 1024
  
     # Dynamic batch size for variable sequence lengths
     use_dynamic_bsz: true
@@ -82,9 +82,7 @@ actor_rollout_ref:
  
     # Optimizer settings
     optim:
-      lr: 1e-6
-      lr_warmup_steps: 20
-      lr_scheduler: cosine      
+      lr: 1e-6    
  
   # ============================================================
   # Teacher Server Configuration
@@ -94,8 +92,6 @@ actor_rollout_ref:
     server_port: 15555
     n_server_workers: 1
     temperature: 1.0
-    # Only compute log probs for response tokens (memory optimization)
-    only_response: true
  
   # ============================================================
   # Rollout (vLLM) Configuration
@@ -120,7 +116,7 @@ actor_rollout_ref:
 # ============================================================
 critic:
   model:
-    path: Qwen/Qwen3-0.6B
+    path: Qwen/Qwen2.5-0.5B-Instruct
  
 # ============================================================
 # Trainer Configuration
@@ -129,11 +125,11 @@ trainer:
   critic_warmup: 0
   logger: ["console", "wandb"]
   project_name: mw_verl_recipe_reasoning
-  experiment_name: gkd_only_qwen3_8b_to_0p6b_lambda1p0_gsm8k_fsdp2
-  n_gpus_per_node: 3
+  experiment_name: gkd_only_qwen2p5_14b_to_0p5b_lambda1p0_gsm8k_fsdp2_mem_opt
+  n_gpus_per_node: 2
   nnodes: 1
   save_freq: 400
-  test_freq: 200
+  test_freq: 5
   total_epochs: 1
   val_before_train: true
   # GKD-specific settings

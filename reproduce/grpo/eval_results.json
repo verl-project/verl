@@ -1,0 +1,71 @@
+{
+  "pass_k": 3,
+  "args": {
+    "checkpoint_dir": "/workspace/mlf2/verl/reproduce/grpo/checkpoints/mw_verl_recipe_reasoning/openthoughts-grpo-qwen3_0p6b_fsdp2",
+    "step0_model": "Qwen/Qwen3-0.6B",
+    "validation_parquet": "/workspace/mlf2/verl/reproduce/data/openthoughts3/local_parquet_dir/test.parquet",
+    "num_samples": 500,
+    "seed": 2026,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "max_tokens": 20480,
+    "batch_size": 8,
+    "pass_k": 3,
+    "use_vllm_serve": true,
+    "vllm_host": "127.0.0.1",
+    "vllm_port": 0,
+    "vllm_start_timeout_s": 300,
+    "vllm_stop_timeout_s": 15,
+    "vllm_tp_size": 1,
+    "vllm_dp_size": 4,
+    "vllm_gpu_memory_utilization": 0.75,
+    "vllm_max_model_len": null,
+    "max_concurrent_requests": 32,
+    "output_json": "eval_results.json",
+    "wandb_project": "mw_verl_recipe_reasoning",
+    "wandb_run_name": "openthoughts-grpo-qwen3_0p6b_fsdp2",
+    "wandb_run_id": "qqkjgbml"
+  },
+  "env": {
+    "CUDA_VISIBLE_DEVICES": "4,5,6,7",
+    "VLLM_GPU_MEMORY_UTILIZATION": "0.75"
+  },
+  "results": [
+    {
+      "label": "step0",
+      "step": null,
+      "model": "Qwen/Qwen3-0.6B",
+      "n": 500,
+      "acc": 0.606
+    },
+    {
+      "label": "global_step_100",
+      "step": 100,
+      "model": "/workspace/mlf2/verl/reproduce/grpo/checkpoints/mw_verl_recipe_reasoning/openthoughts-grpo-qwen3_0p6b_fsdp2/_merged_hf_cache/global_step_100",
+      "n": 500,
+      "acc": 0.592
+    },
+    {
+      "label": "global_step_200",
+      "step": 200,
+      "model": "/workspace/mlf2/verl/reproduce/grpo/checkpoints/mw_verl_recipe_reasoning/openthoughts-grpo-qwen3_0p6b_fsdp2/_merged_hf_cache/global_step_200",
+      "n": 500,
+      "acc": 0.6
+    },
+    {
+      "label": "global_step_300",
+      "step": 300,
+      "model": "/workspace/mlf2/verl/reproduce/grpo/checkpoints/mw_verl_recipe_reasoning/openthoughts-grpo-qwen3_0p6b_fsdp2/_merged_hf_cache/global_step_300",
+      "n": 500,
+      "acc": 0.58
+    },
+    {
+      "label": "global_step_398",
+      "step": 398,
+      "model": "/workspace/mlf2/verl/reproduce/grpo/checkpoints/mw_verl_recipe_reasoning/openthoughts-grpo-qwen3_0p6b_fsdp2/_merged_hf_cache/global_step_398",
+      "n": 500,
+      "acc": 0.578
+    }
+  ],
+  "last_update_unix": 1769825612.5359862
+}

@@ -373,10 +373,10 @@ class RayPPOTrainer:
                     server_port=teacher_config.server_port,
                     n_server_workers=getattr(teacher_config, "n_server_workers", 1),
                     temperature=getattr(teacher_config, "temperature", 1.0),
-                    only_response=getattr(teacher_config, "only_response", True),  # Default True to save memory
+                    only_response=getattr(teacher_config, "only_response", False),
                 )
                 print(f"[GKD] Initialized TeacherClient: {teacher_config.server_ip}:{teacher_config.server_port}"
-                      f" (only_response={getattr(teacher_config, 'only_response', True)})")
+                      f" (only_response={getattr(teacher_config, 'only_response', False)})")
             else:
                 raise ValueError("use_teacher_kl_loss=True but no teacher config found in actor_rollout_ref.teacher")
 
