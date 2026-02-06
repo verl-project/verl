@@ -562,7 +562,7 @@ class RayFlowGRPOTrainer:
             if (
                 self.config.reward_model.enable
                 and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model"
-                and self.reward_loop_manager is not None
+                and not self.use_reward_loop
             ):
                 return {}
 
@@ -613,7 +613,14 @@ class RayFlowGRPOTrainer:
             sample_inputs.extend(input_texts)
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
-            # evaluate using reward_function or async reward_loop
+            # apply sync reward loop
+            if "rm_score" not in test_batch.batch.keys() and self.use_reward_loop:
+                self.checkpoint_manager.sleep_replicas()
+                reward_batch = self.reward_loop_manager.compute_rm_score(test_batch)
+                test_batch = test_batch.union(reward_batch)
+                self.checkpoint_manager.update_weights()
+
+            # evaluate using reward_function or reward_loop
             reward_tensor, reward_extra_info = self._compute_or_extract_reward(
                 test_batch, reward_fn=self.val_reward_fn, reward_for_val=True
             )
