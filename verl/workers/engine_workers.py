@@ -325,7 +325,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if lr is not None:
                 output["metrics"]["lr"] = lr
             final_output = self._postprocess_output(
-                output, global_token_num=global_token_num, delta_time=delta_time, forward_only=False, images_seqlens=images_seqlens
+                output,
+                global_token_num=global_token_num,
+                delta_time=delta_time,
+                forward_only=False,
+                images_seqlens=images_seqlens,
             ).cpu()
         else:
             final_output = None
@@ -367,7 +371,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if self.engine.is_mp_src_rank_with_outputs():
             final_output = self._postprocess_output(
-                output, global_token_num=global_token_num, delta_time=delta_time, forward_only=True, images_seqlens=images_seqlens
+                output,
+                global_token_num=global_token_num,
+                delta_time=delta_time,
+                forward_only=True,
+                images_seqlens=images_seqlens,
             ).cpu()
         else:
             final_output = None
