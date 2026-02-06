@@ -35,6 +35,7 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
+from verl.checkpoint_engine.base import CheckpointEngineWorker
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
@@ -44,7 +45,6 @@ from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
-from verl.workers.rollout.vllm_rollout import ServerAdapter
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -709,7 +709,7 @@ class vLLMHttpServer:
             return {"aborted": False, "request_id": request_id, "error": str(e)}
 
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
+_rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
 
 
 class vLLMReplica(RolloutReplica):
@@ -728,9 +728,11 @@ class vLLMReplica(RolloutReplica):
         """Get rollout worker actor class for colocated and standalone mode."""
         worker_dict_cls = RayClassWithInitArgs(
             cls=_rollout_worker_actor_cls,
-            config=self.config,
+            rollout_config=self.config,
             model_config=self.model_config,
-            device_mesh=None,
+            replica_rank=self.replica_rank,
+            world_size=self.world_size,
+            gpus_per_node=self.gpus_per_node,
         )
         return worker_dict_cls
 
@@ -780,7 +782,12 @@ class vLLMReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
+                runtime_env={
+                    "env_vars": {
+                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                    }
+                },
                 name=name,
             ).remote(
                 config=self.config,

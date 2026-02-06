@@ -107,9 +107,11 @@ class MockReplica(RolloutReplica):
 
 
 class CheckpointEngineWorkerTest(CheckpointEngineWorker):
-    def __init__(self, rollout_config: RolloutConfig, model_config: HFModelConfig, check_allclose: bool = True) -> None:
+    def __init__(
+        self, rollout_config: RolloutConfig, model_config: HFModelConfig, check_allclose: bool = True, *args, **kwargs
+    ) -> None:
         server_adapter = MockServerAdapter(rollout_config, model_config, check_allclose)
-        super().__init__(rollout_config, model_config, server_adapter)
+        super().__init__(rollout_config, model_config, server_adapter, *args, **kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def check_weights(self):

@@ -214,6 +214,16 @@ class DetachActorWorker(DetachNcclSync):
         )
         return params
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def update_weights(self):
+        def actor_params_to_full(actor_params):
+            for key, param in actor_params.items():
+                if hasattr(param, "full_tensor"):
+                    yield key, param.full_tensor()
+
+        actor_params = self._get_actor_params()
+        await self.checkpoint_engine.send_weights(actor_params_to_full(actor_params))
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_actor_weights_info(self):
         assert self._is_actor

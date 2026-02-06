@@ -22,9 +22,10 @@ import torch
 from omegaconf import DictConfig
 from ray.util.collective import collective
 
+from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.utils.device import get_torch_device, is_npu_available
-from verl.utils.distributed import stateless_init_process_group
+from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import get_torch_device
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -43,6 +44,16 @@ class BaseDetachNcclSync:
         )
         self._bg_thread.start()
         logger.info(f"[DetachNcclSync] Background thread for SGLang sync started. PID: {os.getpid()}")
+        if role == "actor":
+            checkpoint_engine_config = omega_conf_to_dataclass(config.rollout.checkpoint_engine)
+            backend = checkpoint_engine_config.backend
+            bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
+            engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
+            if torch.distributed.get_rank() == 0:
+                engine_kwargs["is_master"] = True
+            self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
+        else:
+            self.checkpoint_engine = None
 
     @classmethod
     def get_bucket_size_mb(cls):
@@ -120,29 +131,9 @@ class BaseDetachNcclSync:
         if hasattr(self, "_bg_thread") and self._bg_thread.is_alive():
             self._bg_thread.join(timeout=1.0)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def init_checkpoint_engine(self, rank_offset: int, actor_num: int, rollout_num: int):
-        from .checkpoint_engine import CheckpointEngine
-
-        current_rank = torch.distributed.get_rank() + rank_offset
-        actor_ranks = list(range(actor_num))
-        rollout_ranks = [rank + actor_num for rank in range(rollout_num)]
-        assert rank_offset == 0 or rank_offset == actor_num
-
-        self.checkpoint_engine = CheckpointEngine(
-            current_rank, actor_ranks, rollout_ranks, self.config.checkpoint_engine.device_buffer_size_M
-        )
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def create_weight_sync_group(self, master_address, master_port, rank_offset, world_size):
-        rank = torch.distributed.get_rank() + rank_offset
-        self._weight_sync_group = stateless_init_process_group(
-            master_address,
-            master_port,
-            rank,
-            world_size,
-            get_torch_device().current_device(),
-        )
+    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
+    def execute_checkpoint_engine(self, method: str, *args, **kwargs):
+        return getattr(self.checkpoint_engine, method)(*args, **kwargs)
 
     @staticmethod
     def get_inference_model(rollout):
@@ -217,10 +208,7 @@ class BaseDetachNcclSync:
                     origin_data = origin_data.full_tensor()
                 if torch.distributed.get_rank() == 0:
                     tensor.copy_(origin_data)
-            if is_npu_available:
-                self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
-            else:
-                collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
+            collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
             if self._is_rollout:
                 inference_model.load_weights([(key, tensor)])
 
