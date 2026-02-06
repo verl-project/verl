@@ -22,6 +22,7 @@ from verl.single_controller.ray.base import (
     RayResourcePool,
     split_resource_pool,
 )
+from verl.utils.device import get_device_name
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 
 
@@ -120,6 +121,53 @@ async def test_nixl_checkpoint_engine(
 
     # create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(backend="nixl", trainer=trainer, replicas=replicas)
+    for _ in range(3):
+        await checkpoint_manager.update_weights()
+        rollout.check_weights()
+
+    ray.shutdown()
+
+
+@pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rebuild_group", [False])
+@pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+async def test_kimi_checkpoint_engine(
+    rebuild_group,
+    num_trainer,
+    num_rollout,
+    num_nodes=1,
+    num_gpus_per_node=8,
+    check_allclose=True,
+    model_path="~/models/Qwen/Qwen3-8B-Base",
+):
+    model_path = os.path.expanduser(model_path)
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "NCCL_IB_HCA": "mlx5",
+                "VERL_LOGGING_LEVEL": "DEBUG",
+            }
+        }
+    )
+
+    # initialize config
+    checkpoint_engine_config = CheckpointEngineConfig(
+        backend="kimi_ckpt_engine", engine_kwargs={"kimi_ckpt_engine": {"rebuild_group": rebuild_group}}
+    )
+    model_config = HFModelConfig(path=model_path, use_remove_padding=True)
+    rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
+
+    # create trainer and rollout worker group
+    resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
+    resource_pool.get_placement_groups(device_name=get_device_name())
+    trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
+    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    trainer.reset()
+    rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
+
+    # create checkpoint engine manager
+    checkpoint_manager = CheckpointEngineManager(backend="kimi_ckpt_engine", trainer=trainer, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
