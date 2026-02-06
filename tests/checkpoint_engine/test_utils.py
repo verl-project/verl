@@ -158,9 +158,6 @@ async def create_rollout_worker_group(
         model_config=model_config,
         rollout_config=rollout_config,
         check_allclose=check_allclose,
-        replica_rank=0,
-        world_size=resource_pool.world_size,
-        ngpus_per_node=resource_pool.n_gpus_per_node,
     )
     wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name())
 

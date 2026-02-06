@@ -39,6 +39,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
 
+from verl.checkpoint_engine.base import CheckpointEngineWorker
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
@@ -46,7 +47,7 @@ from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler.profile import DistProfiler
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.sglang_rollout.sglang_rollout import ServerAdapter, _set_envs_and_config
+from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
 from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
 
 logger = logging.getLogger(__file__)
@@ -495,7 +496,7 @@ class SGLangHttpServer:
             await self.tokenizer_manager.stop_profile()
 
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
+_rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
 
 
 class SGLangReplica(RolloutReplica):

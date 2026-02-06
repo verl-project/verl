@@ -47,7 +47,7 @@ from verl.utils.rollout_trace import (
     rollout_trace_op,
 )
 from verl.utils.transferqueue_utils import tqbridge
-from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
+from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -996,11 +996,3 @@ class AgentLoopManager:
             await asyncio.gather(*tasks)
 
         asyncio.run(run_all())
-
-    def get_replicas(self) -> list[RolloutReplica]:
-        """Get all rollout replicas.
-
-        Returns:
-            list[RolloutReplica]: All rollout replicas.
-        """
-        return self.rollout_replicas

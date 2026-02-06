@@ -23,6 +23,7 @@ from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.utils.device import get_torch_device, get_visible_devices_keyword
+from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
@@ -79,9 +80,6 @@ class CheckpointEngineRegistry:
         """
         if backend not in cls._registry:
             raise ValueError(f"Checkpoint engine {backend} not registered")
-        print(f"Create checkpoint engine {backend} with args {args} and kwargs {kwargs}")
-        if backend != "hccl":
-            raise ValueError(f"Checkpoint engine {backend} is not supported")
         return cls._registry[backend](*args, **kwargs)
 
 
@@ -264,36 +262,45 @@ class CheckpointEngineWorker(Worker):
     ) -> None:
         self.rollout_config = rollout_config
         self.model_config = model_config
-        self.rank_offset = kwargs.get("rank_offset", 0)
-        # Rebuild rank as global rollout rank and world size
-        rollout_rank = int(os.environ["RANK"])
-        # Keep the original RANK if no kwargs received.
-        replica_rank = kwargs.get("replica_rank", 0)
-        world_size = kwargs.get("world_size", os.environ["WORLD_SIZE"])
-        gpus_per_node = kwargs.get("gpus_per_node", 8)
-        rank = replica_rank * world_size + rollout_rank
-        local_rank = rank % gpus_per_node
-        os.environ["RANK"] = str(rank)
+
+        self.server_adapter: BaseRollout = server_adapter
+        self.checkpoint_engine: CheckpointEngine = None
+        self.init_flag = False
+        self.extra_rollout_args = args
+        self.extra_rollout_kwargs = kwargs
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
+    def init_component(self, rank: int, world_size: str, master_addr: str, master_port: str):
+        if self.init_flag:
+            return
+
         if not os.environ.get(get_visible_devices_keyword(), None):
+            gpus_per_node = get_torch_device().device_count()
+            local_rank = rank % gpus_per_node
             get_torch_device().set_device(local_rank)
 
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        os.environ["MASTER_ADDR"], os.environ["MASTER_PORT"] = master_addr, master_port
         # sglang and trt-llm need device_mesh for internal communication
-        # TODO initialize_global_process_group_ray stucked, some environment variables are not right
-        # TODO We should avoid abusing env variables
-        # initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
-        self.server_adapter: BaseRollout = server_adapter or get_rollout_class(
-            rollout_config.name, rollout_config.mode
-        )(config=rollout_config, model_config=model_config, device_mesh=None)
-
-        backend = rollout_config.checkpoint_engine.backend
-        bucket_size = rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
-        engine_kwargs = rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
+        initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
+        if self.server_adapter is None:
+            self.server_adapter = get_rollout_class(self.rollout_config.name, self.rollout_config.mode)(
+                config=self.rollout_config,
+                model_config=self.model_config,
+                device_mesh=None,
+                extra_args=self.extra_rollout_args,
+                extra_kwargs=self.extra_rollout_kwargs,
+            )
+        backend = self.rollout_config.checkpoint_engine.backend
+        bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
+        engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
         self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
+        self.init_flag = True
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):
         weights = self.checkpoint_engine.receive_weights()
-
         await self.server_adapter.update_weights(weights)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
@@ -416,6 +423,15 @@ class CheckpointEngineManager:
             workers.extend(replica.workers)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
         trainer = self.trainer
+        world_size = len(workers)
+        ranks = list(range(world_size))
+        master_addr = ray.get(rollout.workers[0]._get_node_ip.remote()).strip("[]")
+        master_port = str(ray.get(rollout.workers[0]._get_free_port.remote()))
+        ray.get(
+            rollout.init_component(
+                ranks, [world_size] * world_size, [master_addr] * world_size, [master_port] * world_size
+            )
+        )
 
         # 3. build process group
         self.build_process_group(rollout)

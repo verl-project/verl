@@ -223,7 +223,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
     def get_replicas(self):
         """Get rollout worker group"""
-        return self.async_rollout_manager.get_replicas()
+        return self.async_rollout_manager.rollout_replicas
 
     def get_max_queue_size(self):
         return self.max_queue_size

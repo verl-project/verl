@@ -23,6 +23,7 @@ from ray.actor import ActorHandle
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
 
+from verl.checkpoint_engine import CheckpointEngineWorker
 from verl.single_controller.ray import RayClassWithInitArgs, SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
@@ -231,7 +232,7 @@ class TRTLLMHttpServer:
         )
 
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
+_rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
 
 
 class TRTLLMReplica(RolloutReplica):
