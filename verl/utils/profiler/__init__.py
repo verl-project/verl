@@ -15,6 +15,7 @@
 from ..device import is_npu_available
 from ..import_utils import is_nvtx_available
 from .performance import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
+from .precision_hook import PrecisionDebuggerLogger
 from .profile import DistProfiler, DistProfilerExtension, ProfilerConfig
 
 # Select marker implementations by availability, but keep DistProfiler as our dispatcher
@@ -37,4 +38,5 @@ __all__ = [
     "ProfilerConfig",
     "simple_timer",
     "marked_timer",
+    "PrecisionDebuggerLogger",
 ]

@@ -22,18 +22,6 @@ from verl.utils.profiler.config import PrecisionDebuggerToolConfig
 
 
 _GLOBAL_LOCK = threading.Lock()
-_THREAD_LOCKS: dict[int, threading.Lock] = {}
-_THREAD_LOCKS_LOCK = threading.Lock()
-
-
-def _get_thread_lock() -> threading.Lock:
-    tid = threading.get_ident()
-    with _THREAD_LOCKS_LOCK:
-        lock = _THREAD_LOCKS.get(tid)
-        if lock is None:
-            lock = threading.Lock()
-            _THREAD_LOCKS[tid] = lock
-        return lock
 
 
 class PrecisionDebuggerProfiler:
@@ -49,6 +37,7 @@ class PrecisionDebuggerProfiler:
         self._active_lock: Optional[threading.Lock] = None
         self._enabled = self._is_enabled(self.precision_cfg)
         self._available = is_msprobe_available()
+        self._debugger = None
 
     @staticmethod
     def _normalize_config(precision_cfg) -> PrecisionDebuggerToolConfig:
@@ -77,11 +66,7 @@ class PrecisionDebuggerProfiler:
         return True
 
     def _get_lock(self) -> threading.Lock:
-        if self.precision_cfg.concurrency == "serialize":
-            return _GLOBAL_LOCK
-        if self.precision_cfg.concurrency == "per_thread":
-            return _get_thread_lock()
-        return threading.Lock()
+        return _GLOBAL_LOCK
 
     def start(self, stage: str, global_step: Optional[int] = None, model=None) -> bool:
         if not self._should_collect(stage=stage, global_step=global_step):
@@ -107,13 +92,18 @@ class PrecisionDebuggerProfiler:
         try:
             from msprobe.pytorch import PrecisionDebugger
 
-            debugger = PrecisionDebugger._instance
-            if debugger is None or self.precision_cfg.concurrency == "per_request":
-                PrecisionDebugger(config_path=config_path, dump_path=dump_path)
-                debugger = PrecisionDebugger._instance
-            if debugger is None:
-                return False
-            debugger.service.config.dump_path = dump_path
+            debugger = None
+            if self._debugger is None:
+                debugger = PrecisionDebugger(config_path=config_path, dump_path=dump_path)
+                if debugger is None:
+                    if self.precision_cfg.strict:
+                        raise RuntimeError("Failed to create PrecisionDebugger instance")
+                    return False
+                self._debugger = debugger
+            else:
+                debugger = self._debugger
+            if hasattr(debugger, "service") and hasattr(debugger.service, "config"):
+                debugger.service.config.dump_path = dump_path
             debugger.start(model)
             return True
         except Exception:
@@ -130,14 +120,13 @@ class PrecisionDebuggerProfiler:
             self._release_lock()
             return
         try:
-            from msprobe.pytorch import PrecisionDebugger
-
-            debugger = PrecisionDebugger._instance
+            debugger = self._debugger
             if debugger is None:
                 return
             debugger.stop()
             if step:
-                debugger.step()
+                if hasattr(debugger, "step"):
+                    debugger.step()
         finally:
             self._release_lock()
 

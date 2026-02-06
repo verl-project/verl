@@ -39,7 +39,7 @@ from torch import nn
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id, get_torch_device
-from verl.utils.profiler import DistProfiler
+from verl.utils.profiler import DistProfiler, PrecisionDebuggerLogger
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 from verl.utils.megatron.router_replay_utils import (
@@ -755,7 +755,8 @@ class MegatronPPOActor(BasePPOActor):
         return losses_reduced
 
     @GPUMemoryLogger(role="megatron actor", logger=logger)
-    @DistProfiler.annotate(precision_stage="train", precision_model_attr="actor_module")
+    @PrecisionDebuggerLogger(stage="train", model_attr="actor_module")
+    @DistProfiler.annotate()
     def update_policy(self, dataloader: Iterable[DataProto], enable_mtp: bool = False) -> dict:
         """Update the policy with an iterator of DataProto
 
@@ -826,6 +827,7 @@ class MegatronPPOActor(BasePPOActor):
         get_torch_device().empty_cache()
         return metrics
 
-    @DistProfiler.annotate(precision_stage="update_actor", precision_model_attr="actor_module", precision_step=True)
+    @PrecisionDebuggerLogger(stage="update_actor", model_attr="actor_module", step=True)
+    @DistProfiler.annotate()
     def _optimizer_step_with_precision(self):
         return self.actor_optimizer.step()

@@ -165,65 +165,8 @@ class DistProfiler:
         color: Optional[str] = None,
         domain: Optional[str] = None,
         category: Optional[str] = None,
-        precision_stage: Optional[str] = None,
-        precision_model_attr: Optional[object] = None,
-        precision_global_step_attr: Optional[str] = None,
-        precision_step: bool = False,
         **kwargs_outer,
     ) -> Callable:
-        def _get_model(self_instance):
-            if precision_model_attr is None:
-                return None
-            if isinstance(precision_model_attr, (list, tuple)):
-                for attr in precision_model_attr:
-                    val = _resolve_attr(self_instance, attr)
-                    if val is not None:
-                        return val
-                return None
-            return _resolve_attr(self_instance, precision_model_attr)
-
-        def _resolve_attr(obj, attr):
-            if not isinstance(attr, str):
-                return None
-            if "." in attr:
-                current = obj
-                for part in attr.split("."):
-                    current = getattr(current, part, None)
-                    if current is None:
-                        return None
-                return current
-            return getattr(obj, attr, None)
-
-        def _get_global_step(self_instance, args, kwargs):
-            for val in list(args) + list(kwargs.values()):
-                if hasattr(val, "meta_info"):
-                    meta = getattr(val, "meta_info")
-                    if isinstance(meta, dict) and "global_steps" in meta:
-                        return meta.get("global_steps")
-                if isinstance(val, dict) and "global_steps" in val:
-                    return val.get("global_steps")
-            if precision_global_step_attr and hasattr(self_instance, precision_global_step_attr):
-                return getattr(self_instance, precision_global_step_attr)
-            if hasattr(self_instance, "precision_global_step"):
-                return getattr(self_instance, "precision_global_step")
-            return None
-
-        def _build_precision_impl(self_instance):
-            precision_cfg = getattr(self_instance, "precision_debugger_cfg", None)
-            if not precision_cfg or not precision_stage:
-                return None
-            from .precision_debugger_profile import PrecisionDebuggerProfiler
-
-            rank = getattr(getattr(self_instance, "profiler", None), "rank", None)
-            return PrecisionDebuggerProfiler(precision_cfg, rank=rank)
-
-        def _precision_start(precision_impl, self_instance, args, kwargs_inner):
-            if precision_impl is None:
-                return False
-            global_step = _get_global_step(self_instance, args, kwargs_inner)
-            model = _get_model(self_instance)
-            return precision_impl.start(stage=precision_stage, global_step=global_step, model=model)
-
         def _decorate_with_profiler(impl, func_inner):
             if hasattr(impl, "annotate"):
                 return impl.annotate(message=message, color=color, domain=domain, category=category, **kwargs_outer)(
@@ -243,17 +186,15 @@ class DistProfiler:
         def decorator(func_inner):
             @functools.wraps(func_inner)
             def wrapper(self_instance, *args, **kwargs_inner):
-                precision_impl = _build_precision_impl(self_instance)
-                precision_started = _precision_start(precision_impl, self_instance, args, kwargs_inner)
                 try:
                     if _should_profile(self_instance):
                         impl = self_instance.profiler._impl
                         wrapped = _decorate_with_profiler(impl, func_inner)
-                        return wrapped(self_instance, *args, **kwargs_inner)
+                        try:
+                            return wrapped(self_instance, *args, **kwargs_inner)
+                        except Exception:
+                            return func_inner(self_instance, *args, **kwargs_inner)
                     return func_inner(self_instance, *args, **kwargs_inner)
-                finally:
-                    if precision_impl is not None and precision_stage:
-                        precision_impl.stop(started=precision_started, step=precision_step)
 
             return wrapper
 

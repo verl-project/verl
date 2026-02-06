@@ -37,7 +37,13 @@ from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
+from verl.utils.profiler import (
+    DistProfiler,
+    DistProfilerExtension,
+    PrecisionDebuggerLogger,
+    ProfilerConfig,
+    log_gpu_memory_usage,
+)
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
@@ -552,23 +558,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
-    @DistProfiler.annotate(
-        color="olive",
-        role="ref_compute_log_prob",
-        precision_stage="ref_compute_log_prob",
-        precision_model_attr="ref",
-    )
+    @PrecisionDebuggerLogger(stage="ref_compute_log_prob", model_attr="ref")
+    @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(
-        color="blue",
-        role="actor_compute_log_prob",
-        precision_stage="actor_compute_log_prob",
-        precision_model_attr="actor",
-    )
+    @PrecisionDebuggerLogger(stage="actor_compute_log_prob", model_attr="actor")
+    @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
         return output.cpu() if output is not None else None

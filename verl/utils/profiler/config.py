@@ -87,7 +87,6 @@ class PrecisionDebuggerToolConfig(BaseConfig):
     data_dir: str = "outputs/precision_debug"
     steps: Optional[list[int]] = None
     stages: Optional[list[str]] = None
-    concurrency: str = "serialize"  # serialize | per_thread | per_request
     strict: bool = False
 
     def __post_init__(self) -> None:
@@ -99,10 +98,6 @@ class PrecisionDebuggerToolConfig(BaseConfig):
             assert isinstance(self.steps, list), f"steps must be list[int], got {type(self.steps)}"
         if self.stages is not None:
             assert isinstance(self.stages, list), f"stages must be list[str], got {type(self.stages)}"
-        assert isinstance(self.concurrency, str), f"concurrency must be str, got {type(self.concurrency)}"
-        assert self.concurrency in {"serialize", "per_thread", "per_request"}, (
-            "concurrency must be one of serialize, per_thread, per_request"
-        )
         assert isinstance(self.strict, bool), f"strict must be bool, got {type(self.strict)}"
 
 
