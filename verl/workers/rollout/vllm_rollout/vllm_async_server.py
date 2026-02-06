@@ -252,11 +252,6 @@ class vLLMHttpServer:
             hf_overrides["quantization_config"] = quantization_config_dict
             quantization = "compressed-tensors"
 
-            # Support lm_head fp32 (if configured)
-            if qat_config_dict.get("lm_head_fp32", False):
-                hf_overrides["head_dtype"] = "float32"
-                logger.info("Enabled FP32 for lm_head via head_dtype override")
-
             logger.info("QAT quantization config injected to vLLM async server")
         elif quantization is not None:
             # Handle other quantization methods (fp8, torchao)

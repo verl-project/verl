@@ -83,7 +83,7 @@ from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min
 from verl.utils.py_functional import convert_to_regular_types
 
 # QAT support
-from verl.utils.qat import QATQuantizer, apply_qat, enable_qat_fuse
+from verl.utils.qat import apply_qat, enable_qat_fuse
 from verl.utils.ray_utils import get_event_loop
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.config.optimizer import build_optimizer
@@ -796,9 +796,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # QAT: quantize weights before sending to vLLM
         if self._qat_enabled:
+            from verl.utils.qat.quantizer import QATQuantizer
+
             params_dict = dict(per_tensor_param)
             quantizer = QATQuantizer(
                 mode=self.qat_config.mode,
+                group_size=self.qat_config.group_size,
                 ignore_patterns=self.qat_config.ignore_patterns,
                 device=torch.device(get_device_id()),
                 param_dtype=self._param_dtype,

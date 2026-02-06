@@ -20,7 +20,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-import torch
 import torch.nn as nn
 
 from verl.base_config import BaseConfig
@@ -109,6 +108,7 @@ def apply_qat(
 
     logger.info(f"Found {len(modules_to_replace)} Linear layers to convert to QAT")
 
+    converted_count = 0
     for name, module in modules_to_replace:
         if isinstance(module, QATLinear):
             continue
@@ -121,11 +121,8 @@ def apply_qat(
         )
 
         _set_module(model, name, fake_quant_module)
-        logger.debug(f"Converted {name} to QATLinear")
+        converted_count += 1
 
-    model._qat_config = config
-
-    converted_count = sum(1 for name, m in model.named_modules() if isinstance(m, QATLinear))
     logger.info(f"Successfully applied QAT to {converted_count} layers")
 
     return model
@@ -140,58 +137,41 @@ def _set_module(model: nn.Module, name: str, new_module: nn.Module):
     setattr(parent, parts[-1], new_module)
 
 
+FUSION_PATTERNS = {
+    "qkv": ["q_proj", "k_proj", "v_proj"],
+    "gate_up": ["gate_proj", "up_proj"],
+}
+
+
 def setup_fusion_siblings(model: nn.Module):
     """Setup fusion siblings for QKV and GateUp layers."""
     import weakref
 
     from verl.utils.qat.linear import QATLinear
 
-    qat_modules = {}
-    for name, module in model.named_modules():
-        if isinstance(module, QATLinear):
-            qat_modules[name] = module
+    qat_modules = {name: m for name, m in model.named_modules() if isinstance(m, QATLinear)}
 
-    # Setup QKV fusion siblings
-    qkv_groups = {}
-    for name, module in qat_modules.items():
-        for proj in ["q_proj", "k_proj", "v_proj"]:
-            if name.endswith(proj):
-                parent = name.rsplit(".", 1)[0]
-                if parent not in qkv_groups:
-                    qkv_groups[parent] = {}
-                qkv_groups[parent][proj] = module
+    counts = {}
+    for group_name, suffixes in FUSION_PATTERNS.items():
+        groups: dict[str, dict[str, nn.Module]] = {}
+        for name, module in qat_modules.items():
+            for suffix in suffixes:
+                if name.endswith(suffix):
+                    parent = name.rsplit(".", 1)[0]
+                    groups.setdefault(parent, {})[suffix] = module
 
-    qkv_count = 0
-    for parent, projs in qkv_groups.items():
-        if len(projs) >= 2:
-            modules = list(projs.values())
-            for i, m in enumerate(modules):
-                siblings = [modules[j] for j in range(len(modules)) if j != i]
-                m._fusion_siblings_ref = [weakref.ref(s) for s in siblings]
-            qkv_count += 1
+        count = 0
+        for parent, projs in groups.items():
+            if len(projs) >= 2:
+                modules = list(projs.values())
+                for i, m in enumerate(modules):
+                    siblings = modules[:i] + modules[i + 1 :]
+                    m._fusion_siblings_ref = [weakref.ref(s) for s in siblings]
+                count += 1
+        counts[group_name] = count
 
-    # Setup GateUp fusion siblings
-    gate_up_groups = {}
-    for name, module in qat_modules.items():
-        if name.endswith("gate_proj") or name.endswith("up_proj"):
-            parent = name.rsplit(".", 1)[0]
-            proj_type = name.rsplit(".", 1)[1]
-            if parent not in gate_up_groups:
-                gate_up_groups[parent] = {}
-            gate_up_groups[parent][proj_type] = module
-
-    gate_up_count = 0
-    for parent, projs in gate_up_groups.items():
-        if "gate_proj" in projs and "up_proj" in projs:
-            gate = projs["gate_proj"]
-            up = projs["up_proj"]
-            gate._fusion_siblings_ref = [weakref.ref(up)]
-            up._fusion_siblings_ref = [weakref.ref(gate)]
-            gate_up_count += 1
-
-    logger.info(f"[QAT Fuse] Setup fusion siblings: {qkv_count} QKV groups, {gate_up_count} GateUp pairs")
-
-    return qkv_count, gate_up_count
+    logger.info(f"[QAT Fuse] Setup fusion siblings: {counts}")
+    return counts
 
 
 def enable_qat_fuse(model: nn.Module):

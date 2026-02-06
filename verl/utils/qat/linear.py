@@ -23,114 +23,102 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from compressed_tensors.quantization.quant_args import FP4_E2M1_DATA, FP8_E4M3_DATA
 
-__all__ = ["QATLinear", "QATMode", "STEFP4QuantTriton", "TRITON_AVAILABLE", "fp4_fake_quant_weight"]
-
-
-TRITON_AVAILABLE = False
-
-try:
-    import triton
-    import triton.language as tl
-
-    if torch.cuda.is_available():
-        cap = torch.cuda.get_device_capability()
-        if cap >= (8, 9):
-            TRITON_AVAILABLE = True
-except ImportError:
-    pass
+__all__ = ["QATLinear", "QATMode"]
 
 
-if TRITON_AVAILABLE:
-    _TORCH_TO_TL_DTYPE = {
-        torch.float32: tl.float32,
-        torch.float16: tl.float16,
-        torch.bfloat16: tl.bfloat16,
-    }
+import triton
+import triton.language as tl
 
-    @triton.jit
-    def _fp4_fake_quant_kernel(
-        x_ptr,
-        y_ptr,
-        M,
-        N,
-        global_scale_ptr,
-        stride_xm,
-        stride_xn,
-        stride_ym,
-        stride_yn,
-        BLOCK_SIZE: tl.constexpr,
-        TILE_M: tl.constexpr,
-        TILE_N: tl.constexpr,
-        NUM_FP4_BLOCKS: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
-    ):
-        pid_m = tl.program_id(axis=0)
-        pid_n = tl.program_id(axis=1)
-        row_start = pid_m * TILE_M
-        col_start = pid_n * TILE_N
+_TORCH_TO_TL_DTYPE = {
+    torch.float32: tl.float32,
+    torch.float16: tl.float16,
+    torch.bfloat16: tl.bfloat16,
+}
 
-        x_block_ptr = tl.make_block_ptr(
-            base=x_ptr,
-            shape=(M, N),
-            strides=(stride_xm, stride_xn),
-            offsets=(row_start, col_start),
-            block_shape=(TILE_M, TILE_N),
-            order=(1, 0),
-        )
-        y_block_ptr = tl.make_block_ptr(
-            base=y_ptr,
-            shape=(M, N),
-            strides=(stride_ym, stride_yn),
-            offsets=(row_start, col_start),
-            block_shape=(TILE_M, TILE_N),
-            order=(1, 0),
-        )
 
-        global_scale = tl.load(global_scale_ptr).to(tl.float32)
-        global_scale_safe = tl.where(global_scale > 0.0, global_scale, 1e-12)
+@triton.jit
+def _fp4_fake_quant_kernel(
+    x_ptr,
+    y_ptr,
+    M,
+    N,
+    global_scale_ptr,
+    stride_xm,
+    stride_xn,
+    stride_ym,
+    stride_yn,
+    BLOCK_SIZE: tl.constexpr,
+    TILE_M: tl.constexpr,
+    TILE_N: tl.constexpr,
+    NUM_FP4_BLOCKS: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    row_start = pid_m * TILE_M
+    col_start = pid_n * TILE_N
 
-        tile = tl.load(x_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-        tile_reshaped = tl.reshape(tile, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE))
-        x_abs = tl.abs(tile_reshaped)
+    x_block_ptr = tl.make_block_ptr(
+        base=x_ptr,
+        shape=(M, N),
+        strides=(stride_xm, stride_xn),
+        offsets=(row_start, col_start),
+        block_shape=(TILE_M, TILE_N),
+        order=(1, 0),
+    )
+    y_block_ptr = tl.make_block_ptr(
+        base=y_ptr,
+        shape=(M, N),
+        strides=(stride_ym, stride_yn),
+        offsets=(row_start, col_start),
+        block_shape=(TILE_M, TILE_N),
+        order=(1, 0),
+    )
 
-        block_max = tl.max(x_abs, axis=2, keep_dims=True)
-        block_max_scaled = block_max / (6.0 * global_scale_safe)
-        block_max_scaled = tl.minimum(block_max_scaled, 448.0)
-        block_max_quant = block_max_scaled.to(tl.float8e4nv).to(tl.float32) * global_scale
-        block_max_quant = tl.where(block_max_quant >= 1e-5, block_max_quant, 1.0)
+    global_scale = tl.load(global_scale_ptr).to(tl.float32)
+    global_scale_safe = tl.where(global_scale > 0.0, global_scale, 1e-12)
 
-        block_max_quant_broadcast = tl.broadcast_to(block_max_quant, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE))
-        abs_scaled = x_abs / block_max_quant_broadcast
+    tile = tl.load(x_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    tile_reshaped = tl.reshape(tile, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE))
+    x_abs = tl.abs(tile_reshaped)
 
-        q_val = tl.where(
-            abs_scaled <= 0.25,
-            0.0,
+    block_max = tl.max(x_abs, axis=2, keep_dims=True)
+    block_max_scaled = block_max / (6.0 * global_scale_safe)
+    block_max_scaled = tl.minimum(block_max_scaled, 448.0)
+    block_max_quant = block_max_scaled.to(tl.float8e4nv).to(tl.float32) * global_scale
+    block_max_quant = tl.where(block_max_quant >= 1e-5, block_max_quant, 1.0)
+
+    block_max_quant_broadcast = tl.broadcast_to(block_max_quant, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE))
+    abs_scaled = x_abs / block_max_quant_broadcast
+
+    q_val = tl.where(
+        abs_scaled <= 0.25,
+        0.0,
+        tl.where(
+            abs_scaled < 0.75,
+            0.5,
             tl.where(
-                abs_scaled < 0.75,
-                0.5,
+                abs_scaled <= 1.25,
+                1.0,
                 tl.where(
-                    abs_scaled <= 1.25,
-                    1.0,
+                    abs_scaled < 1.75,
+                    1.5,
                     tl.where(
-                        abs_scaled < 1.75,
-                        1.5,
-                        tl.where(
-                            abs_scaled <= 2.5,
-                            2.0,
-                            tl.where(abs_scaled < 3.5, 3.0, tl.where(abs_scaled <= 5.0, 4.0, 6.0)),
-                        ),
+                        abs_scaled <= 2.5,
+                        2.0,
+                        tl.where(abs_scaled < 3.5, 3.0, tl.where(abs_scaled <= 5.0, 4.0, 6.0)),
                     ),
                 ),
             ),
-        )
+        ),
+    )
 
-        x_rescaled = q_val * block_max_quant_broadcast
-        x_rescaled = tl.where(tile_reshaped >= 0, x_rescaled, -x_rescaled)
-        tile_quant = tl.reshape(x_rescaled, (TILE_M, TILE_N))
+    x_rescaled = q_val * block_max_quant_broadcast
+    x_rescaled = tl.where(tile_reshaped >= 0, x_rescaled, -x_rescaled)
+    tile_quant = tl.reshape(x_rescaled, (TILE_M, TILE_N))
 
-        tl.store(y_block_ptr, tile_quant.to(OUT_DTYPE), boundary_check=(0, 1))
+    tl.store(y_block_ptr, tile_quant.to(OUT_DTYPE), boundary_check=(0, 1))
 
 
 def fp4_fake_quant_weight(
@@ -141,9 +129,6 @@ def fp4_fake_quant_weight(
     tile_cols: int = 64,
 ) -> torch.Tensor:
     """Apply FP4 fake quantization using Triton kernel."""
-    if not TRITON_AVAILABLE:
-        raise RuntimeError("Triton not available. Requires GPU with compute cap >= 8.9")
-
     x_shape = weight.shape
     x_dtype = weight.dtype
     x = weight.reshape(-1, x_shape[-1]).contiguous()
@@ -180,12 +165,6 @@ def fp4_fake_quant_weight(
         OUT_DTYPE=_TORCH_TO_TL_DTYPE[x_dtype],
     )
     return y.view(*x_shape)
-
-
-if not TRITON_AVAILABLE:
-
-    def fp4_fake_quant_weight(weight, global_amax=None, block_size=16, **kwargs):
-        raise RuntimeError("Triton is required for QAT (GPU with compute capability >= 8.9)")
 
 
 class STEFP4QuantTriton(torch.autograd.Function):
@@ -276,24 +255,6 @@ class QATLinear(nn.Linear):
 
         return new_linear
 
-    def to_linear(self) -> nn.Linear:
-        """Convert back to standard nn.Linear."""
-        has_bias = self.bias is not None
-        linear = nn.Linear(
-            self.in_features,
-            self.out_features,
-            bias=has_bias,
-            device=self.weight.device,
-            dtype=self.weight.dtype,
-        )
-
-        if self.weight.device != torch.device("meta"):
-            linear.weight = nn.Parameter(self.weight.clone())
-            if has_bias:
-                linear.bias = nn.Parameter(self.bias.clone())
-
-        return linear
-
     def _is_amax_initialized(self) -> bool:
         """Check if input_amax has been initialized."""
         if not hasattr(self, "input_amax"):
@@ -302,6 +263,8 @@ class QATLinear(nn.Linear):
 
     def _update_input_global_scale(self, x: torch.Tensor):
         """Update static input_global_scale based on observer strategy."""
+        from compressed_tensors.quantization.quant_args import FP4_E2M1_DATA, FP8_E4M3_DATA
+
         assert self.mode == QATMode.W4A4, "_update_input_global_scale should only be called in W4A4 mode"
 
         current_amax = torch.amax(torch.abs(x)).detach().to(torch.float32)

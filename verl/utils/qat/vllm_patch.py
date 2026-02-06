@@ -19,7 +19,7 @@ This module enables dynamic weight reloading for quantized models in vLLM,
 supporting QAT (Quantization-Aware Training) weight synchronization.
 
 Key features:
-- LazyParamsDict for parameter metadata caching and lazy rebuild
+- ParamMetaDict for parameter metadata caching and rebuild
 - Tensor Swap for parameters with shape changes (CUDA Graph address stability)
 - Support for multi-bucket weight loading
 
@@ -41,27 +41,18 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-# Parameters deleted after process_weights, need lazy rebuild
-DENSE_LAZY_REBUILD_PARAMS = {"weight_packed", "weight_global_scale"}
-MOE_LAZY_REBUILD_PARAMS = {"w13_weight_packed", "w2_weight_packed"}
-
-# Parameters with shape changes, need Tensor Swap for address stability
-DENSE_TENSOR_SWAP_PARAMS = {"weight_scale"}
-MOE_TENSOR_SWAP_PARAMS = {"w13_weight_scale", "w2_weight_scale"}
-
-
-class LazyParamsDict(dict):
+class ParamMetaDict(dict):
     """
-    Dict-like class for parameter management with lazy rebuild and tensor swap.
+    Dict-like class for parameter management with metadata-based rebuild and tensor swap.
 
     Supports:
-    - Lazy rebuild of deleted parameters from saved metadata
+    - Rebuild of deleted parameters from saved metadata
     - Tensor Swap for parameters with shape changes (address stability for CUDA Graph)
     """
 
     def __init__(self, model: torch.nn.Module, device: Optional[torch.device] = None):
         """
-        Initialize LazyParamsDict from a model.
+        Initialize ParamMetaDict from a model.
 
         Args:
             model: vLLM model (may be wrapped in ModelRunner)
@@ -87,7 +78,7 @@ class LazyParamsDict(dict):
             self[name] = param
 
     def _build_mappings(self):
-        """Build layer metadata cache for lazy rebuild and tensor swap."""
+        """Build layer metadata cache for rebuild and tensor swap."""
         for layer_name, module in self._model.named_modules():
             # Check for _hf_param_meta which indicates this layer has HF format params
             if hasattr(module, "_hf_param_meta"):
@@ -124,7 +115,7 @@ class LazyParamsDict(dict):
                             "hf_meta": module._hf_param_meta["w2_weight_scale"],
                         }
 
-    def _try_lazy_rebuild(self, key: str) -> Optional[Parameter]:
+    def _try_rebuild(self, key: str) -> Optional[Parameter]:
         """
         Try to rebuild a parameter from metadata if it was deleted.
 
@@ -160,109 +151,28 @@ class LazyParamsDict(dict):
                 return param
 
         # Rebuild from metadata
-        param_meta = meta[param_name]
-        shape = param_meta["shape"]
-        dtype = param_meta["dtype"]
-        device = self.device or param_meta.get("device", "cuda")
-        param_class = param_meta.get("param_class", Parameter)
-
-        # Get saved weight_loader
-        weight_loaders = getattr(module, "_weight_loaders", {})
-        weight_loader = weight_loaders.get(param_name)
-
-        # Create parameter data tensor
-        data = torch.empty(shape, dtype=dtype, device=device)
-
-        # Try to use the original parameter class (vLLM special types)
-        try:
-            if param_class is not Parameter and weight_loader is not None:
-                # vLLM parameter types need specific constructor arguments
-                kwargs = {"data": data, "weight_loader": weight_loader}
-
-                # Add input_dim/output_dim if saved
-                if "input_dim" in param_meta:
-                    kwargs["input_dim"] = param_meta["input_dim"]
-                if "output_dim" in param_meta:
-                    kwargs["output_dim"] = param_meta["output_dim"]
-
-                new_param = param_class(**kwargs)
-            else:
-                # Fallback to standard Parameter
-                new_param = Parameter(data, requires_grad=False)
-                if weight_loader is not None:
-                    new_param.weight_loader = weight_loader
-        except Exception as e:
-            # If reconstruction with original class fails, fallback to Parameter
-            logger.warning(f"Failed to rebuild {key} with class {param_class}: {e}, using Parameter")
-            new_param = Parameter(data, requires_grad=False)
-            if weight_loader is not None:
-                new_param.weight_loader = weight_loader
-
-        # Restore MoE-specific attributes (quant_method is required by weight_loader)
-        if "quant_method" in param_meta:
-            new_param.quant_method = param_meta["quant_method"]
-
-        # Register on module
+        new_param = _create_param_from_meta(module, param_name, meta[param_name], self.device)
         module.register_parameter(param_name, new_param)
-
         return new_param
 
     def prepare_for_reload(self) -> None:
-        """Prepare layers for weight reload by swapping Marlin tensors with HF-shape tensors."""
+        """Replace Marlin-format tensors with HF-shape tensors for reload."""
         for layer_name, swap_info in self._tensor_swap_layers.items():
             module = swap_info["module"]
-            hf_meta = swap_info["hf_meta"]
             param_name = swap_info.get("param_name", "weight_scale")
-
-            # Get HF shape from metadata
-            hf_shape = hf_meta["shape"]
-            hf_dtype = hf_meta["dtype"]
-            device = self.device or hf_meta.get("device", "cuda")
-            param_class = hf_meta.get("param_class", Parameter)
-
-            # Get saved weight_loader
-            weight_loaders = getattr(module, "_weight_loaders", {})
-            weight_loader = weight_loaders.get(param_name)
-
-            # Create temporary HF shape tensor
-            hf_tensor = torch.empty(hf_shape, dtype=hf_dtype, device=device)
-
-            # Try to use the original parameter class (vLLM special types)
-            try:
-                if param_class is not Parameter and weight_loader is not None:
-                    # vLLM parameter types need specific constructor arguments
-                    kwargs = {"data": hf_tensor, "weight_loader": weight_loader}
-
-                    # Add input_dim/output_dim if saved
-                    if "input_dim" in hf_meta:
-                        kwargs["input_dim"] = hf_meta["input_dim"]
-                    if "output_dim" in hf_meta:
-                        kwargs["output_dim"] = hf_meta["output_dim"]
-
-                    temp_param = param_class(**kwargs)
-                else:
-                    temp_param = Parameter(hf_tensor, requires_grad=False)
-                    if weight_loader is not None:
-                        temp_param.weight_loader = weight_loader
-            except Exception as e:
-                logger.warning(f"Failed to create temp param with class {param_class}: {e}")
-                temp_param = Parameter(hf_tensor, requires_grad=False)
-                if weight_loader is not None:
-                    temp_param.weight_loader = weight_loader
-
-            if "quant_method" in hf_meta:
-                temp_param.quant_method = hf_meta["quant_method"]
-
-            setattr(module, param_name, temp_param)
+            hf_meta = swap_info["hf_meta"]
+            if hasattr(module, param_name):
+                new_param = _create_param_from_meta(module, param_name, hf_meta, self.device)
+                setattr(module, param_name, new_param)
 
     def __getitem__(self, key: str) -> Parameter:
-        """Get parameter with lazy rebuild support."""
+        """Get parameter with rebuild support."""
         # Try standard lookup first
         if key in dict.keys(self):
             return super().__getitem__(key)
 
-        # Try lazy rebuild
-        param = self._try_lazy_rebuild(key)
+        # Try rebuild from metadata
+        param = self._try_rebuild(key)
         if param is not None:
             self[key] = param
             return param
@@ -270,11 +180,11 @@ class LazyParamsDict(dict):
         raise KeyError(f"Parameter not found: {key}")
 
     def __contains__(self, key: str) -> bool:
-        """Check if parameter exists (with lazy rebuild check)."""
+        """Check if parameter exists (with rebuild check)."""
         if super().__contains__(key):
             return True
 
-        # Check if can lazy rebuild
+        # Check if can rebuild from metadata
         parts = key.rsplit(".", 1)
         if len(parts) == 2:
             layer_name, param_name = parts
@@ -293,8 +203,49 @@ class LazyParamsDict(dict):
             return default
 
 
+def _create_param_from_meta(
+    module: torch.nn.Module,
+    param_name: str,
+    meta: dict,
+    device: Optional[torch.device] = None,
+) -> Parameter:
+    """Create a Parameter from saved metadata. Used by rebuild and tensor swap."""
+    shape = meta["shape"]
+    dtype = meta["dtype"]
+    dev = device or meta.get("device", "cuda")
+    param_class = meta.get("param_class", Parameter)
+
+    weight_loaders = getattr(module, "_weight_loaders", {})
+    weight_loader = weight_loaders.get(param_name)
+
+    data = torch.empty(shape, dtype=dtype, device=dev)
+
+    try:
+        if param_class is not Parameter and weight_loader is not None:
+            kwargs = {"data": data, "weight_loader": weight_loader}
+            if "input_dim" in meta:
+                kwargs["input_dim"] = meta["input_dim"]
+            if "output_dim" in meta:
+                kwargs["output_dim"] = meta["output_dim"]
+            new_param = param_class(**kwargs)
+        else:
+            new_param = Parameter(data, requires_grad=False)
+            if weight_loader is not None:
+                new_param.weight_loader = weight_loader
+    except Exception as e:
+        logger.warning(f"Failed to create param {param_name} with class {param_class}: {e}, using Parameter")
+        new_param = Parameter(data, requires_grad=False)
+        if weight_loader is not None:
+            new_param.weight_loader = weight_loader
+
+    if "quant_method" in meta:
+        new_param.quant_method = meta["quant_method"]
+
+    return new_param
+
+
 def save_param_meta(layer: torch.nn.Module, param_name: str):
-    """Save parameter metadata for lazy rebuild."""
+    """Save parameter metadata for rebuild."""
     if not hasattr(layer, "_hf_param_meta"):
         layer._hf_param_meta = {}
 
@@ -322,79 +273,22 @@ def save_param_meta(layer: torch.nn.Module, param_name: str):
     layer._hf_param_meta[param_name] = meta
 
 
-def get_process_call_count(layer: torch.nn.Module) -> int:
-    """Get the number of times process_weights_after_loading has been called."""
-    if not hasattr(layer, "_process_weights_call_count"):
-        layer._process_weights_call_count = 0
-    return layer._process_weights_call_count
-
-
-def increment_process_call_count(layer: torch.nn.Module):
-    """Increment the process_weights_after_loading call count."""
-    if not hasattr(layer, "_process_weights_call_count"):
-        layer._process_weights_call_count = 0
-    layer._process_weights_call_count += 1
+def _check_first_call(layer: torch.nn.Module) -> bool:
+    """Check if this is the first process_weights call, and increment counter."""
+    count = getattr(layer, "_process_weights_call_count", 0)
+    layer._process_weights_call_count = count + 1
+    return count == 0
 
 
 # Dense W4A16 Patches
 def patched_w4a16_create_weights(
-    self,
-    layer: torch.nn.Module,
-    output_partition_sizes: list[int],
-    input_size_per_partition: int,
-    params_dtype: torch.dtype,
-    weight_loader: Callable,
-    **kwargs,
+    self, layer, output_partition_sizes, input_size_per_partition, params_dtype, weight_loader, **kwargs
 ):
-    """Patched create_weights for W4A16 Dense layer."""
-    from vllm.model_executor.parameter import (
-        GroupQuantScaleParameter,
-        ModelWeightParameter,
-        PerTensorScaleParameter,
+    """Wrapper: calls original create_weights + saves params_dtype for process_weights_after_loading."""
+    _originals["w4a16_create_weights"](
+        self, layer, output_partition_sizes, input_size_per_partition, params_dtype, weight_loader, **kwargs
     )
-
-    output_size_per_partition = sum(output_partition_sizes)
-    layer.logical_widths = output_partition_sizes
-    layer.input_size_per_partition = input_size_per_partition
-    layer.output_size_per_partition = output_size_per_partition
     layer.params_dtype = params_dtype
-
-    weight = ModelWeightParameter(
-        data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition // 2,
-            dtype=torch.uint8,
-        ),
-        input_dim=1,
-        output_dim=0,
-        weight_loader=weight_loader,
-    )
-    layer.register_parameter("weight_packed", weight)
-
-    weight_global_scale = PerTensorScaleParameter(
-        data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-        weight_loader=weight_loader,
-    )
-    layer.register_parameter("weight_global_scale", weight_global_scale)
-
-    weight_scale = GroupQuantScaleParameter(
-        data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition // self.group_size,
-            dtype=torch.float8_e4m3fn,
-        ),
-        input_dim=1,
-        output_dim=0,
-        weight_loader=weight_loader,
-    )
-    layer.register_parameter("weight_scale", weight_scale)
-
-    if self.has_input_global_scale:
-        input_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("input_global_scale", input_global_scale)
 
 
 def patched_w4a16_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -407,9 +301,7 @@ def patched_w4a16_process_weights_after_loading(self, layer: torch.nn.Module) ->
         nvfp4_marlin_process_scales,
     )
 
-    call_count = get_process_call_count(layer)
-    is_first_call = call_count == 0
-    increment_process_call_count(layer)
+    is_first_call = _check_first_call(layer)
 
     group_size = 16
     part_size_n = layer.output_size_per_partition
@@ -489,29 +381,6 @@ def patched_w4a16_process_weights_after_loading(self, layer: torch.nn.Module) ->
         delattr(layer, "weight_global_scale")
 
 
-def patched_w4a16_apply_weights(
-    self,
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Apply weights using compute parameters."""
-    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-        apply_fp4_marlin_linear,
-    )
-
-    return apply_fp4_marlin_linear(
-        input=x,
-        weight=layer.weight,
-        weight_scale=layer.weight_scale,
-        weight_scale_2=layer.weight_scale_2,
-        workspace=layer.workspace,
-        size_n=layer.output_size_per_partition,
-        size_k=layer.input_size_per_partition,
-        bias=bias,
-    )
-
-
 def patched_w4a4_create_weights(
     self,
     layer: torch.nn.Module,
@@ -577,9 +446,7 @@ def patched_w4a4_process_weights_after_loading(self, layer: torch.nn.Module) -> 
         swizzle_blockscale,
     )
 
-    call_count = get_process_call_count(layer)
-    is_first_call = call_count == 0
-    increment_process_call_count(layer)
+    is_first_call = _check_first_call(layer)
 
     # Save metadata (first call only)
     if is_first_call:
@@ -640,217 +507,53 @@ def patched_w4a4_process_weights_after_loading(self, layer: torch.nn.Module) -> 
     delattr(layer, "input_global_scale_hf")
 
 
-def patched_w4a4_apply_weights(
-    self,
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Apply weights using compute parameters."""
-    import vllm.envs as envs
-    from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-    from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-        run_nvfp4_emulations,
-    )
-    from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
+def _marlin_repack_experts(packed, perm, size_k, size_n, num_experts):
+    """Repack weight for each expert into Marlin format and stack."""
+    import vllm._custom_ops as ops
 
-    if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-        out = run_nvfp4_emulations(
-            x=x,
-            input_global_scale=layer.input_global_scale,
-            weight=layer.weight_packed,
-            weight_scale_swizzled=layer.weight_scale,
-            weight_global_scale=layer.weight_global_scale,
+    result = []
+    for i in range(num_experts):
+        qweight = packed[i].view(torch.int32).T.contiguous()
+        result.append(
+            ops.gptq_marlin_repack(
+                b_q_weight=qweight,
+                perm=perm,
+                size_k=size_k,
+                size_n=size_n,
+                num_bits=4,
+                is_a_8bit=False,
+            )
         )
-        if bias is not None:
-            out = out + bias
-        return out
+    return torch.stack(result)
 
-    output_dtype = x.dtype
-    output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
 
-    # Quantize input
-    x_fp4, x_blockscale = scaled_fp4_quant(
-        x,
-        layer.input_global_scale,
-        is_sf_swizzled_layout=True,
-        backend=self.backend,
+def _marlin_process_scales_experts(scale_hf, param_dtype, size_k, size_n, group_size, num_experts):
+    """Process scales for each expert into Marlin format and stack."""
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+        marlin_permute_scales,
+        nvfp4_marlin_process_scales,
     )
 
-    # Matrix multiply
-    mm_args = (
-        x_fp4,
-        layer.weight_packed,
-        x_blockscale,
-        layer.weight_scale,
-        layer.alpha,
-        output_dtype,
-    )
-
-    if self.backend.startswith("flashinfer-"):
-        backend_name = self.backend[len("flashinfer-") :]
-        out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
-    elif self.backend == "fbgemm":
-        out = torch.ops.fbgemm.f4f4bf16(
-            x_fp4,
-            layer.weight_packed,
-            x_blockscale.view(-1).view(torch.uint8),
-            layer.weight_scale,
-            layer.alpha,
-            use_mx=False,
-        ).to(output_dtype)
-    else:
-        out = cutlass_scaled_fp4_mm(*mm_args)
-
-    if bias is not None:
-        out = out + bias
-    return out.view(*output_shape)
-
-
-def patched_nvfp4_moe_create_weights(
-    self,
-    layer: torch.nn.Module,
-    num_experts: int,
-    hidden_size: int,
-    intermediate_size_per_partition: int,
-    params_dtype: torch.dtype,
-    **extra_weight_attrs,
-):
-    """Patched create_weights for NVFP4 MoE layer."""
-    from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
-    from vllm.model_executor.utils import set_weight_attrs
-
-    layer.num_experts = num_experts
-    layer.params_dtype = params_dtype
-    layer.hidden_size = hidden_size
-    layer.intermediate_size_per_partition = intermediate_size_per_partition
-    w13_num_shards = 2 if self.moe.is_act_and_mul else 1
-
-    w13_weight = torch.nn.Parameter(
-        torch.empty(
-            num_experts,
-            w13_num_shards * intermediate_size_per_partition,
-            hidden_size // 2,
-            requires_grad=False,
-            dtype=torch.uint8,
-        ),
-        requires_grad=False,
-    )
-    layer.register_parameter("w13_weight_packed", w13_weight)
-    set_weight_attrs(w13_weight, extra_weight_attrs)
-
-    w2_weight = torch.nn.Parameter(
-        torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition // 2,
-            dtype=torch.uint8,
-        ),
-        requires_grad=False,
-    )
-    layer.register_parameter("w2_weight_packed", w2_weight)
-    set_weight_attrs(w2_weight, extra_weight_attrs)
-
-    w13_weight_scale = torch.nn.Parameter(
-        torch.empty(
-            num_experts,
-            w13_num_shards * intermediate_size_per_partition,
-            hidden_size // self.group_size,
-            dtype=torch.float8_e4m3fn,
-        ),
-        requires_grad=False,
-    )
-    layer.register_parameter("w13_weight_scale", w13_weight_scale)
-    extra_weight_attrs_scale = dict(extra_weight_attrs)
-    extra_weight_attrs_scale["quant_method"] = FusedMoeWeightScaleSupported.GROUP.value
-    set_weight_attrs(w13_weight_scale, extra_weight_attrs_scale)
-
-    w2_weight_scale = torch.nn.Parameter(
-        torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition // self.group_size,
-            dtype=torch.float8_e4m3fn,
-        ),
-        requires_grad=False,
-    )
-    layer.register_parameter("w2_weight_scale", w2_weight_scale)
-    set_weight_attrs(w2_weight_scale, extra_weight_attrs_scale)
-
-    w13_weight_scale_2 = torch.nn.Parameter(
-        torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
-        requires_grad=False,
-    )
-    layer.register_parameter("w13_weight_global_scale", w13_weight_scale_2)
-    extra_weight_attrs_tensor = dict(extra_weight_attrs)
-    extra_weight_attrs_tensor["quant_method"] = FusedMoeWeightScaleSupported.TENSOR.value
-    set_weight_attrs(w13_weight_scale_2, extra_weight_attrs_tensor)
-
-    w2_weight_scale_2 = torch.nn.Parameter(
-        torch.empty(num_experts, dtype=torch.float32),
-        requires_grad=False,
-    )
-    layer.register_parameter("w2_weight_global_scale", w2_weight_scale_2)
-    set_weight_attrs(w2_weight_scale_2, extra_weight_attrs_tensor)
-
-    w13_input_scale = torch.nn.Parameter(
-        torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
-        requires_grad=False,
-    )
-    layer.register_parameter("w13_input_global_scale", w13_input_scale)
-    set_weight_attrs(w13_input_scale, extra_weight_attrs_tensor)
-
-    w2_input_scale = torch.nn.Parameter(
-        torch.empty(num_experts, dtype=torch.float32),
-        requires_grad=False,
-    )
-    layer.register_parameter("w2_input_global_scale", w2_input_scale)
-    set_weight_attrs(w2_input_scale, extra_weight_attrs_tensor)
-
-
-def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-    """Patched process_weights_after_loading for NVFP4 MoE layer."""
-    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
-
-    call_count = get_process_call_count(layer)
-    is_first_call = call_count == 0
-    increment_process_call_count(layer)
-
-    # Save metadata (first call only)
-    if is_first_call:
-        save_param_meta(layer, "w13_weight_packed")
-        save_param_meta(layer, "w2_weight_packed")
-        save_param_meta(layer, "w13_weight_scale")
-        save_param_meta(layer, "w2_weight_scale")
-        if not hasattr(layer, "_weight_loaders"):
-            layer._weight_loaders = {}
-        for pname in ["w13_weight_packed", "w2_weight_packed", "w13_weight_scale", "w2_weight_scale"]:
-            param = getattr(layer, pname, None)
-            if param is not None and hasattr(param, "weight_loader"):
-                layer._weight_loaders[pname] = param.weight_loader
-
-    is_marlin = self.nvfp4_backend == NvFp4MoeBackend.MARLIN
-    if is_marlin:
-        _process_nvfp4_moe_marlin(self, layer, is_first_call)
-    else:
-        _process_nvfp4_moe_flashinfer_cutlass(self, layer, is_first_call)
-
-    # Delete HF parameters
-    if hasattr(layer, "w13_weight_packed"):
-        delattr(layer, "w13_weight_packed")
-    if hasattr(layer, "w2_weight_packed"):
-        delattr(layer, "w2_weight_packed")
+    result = []
+    scales = scale_hf.to(param_dtype)
+    for i in range(num_experts):
+        s = marlin_permute_scales(
+            s=scales[i].T,
+            size_k=size_k,
+            size_n=size_n,
+            group_size=group_size,
+            is_a_8bit=False,
+        )
+        result.append(nvfp4_marlin_process_scales(s))
+    return torch.stack(result)
 
 
 def _process_nvfp4_moe_marlin(self, layer: torch.nn.Module, is_first_call: bool) -> None:
     """Process MoE layer with MARLIN backend (W4A16)."""
-    import vllm._custom_ops as ops
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import make_nvfp4_moe_kernel
     from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
         marlin_make_workspace_new,
-        marlin_permute_scales,
         nvfp4_marlin_process_global_scale,
-        nvfp4_marlin_process_scales,
     )
 
     group_size = 16
@@ -861,85 +564,27 @@ def _process_nvfp4_moe_marlin(self, layer: torch.nn.Module, is_first_call: bool)
     param_dtype = layer.params_dtype
     w13_num_shards = 2 if self.moe.is_act_and_mul else 1
 
-    # Create workspace
     if is_first_call:
         layer.workspace = marlin_make_workspace_new(device, 4)
 
     perm = torch.empty(0, dtype=torch.int, device=device)
-
-    w13_packed = layer.w13_weight_packed.data
-    w2_packed = layer.w2_weight_packed.data
-    w13_scale_hf = layer.w13_weight_scale.data
-    w2_scale_hf = layer.w2_weight_scale.data
 
     if self.moe.is_act_and_mul and not torch.allclose(
         layer.w13_weight_global_scale[:, 0], layer.w13_weight_global_scale[:, 1]
     ):
         logger.warning("w1_weight_global_scale must match w3_weight_global_scale. Accuracy may be affected.")
 
-    # Process w13_weight
-    w13_tensor_list = []
     size_n_w13, size_k_w13 = n * w13_num_shards, k
-    for i in range(e):
-        qweight = w13_packed[i].view(torch.int32).T.contiguous()
-        marlin_qweight = ops.gptq_marlin_repack(
-            b_q_weight=qweight,
-            perm=perm,
-            size_k=size_k_w13,
-            size_n=size_n_w13,
-            num_bits=4,
-            is_a_8bit=False,
-        )
-        w13_tensor_list.append(marlin_qweight)
-    w13_weight_marlin = torch.cat([x.unsqueeze(0) for x in w13_tensor_list], 0)
-
-    # Process w2_weight
-    w2_tensor_list = []
     size_n_w2, size_k_w2 = k, n
-    for i in range(e):
-        qweight = w2_packed[i].view(torch.int32).T.contiguous()
-        marlin_qweight = ops.gptq_marlin_repack(
-            b_q_weight=qweight,
-            perm=perm,
-            size_k=size_k_w2,
-            size_n=size_n_w2,
-            num_bits=4,
-            is_a_8bit=False,
-        )
-        w2_tensor_list.append(marlin_qweight)
-    w2_weight_marlin = torch.cat([x.unsqueeze(0) for x in w2_tensor_list], 0)
 
-    # Process w13_weight_scale
-    w13_scale_list = []
-    scales = w13_scale_hf.to(param_dtype)
-    for i in range(e):
-        scale = scales[i].T
-        marlin_scales = marlin_permute_scales(
-            s=scale,
-            size_k=size_k_w13,
-            size_n=size_n_w13,
-            group_size=group_size,
-            is_a_8bit=False,
-        )
-        marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
-        w13_scale_list.append(marlin_scales)
-    w13_weight_scale_marlin = torch.cat([x.unsqueeze(0) for x in w13_scale_list], 0)
-
-    # Process w2_weight_scale
-    w2_scale_list = []
-    scales = w2_scale_hf.to(param_dtype)
-    for i in range(e):
-        scale = scales[i].T
-        marlin_scales = marlin_permute_scales(
-            s=scale,
-            size_k=size_k_w2,
-            size_n=size_n_w2,
-            group_size=group_size,
-            is_a_8bit=False,
-        )
-        marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
-        w2_scale_list.append(marlin_scales)
-    w2_weight_scale_marlin = torch.cat([x.unsqueeze(0) for x in w2_scale_list], 0)
+    w13_weight_marlin = _marlin_repack_experts(layer.w13_weight_packed.data, perm, size_k_w13, size_n_w13, e)
+    w2_weight_marlin = _marlin_repack_experts(layer.w2_weight_packed.data, perm, size_k_w2, size_n_w2, e)
+    w13_weight_scale_marlin = _marlin_process_scales_experts(
+        layer.w13_weight_scale.data, param_dtype, size_k_w13, size_n_w13, group_size, e
+    )
+    w2_weight_scale_marlin = _marlin_process_scales_experts(
+        layer.w2_weight_scale.data, param_dtype, size_k_w2, size_n_w2, group_size, e
+    )
 
     # Process global scales
     w13_scale_2 = 1.0 / layer.w13_weight_global_scale[:, 0]
@@ -1088,7 +733,101 @@ def _process_nvfp4_moe_flashinfer_cutlass(self, layer: torch.nn.Module, is_first
         )
 
 
+# MoE NVFP4 Patches (entry points)
+def patched_nvfp4_moe_create_weights(
+    self, layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype, **extra_weight_attrs
+):
+    """Wrapper: calls original create_weights + saves hidden_size/intermediate_size_per_partition."""
+    _originals["moe_create_weights"](
+        self, layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype, **extra_weight_attrs
+    )
+    layer.hidden_size = hidden_size
+    layer.intermediate_size_per_partition = intermediate_size_per_partition
+
+
+def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    """Patched process_weights_after_loading for NVFP4 MoE layer."""
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    is_first_call = _check_first_call(layer)
+
+    # Save metadata (first call only)
+    if is_first_call:
+        save_param_meta(layer, "w13_weight_packed")
+        save_param_meta(layer, "w2_weight_packed")
+        save_param_meta(layer, "w13_weight_scale")
+        save_param_meta(layer, "w2_weight_scale")
+        if not hasattr(layer, "_weight_loaders"):
+            layer._weight_loaders = {}
+        for pname in ["w13_weight_packed", "w2_weight_packed", "w13_weight_scale", "w2_weight_scale"]:
+            param = getattr(layer, pname, None)
+            if param is not None and hasattr(param, "weight_loader"):
+                layer._weight_loaders[pname] = param.weight_loader
+
+    is_marlin = self.nvfp4_backend == NvFp4MoeBackend.MARLIN
+    if is_marlin:
+        _process_nvfp4_moe_marlin(self, layer, is_first_call)
+    else:
+        _process_nvfp4_moe_flashinfer_cutlass(self, layer, is_first_call)
+
+    # Delete HF parameters
+    if hasattr(layer, "w13_weight_packed"):
+        delattr(layer, "w13_weight_packed")
+    if hasattr(layer, "w2_weight_packed"):
+        delattr(layer, "w2_weight_packed")
+
+
+_PATCH_TARGETS = [
+    # Dense W4A16
+    (
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.create_weights",
+        patched_w4a16_create_weights,
+    ),
+    (
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.process_weights_after_loading",
+        patched_w4a16_process_weights_after_loading,
+    ),
+    # Dense W4A4
+    (
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w4a4_nvfp4.CompressedTensorsW4A4Fp4.create_weights",
+        patched_w4a4_create_weights,
+    ),
+    (
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w4a4_nvfp4.CompressedTensorsW4A4Fp4.process_weights_after_loading",
+        patched_w4a4_process_weights_after_loading,
+    ),
+    # MoE NVFP4
+    (
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "compressed_tensors_moe.CompressedTensorsW4A4Nvfp4MoEMethod.create_weights",
+        patched_nvfp4_moe_create_weights,
+    ),
+    (
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "compressed_tensors_moe.CompressedTensorsW4A4Nvfp4MoEMethod.process_weights_after_loading",
+        patched_nvfp4_moe_process_weights_after_loading,
+    ),
+]
+
 _applied_patches = []
+_originals: dict[str, object] = {}
+
+
+def _save_originals():
+    """Save original vLLM methods before patching (used by wrapper-style patches)."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+        CompressedTensorsW4A4Nvfp4MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a16_nvfp4 import (
+        CompressedTensorsW4A16Fp4,
+    )
+
+    _originals["w4a16_create_weights"] = CompressedTensorsW4A16Fp4.create_weights
+    _originals["moe_create_weights"] = CompressedTensorsW4A4Nvfp4MoEMethod.create_weights
 
 
 def apply_qat_patches():
@@ -1099,91 +838,17 @@ def apply_qat_patches():
         logger.warning("QAT patches already applied, skipping")
         return _applied_patches
 
+    _save_originals()
+
     logger.info("Applying NVFP4 patches for dynamic weight loading...")
 
-    # Dense W4A16 patches
-    patch1 = patch(
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.create_weights",
-        patched_w4a16_create_weights,
-    )
-    _applied_patches.append(patch1)
-    patch1.start()
-
-    patch2 = patch(
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.process_weights_after_loading",
-        patched_w4a16_process_weights_after_loading,
-    )
-    _applied_patches.append(patch2)
-    patch2.start()
-
-    patch3 = patch(
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.apply_weights",
-        patched_w4a16_apply_weights,
-    )
-    _applied_patches.append(patch3)
-    patch3.start()
-
-    # Dense W4A4 patches
-    patch4 = patch(
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a4_nvfp4.CompressedTensorsW4A4Fp4.create_weights",
-        patched_w4a4_create_weights,
-    )
-    _applied_patches.append(patch4)
-    patch4.start()
-
-    patch5 = patch(
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a4_nvfp4.CompressedTensorsW4A4Fp4.process_weights_after_loading",
-        patched_w4a4_process_weights_after_loading,
-    )
-    _applied_patches.append(patch5)
-    patch5.start()
-
-    patch6 = patch(
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a4_nvfp4.CompressedTensorsW4A4Fp4.apply_weights",
-        patched_w4a4_apply_weights,
-    )
-    _applied_patches.append(patch6)
-    patch6.start()
-
-    # MoE NVFP4 patches
-    patch7 = patch(
-        "vllm.model_executor.layers.quantization.compressed_tensors."
-        "compressed_tensors_moe.CompressedTensorsW4A4Nvfp4MoEMethod.create_weights",
-        patched_nvfp4_moe_create_weights,
-    )
-    _applied_patches.append(patch7)
-    patch7.start()
-
-    patch8 = patch(
-        "vllm.model_executor.layers.quantization.compressed_tensors."
-        "compressed_tensors_moe.CompressedTensorsW4A4Nvfp4MoEMethod.process_weights_after_loading",
-        patched_nvfp4_moe_process_weights_after_loading,
-    )
-    _applied_patches.append(patch8)
-    patch8.start()
+    for target, replacement in _PATCH_TARGETS:
+        p = patch(target, replacement)
+        _applied_patches.append(p)
+        p.start()
 
     logger.info(f"Applied {len(_applied_patches)} NVFP4 patches for dynamic weight loading")
     return _applied_patches
-
-
-def remove_qat_patches(patches=None):
-    """Remove applied patches."""
-    global _applied_patches
-
-    patches_to_remove = patches or _applied_patches
-    for p in patches_to_remove:
-        p.stop()
-
-    if patches is None:
-        _applied_patches = []
-
-    logger.info("Removed NVFP4 patches")
 
 
 def prepare_qat_for_load_weights(model, device=None):
@@ -1198,30 +863,26 @@ def prepare_qat_for_load_weights(model, device=None):
     if hasattr(model, "model"):
         inner_model = model.model
 
-    lazy_params = LazyParamsDict(inner_model, device=device)
+    param_meta = ParamMetaDict(inner_model, device=device)
 
-    # Tensor swap: replace Marlin-format weight_scale with HF-format tensor
-    lazy_params.prepare_for_reload()
-    logger.info(f"[prepare_qat] Tensor swap prepared for {len(lazy_params._tensor_swap_layers)} layers")
+    # Tensor swap: replace Marlin-format tensors with HF-shape tensors for reload
+    param_meta.prepare_for_reload()
+    logger.info(f"[prepare_qat] Tensor swap prepared for {len(param_meta._tensor_swap_layers)} layers")
 
-    # Rebuild deleted parameters
+    # Rebuild all missing parameters (deleted by process_weights_after_loading) in HF shape
     rebuilt_count = 0
-    for layer_name, cache_entry in lazy_params._layer_meta_cache.items():
-        meta = cache_entry["meta"]
+    for layer_name, cache_entry in param_meta._layer_meta_cache.items():
         module = cache_entry["module"]
-        for param_name in meta.keys():
+        for param_name, pm in cache_entry["meta"].items():
             if hasattr(module, param_name) and getattr(module, param_name) is not None:
                 continue
-            full_name = f"{layer_name}.{param_name}" if layer_name else param_name
-            try:
-                lazy_params[full_name]
-                rebuilt_count += 1
-            except KeyError:
-                pass
+            new_param = _create_param_from_meta(module, param_name, pm, device)
+            module.register_parameter(param_name, new_param)
+            rebuilt_count += 1
 
     logger.info(f"[prepare_qat] Rebuilt {rebuilt_count} parameters")
-    inner_model._lazy_params_for_restore = lazy_params
-    return lazy_params
+    inner_model._param_meta_for_restore = param_meta
+    return param_meta
 
 
 def manual_process_weights_after_loading(model):
@@ -1252,9 +913,7 @@ def manual_process_weights_after_loading(model):
 
 
 __all__ = [
-    "LazyParamsDict",
     "apply_qat_patches",
-    "remove_qat_patches",
     "prepare_qat_for_load_weights",
     "manual_process_weights_after_loading",
 ]
