@@ -652,10 +652,14 @@ global_profiler:
       data_dir: outputs/precision_debug
       steps: null
       stages:
-      - rollout
-      - train
+      - rollout_generate
       - update_actor
-      - ref_model
+      - actor_compute_log_prob
+      - ref_compute_log_prob
+      - compute_values
+      - critic_update
+      - compute_rm_score
+      - train
 transfer_queue:
   enable: false
 ray_kwargs:

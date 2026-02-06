@@ -755,7 +755,7 @@ class MegatronPPOActor(BasePPOActor):
         return losses_reduced
 
     @GPUMemoryLogger(role="megatron actor", logger=logger)
-    @DistProfiler.precision(stage="train", model_attr="actor_module")
+    @DistProfiler.annotate(precision_stage="train", precision_model_attr="actor_module")
     def update_policy(self, dataloader: Iterable[DataProto], enable_mtp: bool = False) -> dict:
         """Update the policy with an iterator of DataProto
 
@@ -826,6 +826,6 @@ class MegatronPPOActor(BasePPOActor):
         get_torch_device().empty_cache()
         return metrics
 
-    @DistProfiler.precision(stage="update_actor", model_attr="actor_module")
+    @DistProfiler.annotate(precision_stage="update_actor", precision_model_attr="actor_module", precision_step=True)
     def _optimizer_step_with_precision(self):
         return self.actor_optimizer.step()

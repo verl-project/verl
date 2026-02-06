@@ -112,6 +112,8 @@ class vLLMHttpServer:
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        self.precision_debugger_cfg = getattr(self.config, "precision_debugger", None)
+        self.precision_global_step = None
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
             self.config.max_model_len = max_position_embeddings
@@ -177,6 +179,9 @@ class vLLMHttpServer:
             tuple: (master_address, master_port, dp_rpc_port)
         """
         return self._master_address, self._master_port, self._dp_rpc_port
+
+    def set_precision_global_step(self, global_step: int) -> None:
+        self.precision_global_step = global_step
 
     def get_server_address(self):
         """Get http server address and port."""
@@ -445,6 +450,11 @@ class vLLMHttpServer:
         self.task = asyncio.create_task(asyncio.to_thread(run_headless_wrapper))
         self.task.add_done_callback(on_run_headless_done)
 
+    @DistProfiler.annotate(
+        precision_stage="rollout_generate",
+        precision_model_attr=["engine", "engine.model", "engine.model_runner.model"],
+        precision_global_step_attr="precision_global_step",
+    )
     async def generate(
         self,
         prompt_ids: list[int],
@@ -455,6 +465,8 @@ class vLLMHttpServer:
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        if "_precision_global_step" in sampling_params:
+            self.precision_global_step = sampling_params.pop("_precision_global_step")
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)

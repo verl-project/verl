@@ -319,7 +319,7 @@ global_profiler:
       steps: null
 
       # Stages to collect
-      stages: ["rollout", "train", "update_actor", "ref_model"]
+      stages: ["rollout_generate", "update_actor", "actor_compute_log_prob", "ref_compute_log_prob", "compute_values", "critic_update", "compute_rm_score", "train"]
 
 # configs for TransferQueue
 transfer_queue:

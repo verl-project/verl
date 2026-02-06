@@ -938,8 +938,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
-    @DistProfiler.annotate(color="red", role="rollout_generate")
-    @DistProfiler.precision(stage="rollout", model_attr=("actor_module_fsdp", "actor_module"))
+    @DistProfiler.annotate(
+        color="red",
+        role="rollout_generate",
+        precision_stage="rollout_generate",
+        precision_model_attr=("actor_module_fsdp", "actor_module"),
+    )
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
         assert self._is_rollout
@@ -989,7 +993,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+    @DistProfiler.annotate(
+        color="blue",
+        role="actor_compute_log_prob",
+        precision_stage="actor_compute_log_prob",
+        precision_model_attr=("actor_module_fsdp", "actor_module"),
+    )
     def compute_log_prob(self, data: DataProto):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
@@ -1041,8 +1050,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
-    @DistProfiler.precision(stage="ref_model", model_attr=("ref_module_fsdp", "actor_module_fsdp"))
+    @DistProfiler.annotate(
+        color="olive",
+        role="ref_compute_log_prob",
+        precision_stage="ref_compute_log_prob",
+        precision_model_attr=("ref_module_fsdp", "actor_module_fsdp"),
+    )
     def compute_ref_log_prob(self, data: DataProto):
         if self._is_lora:
             # if _is_lora, actor without lora applied is the ref
@@ -1541,7 +1554,12 @@ class CriticWorker(Worker, DistProfilerExtension):
         )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="critic"))
-    @DistProfiler.annotate(color="cyan", role="compute_values")
+    @DistProfiler.annotate(
+        color="cyan",
+        role="compute_values",
+        precision_stage="compute_values",
+        precision_model_attr="critic_module_fsdp",
+    )
     def compute_values(self, data: DataProto):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
@@ -1561,7 +1579,12 @@ class CriticWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="critic"))
-    @DistProfiler.annotate(color="pink", role="critic_update")
+    @DistProfiler.annotate(
+        color="pink",
+        role="critic_update",
+        precision_stage="critic_update",
+        precision_model_attr="critic_module_fsdp",
+    )
     def update_critic(self, data: DataProto):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
@@ -1929,7 +1952,12 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         return DataProto.from_dict(rm_inputs)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
-    @DistProfiler.annotate(color="brown", role="compute_rm_score")
+    @DistProfiler.annotate(
+        color="brown",
+        role="compute_rm_score",
+        precision_stage="compute_rm_score",
+        precision_model_attr="reward_model_module_fsdp",
+    )
     def compute_rm_score(self, data: DataProto):
         import itertools
 

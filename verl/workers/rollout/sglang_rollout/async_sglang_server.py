@@ -168,6 +168,8 @@ class SGLangHttpServer:
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        self.precision_debugger_cfg = getattr(self.config, "precision_debugger", None)
+        self.precision_global_step = None
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
             self.config.max_model_len = max_position_embeddings
@@ -219,6 +221,9 @@ class SGLangHttpServer:
     def get_master_address(self):
         """Get master address and port for init NCCL process group."""
         return self._master_address, self._master_port
+
+    def set_precision_global_step(self, global_step: int) -> None:
+        self.precision_global_step = global_step
 
     def get_server_address(self):
         """Get http server address and port."""
@@ -394,6 +399,11 @@ class SGLangHttpServer:
         obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @DistProfiler.annotate(
+        precision_stage="rollout_generate",
+        precision_model_attr=["model", "model_runner.model"],
+        precision_global_step_attr="precision_global_step",
+    )
     async def generate(
         self,
         prompt_ids: torch.Tensor,
@@ -403,6 +413,8 @@ class SGLangHttpServer:
         video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        if "_precision_global_step" in sampling_params:
+            self.precision_global_step = sampling_params.pop("_precision_global_step")
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
 

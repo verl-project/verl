@@ -177,6 +177,10 @@ class vLLMColocateWorkerExtension:
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
+        if not hasattr(self, "_precision_global_step"):
+            self._precision_global_step = -1
+        self._precision_global_step += 1
+
         if current_platform.device_type == "npu" and self.device is None:
             self.device = torch.device(f"npu:{self.local_rank}")
 

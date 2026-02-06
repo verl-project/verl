@@ -103,6 +103,10 @@ async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
         }
 
 
+def _launch_server_with_precision(server_args: ServerArgs) -> None:
+    launch_server(server_args)
+
+
 def launch_server_process(
     server_args: ServerArgs,
     timeout: float = DEFAULT_TIMEOUT,
@@ -134,7 +138,7 @@ def launch_server_process(
         This is for consistency; except for the process obtained by node_rank = 0,
         other processes have no actual effect.
     """
-    p = multiprocessing.Process(target=launch_server, args=(server_args,))
+    p = multiprocessing.Process(target=_launch_server_with_precision, args=(server_args,))
     if server_args.node_rank != 0 or not first_rank_in_node:
         logger.info(f"Server process started with PID {p.pid} for node rank {server_args.node_rank}", flush=True)
         return p

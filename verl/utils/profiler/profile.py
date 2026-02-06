@@ -13,14 +13,11 @@
 # limitations under the License.
 
 import functools
+import inspect
 from typing import Callable, Optional
 
 from ..memory_utils import MemorySnapshotSampler, enable_memory_visualize
 from .config import ProfilerConfig, TorchMemoryToolConfig
-import os
-import threading
-
-_precision_lock = threading.Lock()
 
 
 def mark_start_range(
@@ -81,6 +78,7 @@ class DistProfiler:
     - npu: NPUProfiler (Ascend)
     - torch: PyTorch torch.profiler wrapper
     - torch_memory: Torch CUDA memory snapshot dump
+    - precision_debugger: msprobe precision debugger
     """
 
     def __init__(
@@ -100,6 +98,7 @@ class DistProfiler:
         self._tool = getattr(config, "tool", None)
         self._enable = config.enable
         self._this_step = False
+        self.rank = rank
 
         # Normalize rank selection
         self._this_rank = False
@@ -129,6 +128,10 @@ class DistProfiler:
             self._impl = _Torch(rank=rank, config=config, tool_config=tool_config)
         elif self._tool == "torch_memory":
             self._impl = TorchMemoryProfiler(rank=rank, config=config, tool_config=tool_config)
+        elif self._tool == "precision_debugger":
+            from .precision_debugger_profile import PrecisionDebuggerProfiler as _Precision
+
+            self._impl = _Precision(precision_cfg=tool_config, rank=rank)
         else:
             # Fallback to a no-op impl
             self._impl = _NoOpProfiler()
@@ -155,98 +158,6 @@ class DistProfiler:
             self._this_step = False
             return getattr(self._impl, "stop", lambda: None)()
 
-    def precision_start(self, precision_cfg, stage: str, global_step: Optional[int], model=None) -> bool:
-        if not precision_cfg or not precision_cfg.get("enable", False):
-            return False
-        stages = precision_cfg.get("stages", None)
-        if stages is not None and stage not in set(stages):
-            return False
-        steps = precision_cfg.get("steps", None)
-        if steps is not None and global_step is not None:
-            if int(global_step) not in set(steps):
-                return False
-        config_path = precision_cfg.get("config_path", None)
-        data_dir = precision_cfg.get("data_dir", None)
-        if not config_path or not data_dir:
-            return False
-        dump_path = os.path.join(data_dir, str(global_step) if global_step is not None else "unknown", stage)
-        os.makedirs(dump_path, exist_ok=True)
-        with _precision_lock:
-            from msprobe.pytorch import PrecisionDebugger
-
-            debugger = PrecisionDebugger._instance
-            if debugger is None:
-                PrecisionDebugger(config_path=config_path, dump_path=dump_path)
-                debugger = PrecisionDebugger._instance
-            if debugger is None:
-                return False
-            debugger.service.config.dump_path = dump_path
-        debugger.start(model)
-        return True
-
-    def precision_stop(self, precision_cfg, stage: str, started: bool) -> None:
-        if not started:
-            return
-        from msprobe.pytorch import PrecisionDebugger
-
-        debugger = PrecisionDebugger._instance
-        if debugger is None:
-            return
-        debugger.stop()
-        if stage == "update_actor":
-            debugger.step()
-
-    @classmethod
-    def precision(
-        cls,
-        stage: str,
-        model_attr: Optional[object] = None,
-    ) -> Callable:
-        def _get_model(self_instance):
-            if model_attr is None:
-                return None
-            if isinstance(model_attr, (list, tuple)):
-                for attr in model_attr:
-                    val = getattr(self_instance, attr, None)
-                    if val is not None:
-                        return val
-                return None
-            return getattr(self_instance, model_attr, None)
-
-        def _get_global_step(self_instance, args, kwargs):
-            for val in list(args) + list(kwargs.values()):
-                if hasattr(val, "meta_info"):
-                    meta = getattr(val, "meta_info")
-                    if isinstance(meta, dict) and "global_steps" in meta:
-                        return meta.get("global_steps")
-                if hasattr(val, "get"):
-                    try:
-                        step = val.get("global_steps", None)
-                        if step is not None:
-                            return step
-                    except Exception:
-                        pass
-            if hasattr(self_instance, "precision_global_step"):
-                return getattr(self_instance, "precision_global_step")
-            return None
-
-        def decorator(func):
-            @functools.wraps(func)
-            def wrapper(self_instance, *args, **kwargs):
-                profiler = getattr(self_instance, "profiler", None)
-                precision_cfg = getattr(self_instance, "precision_debugger_cfg", None)
-                if not profiler or not precision_cfg:
-                    return func(self_instance, *args, **kwargs)
-                global_step = _get_global_step(self_instance, args, kwargs)
-                model = _get_model(self_instance)
-                started = profiler.precision_start(precision_cfg, stage, global_step, model)
-                result = func(self_instance, *args, **kwargs)
-                profiler.precision_stop(precision_cfg, stage, started)
-                return result
-
-            return wrapper
-
-        return decorator
 
     @classmethod
     def annotate(
@@ -255,31 +166,113 @@ class DistProfiler:
         color: Optional[str] = None,
         domain: Optional[str] = None,
         category: Optional[str] = None,
+        precision_stage: Optional[str] = None,
+        precision_model_attr: Optional[object] = None,
+        precision_global_step_attr: Optional[str] = None,
+        precision_step: bool = False,
         **kwargs_outer,
     ) -> Callable:
-        def decorator(func):
+        def _get_model(self_instance):
+            if precision_model_attr is None:
+                return None
+            if isinstance(precision_model_attr, (list, tuple)):
+                for attr in precision_model_attr:
+                    val = _resolve_attr(self_instance, attr)
+                    if val is not None:
+                        return val
+                return None
+            return _resolve_attr(self_instance, precision_model_attr)
+
+        def _resolve_attr(obj, attr):
+            if not isinstance(attr, str):
+                return None
+            if "." in attr:
+                current = obj
+                for part in attr.split("."):
+                    current = getattr(current, part, None)
+                    if current is None:
+                        return None
+                return current
+            return getattr(obj, attr, None)
+
+        def _get_global_step(self_instance, args, kwargs):
+            for val in list(args) + list(kwargs.values()):
+                if hasattr(val, "meta_info"):
+                    meta = getattr(val, "meta_info")
+                    if isinstance(meta, dict) and "global_steps" in meta:
+                        return meta.get("global_steps")
+                if isinstance(val, dict) and "global_steps" in val:
+                    return val.get("global_steps")
+            if precision_global_step_attr and hasattr(self_instance, precision_global_step_attr):
+                return getattr(self_instance, precision_global_step_attr)
+            if hasattr(self_instance, "precision_global_step"):
+                return getattr(self_instance, "precision_global_step")
+            return None
+
+        def _build_precision_impl(self_instance):
+            precision_cfg = getattr(self_instance, "precision_debugger_cfg", None)
+            if not precision_cfg or not precision_stage:
+                return None
+            from .precision_debugger_profile import PrecisionDebuggerProfiler
+
+            rank = getattr(getattr(self_instance, "profiler", None), "rank", None)
+            return PrecisionDebuggerProfiler(precision_cfg, rank=rank)
+
+        def _precision_start(precision_impl, self_instance, args, kwargs_inner):
+            if precision_impl is None:
+                return False
+            global_step = _get_global_step(self_instance, args, kwargs_inner)
+            model = _get_model(self_instance)
+            return precision_impl.start(stage=precision_stage, global_step=global_step, model=model)
+
+        def _decorate_with_profiler(impl, func_inner):
+            if hasattr(impl, "annotate"):
+                return impl.annotate(message=message, color=color, domain=domain, category=category, **kwargs_outer)(
+                    func_inner
+                )
+            return func_inner
+
+        def _should_profile(self_instance) -> bool:
+            profiler = getattr(self_instance, "profiler", None)
+            return (
+                profiler
+                and profiler.check_enable()
+                and profiler.check_this_step()
+                and profiler.check_this_rank()
+            )
+
+        if inspect.iscoroutinefunction(func):
+
             @functools.wraps(func)
+            async def async_wrapper(self_instance, *args, **kwargs_inner):
+                precision_impl = _build_precision_impl(self_instance)
+                precision_started = _precision_start(precision_impl, self_instance, args, kwargs_inner)
+                try:
+                    if _should_profile(self_instance):
+                        impl = self_instance.profiler._impl
+                        wrapped = _decorate_with_profiler(impl, func)
+                        return await wrapped(self_instance, *args, **kwargs_inner)
+                    return await func(self_instance, *args, **kwargs_inner)
+                finally:
+                    if precision_impl is not None and precision_stage:
+                        precision_impl.stop(started=precision_started, step=precision_step)
+
+            return async_wrapper
+
+        def decorator(func_inner):
+            @functools.wraps(func_inner)
             def wrapper(self_instance, *args, **kwargs_inner):
-                profiler = getattr(self_instance, "profiler", None)
-                if (
-                    not profiler
-                    or not profiler.check_enable()
-                    or not profiler.check_this_step()
-                    or not profiler.check_this_rank()
-                ):
-                    return func(self_instance, *args, **kwargs_inner)
-
-                impl = profiler._impl
-                if hasattr(impl, "annotate"):
-                    try:
-                        actual_decorator = impl.annotate(
-                            message=message, color=color, domain=domain, category=category, **kwargs_outer
-                        )
-
-                        return actual_decorator(func)(self_instance, *args, **kwargs_inner)
-                    except Exception:
-                        return func(self_instance, *args, **kwargs_inner)
-                return func(self_instance, *args, **kwargs_inner)
+                precision_impl = _build_precision_impl(self_instance)
+                precision_started = _precision_start(precision_impl, self_instance, args, kwargs_inner)
+                try:
+                    if _should_profile(self_instance):
+                        impl = self_instance.profiler._impl
+                        wrapped = _decorate_with_profiler(impl, func_inner)
+                        return wrapped(self_instance, *args, **kwargs_inner)
+                    return func_inner(self_instance, *args, **kwargs_inner)
+                finally:
+                    if precision_impl is not None and precision_stage:
+                        precision_impl.stop(started=precision_started, step=precision_step)
 
             return wrapper
 
@@ -292,6 +285,8 @@ class _NoOpProfiler:
 
     def stop(self):
         return
+
+
 
 
 class TorchMemoryProfiler:

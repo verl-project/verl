@@ -552,21 +552,29 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
-    @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
-    @DistProfiler.precision(stage="ref_model", model_attr="ref")
+    @DistProfiler.annotate(
+        color="olive",
+        role="ref_compute_log_prob",
+        precision_stage="ref_compute_log_prob",
+        precision_model_attr="ref",
+    )
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+    @DistProfiler.annotate(
+        color="blue",
+        role="actor_compute_log_prob",
+        precision_stage="actor_compute_log_prob",
+        precision_model_attr="actor",
+    )
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
-    @DistProfiler.precision(stage="update_actor", model_attr="actor")
     def update_actor(self, data: TensorDict) -> TensorDict:
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None

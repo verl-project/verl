@@ -389,7 +389,7 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["sum_pi_squared"] = sum_pi_squared
             return outputs
 
-    @DistProfiler.precision(stage="update_actor", model_attr="actor_module")
+    @DistProfiler.annotate(precision_stage="update_actor", precision_model_attr="actor_module", precision_step=True)
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
         if self.scaler is not None:
@@ -501,7 +501,7 @@ class DataParallelPPOActor(BasePPOActor):
         return outputs
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
-    @DistProfiler.precision(stage="train", model_attr="actor_module")
+    @DistProfiler.annotate(precision_stage="train", precision_model_attr="actor_module")
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()

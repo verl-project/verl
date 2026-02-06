@@ -190,6 +190,11 @@ class ServerAdapter(BaseRollout):
             - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
         """
         await self._init_server_adapter()
+        if not hasattr(self, "_precision_global_step"):
+            self._precision_global_step = -1
+        self._precision_global_step += 1
+        if hasattr(self, "server_actor") and self.server_actor is not None:
+            await self.server_actor.set_precision_global_step.remote(self._precision_global_step)
 
         update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
         if self.config.get("quantization", None) == "fp8":
