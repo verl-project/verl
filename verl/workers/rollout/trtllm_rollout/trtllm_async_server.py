@@ -89,6 +89,10 @@ class TRTLLMHttpServer:
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
             self.config.load_format = "auto"
 
+        self.is_vlm_model = (
+            self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
+        ) or hasattr(self.model_config, "vision_config")
+
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
@@ -125,7 +129,7 @@ class TRTLLMHttpServer:
             "model": self.model_config.local_path,
             "backend": "pytorch",
             "orchestrator_type": "ray",
-            "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
+            "ray_worker_extension_cls": "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension",
             "kv_cache_config": kv_cache_config,
             "max_seq_len": self.config.max_model_len,
             "max_batch_size": self.config.max_num_seqs,
@@ -159,15 +163,42 @@ class TRTLLMHttpServer:
                 }
             )
 
-        self.llm = await AsyncLLM(**llm_kwargs)
+        if self.is_vlm_model:
+            from tensorrt_llm.inputs.multimodal import MultimodalServerConfig
 
-        trtllm_server = OpenAIServer(
-            llm=self.llm,
-            model=self.model_config.local_path,
-            tool_parser=None,
-            server_role=None,
-            metadata_server_cfg=None,
-        )
+            multimodal_config = MultimodalServerConfig(
+                media_io_kwargs={
+                    "image": {
+                        "format": "pil",
+                        "device": "cpu",
+                    },
+                    "video": {
+                        "num_frames": 8,
+                        "fps": 30,
+                        "format": "pil",
+                        "device": "cpu",
+                    },
+                }
+            )
+            self.llm = await AsyncLLM(**llm_kwargs)
+            trtllm_server = OpenAIServer(
+                llm=self.llm,
+                model=self.model_config.local_path,
+                tool_parser=None,
+                server_role=None,
+                metadata_server_cfg=None,
+                multimodal_server_config=multimodal_config,
+            )
+        else:
+            self.llm = await AsyncLLM(**llm_kwargs)
+            trtllm_server = OpenAIServer(
+                llm=self.llm,
+                model=self.model_config.local_path,
+                tool_parser=None,
+                server_role=None,
+                metadata_server_cfg=None,
+            )
+
         app = trtllm_server.app
         self._server_port, self._server_task = await run_unvicorn(app, None, self._server_address)
 
@@ -179,9 +210,6 @@ class TRTLLMHttpServer:
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
-        """Generate sequence with token-in-token-out."""
-        assert image_data is None and video_data is None, "Multimodality is not yet supported in TRTLLMHttpServer."
-
         from tensorrt_llm.llmapi import SamplingParams
 
         max_tokens = min(self.config.response_length, self.config.max_model_len - len(prompt_ids))
@@ -192,15 +220,35 @@ class TRTLLMHttpServer:
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
-        outputs = await self.llm.generate_async(
-            inputs=prompt_ids,
-            sampling_params=trt_llm_sampling_params,
-        )
-
+        if self.is_vlm_model:
+            if image_data or video_data:
+                input_dict = {
+                    "prompt_token_ids": prompt_ids,
+                    "multi_modal_data": {},
+                    "mm_processor_kwargs": {},
+                }
+                if image_data:
+                    input_dict["multi_modal_data"]["image"] = image_data
+                if video_data:
+                    input_dict["multi_modal_data"]["video"] = video_data
+                outputs = await self.llm.generate_async(
+                    inputs=input_dict,
+                    sampling_params=trt_llm_sampling_params,
+                )
+            else:
+                outputs = await self.llm.generate_async(
+                    inputs=prompt_ids,
+                    sampling_params=trt_llm_sampling_params,
+                )
+        else:
+            outputs = await self.llm.generate_async(
+                inputs=prompt_ids,
+                sampling_params=trt_llm_sampling_params,
+            )
         token_ids = outputs.outputs[0].token_ids
         log_probs = None
-        if trt_llm_sampling_params.logprobs is not None:
-            log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
+        if outputs.outputs[0].logprobs is not None:
+            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(outputs.outputs[0].logprobs)]
         return TokenOutput(token_ids=token_ids, log_probs=log_probs)
 
     async def wake_up(self):
