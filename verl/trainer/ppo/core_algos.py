@@ -1022,10 +1022,10 @@ def compute_flow_grpo_outcome_advantage(
     (with only one scalar reward for each response).
 
     Args:
-        instance_level_rewards: `(torch.Tensor)`
-            shape is (bs, )
+        token_level_rewards: `(torch.Tensor)`
+            shape is (bs, ), (bs, 1) or (bs, response_length)
         response_mask: `(torch.Tensor)`
-            shape is (bs, response_length). Not used in this function, but kept for consistency.
+            shape is (bs, response_length)
         index: `(np.ndarray)`
             index array for grouping
         epsilon: `(float)`
@@ -1043,11 +1043,14 @@ def compute_flow_grpo_outcome_advantage(
 
     Returns:
         advantages: `(torch.Tensor)`
-            shape is (bs, )
+            shape is (bs, response_length)
         Returns: `(torch.Tensor)`
-            shape is (bs, )
+            shape is (bs, response_length)
     """
     scores = token_level_rewards
+    if scores.ndim == 1:
+        scores = scores.unsqueeze(-1)
+    scores = scores.expand_as(response_mask).clone()
 
     id2score = defaultdict(list)
     id2mean = {}

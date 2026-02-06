@@ -119,7 +119,7 @@ def create_data_samples(num_device: int, model_config: DiffusersModelConfig) -> 
     vae_scale_factor = 8
     height, width = img_size, img_size
     latent_height, latent_width = height // vae_scale_factor // 2, width // vae_scale_factor // 2
-    num_train_timesteps = 10
+    num_diffusion_steps = 10
     timesteps = scheduler.timesteps[None].repeat(batch_size, 1)
 
     torch.manual_seed(1)
@@ -128,19 +128,19 @@ def create_data_samples(num_device: int, model_config: DiffusersModelConfig) -> 
     batch = TensorDict(
         {
             "input_ids": torch.randint(0, vocab_size, (batch_size, seq_len)),
-            "attention_mask": torch.ones((batch_size, seq_len)),
-            "response_mask": torch.ones((batch_size, seq_len)),
-            "old_log_probs": torch.randn((batch_size, num_train_timesteps)),
-            "advantages": torch.randn((batch_size,)),
+            "attention_mask": torch.ones((batch_size, inference_steps)),
+            "response_mask": torch.ones((batch_size, inference_steps)),
+            "old_log_probs": torch.randn((batch_size, num_diffusion_steps)),
+            "advantages": torch.randn((batch_size, num_diffusion_steps)),
             "responses": torch.randn((batch_size, 3, height, width)),
             "all_latents": torch.randn((batch_size, inference_steps, latent_height * latent_width, latent_dim)),
-            "rollout_log_probs": torch.randn((batch_size, num_train_timesteps)),
+            "rollout_log_probs": torch.randn((batch_size, num_diffusion_steps)),
             "all_timesteps": timesteps,
             "prompt_embeds": torch.randn((batch_size, seq_len, encoder_latent_dim)),
             "prompt_embeds_mask": torch.ones((batch_size, seq_len), dtype=torch.int32),
             "negative_prompt_embeds": torch.randn((batch_size, seq_len, encoder_latent_dim)),
             "negative_prompt_embeds_mask": torch.ones((batch_size, seq_len), dtype=torch.int32),
-            "loss_mask": torch.ones((batch_size, latent_height * latent_width), dtype=torch.int32),
+            "loss_mask": torch.ones((batch_size, inference_steps), dtype=torch.int32),
         },
         batch_size=batch_size,
     )
@@ -173,7 +173,13 @@ def test_diffusers_fsdp_engine(strategy):
 
     # forward only without loss function
     data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
-    tu.assign_non_tensor(data_td, compute_loss=False)
+    tu.assign_non_tensor(
+        data_td,
+        compute_loss=False,
+        image_height=training_config.model_config.get("image_height", 512),
+        image_width=training_config.model_config.get("image_width", 512),
+        vae_scale_factor=training_config.model_config.get("vae_scale_factor", 8),
+    )
     output = wg.infer_batch(data_td)
     output_dict = output.get()
 
@@ -199,6 +205,9 @@ def test_diffusers_fsdp_engine(strategy):
         epochs=ppo_epochs,
         seed=seed,
         dataloader_kwargs={"shuffle": shuffle},
+        image_height=training_config.model_config.get("image_height", 512),
+        image_width=training_config.model_config.get("image_width", 512),
+        vae_scale_factor=training_config.model_config.get("vae_scale_factor", 8),
     )
     output = wg.train_mini_batch(data_td)
     output_dict = output.get()

@@ -17,10 +17,10 @@ from typing import Any, Literal
 import torch
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
+from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 from verl.workers.utils.diffusers_patch.schedulers import FlowMatchSDEDiscreteScheduler
 from verl.workers.utils.vllm_omni_patch.data import DiffusionOutput
-from verl.workers.utils.vllm_omni_patch.request import OmniDiffusionRequest
 
 
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
@@ -233,14 +233,10 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         num_inference_steps = req.num_inference_steps or num_inference_steps
         max_sequence_length = req.max_sequence_length or max_sequence_length
 
-        # TODO (mike): wait vllm-omni side fix
-        try:
-            noise_level = req.noise_level or noise_level
-            sde_window_size = req.sde_window_size or sde_window_size
-            sde_window_range = req.sde_window_range or sde_window_range
-            sde_type = req.sde_type or sde_type
-        except AttributeError:
-            pass
+        noise_level = req.extra_args.get("noise_level", None) or noise_level
+        sde_window_size = req.extra_args.get("sde_window_size", None) or sde_window_size
+        sde_window_range = req.extra_args.get("sde_window_range", None) or sde_window_range
+        sde_type = req.extra_args.get("sde_type", None) or sde_type
 
         generator = req.generator or generator
         if generator is None and req.seed is not None:

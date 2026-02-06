@@ -35,18 +35,13 @@ def test_flow_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: b
     # prepere input
     batch_size = 8
     steps = 10
-    token_level_rewards = torch.randn(
-        (
-            batch_size,
-            steps,
-        ),
-        dtype=torch.float32,
-    )
+    token_level_rewards = torch.randn((batch_size, 1), dtype=torch.float32)
+    response_mask = torch.ones((batch_size, steps), dtype=torch.int32)
     uid = np.array([uuid.uuid4().hex for _ in range(batch_size)])
 
     advantages, returns = compute_flow_grpo_outcome_advantage(
         token_level_rewards=token_level_rewards,
-        response_mask=None,
+        response_mask=response_mask,
         index=uid,
         norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         global_std=global_std,
@@ -64,6 +59,7 @@ def test_compute_policy_loss_flow_grpo() -> None:
     rollout_log_probs = torch.randn((batch_size, steps), dtype=torch.float32)
     current_log_probs = torch.randn((batch_size, steps), dtype=torch.float32)
     advantages = torch.randn((batch_size, steps), dtype=torch.float32)
+    response_mask = torch.ones((batch_size, steps), dtype=torch.int32)
     from hydra import compose, initialize_config_dir
 
     from verl.workers.config.actor import FSDPActorConfig
@@ -85,7 +81,7 @@ def test_compute_policy_loss_flow_grpo() -> None:
             old_log_prob=rollout_log_probs[:, step],
             log_prob=current_log_probs[:, step],
             advantages=advantages[:, step],
-            response_mask=None,
+            response_mask=response_mask[:, step],
             loss_agg_mode="token-mean",
             config=actor_config,
         )

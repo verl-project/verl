@@ -25,6 +25,7 @@ import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from ray.actor import ActorHandle
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import build_app, omni_init_app_state
@@ -386,13 +387,20 @@ class vLLMOmniHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
+        vllm_omni_sampling_params = dict(extra_args={})
+        for k, v in sampling_params.items():
+            if hasattr(OmniDiffusionRequest, k):
+                vllm_omni_sampling_params[k] = v
+            else:
+                vllm_omni_sampling_params["extra_args"][k] = v
+
         generator = self.engine.generate(
             prompt="",  # TODO (mike): drop empty prompt
             prompt_ids=prompt_ids,
             request_id=request_id,
             lora_request=lora_request,
             priority=priority,
-            **sampling_params,
+            **vllm_omni_sampling_params,
         )
 
         # Get final response

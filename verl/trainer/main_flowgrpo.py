@@ -314,9 +314,12 @@ class TaskRunner:
         tokenizer_path = config.actor_rollout_ref.model.get("tokenizer_path", os.path.join(local_path, "tokenizer"))
         tokenizer = hf_tokenizer(tokenizer_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        processor = hf_processor(
-            os.path.join(local_path, "processor"), trust_remote_code=trust_remote_code, use_fast=True
-        )
+        if os.path.exists(os.path.join(local_path, "processor")):
+            processor = hf_processor(
+                os.path.join(local_path, "processor"), trust_remote_code=trust_remote_code, use_fast=True
+            )
+        else:
+            processor = None
 
         # Load the reward manager for training and validation.
         if not config.reward_model.use_reward_loop:

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -281,14 +281,19 @@ class DiffusersModelConfig(BaseConfig):
     def __post_init__(self):
         import_external_libs(self.external_lib)
         if self.tokenizer_path is None:
-            self.tokenizer_path = self.path
+            self.tokenizer_path = os.path.join(self.path, "tokenizer")
         self.local_path = copy_to_local(self.path, use_shm=self.use_shm)
 
         # construct tokenizer
         if self.load_tokenizer:
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
             self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
-            self.processor = hf_processor(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
+            if os.path.exists(os.path.join(self.local_path, "processor")):
+                self.processor = hf_processor(
+                    os.path.join(self.local_path, "processor"), trust_remote_code=self.trust_remote_code
+                )
+            else:
+                self.processor = None
 
     def get_processor(self):
         return self.processor if self.processor is not None else self.tokenizer

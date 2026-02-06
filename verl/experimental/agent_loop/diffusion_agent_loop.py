@@ -123,7 +123,10 @@ class DiffusionAgentLoopWorker:
         local_path = copy_to_local(config.actor_rollout_ref.model.path)
         # see issue https://github.com/huggingface/tokenizers/issues/537, we use a non-fast tokenizer here
         self.tokenizer = hf_tokenizer(os.path.join(local_path, "tokenizer"), trust_remote_code=True, use_fast=False)
-        self.processor = hf_processor(os.path.join(local_path, "processor"), trust_remote_code=True)
+        if os.path.exists(os.path.join(local_path, "processor")):
+            self.processor = hf_processor(os.path.join(local_path, "processor"), trust_remote_code=True)
+        else:
+            self.processor = None
 
         agent_loop_config_path = config.actor_rollout_ref.rollout.agent.agent_loop_config_path
         if agent_loop_config_path:

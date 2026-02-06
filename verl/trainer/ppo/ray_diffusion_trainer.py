@@ -119,9 +119,8 @@ def compute_response_mask(data: DataProto):
         torch.Tensor: The attention mask for the response tokens.
     """
     all_latents = data.batch["all_latents"]
-    b, _, s, _ = all_latents.shape
-    # TODO (mike): not sure the mask is what we expect
-    response_mask = torch.ones((b, s), dtype=torch.int32)
+    b, t, _, _ = all_latents.shape
+    response_mask = torch.ones((b, t), dtype=torch.int32)
     return response_mask
 
 

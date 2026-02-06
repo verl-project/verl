@@ -660,7 +660,7 @@ class DiffusersFSDPEngine(BaseEngine):
             data = tu.get_tensordict(
                 {
                     "old_log_probs": micro_batch["old_log_probs"][:, step],
-                    "advantages": micro_batch["advantages"],
+                    "advantages": micro_batch["advantages"][:, step],
                     "response_mask": micro_batch["response_mask"][:, step],
                 },
                 {
