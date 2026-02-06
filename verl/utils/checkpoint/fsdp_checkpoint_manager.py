@@ -36,7 +36,7 @@ from verl.utils.logger import log_with_rank
 from .checkpoint_manager import BaseCheckpointManager
 
 # Setup logging
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
@@ -340,9 +340,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     if generation_config is not None:
                         save_model.generation_config = generation_config
                     else:
-                        print(
-                            f"Warning: {self.__class__.__name__}.save_checkpoint: Generation config file not found "
-                            f"in, using a generation config created from the model config when saving hf_model."
+                        logger.warning(
+                            f"{self.__class__.__name__}.save_checkpoint: "
+                            "Generation config file not found, using a generation "
+                            "config created from the model config when saving hf_model."
                         )
 
                 save_model.save_pretrained(hf_local_path, state_dict=state_dict)

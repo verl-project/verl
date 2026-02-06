@@ -29,7 +29,7 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import (
     vLLMReplica,
 )
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 

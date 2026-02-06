@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import os
 from collections import defaultdict
 from typing import Any
 
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 from verl import DataProto
 from verl.utils.reward_score import default_compute_score
@@ -104,14 +109,14 @@ class NaiveRewardManager(AbstractRewardManager):
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print("[prompt]", prompt_str)
-                print("[response]", response_str)
-                print("[ground_truth]", ground_truth)
+                logger.debug(f"[prompt] {prompt_str}")
+                logger.debug(f"[response] {response_str}")
+                logger.debug(f"[ground_truth] {ground_truth}")
                 if isinstance(score, dict):
                     for key, value in score.items():
-                        print(f"[{key}]", value)
+                        logger.debug(f"[{key}] {value}")
                 else:
-                    print("[score]", score)
+                    logger.debug(f"[score] {score}")
 
         if return_dict:
             return {

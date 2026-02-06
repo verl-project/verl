@@ -14,13 +14,18 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import multiprocessing
+import os
 import warnings
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 import ray
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 from verl.utils.reward_score import default_compute_score
 from verl.utils.transferqueue_utils import tqbridge
@@ -190,7 +195,7 @@ def compute_reward(data: DataProto, reward_fn: AbstractRewardManager) -> tuple[t
         reward_tensor = reward_result["reward_tensor"]
         reward_extra_infos_dict = reward_result.get("reward_extra_info", {})
     except Exception as e:
-        print(f"Error in reward_fn: {e}")
+        logger.error(f"Error in reward_fn: {e}")
         reward_tensor = reward_fn(data)
         reward_extra_infos_dict = {}
 

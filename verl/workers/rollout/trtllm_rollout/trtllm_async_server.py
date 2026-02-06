@@ -31,7 +31,7 @@ from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutpu
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
 from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
@@ -324,10 +324,10 @@ class TRTLLMReplica(RolloutReplica):
         # Check server process should be launched on the same node as first bundle of first pg.
         first_pg_data = placement_group_table(pgs[0])
         node_id = first_pg_data["bundles_to_node_id"][bundle_indices[0][0]]
-        print(f"TRTLLMReplica: {self.replica_rank}")
-        print(f"pg node_id: {node_id}")
-        print(f"pgs: {pgs}")
-        print(f"bundle_indices: {bundle_indices}")
+        logger.info(f"TRTLLMReplica: {self.replica_rank}")
+        logger.info(f"pg node_id: {node_id}")
+        logger.info(f"pgs: {pgs}")
+        logger.info(f"bundle_indices: {bundle_indices}")
 
         # TRTLLMReplica is a 1:1 map from replica to TRTLLMHttpServer.
         name = (

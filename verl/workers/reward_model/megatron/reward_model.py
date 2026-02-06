@@ -16,8 +16,13 @@ Megatron Reward Model.
 """
 
 import itertools
+import logging
+import os
 
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 import torch.distributed
 from megatron.core import parallel_state as mpu
 from megatron.core.pipeline_parallel import get_forward_backward_func
@@ -52,7 +57,7 @@ class MegatronRewardModel(BasePPORewardModel):
         self.rm_tokenizer = rm_tokenizer
         self.use_different_tokenizer = rm_tokenizer is not None
 
-        print(f"MegatronRewardModel.config: {self.config}")
+        logger.info(f"MegatronRewardModel.config: {self.config}")
 
         if self.config.megatron.param_offload:
             self.offload_params_to_cpu()
@@ -90,10 +95,10 @@ class MegatronRewardModel(BasePPORewardModel):
             )
             if print_decode and torch.distributed.get_rank() == 0:
                 # only print first decode result
-                print(
-                    f"device {get_device_id()}: sft decode result:\n{decode_result}\n \
-                        \ndevice {get_device_id()}: sft decode result with \
-                        rm chat template:\n{decode_with_rm_chat}\n\n"
+                logger.debug(
+                    f"device {get_device_id()}: sft decode result:\n{decode_result}\n"
+                    f"\ndevice {get_device_id()}: sft decode result with "
+                    f"rm chat template:\n{decode_with_rm_chat}\n\n"
                 )
                 print_decode = False
             # 3. encode by rm_tokenizer
@@ -105,7 +110,7 @@ class MegatronRewardModel(BasePPORewardModel):
             cur_seqlen = rm_input_ids.shape[-1]
             # NOTE(gh): the later reward compute will process the shape (bs, seqlen_pad_128)
             if cur_seqlen > ori_seqlen:
-                print(f"warninig: rm encode seqlen {cur_seqlen} > sft encode seqlen {ori_seqlen}")
+                logger.warning(f"rm encode seqlen {cur_seqlen} > sft encode seqlen {ori_seqlen}")
                 rm_input_ids = rm_input_ids[:ori_seqlen]
                 rm_attention_mask = rm_attention_mask[:ori_seqlen]
             else:

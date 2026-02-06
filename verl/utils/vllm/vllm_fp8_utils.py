@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import os
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
@@ -30,6 +31,7 @@ except ImportError as e:
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
@@ -80,7 +82,7 @@ def get_module_from_param_name(model, name: str):
             else:
                 current_module = getattr(current_module, part)
     except (AttributeError, IndexError, ValueError) as e:
-        print(f"Warning: Could not find module for parameter '{name}'. Error: {e}")
+        logger.warning(f"Could not find module for parameter '{name}'. Error: {e}")
     return current_module
 
 
@@ -185,7 +187,7 @@ def process_weights_after_loading_for_vllm10(self, layer) -> None:
             ModelWeightParameter,
         )
     except Exception:
-        print("error")
+        logger.error("Failed to import vllm parameters for process_weights_after_loading")
     from torch.nn import Parameter
 
     def _create_param_from_subclass_attributes(custom_param):

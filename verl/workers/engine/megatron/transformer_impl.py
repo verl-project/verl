@@ -58,8 +58,8 @@ from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import postprocess_batch_func, prepare_micro_batches
 from .utils import set_random_seed
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class MegatronEngine(BaseEngine):
@@ -183,7 +183,7 @@ class MegatronEngine(BaseEngine):
 
         if torch.distributed.get_rank() == 0:
             if tf_config is not None:
-                print(f"TF config: {tf_config}")
+                logger.info(f"TF config: {tf_config}")
         self.tf_config = tf_config
 
         from verl.workers.config.megatron_peft import get_peft_cls
@@ -227,7 +227,7 @@ class MegatronEngine(BaseEngine):
             peft_config=self.model_config.get("lora", None),
         )
         self.tf_config = updated_tf_config
-        print(f"module: {len(module)}")
+        logger.info(f"module: {len(module)}")
 
         if self.engine_config.use_dist_checkpointing:
             load_mcore_dist_weights(module, self.engine_config.dist_checkpointing_path, is_value_model=is_value_model)

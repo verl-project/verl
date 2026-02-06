@@ -22,8 +22,8 @@ from transformers import AutoTokenizer
 from verl import DataProto
 from verl.utils.ray_utils import get_event_loop
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class RewardManagerBase(ABC):

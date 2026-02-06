@@ -18,7 +18,6 @@ import copy
 import logging
 import os
 import re
-import traceback
 from collections import defaultdict
 from io import BytesIO
 from typing import Optional
@@ -34,6 +33,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 from verl.utils.import_utils import load_extern_object
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -126,7 +126,7 @@ class RLHFDataset(Dataset):
                     tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list
                 ]
             except Exception as e:
-                logger.warning("Failed to initialize tools from %s: %s", self.tool_config_path, e)
+                logger.warning(f"Failed to initialize tools from {self.tool_config_path}: {e}")
                 self.tool_schemas = None
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
@@ -164,7 +164,7 @@ class RLHFDataset(Dataset):
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
         total = len(self.dataframe)
-        print(f"dataset len: {len(self.dataframe)}")
+        logger.info(f"dataset len: {len(self.dataframe)}")
 
         if self.max_samples > 0 and self.max_samples < total:
             if self.shuffle:
@@ -174,7 +174,7 @@ class RLHFDataset(Dataset):
             else:
                 indices = np.arange(self.max_samples)
             self.dataframe = self.dataframe.select(indices.tolist())
-            print(f"selected {self.max_samples} random samples out of {total}")
+            logger.info(f"selected {self.max_samples} random samples out of {total}")
 
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
 
@@ -231,8 +231,7 @@ class RLHFDataset(Dataset):
                             ][0]
                         )
                     except Exception:
-                        print("Error processing one of the samples, skipping...")
-                        traceback.print_exc()
+                        logger.warning("Error processing one of the samples, skipping...", exc_info=True)
                         return self.max_prompt_length + 1
 
             else:
@@ -247,8 +246,7 @@ class RLHFDataset(Dataset):
                             tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, **apply_kwargs)
                         )
                     except Exception:
-                        print("Error processing one of the samples, skipping...")
-                        traceback.print_exc()
+                        logger.warning("Error processing one of the samples, skipping...", exc_info=True)
                         return self.max_prompt_length + 1
 
             dataframe = dataframe.filter(
@@ -257,7 +255,7 @@ class RLHFDataset(Dataset):
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
 
-            print(f"filter dataset len: {len(dataframe)}")
+            logger.info(f"filter dataset len: {len(dataframe)}")
         return dataframe
 
     def resume_dataset_state(self):
@@ -267,7 +265,7 @@ class RLHFDataset(Dataset):
             self._download(use_origin_parquet=True)  # download and resume from original parquet files
             self._read_files_and_tokenize()
         else:
-            print(r"old dataloader ckpt file is used, please train from scratch for better ckpt performance")
+            logger.warning("old dataloader ckpt file is used, please train from scratch for better ckpt performance")
 
     def __getstate__(self):
         if not self.serialize_dataset:
@@ -355,7 +353,7 @@ class RLHFDataset(Dataset):
         interaction_kwargs = row_dict.get("extra_info", {}).get("interaction_kwargs", {})
         need_tools_kwargs = row_dict.get("extra_info", {}).get("need_tools_kwargs", self.need_tools_kwargs)
         if need_tools_kwargs and not tools_kwargs:
-            logger.warning("tools_kwargs is empty for index {}, data source: {}", index, row_dict["data_source"])
+            logger.warning(f"tools_kwargs is empty for index {index}, data source: {row_dict['data_source']}")
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
@@ -417,7 +415,7 @@ class RLHFDataset(Dataset):
             raise ValueError("RLHFDataset dataframe 为 None!")
 
         total_samples = len(self.dataframe)
-        print(f"total_samples: {total_samples}")
+        logger.info(f"total_samples: {total_samples}")
         if total_samples == 0:
             raise ValueError("Cannot split an empty dataset")
         if total_samples % num_splits != 0:
@@ -471,6 +469,6 @@ def get_dataset_class(data_config: DictConfig):
     else:
         # Use the default RLHFDataset class if no custom class is specified
         dataset_cls = RLHFDataset
-    print(f"Using dataset class: {dataset_cls.__name__}")
+    logger.info(f"Using dataset class: {dataset_cls.__name__}")
 
     return dataset_cls

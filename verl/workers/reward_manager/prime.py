@@ -13,12 +13,17 @@
 # limitations under the License.
 
 import asyncio
+import logging
+import os
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import Any, Callable, Optional
 
 import psutil
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 from transformers import PreTrainedTokenizer
 
 from verl import DataProto
@@ -35,10 +40,10 @@ async def single_compute_score(evaluation_func, completion, reference, task, tas
         future = loop.run_in_executor(executor, partial(evaluation_func, task, completion, reference, task_extra_info))
         return await asyncio.wait_for(future, timeout=timeout)
     except asyncio.TimeoutError:
-        print(f"[Timeout] Task timeout: {completion}")
+        logger.warning(f"Task timeout: {completion}")
         return None  # Default value for timed-out rows
     except Exception as e:
-        print(f"[Error] Task failed: {e}, completion: {completion[:80]}")
+        logger.error(f"Task failed: {e}, completion: {completion[:80]}")
         return None  # Default value for failed rows
 
 
@@ -59,7 +64,7 @@ async def parallel_compute_score_async(
             ]
             results = await asyncio.gather(*tasks_async, return_exceptions=False)
         except Exception as e:
-            print(f"[Exception] async gather failed: {e}")
+            logger.exception(f"async gather failed: {e}")
             raise
         finally:
             terminated_count = 0
@@ -74,7 +79,7 @@ async def parallel_compute_score_async(
                     terminated_count += 1
                 except Exception:
                     pass
-            print(f"[Shutdown] {terminated_count} subprocess(es) terminated.")
+            logger.info(f"{terminated_count} subprocess(es) terminated.")
 
     # Process results
     for result, completion, reference, task in zip(results, completions, references, tasks, strict=True):
@@ -141,10 +146,10 @@ class PrimeRewardManager(AbstractRewardManager):
                 num_processes=64,
             )
         except asyncio.TimeoutError:
-            print("[Timeout] Global reward scoring timed out. Setting all as 0.")
+            logger.warning("Global reward scoring timed out. Setting all as 0.")
             scores = [0.0 for _ in range(len(sequences_str))]
         except Exception as e:
-            print(f"[Error] Unexpected error during scoring. Setting all as 0. {e}")
+            logger.error(f"Unexpected error during scoring. Setting all as 0. {e}")
             scores = [0.0 for _ in range(len(sequences_str))]
         data.batch["acc"] = torch.tensor(scores, dtype=torch.float32, device=prompt_ids.device)
         return scores
@@ -181,7 +186,7 @@ class PrimeRewardManager(AbstractRewardManager):
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print(sequences_str)
+                logger.debug(f"sequences: {sequences_str}")
 
         if return_dict:
             return {"reward_tensor": reward_tensor}

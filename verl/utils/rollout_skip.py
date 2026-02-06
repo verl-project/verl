@@ -11,9 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
 from pathlib import Path
 
 from verl.protocol import DataProto
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class RolloutSkip:
@@ -45,18 +50,13 @@ class RolloutSkip:
 
         # Check if path is in Ray temporary directory
         if str(self.dumped_dir.absolute()).startswith("/tmp/ray/session"):
-            print(
-                f"\033[33m{self.print_mark} Warning: \nUsing dump path ",
-                f"'{self.dumped_dir.absolute()}' is not recommended ",
-                "as it's located in /tmp/ray/session*\033[0m",
-                flush=True,
+            logger.warning(
+                f"{self.print_mark} Using dump path "
+                f"'{self.dumped_dir.absolute()}' is not recommended "
+                "as it's located in /tmp/ray/session*"
             )
 
-        print(
-            f"{self.print_mark} Rollout skip dump path set to: ",
-            f"{self.dumped_dir.absolute()}",
-            flush=True,
-        )
+        logger.info(f"{self.print_mark} Rollout skip dump path set to: {self.dumped_dir.absolute()}")
 
         self._rollout_wg = rollout_wg
 
@@ -67,53 +67,33 @@ class RolloutSkip:
     def wrap_generate_sequences(self):
         try:
             self._rollout_wg.generate_sequences = wrap_generate_sequences(self, self._rollout_wg)
-            print(
-                f"{self.print_mark} Successfully patched `actor_rollout_wg.generate_sequences()`",
-                flush=True,
-            )
+            logger.info(f"{self.print_mark} Successfully patched `actor_rollout_wg.generate_sequences()`")
         except Exception as e:
-            raise RuntimeError(
-                "{self.print_mark} Failed to patch `actor_rollout_wg.generate_sequences()`",
-                flush=True,
-            ) from e
+            raise RuntimeError(f"{self.print_mark} Failed to patch `actor_rollout_wg.generate_sequences()`") from e
 
     def try_load(self):
         if not self.curr_path_dump.exists():
-            print(
-                f"{self.print_mark} No data dump found at {self.curr_path_dump}.",
-                "The trainer will generate and automatically dump the data for this first run.",
-                flush=True,
+            logger.info(
+                f"{self.print_mark} No data dump found at {self.curr_path_dump}. The trainer will generate and"
+                " automatically dump the data for this first run."
             )
             return None
 
         try:
             # * Load
             ret_batch = DataProto.load_from_disk(self.curr_path_dump)
-            print(
-                f"\033[32m{self.print_mark} Successfully load pre-generated data from {self.curr_path_dump}\033[0m",
-                flush=True,
-            )
+            logger.info(f"{self.print_mark} Successfully load pre-generated data from {self.curr_path_dump}")
             return ret_batch
         except Exception as e:
-            print(
-                f"\033[31m{self.print_mark} Failed to load pre-generated data from {self.curr_path_dump}",
-                f"Error: {str(e)}\033[0m",
-                flush=True,
-            )
+            logger.error(f"{self.print_mark} Failed to load pre-generated data from {self.curr_path_dump}. Error: {e}")
             return None
 
     def dump(self, outputs: DataProto):
         try:
             outputs.save_to_disk(self.curr_path_dump)
-            print(
-                f"\033[32m{self.print_mark} Successfully dump data in {self.curr_path_dump}\033[0m",
-                flush=True,
-            )
+            logger.info(f"{self.print_mark} Successfully dump data in {self.curr_path_dump}")
         except Exception as e:
-            print(
-                f"\033[31m{self.print_mark} Failed to dump data in {self.curr_path_dump}: {e}\033[0m",
-                flush=True,
-            )
+            logger.error(f"{self.print_mark} Failed to dump data in {self.curr_path_dump}: {e}")
 
 
 def wrap_generate_sequences(rolloutskip: RolloutSkip, rollout_wg):

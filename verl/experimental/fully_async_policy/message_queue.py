@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import os
 from collections import deque
 from typing import Any
 
@@ -21,6 +22,7 @@ import ray
 from omegaconf import DictConfig
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @ray.remote(num_cpus=2, max_concurrency=20)
@@ -59,8 +61,8 @@ class MessageQueue:
         self.total_consumed = 0
         self.dropped_samples = 0
 
-        print(
-            f"[MessageQueue] initialized with max_queue_size={max_queue_size},"
+        logger.info(
+            f"MessageQueue initialized with max_queue_size={max_queue_size}, "
             f"staleness_threshold={self.staleness_threshold}"
         )
 
@@ -90,7 +92,7 @@ class MessageQueue:
             self._consumer_condition.notify_all()
 
             if self.total_produced % 100 == 0:
-                print(f"MessageQueue stats: produced={self.total_produced}, queue_size={len(self.queue)}")
+                logger.debug(f"MessageQueue stats: produced={self.total_produced}, queue_size={len(self.queue)}")
             if is_drop:
                 return False
             return True
@@ -120,7 +122,7 @@ class MessageQueue:
         async with self._lock:
             old_version = self.current_param_version
             self.current_param_version = version
-            print(f"Parameter version updated from {old_version} to {version}")
+            logger.info(f"Parameter version updated from {old_version} to {version}")
 
     async def get_queue_size(self) -> int:
         """Get current queue length"""

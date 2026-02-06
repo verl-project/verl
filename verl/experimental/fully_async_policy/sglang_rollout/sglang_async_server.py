@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import os
 from typing import Any, Optional
 
 import ray
@@ -26,8 +27,8 @@ from verl.workers.rollout.sglang_rollout.async_sglang_server import (
     SGLangReplica,
 )
 
-logger = logging.getLogger(__file__)
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class SGLangHttpServerForPartial(SGLangHttpServer):
@@ -173,7 +174,7 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
 
     async def reset_prefix_cache(self):
         async with self.lock:
-            print("Reset prefix cache ...")
+            logger.info("Reset prefix cache ...")
             await self.tokenizer_manager.flush_cache()
 
 

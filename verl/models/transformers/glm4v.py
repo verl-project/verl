@@ -38,8 +38,8 @@ from verl.utils.ulysses import (
     validate_ulysses_config,
 )
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 if is_flash_attn_2_available():

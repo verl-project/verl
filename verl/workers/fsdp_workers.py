@@ -89,8 +89,8 @@ from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 device_name = get_device_name()
 
@@ -368,7 +368,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         if self.rank == 0:
-            print(f"Model config after override: {actor_model_config}")
+            logger.info(f"Model config after override: {actor_model_config}")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(
@@ -440,14 +440,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
         if self._is_lora:
-            print("Applying LoRA to actor module")
+            logger.info("Applying LoRA to actor module")
             actor_module.enable_input_require_grads()
 
             lora_adapter_path = self.config.model.get("lora_adapter_path")
             if lora_adapter_path is not None:
                 from peft import PeftModel
 
-                print(f"Loading pre-trained LoRA adapter to {role} from: {lora_adapter_path}")
+                logger.info(f"Loading pre-trained LoRA adapter to {role} from: {lora_adapter_path}")
 
                 # Copy adapter to local if needed
                 local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.config.model.get("use_shm", False))
@@ -477,10 +477,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 vision_tower.requires_grad_(False)
                 self.use_orig_params = True
                 if self.rank == 0:
-                    print("[actor model] Vision tower is set to not trainable.")
+                    logger.info("Vision tower is set to not trainable.")
             else:
                 if self.rank == 0:
-                    print("[actor model] No vision tower found.")
+                    logger.info("No vision tower found.")
 
         torch.distributed.barrier()
 
@@ -514,7 +514,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         #     auto_wrap_policy = None
 
         if self.rank == 0:
-            print(f"wrap_policy: {auto_wrap_policy}")
+            logger.info(f"wrap_policy: {auto_wrap_policy}")
 
         fsdp_mesh = self.device_mesh
         fsdp_enable_zero3 = fsdp_config.reshard_after_forward
@@ -586,7 +586,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
             if self.rank == 0:
-                print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
+                logger.info(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
 
             if lr_scheduler_type == "constant":
                 actor_lr_scheduler = get_constant_schedule_with_warmup(
@@ -832,7 +832,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 ref_model_path = ref_model.get("path", self.config.model.path)
 
             if self.rank == 0:
-                print("reference model:", ref_model_path)
+                logger.info(f"reference model: {ref_model_path}")
             local_path = copy_to_local(ref_model_path, use_shm=use_shm)
             use_prefix_grouper = hasattr(self.config, "actor") and self.config.actor.get("use_prefix_grouper", False)
 
@@ -1284,7 +1284,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         }
         override_config_kwargs.update(override_config)
         if self.rank == 0:
-            print(f"Critic overriding config {override_config_kwargs}")
+            logger.info(f"Critic overriding config {override_config_kwargs}")
 
         torch_dtype = self.config.model.fsdp_config.get("model_dtype", "fp32")
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
@@ -1352,7 +1352,7 @@ class CriticWorker(Worker, DistProfilerExtension):
                 critic_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
         if self._is_lora:
-            print("Applying LoRA to critic module")
+            logger.info("Applying LoRA to critic module")
             critic_module.enable_input_require_grads()
 
             # Check if we should load a pre-trained LoRA adapter
@@ -1360,7 +1360,7 @@ class CriticWorker(Worker, DistProfilerExtension):
             if lora_adapter_path is not None:
                 from peft import PeftModel
 
-                print(f"Loading pre-trained LoRA adapter to critic from: {lora_adapter_path}")
+                logger.info(f"Loading pre-trained LoRA adapter to critic from: {lora_adapter_path}")
 
                 # Copy adapter to local if needed
                 local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.config.model.get("use_shm", False))
@@ -1420,10 +1420,10 @@ class CriticWorker(Worker, DistProfilerExtension):
                 vision_tower.requires_grad_(False)
                 self.use_orig_params = True
                 if self.rank == 0:
-                    print("[critic model] Vision tower is set to not trainable.")
+                    logger.info("Vision tower is set to not trainable.")
             else:
                 if self.rank == 0:
-                    print("[critic model] No vision tower found.")
+                    logger.info("No vision tower found.")
 
         # Note: We force turn off CPUOffload for critic because it causes incorrect results when using grad accumulation
         if config.strategy == "fsdp":
@@ -1481,7 +1481,7 @@ class CriticWorker(Worker, DistProfilerExtension):
             num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
         if self.rank == 0:
-            print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
+            logger.info(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
 
         from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
@@ -1894,7 +1894,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             )
             if self.rank == 0 and i == 0:
                 # for debugging purpose
-                print(f"Switch template. chat: {prompt_with_chat_template}")
+                logger.debug(f"Switch template. chat: {prompt_with_chat_template}")
 
             # the maximum length is actually determined by the reward model itself
             max_length = self.config.get("max_length", src_max_length)

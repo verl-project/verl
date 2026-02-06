@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import os
 from collections import defaultdict
 from typing import Any
 
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 from verl import DataProto
 from verl.workers.reward_manager import register
@@ -114,10 +119,10 @@ class BatchRewardManager(AbstractRewardManager):
                 response_str = self.tokenizer.decode(data.batch["responses"][i][:length], skip_special_tokens=True)
                 prompt_str = self.tokenizer.decode(data.batch["prompts"][i], skip_special_tokens=True)
                 ground_truth = data[i].non_tensor_batch["reward_model"].get("ground_truth", None)
-                print("[prompt]", prompt_str)
-                print("[response]", response_str)
-                print("[ground_truth]", ground_truth)
-                print("[score]", scores[i])
+                logger.debug(f"[prompt] {prompt_str}")
+                logger.debug(f"[response] {response_str}")
+                logger.debug(f"[ground_truth] {ground_truth}")
+                logger.debug(f"[score] {scores[i]}")
                 already_printed[data_source] = already_printed.get(data_source, 0) + 1
 
         data.batch["acc"] = torch.tensor(rewards, dtype=torch.float32, device=prompt_ids.device)

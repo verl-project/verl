@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 import random
 import shutil
@@ -24,6 +25,9 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.trainer.config import CheckpointConfig
 from verl.utils.device import get_device_name, get_torch_device
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class BaseCheckpointManager:
@@ -136,7 +140,7 @@ class BaseCheckpointManager:
             path = [path]
         for p in path:
             abs_path = os.path.abspath(p)
-            print(f"Checkpoint manager remove previous save local path: {abs_path}")
+            logger.info(f"Checkpoint manager remove previous save local path: {abs_path}")
             if not os.path.exists(abs_path):
                 continue
             shutil.rmtree(abs_path, ignore_errors=True)
@@ -213,17 +217,17 @@ def find_latest_ckpt_path(path, directory_format="global_step_{}"):
     tracker_file = get_checkpoint_tracker_filename(path)
     if not os.path.exists(tracker_file):
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            print(f"Checkpoint tracker file does not exist: {tracker_file}")
+            logger.info(f"Checkpoint tracker file does not exist: {tracker_file}")
         return None
 
     with open(tracker_file, "rb") as f:
         iteration = int(f.read().decode())
     ckpt_path = os.path.join(path, directory_format.format(iteration))
     if not os.path.exists(ckpt_path):
-        print("Checkpoint does not exist: %s", ckpt_path)
+        logger.warning(f"Checkpoint does not exist: {ckpt_path}")
         return None
 
-    print("Found checkpoint: %s", ckpt_path)
+    logger.info(f"Found checkpoint: {ckpt_path}")
     return ckpt_path
 
 

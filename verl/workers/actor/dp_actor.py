@@ -42,8 +42,8 @@ from verl.workers.config import ActorConfig
 
 __all__ = ["DataParallelPPOActor"]
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -64,10 +64,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
         if torch.distributed.get_rank() == 0:
-            print(f"{role} use_remove_padding={self.use_remove_padding}")
+            logger.info(f"{role} use_remove_padding={self.use_remove_padding}")
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
         if torch.distributed.get_rank() == 0:
-            print(f"{role} use_fused_kernels={self.use_fused_kernels}")
+            logger.info(f"{role} use_fused_kernels={self.use_fused_kernels}")
 
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
@@ -76,7 +76,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         self.use_prefix_grouper = self.config.get("use_prefix_grouper", False)
         if torch.distributed.get_rank() == 0:
-            print(f"{role} use_prefix_grouper={self.use_prefix_grouper}")
+            logger.info(f"{role} use_prefix_grouper={self.use_prefix_grouper}")
 
         if self.config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
@@ -408,7 +408,7 @@ class DataParallelPPOActor(BasePPOActor):
             self.scaler.update()
         else:
             if not torch.isfinite(grad_norm):
-                print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
+                logger.warning(f"rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
                 self.actor_optimizer.zero_grad()
             else:
                 self.actor_optimizer.step()

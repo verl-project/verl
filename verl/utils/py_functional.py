@@ -16,6 +16,7 @@ Contain small python utility functions
 """
 
 import importlib
+import logging
 import multiprocessing
 import os
 import queue  # Import the queue module for exception type hint
@@ -26,6 +27,9 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Optional
 
 from verl.utils.metric import Metric
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 # --- Top-level helper for multiprocessing timeout ---
@@ -75,10 +79,10 @@ def timeout_limit(seconds: float, use_signals: bool = False):
             if os.name != "posix":
                 raise NotImplementedError(f"Unsupported OS: {os.name}")
             # Issue deprecation warning if use_signals is explicitly True
-            print(
-                "WARN: The 'use_signals=True' option in the timeout decorator is deprecated. \
-                Signals are unreliable outside the main thread. \
-                Please use the default multiprocessing-based timeout (use_signals=False)."
+            logger.warning(
+                "The 'use_signals=True' option in the timeout decorator is deprecated. "
+                "Signals are unreliable outside the main thread. "
+                "Please use the default multiprocessing-based timeout (use_signals=False)."
             )
 
             @wraps(func)
@@ -114,7 +118,7 @@ def timeout_limit(seconds: float, use_signals: bool = False):
                     process.terminate()
                     process.join(timeout=0.5)  # Give it a moment to terminate
                     if process.is_alive():
-                        print(f"Warning: Process {process.pid} did not terminate gracefully after timeout.")
+                        logger.warning(f"Process {process.pid} did not terminate gracefully after timeout.")
                     # Update function name in error message if needed (optional but good practice)
                     raise TimeoutError(f"Function {func.__name__} timed out after {seconds} seconds (multiprocessing)!")
 

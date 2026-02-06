@@ -17,6 +17,8 @@ The input is a parquet file that contains N generated sequences and (optional) t
 
 """
 
+import logging
+import os
 from collections import defaultdict
 
 import hydra
@@ -25,6 +27,9 @@ import pandas as pd
 import ray
 from omegaconf import OmegaConf
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 from verl.trainer.ppo.reward import get_custom_reward_fn
 from verl.utils.fs import copy_to_local
@@ -73,7 +78,7 @@ def main(config):
     for data_source, rewards in data_source_reward.items():
         metric_dict[f"test_score/{data_source}"] = np.mean(rewards)
 
-    print(metric_dict)
+    logger.info(f"Evaluation metrics: {metric_dict}")
 
 
 if __name__ == "__main__":

@@ -82,8 +82,8 @@ from verl.utils.ulysses import (
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "INFO"))
 
 
 def extract_step(path):
@@ -118,8 +118,8 @@ class FSDPSFTTrainer:
         self.config.ulysses_sequence_parallel_size = getattr(self.config, "ulysses_sequence_parallel_size", 1)
         self.use_remove_padding = getattr(self.config, "use_remove_padding", False)
         if self.device_mesh.get_rank() == 0:
-            print(f"Using sequence parallel size: {self.config.ulysses_sequence_parallel_size}")
-            print(f"Using remove padding: {self.use_remove_padding}")
+            logger.info(f"Using sequence parallel size: {self.config.ulysses_sequence_parallel_size}")
+            logger.info(f"Using remove padding: {self.use_remove_padding}")
 
         self._build_dataloader(train_dataset, val_dataset)
 
@@ -137,14 +137,14 @@ class FSDPSFTTrainer:
         self.load_checkpoint()
 
         if self.device_mesh.get_rank() == 0:
-            print(self.config)
+            logger.info(f"Config: {self.config}")
 
         self.device_name = self.config.trainer.device
 
     def _normalize_config_bsz(self):
         dp_size = self.device_mesh.size(0) if not self.ulysses_device_mesh else self.ulysses_device_mesh.size(0)
         if self.device_mesh.get_rank() == 0:
-            print(f"Normalize batch size by dp {dp_size}")
+            logger.info(f"Normalize batch size by dp {dp_size}")
 
         assert self.config.data.train_batch_size % dp_size == 0, (
             f"Global batch size {self.config.data.train_batch_size} is not divisible by dp size {dp_size}"
@@ -167,13 +167,13 @@ class FSDPSFTTrainer:
             rank = self.ulysses_device_mesh.get_local_rank("dp")
             world_size = self.ulysses_device_mesh.size(0)
             if self.ulysses_device_mesh.get_rank() == 0:
-                print(f"Using SP rank {rank} and size {world_size} for data distribution")
-                print("Each SP rank gets different data, but the same data WITHIN the same rank")
+                logger.info(f"Using SP rank {rank} and size {world_size} for data distribution")
+                logger.info("Each SP rank gets different data, but the same data WITHIN the same rank")
         else:
             rank = self.device_mesh.get_rank()
             world_size = self.device_mesh.size()
         if self.device_mesh.get_rank() == 0:
-            print(f"Using FSDP rank {rank} and size {world_size} for data distribution")
+            logger.info(f"Using FSDP rank {rank} and size {world_size} for data distribution")
 
         # Set pin_memory_device when pin_memory is enabled.
         device_name = get_device_name()
@@ -263,7 +263,7 @@ class FSDPSFTTrainer:
                 if lora_adapter_path is not None:
                     from peft import PeftModel
 
-                    print(f"Loading pre-trained LoRA adapter for sft from: {lora_adapter_path}")
+                    logger.info(f"Loading pre-trained LoRA adapter for sft from: {lora_adapter_path}")
 
                     local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.config.model.use_shm)
 
@@ -300,7 +300,7 @@ class FSDPSFTTrainer:
         )
 
         if self.device_mesh.get_rank() == 0:
-            print(auto_wrap_policy)
+            logger.info(f"auto_wrap_policy: {auto_wrap_policy}")
 
         if not self.config.model.fsdp_config.cpu_offload:
             cpu_offload = None
@@ -351,7 +351,7 @@ class FSDPSFTTrainer:
         self.total_steps = self.steps_per_epoch * self.config.trainer.total_epochs
 
         if self.device_mesh.get_rank() == 0:
-            print(
+            logger.info(
                 f"Number of steps/epoch {self.steps_per_epoch}, number of epochs "
                 f"{self.config.trainer.total_epochs}, total number of steps {self.total_steps}"
             )
@@ -499,7 +499,7 @@ class FSDPSFTTrainer:
 
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
+            logger.warning(f"grad_norm is not finite: {grad_norm}")
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()
@@ -549,7 +549,7 @@ class FSDPSFTTrainer:
         local_global_step_folder = os.path.join(self.config.trainer.default_local_dir, f"global_step_{step}")
 
         if self.device_mesh.get_rank() == 0:
-            print(f"Saving checkpoint to: {local_global_step_folder}")
+            logger.info(f"Saving checkpoint to: {local_global_step_folder}")
 
         # Get max checkpoints to keep
         max_ckpt_to_keep = getattr(self.config.trainer, "max_ckpt_to_keep", None)
@@ -567,7 +567,7 @@ class FSDPSFTTrainer:
             # Use StatefulDataLoader's built-in state dict functionality
             dataloader_state_dict = self.train_dataloader.state_dict()
             torch.save(dataloader_state_dict, dataloader_local_path)
-            print(f"Saved dataloader state to: {dataloader_local_path}")
+            logger.info(f"Saved dataloader state to: {dataloader_local_path}")
 
             # Update latest checkpoint tracker (atomic write)
             tracker_file = get_checkpoint_tracker_filename(self.config.trainer.default_local_dir)
@@ -575,7 +575,7 @@ class FSDPSFTTrainer:
             with open(temp_tracker_file, "w") as f:
                 f.write(str(step))
             os.rename(temp_tracker_file, tracker_file)
-            print(f"Updated checkpoint tracker: {tracker_file}")
+            logger.info(f"Updated checkpoint tracker: {tracker_file}")
 
         # Copy to HDFS if configured
         if self.device_mesh.get_rank() == 0 and getattr(self.config.trainer, "default_hdfs_dir", None):
@@ -706,7 +706,7 @@ class FSDPSFTTrainer:
 
         if latest_checkpoint and self.device_mesh.get_rank() == 0:
             step_num = extract_step(latest_checkpoint)
-            print(f"Found latest checkpoint: {latest_checkpoint} (step {step_num})")
+            logger.info(f"Found latest checkpoint: {latest_checkpoint} (step {step_num})")
 
         return latest_checkpoint
 
@@ -798,8 +798,8 @@ class FSDPSFTTrainer:
 
                 if is_last_step:
                     if rank == 0:
-                        print(f"Total time for train steps: {train_time:.2f}s")
-                        print(f"Final validation metrics: {last_valid_metric}")
+                        logger.info(f"Total time for train steps: {train_time:.2f}s")
+                        logger.info(f"Final validation metrics: {last_valid_metric}")
                     return
 
 

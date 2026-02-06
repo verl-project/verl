@@ -12,12 +12,14 @@
 # limitations under the License.
 
 import logging
+import os
 
 import torch
 
 from verl.protocol import DataProto
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def calculate_token_list_diff(tensor1: torch.Tensor, tensor2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -25,8 +27,10 @@ def calculate_token_list_diff(tensor1: torch.Tensor, tensor2: torch.Tensor, mask
     if tensor1.numel() == 0 or tensor2.numel() == 0:
         return torch.zeros(tensor1.shape[0], dtype=torch.long, device=tensor1.device)
     if tensor1.shape != tensor2.shape or mask.shape != tensor1.shape or mask.shape != tensor2.shape:
-        print(
-            f"<WARN> dim of tensor1, tensor2, mask is not equal, {(tensor1.shape)=},{(tensor2.shape)=}, {(mask.shape)=}"
+        logger.warning(
+            f"dim of tensor1, tensor2, mask is not equal, "
+            f"tensor1.shape={tensor1.shape}, tensor2.shape={tensor2.shape}, "
+            f"mask.shape={mask.shape}"
         )
         return torch.ones_like(tensor1)
     # transfer to same device

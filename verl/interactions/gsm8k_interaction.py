@@ -24,7 +24,7 @@ from verl.utils.reward_score import gsm8k
 from .base import BaseInteraction
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class Gsm8kInteraction(BaseInteraction):

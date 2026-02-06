@@ -35,8 +35,8 @@ from verl.utils.device import (
 from verl.utils.megatron_utils import load_megatron_model_to_gpu, offload_megatron_model_to_cpu, per_tensor_generator
 from verl.workers.megatron_workers import AsyncActorRolloutRefWorker, CriticWorker
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 device_name = get_device_name()
 
@@ -72,13 +72,13 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
             elif rollout_name == "sglang":
                 inference_model = self.rollout._engine
                 if inference_model is None:
-                    print("[sync_rollout_weights] Initialize server adapter engine")
+                    logger.info("Initialize server adapter engine")
 
                     async def init_engine():
                         if hasattr(self.rollout, "_init_server_adapter"):
                             await self.rollout._init_server_adapter()
                         else:
-                            print("[sync_rollout_weights] No _init_server_adapter method found")
+                            logger.warning("No _init_server_adapter method found")
                         return self.rollout._engine
 
                     inference_model = self._run_async_safely(init_engine())
@@ -138,7 +138,7 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
             params_generator = self._get_actor_params_generator()
             local_rank = torch.distributed.get_rank()
             world_size = torch.distributed.get_world_size()
-            print(f"cache_actor_weights_to_cpu, local_rank:{local_rank}, world_size:{world_size}")
+            logger.debug(f"cache_actor_weights_to_cpu, local_rank: {local_rank}, world_size: {world_size}")
             for tensor_idx, (key, tensor) in enumerate(params_generator):
                 if tensor_idx % world_size == local_rank:
                     self.cpu_named_params[key] = tensor.to("cpu", non_blocking=True)
@@ -185,13 +185,13 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
                 # For ServerAdapter, _engine might be None and needs async initialization
                 if inference_model is None:
                     # Initialize the server adapter engine
-                    print("[sync_rollout_weights] Initialize server adapter engine")
+                    logger.info("Initialize server adapter engine")
 
                     async def init_engine():
                         if hasattr(self.rollout, "_init_server_adapter"):
                             await self.rollout._init_server_adapter()
                         else:
-                            print("[sync_rollout_weights] No _init_server_adapter method found")
+                            logger.warning("No _init_server_adapter method found")
                         return self.rollout._engine
 
                     inference_model = self._run_async_safely(init_engine())
@@ -235,23 +235,27 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
             offload_megatron_model_to_cpu(self.actor_module)
         offload_duration = time.time() - offload_start_time
 
-        print(
-            f"sync_rollout_weights_by_checkpoint finish!, rank:{torch.distributed.get_rank()},"
-            f" is_actor:{self._is_actor}, is_rollout:{self._is_rollout},"
-            f" total cost:{update_end_time - cache_start_time} seconds, while cache cost {cache_duration} seconds, "
-            f" register cost {register_duration} seconds, update cost {update_duration} seconds"
+        logger.info(
+            f"sync_rollout_weights_by_checkpoint finish! "
+            f"rank: {torch.distributed.get_rank()}, is_actor: {self._is_actor}, "
+            f"is_rollout: {self._is_rollout}, "
+            f"total cost: {update_end_time - cache_start_time:.2f} seconds, "
+            f"cache cost: {cache_duration:.2f} seconds, "
+            f"register cost: {register_duration:.2f} seconds, "
+            f"update cost: {update_duration:.2f} seconds"
         )
 
         if self._is_actor and self._is_offload_param:
-            print(
-                f"sync_rollout_weights_by_checkpoint load model to gpu cost {load_duration} seconds,"
-                f" offload model to cpu cost {offload_duration} seconds"
+            logger.info(
+                f"sync_rollout_weights_by_checkpoint load model to gpu cost "
+                f"{load_duration:.2f} seconds, offload model to cpu cost "
+                f"{offload_duration:.2f} seconds"
             )
 
 
 class DetachActorWorker(DetachNcclSync):
     def __init__(self, config: DictConfig, role: str):
-        print("[DetachAsyncRolloutWorker] Initializing via DetachNcclSync...")
+        logger.info("Initializing DetachActorWorker via DetachNcclSync...")
         DetachNcclSync.__init__(self, config, role)
 
     def _get_actor_params_generator(self):
@@ -293,7 +297,7 @@ class DetachActorWorker(DetachNcclSync):
 
 class DetachAsyncRolloutWorker(DetachNcclSync):
     def __init__(self, config: DictConfig, role: str):
-        print(f"[DetachAsyncRolloutWorker] {DetachAsyncRolloutWorker.__mro__}")
+        logger.debug(f"DetachAsyncRolloutWorker MRO: {DetachAsyncRolloutWorker.__mro__}")
         DetachNcclSync.__init__(self, config, role)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

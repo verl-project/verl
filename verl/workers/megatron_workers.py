@@ -81,8 +81,8 @@ from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
 from verl.workers.rollout import get_rollout_class
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def set_random_seed(seed, only_rollout=False):
@@ -168,7 +168,7 @@ class MegatronWorker(Worker):
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
         self.architectures = getattr(hf_config, "architectures", None)
         if self.rank == 0:
-            print(f"Model config after override: {hf_config}")
+            logger.info(f"Model config after override: {hf_config}")
 
         from verl.models.mcore.config_converter import mapping_string_to_attn_backend
 
@@ -232,7 +232,7 @@ class MegatronWorker(Worker):
 
         if torch.distributed.get_rank() == 0:
             if tf_config is not None:
-                print(f"TF config: {tf_config}")
+                logger.info(f"TF config: {tf_config}")
         self.hf_config = hf_config
         self.tf_config = tf_config
 
@@ -418,7 +418,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 peft_config=self.config.model.get("lora", None),
             )
             self.tf_config = updated_tf_config
-            print(f"actor_module: {len(actor_module)}")
+            logger.info(f"actor_module: {len(actor_module)}")
             if self.config.actor.load_weight:
                 if self.config.actor.megatron.use_dist_checkpointing:
                     load_mcore_dist_weights(
@@ -460,7 +460,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             self.tf_config = updated_tf_config
             if self.config.ref.load_weight:  # should align with the actor:
                 assert self.config.actor.load_weight == self.config.ref.load_weight
-                print("load ref weight start")
+                logger.info("load ref weight start")
                 if self.config.ref.megatron.use_dist_checkpointing:
                     load_mcore_dist_weights(
                         ref_module,
@@ -612,7 +612,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 actor_optimizer=self.actor_optimizer,
                 mtp_config=self.config.model.mtp if self.config.model.mtp.enable else None,
             )
-            print(f"routing replay layers: {len(RouterReplay.router_instances)}")
+            logger.info(f"routing replay layers: {len(RouterReplay.router_instances)}")
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
 
         if self._is_rollout:
@@ -1121,7 +1121,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
                     )
             t1 = time.time()
             if torch.distributed.get_rank() == 0:
-                print(f"critic load_weight time: {t1 - t0}")
+                logger.info(f"critic load_weight time: {t1 - t0}")
         if self.rank == 0:
             print_model_size(critic_module[0])
 

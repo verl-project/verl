@@ -36,8 +36,8 @@ def extract_step(path):
     return None
 
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "INFO"))
 
 
 class OrchestrationMode(Enum):
@@ -91,7 +91,7 @@ class CheckpointHandler:
         # Determine checkpoint path
         local_global_step_folder = os.path.join(self.default_local_dir, f"global_step_{step}")
         if self.rank == 0:
-            print(f"Saving checkpoint to: {local_global_step_folder}")
+            logger.info(f"Saving checkpoint to: {local_global_step_folder}")
 
         # Get max checkpoints to keep
         max_ckpt_to_keep = self.max_ckpt_to_keep
@@ -111,7 +111,7 @@ class CheckpointHandler:
             # Use StatefulDataLoader's built-in state dict functionality
             dataloader_state_dict = self.train_dataloader.state_dict()
             torch.save(dataloader_state_dict, dataloader_local_path)
-            print(f"Saved dataloader state to: {dataloader_local_path}")
+            logger.info(f"Saved dataloader state to: {dataloader_local_path}")
 
         if self.rank == 0:
             # Update latest checkpoint tracker (atomic write)
@@ -120,7 +120,7 @@ class CheckpointHandler:
             with open(temp_tracker_file, "w") as f:
                 f.write(str(step))
             os.rename(temp_tracker_file, tracker_file)
-            print(f"Updated checkpoint tracker: {tracker_file}")
+            logger.info(f"Updated checkpoint tracker: {tracker_file}")
 
         # Copy to HDFS if configured
         if self.rank == 0 and self.default_hdfs_dir:
@@ -219,6 +219,6 @@ class CheckpointHandler:
 
         if latest_checkpoint and self.rank == 0:
             step_num = extract_step(latest_checkpoint)
-            print(f"Found latest checkpoint: {latest_checkpoint} (step {step_num})")
+            logger.info(f"Found latest checkpoint: {latest_checkpoint} (step {step_num})")
 
         return latest_checkpoint

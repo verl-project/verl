@@ -49,7 +49,7 @@ from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutpu
 from verl.workers.rollout.sglang_rollout.sglang_rollout import ServerAdapter, _set_envs_and_config
 from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 visible_devices_keyword = get_visible_devices_keyword()
@@ -82,7 +82,9 @@ class SGLangHttpServer:
         cuda_visible_devices: str,
         base_gpu_id: int,
     ):
-        print(f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, {nnodes=}, {cuda_visible_devices=}")
+        logger.info(
+            f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, {nnodes=}, {cuda_visible_devices=}"
+        )
         os.environ[visible_devices_keyword] = cuda_visible_devices
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)

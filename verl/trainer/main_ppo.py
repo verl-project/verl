@@ -15,12 +15,17 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other mpain.
 """
 
+import logging
 import os
 import socket
+from pprint import pformat
 
 import hydra
 import ray
 from omegaconf import OmegaConf
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
@@ -73,7 +78,7 @@ def run_ppo(config, task_runner_class=None) -> None:
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
+        logger.info(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     if task_runner_class is None:
@@ -180,7 +185,7 @@ class TaskRunner:
                 from verl.workers.engine_workers import TrainingWorker
 
                 CriticWorker = TrainingWorker
-                print("Using new worker implementation")
+                logger.info("Using new worker implementation")
             else:
                 raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
 
@@ -269,14 +274,13 @@ class TaskRunner:
                    for setting up and running the PPO training process.
         """
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
-        from pprint import pprint
 
         from omegaconf import OmegaConf
 
         from verl.utils.fs import copy_to_local
 
-        print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
-        pprint(OmegaConf.to_container(config, resolve=True))
+        logger.info(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        logger.info(f"Config: {pformat(OmegaConf.to_container(config, resolve=True))}")
         OmegaConf.resolve(config)
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
@@ -316,8 +320,8 @@ class TaskRunner:
 
         use_reward_loop = config.reward_model.use_reward_loop
         if not use_reward_loop:
-            print(
-                "WARNING: Init reward manager in single controller will be deprecated. "
+            logger.warning(
+                "Init reward manager in single controller will be deprecated. "
                 "Please set config.reward_model.use_reward_loop to use distributed reward manager."
             )
             # Load the reward manager for training and validation.

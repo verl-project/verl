@@ -19,16 +19,20 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import logging
 import os
 import uuid
 from collections import defaultdict
 from copy import deepcopy
-from pprint import pprint
+from pprint import pformat
 from typing import Any, Optional
 
 import numpy as np
 import ray
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -370,7 +374,7 @@ class RayPPOTrainer:
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
 
-        print(
+        logger.info(
             f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: "
             f"{len(self.val_dataloader)}"
         )
@@ -381,7 +385,7 @@ class RayPPOTrainer:
             total_training_steps = self.config.trainer.total_training_steps
 
         self.total_training_steps = total_training_steps
-        print(f"Total training steps: {self.total_training_steps}")
+        logger.info(f"Total training steps: {self.total_training_steps}")
 
         try:
             OmegaConf.set_struct(self.config, True)
@@ -391,7 +395,7 @@ class RayPPOTrainer:
                 if OmegaConf.select(self.config, "critic.optim"):
                     self.config.critic.optim.total_training_steps = total_training_steps
         except Exception as e:
-            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+            logger.warning(f"Could not set total_training_steps in config. Structure missing? Error: {e}")
 
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
@@ -419,7 +423,7 @@ class RayPPOTrainer:
         with open(filename, "w") as f:
             f.write("\n".join(lines) + "\n")
 
-        print(f"Dumped generations to {filename}")
+        logger.info(f"Dumped generations to {filename}")
 
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
@@ -589,7 +593,7 @@ class RayPPOTrainer:
                 "validate": True,
                 "global_steps": self.global_steps,
             }
-            print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
+            logger.debug(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
             size_divisor = (
@@ -616,7 +620,7 @@ class RayPPOTrainer:
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
-            print("validation generation end")
+            logger.info("validation generation end")
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
@@ -679,7 +683,7 @@ class RayPPOTrainer:
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
 
         if merged:
-            print("_merge_validation_results validate result will be merged")
+            logger.debug("_merge_validation_results validate result will be merged")
             return {
                 "data_sources": data_source_lst,
                 "sample_uids": sample_uids,
@@ -934,7 +938,7 @@ class RayPPOTrainer:
             self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
         )
 
-        print(f"local_global_step_folder: {local_global_step_folder}")
+        logger.info(f"local_global_step_folder: {local_global_step_folder}")
         actor_local_path = os.path.join(local_global_step_folder, "actor")
 
         actor_remote_path = (
@@ -945,8 +949,8 @@ class RayPPOTrainer:
 
         remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
         if remove_previous_ckpt_in_save:
-            print(
-                "Warning: remove_previous_ckpt_in_save is deprecated,"
+            logger.warning(
+                "remove_previous_ckpt_in_save is deprecated,"
                 + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
             )
         max_actor_ckpt_to_keep = (
@@ -987,7 +991,7 @@ class RayPPOTrainer:
             "async_save" in self.config.actor_rollout_ref.actor.checkpoint
             and self.config.actor_rollout_ref.actor.checkpoint["async_save"]
         ):
-            print("skip write latest_checkpointed_iteration.txt when async_save is True")
+            logger.info("skip write latest_checkpointed_iteration.txt when async_save is True")
             return
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
@@ -1012,7 +1016,7 @@ class RayPPOTrainer:
         # find global_step_folder
         if self.config.trainer.resume_mode == "auto":
             if global_step_folder is None:
-                print("Training from scratch")
+                logger.info("Training from scratch")
                 return 0
         else:
             if self.config.trainer.resume_mode == "resume_path":
@@ -1024,12 +1028,12 @@ class RayPPOTrainer:
                 if not os.path.isabs(global_step_folder):
                     working_dir = os.getcwd()
                     global_step_folder = os.path.join(working_dir, global_step_folder)
-        print(f"Load from checkpoint folder: {global_step_folder}")
+        logger.info(f"Load from checkpoint folder: {global_step_folder}")
         # set global step
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
 
-        print(f"Setting global step to {self.global_steps}")
-        print(f"Resuming from {global_step_folder}")
+        logger.info(f"Setting global step to {self.global_steps}")
+        logger.info(f"Resuming from {global_step_folder}")
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, str(Role.Critic))
@@ -1050,7 +1054,7 @@ class RayPPOTrainer:
             dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
-            print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+            logger.warning(f"No dataloader state found at {dataloader_local_path}, will start from scratch")
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
@@ -1331,7 +1335,7 @@ class RayPPOTrainer:
         if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
-            pprint(f"Initial validation metrics: {val_metrics}")
+            logger.info(f"Initial validation metrics: {pformat(val_metrics)}")
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
@@ -1622,7 +1626,7 @@ class RayPPOTrainer:
                             or esi_close_to_expiration
                         ):
                             if esi_close_to_expiration:
-                                print("Force saving checkpoint: ESI instance expiration approaching.")
+                                logger.info("Force saving checkpoint: ESI instance expiration approaching.")
                             with marked_timer("save_checkpoint", timing_raw, color="green"):
                                 self._save_checkpoint()
 
@@ -1704,7 +1708,7 @@ class RayPPOTrainer:
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
-                    pprint(f"Final validation metrics: {last_val_metrics}")
+                    logger.info(f"Final validation metrics: {pformat(last_val_metrics)}")
                     progress_bar.close()
                     return
 

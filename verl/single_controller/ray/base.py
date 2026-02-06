@@ -33,8 +33,8 @@ from verl.utils.py_functional import temp_env_var
 
 __all__ = ["Worker"]
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def get_random_string(length: int) -> str:

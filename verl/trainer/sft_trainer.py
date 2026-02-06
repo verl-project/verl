@@ -43,8 +43,8 @@ from verl.utils.profiler import log_gpu_memory_usage
 from verl.utils.tracking import Tracking
 from verl.workers.engine_workers import TrainingWorker
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "INFO"))
 
 
 class SFTTrainer:
@@ -75,7 +75,7 @@ class SFTTrainer:
         self.device_name = self.config.trainer.device
 
         if self.rank == 0:
-            print(self.config)
+            logger.info(f"Config: {self.config}")
 
         log_gpu_memory_usage(f"rank {self.rank}: After SFTTrainer init", logger=logger)
 
@@ -388,8 +388,8 @@ class SFTTrainer:
 
                 if is_last_step:
                     if is_logging:
-                        print(f"Total time for train steps: {train_time:.2f}s")
-                        print(f"Final validation metrics: {last_valid_metric}")
+                        logger.info(f"Total time for train steps: {train_time:.2f}s")
+                        logger.info(f"Final validation metrics: {last_valid_metric}")
                     return
 
 

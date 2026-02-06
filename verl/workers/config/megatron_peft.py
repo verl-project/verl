@@ -13,6 +13,12 @@
 # limitations under the License.
 """PEFT configuration of Megatron for VERL."""
 
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
 
 def get_peft_cls(model_config, bridge, provider, dtype=None):
     """Get PEFT class from model config.
@@ -109,7 +115,7 @@ def get_peft_cls(model_config, bridge, provider, dtype=None):
             exclude_modules=lora_cfg.get("exclude_modules", []),
         )
 
-    print(
+    logger.info(
         f"Enabling {lora_type.upper()} with rank={lora_cfg.get('rank')}, "
         f"alpha={lora_cfg.get('alpha')}, dropout={lora_cfg.get('dropout')}"
     )

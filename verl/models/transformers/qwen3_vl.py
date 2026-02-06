@@ -24,8 +24,8 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLForConditionalGeneration,
 )
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def get_rope_index(

@@ -11,10 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
 import warnings
 from enum import Enum
 
 import torch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 try:
     from megatron.core.transformer.moe.moe_utils import (
@@ -307,7 +312,7 @@ def apply_router_replay_patch():
     This patch dynamically adds the 'enable_routing_replay' attribute to TransformerConfig
     and modifies the TopKRouter to support recording and replaying of routing decisions.
     """
-    print("Applying Router Replay Patch...")
+    logger.info("Applying Router Replay Patch...")
     # Clear router instances to avoid state leakage between model initializations.
     RouterReplay.router_instances.clear()
     # Step 1: Patch TransformerConfig to include the feature flag

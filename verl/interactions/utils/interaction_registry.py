@@ -20,8 +20,8 @@ import sys
 
 from omegaconf import OmegaConf
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def get_interaction_class(cls_name):

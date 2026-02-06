@@ -43,13 +43,13 @@ from verl.utils.megatron_utils import (
 from .checkpoint_manager import BaseCheckpointManager
 
 # Setup logging
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 mcore_ge_014 = version.parse(megatron.core.__version__) >= version.parse("0.14.0")
 if not mcore_ge_014:
     logger.warning(
-        "Detected megatron.core %s, recommend upgrading to >= 0.14.0 for better checkpoint compatibility",
-        megatron.core.__version__,
+        f"Detected megatron.core {megatron.core.__version__}, "
+        "recommend upgrading to >= 0.14.0 for better checkpoint compatibility"
     )
 
 
@@ -612,7 +612,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         if self.should_save_extra:
             if self.rank == 0:
                 # Save transformer config
-                print(self.transformer_config)
+                logger.debug(f"Transformer config: {self.transformer_config}")
                 bypass_keys = [
                     "finalize_model_grads_func",
                     "grad_scale_func",

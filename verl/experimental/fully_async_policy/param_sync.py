@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 import time
 
 import ray
@@ -21,6 +22,7 @@ from ray.util.collective import collective
 from verl.utils.device import get_nccl_backend
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @ray.remote
@@ -69,7 +71,7 @@ class ParameterSynchronizer:
         self.rollout_wg.set_actor_weights_info(self.weights_info)
 
     def _init_sync_group(self):
-        print("[ParameterSynchronizer] Initializing parameter synchronization group...")
+        logger.info("Initializing parameter synchronization group...")
         actor_rollout_workers = self.actor_wg.workers + self.rollout_wg.workers
         n_workers = len(self.actor_wg.workers + self.rollout_wg.workers)
         if self.config.trainer.device == "npu":
@@ -121,7 +123,7 @@ class ParameterSynchronizer:
         self.current_version = version
         ray.get(self.rollouter.pause.remote())
 
-        print(f"[ParameterSynchronizer] rollout paused. cost {time.time() - start_time:.2f} seconds")
+        logger.info(f"rollout paused. cost {time.time() - start_time:.2f} seconds")
         # Update MQ version
         self.mq_client.update_param_version_sync(version)
 
@@ -139,14 +141,14 @@ class ParameterSynchronizer:
             self.actor_wg.sync_rollout_weights(self.sync_group_name)
             ray.get(self.rollout_wg.sync_rollout_weights(self.sync_group_name))
         end_time = time.time()
-        print(
-            f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds, "
-            f"pause:{pause_time - start_time:.2f}s, sync:{end_time - pause_time:.2f}s"
+        logger.info(
+            f"sync_weights success. cost {end_time - start_time:.2f} seconds, "
+            f"pause: {pause_time - start_time:.2f}s, sync: {end_time - pause_time:.2f}s"
         )
         # async train do validate
-        print(f"[ParameterSynchronizer] validate: {validate}, use_trainer_do_validate: {use_trainer_do_validate}")
+        logger.info(f"validate: {validate}, use_trainer_do_validate: {use_trainer_do_validate}")
         if validate and use_trainer_do_validate:
-            print("[ParameterSynchronizer] use trainer to do validate")
+            logger.info("use trainer to do validate")
             self.validate_task = self.trainer._validate_process.remote()
         else:
             self.validate_task = None
@@ -157,7 +159,7 @@ class ParameterSynchronizer:
         self.wait_last_resume = self.rollouter.resume.remote(self.wait_last_update)
 
     def wait_last_valid(self):
-        print("[ParameterSynchronizer] Waiting last sync and validate...")
+        logger.info("Waiting last sync and validate...")
         start_time = time.time()
         if self.wait_last_update:
             ray.get(self.wait_last_update)
@@ -165,9 +167,9 @@ class ParameterSynchronizer:
             ray.get(self.wait_last_resume)
         if self.validate_task:
             ray.get(self.validate_task)
-        print(f"[ParameterSynchronizer] Wait last validate cost: {time.time() - start_time:.2f} seconds")
+        logger.info(f"Wait last validate cost: {time.time() - start_time:.2f} seconds")
 
     def rollouter_save_checkpoint(self, local_global_step_folder: str):
         """Trigger rollout to save checkpoint(dataloader)"""
-        print(f"[ParameterSynchronizer] Triggering checkpoint save at {local_global_step_folder} ...")
+        logger.info(f"Triggering checkpoint save at {local_global_step_folder} ...")
         return ray.get(self.rollouter.save_checkpoint.remote(local_global_step_folder))

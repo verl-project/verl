@@ -32,7 +32,7 @@ from verl.utils.device import get_device_id, get_device_name
 from .base import BaseSACActor, SupportSACTraining
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def get_dict_from_prefix(tensordict: TensorDict, prefix: str) -> dict:

@@ -36,8 +36,8 @@ from verl.workers.megatron_workers import (
     RewardModelWorker,
 )
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 device_name = get_device_name()
 
@@ -168,7 +168,7 @@ class DetachActorWorker(DetachSync):
 
 class DetachAsyncRolloutWorker(DetachSync):
     def __init__(self, config: DictConfig, role: str):
-        print(f"[DetachAsyncRolloutWorker] {DetachAsyncRolloutWorker.__mro__}")
+        logger.info(f"DetachAsyncRolloutWorker MRO: {DetachAsyncRolloutWorker.__mro__}")
         ActorRolloutRefWorker.__init__(self, config, role)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

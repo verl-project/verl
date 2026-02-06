@@ -47,7 +47,7 @@ from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.utils import ensure_async_iterator
 from verl.workers.rollout.vllm_rollout.utils import TensorMetadata, get_device_uuid
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
