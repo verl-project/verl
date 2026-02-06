@@ -32,12 +32,13 @@ import hydra
 import numpy as np
 import ray
 import torch
-import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+# import transfer_queue as tq
+import verl.trainer.mock_transfer_queue as tq
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
 from verl.experimental.reward_loop import RewardLoopManager
@@ -65,9 +66,8 @@ from verl.workers.utils.losses import value_loss
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+
 # ======================================= USER SECTION BEGIN =======================================
-
-
 class ReplayBuffer:
     """Replay buffer periodically polls metadata from transfer queue.
 
@@ -80,31 +80,71 @@ class ReplayBuffer:
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
 
         self.poll_interval = poll_interval
+        self.lock = threading.Lock()
         self.poll_thread = threading.Thread(target=self._poll_from_transfer_queue, daemon=True)
         self.poll_thread.start()
 
     def _poll_from_transfer_queue(self):
         """Periodically poll metadata from transfer queue."""
-        while True:
-            # data = tq.kv_list()
-            data = None
-            if data is not None:
-                for partition_id, items in data.items():
-                    self.partitions[partition_id].update(items)
-            time.sleep(self.poll_interval)
+        try:
+            while True:
+                data = tq.kv_list()
+                if data is not None:
+                    for partition_id, items in data.items():
+                        self.add(partition_id, items)
+                time.sleep(self.poll_interval)
+        except Exception as e:
+            logger.error(f"Error in _poll_from_transfer_queue: {e}")
+            os._exit(1)
+
+    def add(self, partition_id: str, items: dict[str, dict]):
+        """Add items to the replay buffer.
+
+        Args:
+            partition_id (str): Partition of transfer queue, e.g. "train" or "val".
+            items (dict[str, dict]): Items to add, e.g. {"key": {"tag": "value"}}.
+        """
+        with self.lock:
+            partition = self.partitions[partition_id]
+            for key, tags in items.items():
+                if key not in partition:
+                    partition[key] = {}
+                partition[key].update(tags)
 
     def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> list[str]:
         """Sample a batch of data from the replay buffer.
 
         Args:
-            partition_id (str): Partition of transfer queue, e.g. "train" or "valid".
-            global_steps (int, optional): Global training steps. Defaults to None.
+            partition_id (str): Partition of transfer queue, e.g. "train" or "val".
+            global_steps (int, optional): Global training steps. If not None, wait until all prompts of
+                this global steps have finished.
             batch_size (int, optional): Batch size. Defaults to None.
 
         Returns:
             TensorDict: A batch of data.
         """
-        pass
+        assert (global_steps or batch_size) and (not (global_steps and batch_size)), (
+            "Either global_steps or batch_size must be specified, but not both."
+        )
+
+        while True:
+            time.sleep(self.poll_interval)
+            with self.lock:
+                keys = []
+                should_wait = False
+                partition = self.partitions[partition_id]
+                for key, tags in partition.items():
+                    if tags["global_steps"] == global_steps:
+                        if tags["status"] == "running":
+                            should_wait = True
+                            break
+                        elif tags["status"] == "success":
+                            keys.append(key)
+                        else:
+                            logger.warning(f"Unknown status {tags['status']} for key {key}")
+                logger.info("partitions", self.partitions)
+                if not should_wait:
+                    return keys
 
 
 @ray.remote
@@ -163,6 +203,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
+        uid, partition_id = prompt["uid"], "train" if not prompt.get("validate", False) else "val"
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
             config = self.config.actor_rollout_ref.rollout
@@ -170,39 +211,32 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
             tasks = []
             for i in range(n):
-                # mark session_id as running
-                # await tq.async_kv_put(
-                #     key=f"{prompt['uid']}_{i}_0",  # {uid}_{session_id}_{index}
-                #     fields=prompt,
-                #     tags={"global_steps": prompt["global_steps"], "status": "running"},
-                #     partition_id="train" if not prompt.get("validate", False) else "val",
-                # )
                 task = asyncio.create_task(
                     self._run_agent_loop(sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt)
                 )
                 tasks.append(task)
             await asyncio.gather(*tasks)
+            await tq.async_kv_put(partition_id=partition_id, key=uid, tags={"status": "finished"})
         except Exception as e:
             logger.exception(f"Error in _run_prompt: {e}")
-            raise e
+            await tq.async_kv_put(partition_id=partition_id, key=uid, tags={"status": "failure"})
 
     async def _agent_loop_postprocess(self, output: AgentLoopOutput | list[AgentLoopOutput], **kwargs) -> None:
         """Put agent loop outputs into TransferQueue."""
         uid, session_id = kwargs["uid"], kwargs["session_id"]
         outputs = output if isinstance(output, list) else [output]
-
-        # if no output, mark session_id as failed to let user know
         if not outputs:
-            await tq.async_kv_put(f"{uid}_{session_id}_0", tags={"status": "failed"})
+            logger.warning(f"Empty output for prompt {uid}_{session_id}")
             return
 
         # NOTE: only use the last output to compute reward score, then assign reward score to all agent loop outputs.
         # User can customize the reward score assignment strategy.
         final_output = outputs[-1]
-        prompts, responses = torch.Tensor(final_output.prompt_ids), torch.Tensor(final_output.response_ids)
+        prompts = torch.tensor(final_output.prompt_ids, dtype=torch.int64)
+        responses = torch.tensor(final_output.response_ids, dtype=torch.int64)
         input_ids = torch.cat([prompts, responses], dim=0)
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
-        position_ids = torch.arange(0, input_ids.size(0), dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
+        position_ids = torch.arange(0, input_ids.size(0), dtype=torch.int64)
         await self._compute_score(
             final_output,
             prompts=prompts.unsqueeze(0),  # [1, prompt_length]
@@ -225,21 +259,23 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         keys, fields = [], []
         for i, output in enumerate(outputs):
             keys.append(f"{uid}_{session_id}_{i}")
-            fields.append(output.as_dict())
+            field = output.as_dict()
+            field.update(kwargs)
+            fields.append(field)
 
-        breakpoint()
         await tq.async_kv_batch_put(
             keys=keys,
             fields=fields,
-            tags=[{"status": "success"}] * len(keys),
+            tags=[{"global_steps": kwargs["global_steps"], "status": "success"}] * len(keys),
             partition_id="train" if not kwargs.get("validate", False) else "val",
         )
 
 
 class AgentLoopManagerTQ(AgentLoopManager):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, replay_buffer: ReplayBuffer, **kwargs):
         self.agent_loop_workers_class = AgentLoopWorkerTQ
         super().__init__(*args, **kwargs)
+        self.replay_buffer = replay_buffer
 
     def generate_sequences(self, prompts: TensorDict) -> None:
         """
@@ -249,6 +285,12 @@ class AgentLoopManagerTQ(AgentLoopManager):
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
         """
+        # mark prompts as pending in replay buffer
+        global_steps = prompts["global_steps"]
+        partition_id = "train" if not prompts.get("validate", False) else "val"
+        items = {uid: {"global_steps": global_steps, "status": "running"} for uid in prompts["uid"]}
+        self.replay_buffer.add(partition_id, items)
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         ray.get(
             [
@@ -373,6 +415,7 @@ class PPOTrainer:
             self.agent_loop_manager = AgentLoopManagerTQ(
                 config=self.config,
                 reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+                replay_buffer=self.replay_buffer,
             )
             logger.info("agent loop manager initialized")
             return
@@ -472,6 +515,7 @@ class PPOTrainer:
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+            replay_buffer=self.replay_buffer,
         )
         logger.info("agent loop manager initialized")
 
@@ -617,10 +661,12 @@ class PPOTrainer:
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         self.agent_loop_manager.generate_sequences(batch)
-        breakpoint()
 
         # 2. get batch from replay buffer
-        batch = self.replay_buffer.sample(global_steps=self.global_steps)
+        batch = self.replay_buffer.sample(partition_id="train", global_steps=self.global_steps)
+        breakpoint()
+        td = tq.kv_batch_get("train", batch)
+        len(td)
 
 
 @ray.remote

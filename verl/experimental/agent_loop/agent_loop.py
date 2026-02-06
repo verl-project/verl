@@ -156,10 +156,16 @@ class AgentLoopOutput(BaseModel):
     def as_dict(self) -> dict[str, Any]:
         """Convert agent loop output to a dictionary."""
         output = self.model_dump(exclude_unset=True)
-        for k in ["prompt_ids", "response_ids", "response_mask", "response_logprobs", "routed_experts"]:
-            v = output.pop(k, None)
-            if v is not None:
-                output[k] = torch.Tensor(v)
+        for k in ["prompt_ids", "response_ids", "response_mask"]:
+            output[k] = torch.tensor(output[k], dtype=torch.int64)
+
+        response_logprobs = output.pop("response_logprobs", None)
+        if response_logprobs is not None:
+            output["response_logprobs"] = torch.tensor(response_logprobs, dtype=torch.float32)
+
+        routed_experts = output.pop("routed_experts", None)
+        if routed_experts is not None:
+            output["routed_experts"] = torch.tensor(routed_experts, dtype=torch.int64)
 
         # rm_scores: reward score for each token
         reward_score = output.pop("reward_score", None)
