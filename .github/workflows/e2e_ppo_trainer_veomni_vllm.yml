@@ -126,7 +126,7 @@ jobs:
       - name: Prepare GEO3K dataset
         run: |
           ray stop --force
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/geo3k
+          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with veomni engine (FSDP_SIZE=4, USP=2)
         run: |
           ray stop --force
