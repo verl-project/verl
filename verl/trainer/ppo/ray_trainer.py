@@ -307,6 +307,11 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
+        # GIFT requires uid-based grouping for correct KL normalization
+        loss_mode = self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
+        if loss_mode == "gift" and not self.use_prefix_grouper:
+            print("[GIFT] Automatically enabling group-level balancing (use_prefix_grouper=True)")
+            self.use_prefix_grouper = True
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
