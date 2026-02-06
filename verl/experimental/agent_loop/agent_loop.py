@@ -469,7 +469,7 @@ class AgentLoopWorker:
             )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs)
+        output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
         return output
 
@@ -717,7 +717,11 @@ class AgentLoopWorker:
             output.reward_score = result["reward_score"]
             output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
-    def _postprocess(self, inputs: list[_InternalAgentLoopOutput]) -> DataProto:
+    def _postprocess(
+        self,
+        inputs: list[_InternalAgentLoopOutput],
+        input_non_tensor_batch: dict | None = None,
+    ) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
@@ -757,6 +761,8 @@ class AgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
+        if self.reward_loop_worker_handles is None and input_non_tensor_batch:
+            non_tensor_batch.update(input_non_tensor_batch)
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
