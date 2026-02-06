@@ -119,7 +119,7 @@ class HFModelConfig(BaseConfig):
     # fsdp lora related. We may setup a separate config later
     lora_rank: int = 0
     lora_alpha: int = 16
-    target_modules: Optional[str] = "all-linear"
+    target_modules: Optional[Any] = "all-linear"  # allow both "all-linear" and ["q_proj","k_proj"]
     target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
 
     exclude_modules: Optional[str] = None
@@ -203,6 +203,14 @@ class HFModelConfig(BaseConfig):
         # per model patch
         if getattr(self.hf_config, "model_type", None) == "kimi_vl":
             self.hf_config.text_config.topk_method = "greedy"
+
+        # Ensure target_modules is a str or list[str]
+        if self.target_modules is None:
+            self.target_modules = "all-linear"
+        assert isinstance(self.target_modules, (str | list))
+        if isinstance(self.target_modules, list):
+            for x in self.target_modules:
+                assert isinstance(x, str)
 
     def get_processor(self):
         return self.processor if self.processor is not None else self.tokenizer
