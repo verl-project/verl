@@ -372,7 +372,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not actor_model_config.tie_word_embeddings,
+            mesh=None if self.config.actor.strategy == "fsdp2" else self.device_mesh,
         )
 
         with init_context(), warnings.catch_warnings():
@@ -403,13 +404,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     actor_module_class = AutoModel
 
-            actor_module = actor_module_class.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
-                config=actor_model_config,
-                trust_remote_code=trust_remote_code,
-                attn_implementation=attn_implementation,
-            )
+            if self.rank > 0 and self.config.actor.strategy == "fsdp2":
+                actor_module = actor_module_class.from_config(actor_model_config, trust_remote_code=trust_remote_code)
+            else:
+                actor_module = actor_module_class.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                    attn_implementation=attn_implementation,
+                )
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
@@ -558,7 +562,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "reshard_after_forward": fsdp_config.reshard_after_forward,
                 "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
             }
-            full_state = actor_module.state_dict()
+            full_state = actor_module.state_dict() if self.rank == 0 else {}
             apply_fsdp2(actor_module, fsdp_kwargs, fsdp_config)
             fsdp2_load_full_state_dict(actor_module, full_state, fsdp_mesh, cpu_offload)
             actor_module_fsdp = actor_module
@@ -1310,7 +1314,8 @@ class CriticWorker(Worker, DistProfilerExtension):
             critic_model_config.text_config.topk_method = "greedy"
 
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not critic_model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not critic_model_config.tie_word_embeddings,
+            mesh=None if config.strategy == "fsdp2" else self.device_mesh,
         )
 
         # TiledMLP configuration for memory-efficient MLP computation
@@ -1333,6 +1338,7 @@ class CriticWorker(Worker, DistProfilerExtension):
                 torch_dtype,
                 critic_model_config,
                 config.model.get("trust_remote_code", False),
+                load_from_pretrained=not (config.strategy == "fsdp2" and self.rank > 0),
             )
 
             use_remove_padding = config.model.get("use_remove_padding", False)
@@ -1458,7 +1464,7 @@ class CriticWorker(Worker, DistProfilerExtension):
                 "reshard_after_forward": fsdp_config.reshard_after_forward,
                 "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
             }
-            full_state = critic_module.state_dict()
+            full_state = critic_module.state_dict() if self.rank == 0 else {}
             apply_fsdp2(critic_module, fsdp_kwargs, fsdp_config)
             fsdp2_load_full_state_dict(critic_module, full_state, fsdp_mesh, offload_policy)
         else:
@@ -1717,18 +1723,24 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not model_config.tie_word_embeddings,
+            mesh=None if config.strategy == "fsdp2" else self.device_mesh,
         )
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             model_config.classifier_dropout = 0.0
-            reward_module = AutoModelForTokenClassification.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                config=model_config,
-                torch_dtype=torch.bfloat16,
-                trust_remote_code=trust_remote_code,
-            )
+            if config.strategy == "fsdp2" and self.rank > 0:
+                reward_module = AutoModelForTokenClassification.from_config(
+                    model_config, trust_remote_code=trust_remote_code
+                )
+            else:
+                reward_module = AutoModelForTokenClassification.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    config=model_config,
+                    torch_dtype=torch.bfloat16,
+                    trust_remote_code=trust_remote_code,
+                )
 
             apply_monkey_patch(
                 model=reward_module,
@@ -1765,7 +1777,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 "reshard_after_forward": config.model.fsdp_config.reshard_after_forward,
                 "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
             }
-            full_state = reward_module.state_dict()
+            full_state = reward_module.state_dict() if self.rank == 0 else {}
             apply_fsdp2(reward_module, fsdp_kwargs, config.model.fsdp_config)
             fsdp2_load_full_state_dict(reward_module, full_state, fsdp_mesh, cpu_offload)
         else:

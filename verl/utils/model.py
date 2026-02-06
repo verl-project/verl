@@ -618,18 +618,19 @@ def patch_valuehead_model(model) -> None:
     model._no_split_modules = getattr(model.pretrained_model, "_no_split_modules", [])
 
 
-def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
+def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code, load_from_pretrained: bool = True):
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 
     try:
-        model = AutoModelForTokenClassification.from_pretrained(
-            pretrained_model_name_or_path=local_path,
-            torch_dtype=torch_dtype,
-            config=model_config,
-            attn_implementation="flash_attention_2",
-            trust_remote_code=trust_remote_code,
-        )
-        return model
+        if load_from_pretrained:
+            return AutoModelForTokenClassification.from_pretrained(
+                pretrained_model_name_or_path=local_path,
+                torch_dtype=torch_dtype,
+                config=model_config,
+                attn_implementation="flash_attention_2",
+                trust_remote_code=trust_remote_code,
+            )
+        return AutoModelForTokenClassification.from_config(model_config, trust_remote_code=trust_remote_code)
     except BaseException as e:
         if not is_trl_available():
             raise RuntimeError(
@@ -644,13 +645,17 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         module_class = AutoModelForVision2Seq
     else:
         module_class = AutoModelForCausalLM
-    ori_model = module_class.from_pretrained(
-        pretrained_model_name_or_path=local_path,
-        torch_dtype=torch_dtype,
-        config=model_config,
-        attn_implementation="flash_attention_2",
-        trust_remote_code=trust_remote_code,
-    )
+    if load_from_pretrained:
+        ori_model = module_class.from_pretrained(
+            pretrained_model_name_or_path=local_path,
+            torch_dtype=torch_dtype,
+            config=model_config,
+            attn_implementation="flash_attention_2",
+            trust_remote_code=trust_remote_code,
+        )
+    else:
+        ori_model = module_class.from_config(model_config, trust_remote_code=trust_remote_code)
+
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
     patch_valuehead_model(model)
     return model
