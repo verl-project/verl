@@ -59,6 +59,11 @@ actor_rollout_ref:
       use_remove_padding: true
       forward_only: false
       dtype: bfloat16
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
+        record_file: null
+        replay_file: null
     _target_: verl.workers.config.McoreActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -199,6 +204,11 @@ actor_rollout_ref:
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
       forward_only: true
       dtype: bfloat16
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
+        record_file: null
+        replay_file: null
     _target_: verl.workers.config.McoreActorConfig
     load_weight: true
   rollout:
@@ -483,6 +493,11 @@ critic:
     use_remove_padding: true
     forward_only: false
     dtype: bfloat16
+    router_replay:
+      _target_: verl.workers.config.EngineRouterReplayConfig
+      mode: disabled
+      record_file: null
+      replay_file: null
   _target_: verl.workers.config.McoreCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: megatron
