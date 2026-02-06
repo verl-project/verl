@@ -113,7 +113,6 @@ class vLLMHttpServer:
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         self.precision_debugger_cfg = getattr(self.config, "precision_debugger", None)
-        self.precision_global_step = None
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
             self.config.max_model_len = max_position_embeddings
@@ -173,15 +172,25 @@ class vLLMHttpServer:
             f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
         )
 
+    def _export_precision_debugger_env(self) -> None:
+        precision_cfg = self.precision_debugger_cfg
+        if not precision_cfg or not getattr(precision_cfg, "enable", False):
+            return
+        try:
+            if hasattr(precision_cfg, "to_container"):
+                precision_cfg = precision_cfg.to_container(resolve=True)
+            if isinstance(precision_cfg, dict):
+                os.environ["VERL_PRECISION_DEBUGGER_CONFIG_JSON"] = json.dumps(precision_cfg)
+        except Exception:
+            # Best-effort only; precision debugger should not block server launch
+            return
+
     def get_master_address(self):
         """Get master address and port for data parallel.
         Returns:
             tuple: (master_address, master_port, dp_rpc_port)
         """
         return self._master_address, self._master_port, self._dp_rpc_port
-
-    def set_precision_global_step(self, global_step: int) -> None:
-        self.precision_global_step = global_step
 
     def get_server_address(self):
         """Get http server address and port."""
@@ -212,6 +221,7 @@ class vLLMHttpServer:
             self._dp_rpc_port = dp_rpc_port
 
         # 1. setup vllm serve cli args
+        self._export_precision_debugger_env()
         engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
         if self.config.get("limit_images", None):  # support for multi-image data
@@ -450,11 +460,6 @@ class vLLMHttpServer:
         self.task = asyncio.create_task(asyncio.to_thread(run_headless_wrapper))
         self.task.add_done_callback(on_run_headless_done)
 
-    @DistProfiler.annotate(
-        precision_stage="rollout_generate",
-        precision_model_attr=["engine", "engine.model", "engine.model_runner.model"],
-        precision_global_step_attr="precision_global_step",
-    )
     async def generate(
         self,
         prompt_ids: list[int],
@@ -465,8 +470,6 @@ class vLLMHttpServer:
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
-        if "_precision_global_step" in sampling_params:
-            self.precision_global_step = sampling_params.pop("_precision_global_step")
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)

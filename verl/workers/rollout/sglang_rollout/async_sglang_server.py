@@ -399,11 +399,6 @@ class SGLangHttpServer:
         obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.release_memory_occupation(obj, None)
 
-    @DistProfiler.annotate(
-        precision_stage="rollout_generate",
-        precision_model_attr=["model", "model_runner.model"],
-        precision_global_step_attr="precision_global_step",
-    )
     async def generate(
         self,
         prompt_ids: torch.Tensor,
@@ -413,8 +408,6 @@ class SGLangHttpServer:
         video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
-        if "_precision_global_step" in sampling_params:
-            self.precision_global_step = sampling_params.pop("_precision_global_step")
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
 

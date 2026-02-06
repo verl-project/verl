@@ -172,6 +172,45 @@ class vLLMColocateWorkerExtension:
         monkey_patch_compute_logits(self.model_runner.model, vocab_size)
         # patch weight loader to support MoE model
         patch_vllm_moe_model_weight_loader(self.model_runner.model)
+        self._attach_precision_debugger()
+
+    def _attach_precision_debugger(self) -> None:
+        cfg_json = os.getenv("VERL_PRECISION_DEBUGGER_CONFIG_JSON", None)
+        if not cfg_json:
+            return
+        try:
+            precision_cfg = json.loads(cfg_json)
+        except Exception:
+            return
+        if not precision_cfg or not precision_cfg.get("enable", False):
+            return
+
+        model = self.model_runner.model
+        if not hasattr(model, "forward"):
+            return
+
+        original_forward = model.forward
+        extension_self = self
+
+        def precision_forward(self, *args, **kwargs):
+            from verl.utils.profiler.precision_debugger_profile import PrecisionDebuggerProfiler
+
+            if not hasattr(extension_self, "_precision_global_step"):
+                extension_self._precision_global_step = None
+            profiler = PrecisionDebuggerProfiler(
+                precision_cfg, rank=getattr(extension_self, "local_rank", None)
+            )
+            started = profiler.start(
+                stage="rollout_generate",
+                global_step=getattr(extension_self, "_precision_global_step", None),
+                model=model,
+            )
+            try:
+                return original_forward(*args, **kwargs)
+            finally:
+                profiler.stop(started=started)
+
+        model.forward = MethodType(precision_forward, model)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""

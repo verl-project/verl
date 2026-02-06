@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import functools
-import inspect
 from typing import Callable, Optional
 
 from ..memory_utils import MemorySnapshotSampler, enable_memory_visualize
@@ -240,24 +239,6 @@ class DistProfiler:
                 and profiler.check_this_step()
                 and profiler.check_this_rank()
             )
-
-        if inspect.iscoroutinefunction(func):
-
-            @functools.wraps(func)
-            async def async_wrapper(self_instance, *args, **kwargs_inner):
-                precision_impl = _build_precision_impl(self_instance)
-                precision_started = _precision_start(precision_impl, self_instance, args, kwargs_inner)
-                try:
-                    if _should_profile(self_instance):
-                        impl = self_instance.profiler._impl
-                        wrapped = _decorate_with_profiler(impl, func)
-                        return await wrapped(self_instance, *args, **kwargs_inner)
-                    return await func(self_instance, *args, **kwargs_inner)
-                finally:
-                    if precision_impl is not None and precision_stage:
-                        precision_impl.stop(started=precision_started, step=precision_step)
-
-            return async_wrapper
 
         def decorator(func_inner):
             @functools.wraps(func_inner)
