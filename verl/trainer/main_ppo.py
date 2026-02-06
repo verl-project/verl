@@ -162,6 +162,9 @@ class TaskRunner:
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
+        elif config.actor_rollout_ref.actor.strategy == "veomni":
+            raise NotImplementedError("VeOmni does not support legacy worker implementation")
+
         else:
             raise NotImplementedError
 
@@ -187,6 +190,15 @@ class TaskRunner:
         elif config.critic.strategy == "megatron":
             # TODO: switch this to TrainingWorker as well
             from verl.workers.megatron_workers import CriticWorker
+
+        elif config.critic.strategy == "veomni":
+            if use_legacy_worker_impl == "disable":
+                from verl.workers.engine_workers import TrainingWorker
+
+                CriticWorker = TrainingWorker
+                print("Using new worker implementation")
+            else:
+                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
 
         else:
             raise NotImplementedError
