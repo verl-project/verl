@@ -366,7 +366,8 @@ class RobDataParallelSACActor(BaseSACActor):
         self.critic_optimizer.step()
         self.critic_scheduler.step()
 
-        if global_steps >= self.config.critic_warmup_steps:
+        update_actor = (global_steps >= self.config.critic_warmup_steps and global_steps % self.config.actor_update_interval == 0)
+        if update_actor:
             # Training actor
             self.actor_optimizer.zero_grad()
             for batch_idx, micro_batch in enumerate(micro_batches):
@@ -412,16 +413,12 @@ class RobDataParallelSACActor(BaseSACActor):
             "sac/alpha": self._get_alpha().detach().item(),
             "sac/alpha_lr": self.alpha_optimizer.param_groups[0]["lr"] if self.auto_entropy else 0.0,
             "sac/alpha_loss": sum(alpha_loss_list) / len(alpha_loss_list) if alpha_loss_list else 0.0,
-            "sac/alpha_grad_norm": alpha_grad_norm.detach().item()
-            if self.auto_entropy and global_steps >= self.config.critic_warmup_steps
-            else 0.0,
+            "sac/alpha_grad_norm": alpha_grad_norm.detach().item() if self.auto_entropy and update_actor else 0.0,
             "sac/replay_pool_size": len(self.replay_pool),
 
             "actor/loss": sum(actor_loss_list) / len(actor_loss_list) if actor_loss_list else 0.0,
             "actor/lr": self.actor_optimizer.param_groups[0]["lr"],
-            "actor/grad_norm": actor_grad_norm.detach().item()
-            if global_steps >= self.config.critic_warmup_steps
-            else 0.0,
+            "actor/grad_norm": actor_grad_norm.detach().item() if update_actor else 0.0,
 
             "actor/logprob_mean": (
                 valid_mean(torch.cat(actor_logprobs_list), batch["valids"]).detach().item()
