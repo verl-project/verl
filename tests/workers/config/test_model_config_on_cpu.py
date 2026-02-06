@@ -12,58 +12,70 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from pprint import pp
+import os
 
+import pytest
 from omegaconf import OmegaConf
 
 from verl.workers.config.model import HFModelConfig
 
 
-def test_target_modules_accepts_list_via_omegaconf():
-    """
-    Test that target_modules field accepts both string and list values
-    when merging OmegaConf configs (simulates CLI override behavior).
+class TestHFModelConfigCPU:
+    model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-0.5B")  # Just a path string, not loaded
 
-    The purpose is to ensure we can pass
-    actor_rollout_ref.model.target_modules='["k_proj","o_proj","down_proj","q_proj"]'
-    """
-    model_path = "~/models/Qwen/Qwen2.5-0.5B"  # Just a path string, not loaded
+    def test_target_modules_accepts_list_via_omegaconf(self):
+        """
+        Test that target_modules field accepts both string and list values
+        when merging OmegaConf configs (simulates CLI override behavior).
 
-    # Create structured config from the dataclass defaults
-    # This is what omega_conf_to_dataclass does internally
-    cfg_from_dataclass = OmegaConf.structured(HFModelConfig)
+        The purpose is to ensure we can pass
+        actor_rollout_ref.model.target_modules='["k_proj","o_proj","down_proj","q_proj"]'
+        """
 
-    pp("{cfg_from_dataclass=}")
+        # Create structured config from the dataclass defaults
+        # This is what omega_conf_to_dataclass does internally
+        cfg_from_dataclass = OmegaConf.structured(HFModelConfig)
 
-    # Simulate CLI override with target_modules as a list
-    cli_config = OmegaConf.create(
-        {
-            "path": model_path,
-            "target_modules": ["k_proj", "o_proj", "q_proj", "v_proj"],
-        }
-    )
+        # Simulate CLI override with target_modules as a list
+        cli_config = OmegaConf.create(
+            {
+                "path": self.model_path,
+                "target_modules": ["k_proj", "o_proj", "q_proj", "v_proj"],
+            }
+        )
 
-    pp("{cli_config=}")
+        # This merge should NOT raise ValidationError
+        # Before the fix (target_modules: str), this would fail with:
+        # "Cannot convert 'ListConfig' to string"
+        merged = OmegaConf.merge(cfg_from_dataclass, cli_config)
 
-    # This merge should NOT raise ValidationError
-    # Before the fix (target_modules: str), this would fail with:
-    # "Cannot convert 'ListConfig' to string"
-    merged = OmegaConf.merge(cfg_from_dataclass, cli_config)
+        # Verify the list was merged correctly
+        assert list(merged.target_modules) == ["k_proj", "o_proj", "q_proj", "v_proj"]
 
-    # Verify the list was merged correctly
-    assert list(merged.target_modules) == ["k_proj", "o_proj", "q_proj", "v_proj"]
+    def test_target_modules_accepts_string_via_omegaconf(self):
+        """Test that target_modules still accepts string values."""
 
+        cfg_from_dataclass = OmegaConf.structured(HFModelConfig)
 
-def test_target_modules_accepts_string_via_omegaconf():
-    """Test that target_modules still accepts string values."""
-    cfg_from_dataclass = OmegaConf.structured(HFModelConfig)
+        cli_config = OmegaConf.create(
+            {
+                "path": self.model_path,
+                "target_modules": "all-linear",
+            }
+        )
 
-    cli_config = OmegaConf.create(
-        {
-            "path": "~/models/some-model",
-            "target_modules": "all-linear",
-        }
-    )
+        merged = OmegaConf.merge(cfg_from_dataclass, cli_config)
+        assert merged.target_modules == "all-linear"
 
-    merged = OmegaConf.merge(cfg_from_dataclass, cli_config)
-    assert merged.target_modules == "all-linear"
+    def test_target_modules_raises_on_invalid_type(self):
+        """Test that __post_init__ raises TypeError for invalid target_modules types."""
+        base_config = OmegaConf.structured(HFModelConfig)
+        invalid_cli_config = OmegaConf.create(
+            {
+                "path": self.model_path,
+                "target_modules": [1, 2, 3],  # list of ints instead of strings
+            }
+        )
+        merged_config = OmegaConf.merge(base_config, invalid_cli_config)
+        with pytest.raises(TypeError):  # Or AssertionError with current implementation
+            OmegaConf.to_object(merged_config)
