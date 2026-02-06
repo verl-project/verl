@@ -4,7 +4,6 @@ ENGINE=${1:-vllm}
 
 # Some models are optimized by vllm ascend. While in some case, e.g. rlhf training, 
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
-export USE_OPTIMIZED_MODEL=0
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
@@ -13,7 +12,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
-    data.train_batch_size=64 \
+    data.train_batch_size=32 \
     data.max_prompt_length=2000 \
     data.max_response_length=2000 \
     data.shuffle=False \
@@ -21,7 +20,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -35,6 +34,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
     actor_rollout_ref.rollout.max_num_batched_tokens=4000 \
     actor_rollout_ref.rollout.max_num_seqs=64 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enforce_eager=False \

@@ -66,7 +66,7 @@ on:
       # Entrypoints
       - ".github/workflows/nightly_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
-      - "examples/ppo_trainer/run_qwen3-8b_npu.sh"
+      - "tests/nightly_ci/run_ppo_qwen3-8b_fsdp_npu.sh"
   schedule:
     - cron: "0 16 * * *"
 
@@ -122,8 +122,7 @@ jobs:
       - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend
         run: |
           ray stop --force
-          
-          bash examples/ppo_trainer/run_qwen3-8b_npu.sh
+          bash tests/nightly_ci/run_ppo_qwen3-8b_fsdp_npu.sh
 
   # Test Megatron strategy
   

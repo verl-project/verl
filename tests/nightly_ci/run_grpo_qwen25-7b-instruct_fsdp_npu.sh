@@ -4,7 +4,6 @@ ENGINE=${1:-vllm}
 
 # Some models are optimized by vllm ascend. While in some case, e.g. rlhf training, 
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
-export USE_OPTIMIZED_MODEL=0
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
@@ -33,8 +32,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=5 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
@@ -47,4 +47,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
-    trainer.total_epochs=-1 $@
+    trainer.total_training_steps=15 \
+    trainer.total_epochs=15 $@
