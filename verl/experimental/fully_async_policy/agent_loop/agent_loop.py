@@ -19,7 +19,7 @@ from typing import Any, Optional, Sequence
 import hydra
 import numpy as np
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
@@ -114,6 +114,12 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         if batch.meta_info.get("validate", False):
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["temperature"] = config.val_kwargs.temperature
+            if config.val_kwargs.sampling_kwargs is not None:
+                sampling_params = (
+                    OmegaConf.to_container(config.val_kwargs.sampling_kwargs, resolve=True) | sampling_params
+                )
+        elif config.sampling_kwargs is not None:
+            sampling_params = OmegaConf.to_container(config.sampling_kwargs, resolve=True) | sampling_params
 
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop
