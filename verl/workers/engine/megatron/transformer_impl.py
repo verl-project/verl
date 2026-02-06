@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import logging
 import os
 from functools import partial
@@ -33,6 +32,11 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
+from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
+from verl.utils.megatron.router_replay_utils import (
+    RouterReplayHelper,
+    set_router_replay_data,
+)
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
@@ -45,6 +49,7 @@ from verl.utils.megatron_utils import (
     offload_megatron_optimizer,
     patch_engine_mtp,
     register_megatron_training_hooks,
+    unwrap_model,
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
@@ -88,6 +93,12 @@ class MegatronEngine(BaseEngine):
         }
         self.weight_converter = None
 
+        # Router replay configuration for MoE models
+        self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
+        logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
+        if self.enable_routing_replay:
+            apply_router_replay_patch()
+
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
         if mpu.is_initialized():
@@ -114,6 +125,8 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self.enable_routing_replay:
+            override_transformer_config["enable_routing_replay"] = True
 
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
@@ -231,6 +244,9 @@ class MegatronEngine(BaseEngine):
 
         if torch.distributed.get_rank() == 0:
             print_model_size(module[0])
+
+        if self.enable_routing_replay:
+            print(f"routing replay layers: {len(RouterReplay.router_instances)}")
 
         return module
 
@@ -543,6 +559,11 @@ class MegatronEngine(BaseEngine):
 
         forward_step = partial(self.forward_step, postprocess_micro_batch_func=postprocess_micro_batch_func)
 
+        enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
+
+        if enable_routing_replay:
+            RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+
         # batch should be a list of batches inside micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.module))
 
@@ -558,6 +579,11 @@ class MegatronEngine(BaseEngine):
             forward_only=forward_only,
         )
 
+        if enable_routing_replay:
+            if self.engine_config.router_replay.mode in ["R3"]:
+                RouterReplay.clear_global_indices()
+                RouterReplay.clear_global_router_replay_action()
+
         if self.model_config.mtp.enable and self.is_mp_src_rank_with_outputs():
             # add mtp_losses
             metrics = get_megatron_mtp_loss(n_micro_batch)
@@ -565,9 +591,9 @@ class MegatronEngine(BaseEngine):
                 losses_reduced[0]["metrics"] = {}
             losses_reduced[0]["metrics"].update(metrics)
 
-        # loss_reduces contains the stats returned from loss_func
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            return postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
+            output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
+            return output
         else:
             return {}
 
@@ -639,10 +665,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
         loss_mask = batch["loss_mask"].to(bool)
         multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
 
+        routed_experts = batch.get("routed_experts", [])
+        attention_mask = batch.get("attention_mask", None)
+
         return {
             "input_ids": input_ids,
             "loss_mask": loss_mask,
             "multi_modal_inputs": multi_modal_inputs,
+            "routed_experts": routed_experts,
+            "attention_mask": attention_mask,
         }
 
     def prepare_model_outputs(self, output: dict, data: TensorDict):
@@ -667,6 +698,22 @@ class MegatronEngineWithLMHead(MegatronEngine):
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         loss_mask = model_inputs["loss_mask"]
+
+        unwrapped_model = unwrap_model(model)
+        if hasattr(unwrapped_model, "vp_stage"):
+            vp_rank = unwrapped_model.vp_stage
+        else:
+            vp_rank = 0
+
+        if RouterReplayHelper.is_replay_backward_action(self.tf_config, vp_rank):
+            router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank)
+            for router in router_instance_list:
+                router.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+
+        if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
+            layers_topk_idx = model_inputs["routed_experts"]
+            attention_mask = model_inputs["attention_mask"].to(bool)
+            set_router_replay_data(layers_topk_idx, attention_mask, self.tf_config, vp_rank)
 
         if pad_mode == DatasetPadMode.NO_PADDING:
             label = input_ids.clone()
@@ -703,55 +750,60 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
             )
-            return output, partial(postprocess_micro_batch_func, data=batch)
+        else:
+            if not isinstance(temperature, torch.Tensor):
+                temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
 
-        if not isinstance(temperature, torch.Tensor):
-            temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
+            temperature = temperature.to(torch.float32)
+            assert temperature.shape[0] == input_ids.shape[0]
+            temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
 
-        temperature = temperature.to(torch.float32)
-        assert temperature.shape[0] == input_ids.shape[0]
-        temperature = verl_F.expand_as_nested(temperature, input_ids)  # (bsz, j1)
+            forward_fn = get_mcore_forward_no_padding_fn(self.model_config.hf_config)
 
-        forward_fn = get_mcore_forward_no_padding_fn(self.model_config.hf_config)
+            def logits_processor(logits, label, temperature):
+                assert logits.shape[:2] == label.shape[:2]
+                # avoid non-positive temperature such as padding
+                temperature[temperature <= 0] = 1e-8
+                assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
+                logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
+                ret = {}
+                if calculate_entropy:
+                    logits_bak = logits.clone()
+                    # # disable the hint until the fused_kernel is optimized for triton>=3.3
+                    # if torch.distributed.get_rank() == 0:
+                    #     logger.warning_once(
+                    #         "For memory-efficient computation, enable fused kernels via "
+                    #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
+                    #         "The current `clone()` operation ensures correctness but increases memory usage."
+                    #     )
+                    entropy = vocab_parallel_entropy(logits)
+                    ret["entropy"] = entropy
+                else:
+                    logits_bak = logits
 
-        def logits_processor(logits, label, temperature):
-            assert logits.shape[:2] == label.shape[:2]
-            # avoid non-positive temperature such as padding
-            temperature[temperature <= 0] = 1e-8
-            assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
-            logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
-            ret = {}
-            if calculate_entropy:
-                logits_bak = logits.clone()
-                # # disable the hint until the fused_kernel is optimized for triton>=3.3
-                # if torch.distributed.get_rank() == 0:
-                #     logger.warning_once(
-                #         "For memory-efficient computation, enable fused kernels via "
-                #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
-                #         "The current `clone()` operation ensures correctness but increases memory usage."
-                #     )
-                entropy = vocab_parallel_entropy(logits)
-                ret["entropy"] = entropy
-            else:
-                logits_bak = logits
+                log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
+                ret["log_probs"] = log_probs
+                return ret
 
-            log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
-            ret["log_probs"] = log_probs
-            return ret
+            logits_processor_args = {"label": label, "temperature": temperature, "loss_mask": loss_mask}
 
-        logits_processor_args = {"label": label, "temperature": temperature, "loss_mask": loss_mask}
+            output = forward_fn(
+                model,
+                input_ids,
+                multi_modal_inputs,
+                logits_processor=logits_processor,
+                logits_processor_args=logits_processor_args,
+                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+                pad_token_id=self.model_config.tokenizer.pad_token_id,
+                data_format="thd" if self.engine_config.use_remove_padding else "bshd",
+                enable_mtp=self.model_config.mtp.enable_train,
+            )
 
-        output = forward_fn(
-            model,
-            input_ids,
-            multi_modal_inputs,
-            logits_processor=logits_processor,
-            logits_processor_args=logits_processor_args,
-            vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-            pad_token_id=self.model_config.tokenizer.pad_token_id,
-            data_format="thd" if self.engine_config.use_remove_padding else "bshd",
-            enable_mtp=self.model_config.mtp.enable_train,
-        )
+        # Router replay: switch to backward replay mode for next backward pass
+        if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
+            router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank)
+            for router in router_instance_list:
+                router.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
 
         return output, partial(postprocess_micro_batch_func, data=batch)
 
