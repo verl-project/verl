@@ -200,7 +200,7 @@ class RewardLoopWorker:
 
     async def compute_score_disrm(self, data: DataProto) -> dict:
         disrm_prompt = await self._preprocess_reward_inputs(data)
-        engine_name = self.config.reward_model.inference.name
+        engine_name = self.config.reward_model.rollout.name
         model_name = self.config.reward_model.model_path
         if engine_name == "vllm":
             # TODO (dyy): the "activation" has been changed to "use_activation" in vllm 0.11.2
