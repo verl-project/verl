@@ -271,6 +271,7 @@ class RayPPOTrainer:
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
+        self._propagate_precision_debugger_config()
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -1074,6 +1075,18 @@ class RayPPOTrainer:
             if self.use_rm and not self.use_reward_loop:
                 self.rm_wg.stop_profile()
 
+    def _propagate_precision_debugger_config(self) -> None:
+        precision_cfg = OmegaConf.select(self.config, "global_profiler.global_tool_config.precision_debugger")
+        if precision_cfg is None:
+            return
+        with open_dict(self.config):
+            if OmegaConf.select(self.config, "actor_rollout_ref") is not None:
+                self.config.actor_rollout_ref.precision_debugger = precision_cfg
+            if OmegaConf.select(self.config, "critic") is not None:
+                self.config.critic.precision_debugger = precision_cfg
+            if OmegaConf.select(self.config, "reward_model") is not None:
+                self.config.reward_model.precision_debugger = precision_cfg
+
     def _get_dp_size(self, worker_group, role: str) -> int:
         """Get data parallel size from worker group dispatch info.
 
@@ -1370,6 +1383,7 @@ class RayPPOTrainer:
                         else curr_step_profile
                     )
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+                batch.meta_info["global_steps"] = self.global_steps
                 batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
                 # add uid to batch

@@ -727,6 +727,17 @@ global_profiler:
       context: all
       stacks: all
       kw_args: {}
+    precision_debugger:
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+      enable: false
+      config_path: null
+      data_dir: outputs/precision_debug
+      steps: null
+      stages:
+      - rollout
+      - train
+      - update_actor
+      - ref_model
 transfer_queue:
   enable: false
 ray_kwargs:

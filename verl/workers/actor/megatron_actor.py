@@ -39,6 +39,7 @@ from torch import nn
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id, get_torch_device
+from verl.utils.profiler import DistProfiler
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 from verl.utils.megatron.router_replay_utils import (
@@ -54,6 +55,7 @@ from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import broadcast_dict_tensor
+ 
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import MtpConfig
 
@@ -753,6 +755,7 @@ class MegatronPPOActor(BasePPOActor):
         return losses_reduced
 
     @GPUMemoryLogger(role="megatron actor", logger=logger)
+    @DistProfiler.precision(stage="train", model_attr="actor_module")
     def update_policy(self, dataloader: Iterable[DataProto], enable_mtp: bool = False) -> dict:
         """Update the policy with an iterator of DataProto
 
@@ -805,7 +808,7 @@ class MegatronPPOActor(BasePPOActor):
                 # Note that o[0] is metrics, o[1] is entropy, o[2] is response_mask
                 append_to_dict(metrics, metric[0])  # append the metric from this micro-batch to global metrics.
 
-            update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
+            update_successful, grad_norm, num_zeros_in_grad = self._optimizer_step_with_precision()
             data = {"actor/grad_norm": grad_norm}
             append_to_dict(metrics, data)
 
@@ -822,3 +825,7 @@ class MegatronPPOActor(BasePPOActor):
         self.actor_optimizer.zero_grad()
         get_torch_device().empty_cache()
         return metrics
+
+    @DistProfiler.precision(stage="update_actor", model_attr="actor_module")
+    def _optimizer_step_with_precision(self):
+        return self.actor_optimizer.step()

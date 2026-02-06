@@ -253,6 +253,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
         self.config = config
+        self.precision_debugger_cfg = config.get("precision_debugger", None)
         if repatch is not None:
             # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
             repatch(self.config.actor.megatron.get("override_transformer_config", {}))
@@ -612,6 +613,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 actor_optimizer=self.actor_optimizer,
                 mtp_config=self.config.model.mtp if self.config.model.mtp.enable else None,
             )
+            self.actor.precision_debugger_cfg = self.precision_debugger_cfg
+            self.actor.profiler = self.profiler
             print(f"routing replay layers: {len(RouterReplay.router_instances)}")
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
 
@@ -753,6 +756,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         dataloader = self.actor.make_minibatch_iterator(data=data)
+        self.actor.precision_global_step = data.meta_info.get("global_steps", None)
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(dataloader=dataloader)
         delta_time = timer.last
@@ -787,6 +791,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
     @DistProfiler.annotate(color="red", role="rollout_generate")
+    @DistProfiler.precision(stage="rollout", model_attr="actor_module")
     def generate_sequences(self, prompts: DataProto):
         assert self._is_rollout
         prompts = prompts.to(get_device_name())
@@ -837,6 +842,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @GPUMemoryLogger(role="compute_ref_log_prob", logger=logger)
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
+    @DistProfiler.precision(stage="ref_model", model_attr=("ref_module", "actor_module"))
     def compute_ref_log_prob(self, data: DataProto):
         if self.peft_cls is not None:
             # if is lora, actor without lora applied is the ref
