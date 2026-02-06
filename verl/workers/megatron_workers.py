@@ -201,6 +201,10 @@ class MegatronWorker(Worker):
                 # In case of invalid overrides, we need to make sure some critical params are set correctly
                 provider.params_dtype = dtype
 
+                # Ensure dtype settings propagate to Megatron-Bridge/TE
+                provider.fp16 = fp16
+                provider.bf16 = bf16
+                
                 # Pass distributed info
                 provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
                 provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
