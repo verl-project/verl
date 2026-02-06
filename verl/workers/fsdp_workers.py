@@ -84,6 +84,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.ray_utils import get_event_loop
+from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
@@ -1414,7 +1415,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
-        if self.config.model.get("freeze_vision_tower", False):
+        if self.config.get("freeze_vision_tower", False):
             vision_tower = get_vl_model_vision_tower(critic_module)
             if vision_tower is not None:
                 vision_tower.requires_grad_(False)
@@ -1780,7 +1781,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
     def _forward_micro_batch(self, micro_batch):
         from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
-        from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
+        from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
 
         with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
@@ -1790,8 +1791,14 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
+            multi_modal_inputs = {}
+            if "multi_modal_inputs" in micro_batch.keys():
+                from verl.utils.model import extract_multi_modal_inputs
+
+                multi_modal_inputs = extract_multi_modal_inputs(micro_batch["multi_modal_inputs"])
+
             if self.use_remove_padding:
-                input_ids_rmpad, indices, *_ = unpad_input(
+                input_ids_rmpad, indices, cu_seqlens, *_ = unpad_input(
                     input_ids.unsqueeze(-1), attention_mask
                 )  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
@@ -1808,15 +1815,38 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                         rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices
                     ).transpose(0, 1)
 
+                # Handle MiniCPM-o specific processing for vision inputs
+                if "image_bound" in multi_modal_inputs:
+                    from verl.utils.dataset.vision_utils import process_multi_modal_inputs_for_minicpmo
+
+                    multi_modal_inputs = process_multi_modal_inputs_for_minicpmo(
+                        input_ids, attention_mask, position_ids, cu_seqlens, multi_modal_inputs
+                    )
+
                 # pad and slice the inputs if sp > 1
                 if self.ulysses_sequence_parallel_size > 1:
-                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
-                        input_ids_rmpad, position_ids_rmpad, sp_size=self.ulysses_sequence_parallel_size
+                    is_vlm_model = hasattr(
+                        getattr(self.reward_module, "module", self.reward_module).config, "vision_config"
                     )
+                    if is_vlm_model:
+                        # vlm model's inputs will be sliced after embedding
+                        input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad(
+                            input_ids_rmpad,
+                            position_ids_rmpad=position_ids_rmpad,
+                            sp_size=self.ulysses_sequence_parallel_size,
+                        )
+                    else:
+                        input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                            input_ids_rmpad, position_ids_rmpad, sp_size=self.ulysses_sequence_parallel_size
+                        )
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
                 output = self.reward_module(
-                    input_ids=input_ids_rmpad, attention_mask=None, position_ids=position_ids_rmpad, use_cache=False
+                    input_ids=input_ids_rmpad,
+                    attention_mask=None,
+                    position_ids=position_ids_rmpad,
+                    **multi_modal_inputs,
+                    use_cache=False,
                 )
                 reward_rmpad = output.logits
                 reward_rmpad = reward_rmpad.squeeze(0)  # (total_nnz)
@@ -1831,7 +1861,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 rm_score = pad_input(reward_rmpad, indices=indices, batch=batch_size, seqlen=seqlen).squeeze(-1)
             else:
                 output = self.reward_module(
-                    input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    **multi_modal_inputs,
+                    use_cache=False,
                 )
                 rm_score = output.logits  # (batch_size, seq_len, 1)
                 rm_score = rm_score.squeeze(-1)
@@ -1859,6 +1893,10 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         return token_level_scores
 
     def _switch_chat_template(self, data: DataProto):
+        multi_modal_inputs = None
+        if "multi_modal_inputs" in data.non_tensor_batch.keys():
+            # TODO, support multi-modal inputs,
+            multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
         src_max_length = data.batch["attention_mask"].shape[-1]
 
         src_tokenizer = self.input_tokenizer
@@ -1882,6 +1920,12 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             valid_response_length = data.batch["attention_mask"][i][-response_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
+            if multi_modal_inputs and multi_modal_inputs[i]:
+                # At this point, the RM does not know how the input_tokenizer tokenized images
+                # and how to decode while excluding multimodal-related tokens.
+                raise NotImplementedError(
+                    "Switch chat template with multi-modal inputs is not supported yet in reward model."
+                )
             # decode
             response = src_tokenizer.decode(valid_response_ids)
             # remove bos and eos
@@ -1920,53 +1964,42 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         rm_position_ids = compute_position_id_with_mask(rm_attention_mask)
 
         rm_inputs = {"input_ids": rm_input_ids, "attention_mask": rm_attention_mask, "position_ids": rm_position_ids}
-
-        return DataProto.from_dict(rm_inputs)
+        non_tensors = {"multi_modal_inputs": multi_modal_inputs} if multi_modal_inputs else None
+        return DataProto.from_dict(rm_inputs, non_tensors=non_tensors)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
     @DistProfiler.annotate(color="brown", role="compute_rm_score")
     def compute_rm_score(self, data: DataProto):
-        import itertools
-
-        from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
-
-        # Support all hardwares
-        data = data.to(get_device_id())
-        if self._do_switch_chat_template:
-            rm_data = self._switch_chat_template(data)
-        else:
-            rm_input_ids = data.batch["input_ids"]
-            rm_attention_mask = data.batch["attention_mask"]
-            rm_position_ids = data.batch["position_ids"]
-            rm_inputs = {
-                "input_ids": rm_input_ids,
-                "attention_mask": rm_attention_mask,
-                "position_ids": rm_position_ids,
-            }
-            rm_data = DataProto.from_dict(rm_inputs)
-
-        # Support all hardwares
-        rm_data = rm_data.to(get_device_id())
-
-        # perform forward computation
         with self.ulysses_sharding_manager:
+            # Support all hardwares
+            data = data.to("cpu")
+            if self._do_switch_chat_template:
+                rm_data = self._switch_chat_template(data)
+            else:
+                select_keys = ["input_ids", "attention_mask", "position_ids"]
+                has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+                non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
+                rm_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
+
+            # perform forward computation
             use_dynamic_bsz = self.config.use_dynamic_bsz
             if use_dynamic_bsz:
                 max_token_len = self.config.forward_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                micro_batches, indices = rearrange_micro_batches(batch=rm_data.batch, max_token_len=max_token_len)
+                micro_batches, indices = prepare_dynamic_batch(rm_data, max_token_len=max_token_len)
             else:
-                micro_batches = rm_data.batch.split(self.config.micro_batch_size_per_gpu)
+                micro_batches = rm_data.split(self.config.micro_batch_size_per_gpu)
+                indices = None
+
             output = []
             for micro_batch in micro_batches:
+                micro_batch = micro_batch.to(get_device_id())
+                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                 rm_score = self._forward_micro_batch(micro_batch)
-                output.append(rm_score)
+                output.append(rm_score.to("cpu"))
             scores = torch.cat(output, dim=0)  # (batch_size)
 
             if use_dynamic_bsz:
-                indices = list(itertools.chain.from_iterable(indices))
-                assert len(indices) == scores.size(0), f"{len(indices)} vs. {scores.size()}"
-                revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
-                scores = scores[revert_indices]
+                scores = restore_dynamic_batch(scores, indices)
 
             token_level_scores = self._expand_to_token_level(data, scores)
             # Note that this is only the scores, may not be the final rewards used to train RL
@@ -1977,7 +2010,6 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         if self.world_size > 1 and fsdp_version(self.reward_module) == 1:
             self.reward_module._handle.reshard(True)
 
-        output = output.to("cpu")
         return output
 
 
