@@ -37,30 +37,10 @@ from verl.utils.qat.core import (
     invalidate_all_scales,
     load_quantization_config,
 )
-from verl.utils.qat.linear import (
-    TRITON_AVAILABLE,
-    QATLinear,
-    QATMode,
-    STEFP4QuantTriton,
-    fp4_fake_quant_weight,
-)
-from verl.utils.qat.quantizer import (
-    FUSE_PATTERNS,
-    QATQuantizer,
-    ScaleInfo,
-    WeightScaleResult,
-    compute_blockwise_scale_only,
-    compute_global_amax,
-    compute_global_scale_from_amax,
-    compute_weight_scales,
-    fuse_global_scales,
-)
 from verl.utils.qat.vllm_patch import (
-    LazyParamsDict,
     apply_qat_patches,
     manual_process_weights_after_loading,
     prepare_qat_for_load_weights,
-    remove_qat_patches,
 )
 
 __all__ = [
@@ -70,26 +50,8 @@ __all__ = [
     "load_quantization_config",
     "enable_qat_fuse",
     "invalidate_all_scales",
-    # Linear (includes Triton kernels)
-    "QATLinear",
-    "QATMode",
-    "STEFP4QuantTriton",
-    "TRITON_AVAILABLE",
-    "fp4_fake_quant_weight",
-    # Quantizer (includes scale computation utilities)
-    "QATQuantizer",
-    "ScaleInfo",
-    "WeightScaleResult",
-    "compute_weight_scales",
-    "compute_blockwise_scale_only",
-    "compute_global_amax",
-    "compute_global_scale_from_amax",
-    "fuse_global_scales",
-    "FUSE_PATTERNS",
     # vLLM Patch
     "apply_qat_patches",
-    "remove_qat_patches",
     "manual_process_weights_after_loading",
     "prepare_qat_for_load_weights",
-    "LazyParamsDict",
 ]
