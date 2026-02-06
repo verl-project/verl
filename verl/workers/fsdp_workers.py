@@ -520,6 +520,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         fsdp_enable_zero3 = fsdp_config.reshard_after_forward
         sharding_strategy = get_sharding_strategy(fsdp_mesh, fsdp_enable_zero3)
 
+        if self.config.get("use_torch_compile", True):
+            if hasattr(actor_module, "model") and hasattr(actor_module.model, "layers"):
+                for block in actor_module.model.layers:
+                    block.compile()
+            else:
+                warnings.warn("Could not find 'model.layers' on the actor module to compile. Skipping.", stacklevel=1)
+
         # TODO: add transformer policy
         # We force reference policy to use CPUOffload to save memory.
         # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
@@ -1424,6 +1431,13 @@ class CriticWorker(Worker, DistProfilerExtension):
             else:
                 if self.rank == 0:
                     print("[critic model] No vision tower found.")
+
+        if self.config.get("use_torch_compile", True):
+            if hasattr(critic_module, "model") and hasattr(critic_module.model, "layers"):
+                for block in critic_module.model.layers:
+                    block.compile()
+            else:
+                warnings.warn("Could not find 'model.layers' on the critic module to compile. Skipping.", stacklevel=1)
 
         # Note: We force turn off CPUOffload for critic because it causes incorrect results when using grad accumulation
         if config.strategy == "fsdp":
