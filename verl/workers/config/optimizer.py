@@ -177,7 +177,7 @@ def build_optimizer(parameters, config: FSDPOptimizerConfig):
     }
 
     optimizer_name_lower = config.optimizer.lower()
-    if "adam" in optimizer_name_lower or "ademamix" in optimizer_name_lower:
+    if "adam" in optimizer_name_lower or "ademamix" in optimizer_name_lower or optimizer_name_lower == "soap":
         optimizer_args["betas"] = config.betas
 
     if config.override_optimizer_config is not None:
