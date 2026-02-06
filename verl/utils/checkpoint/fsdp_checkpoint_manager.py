@@ -30,7 +30,7 @@ from transformers.dynamic_module_utils import custom_object_save
 
 from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
-from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
+from verl.utils.fsdp_utils import fsdp_version, get_fsdp_state_ctx, get_fsdp_state_dict
 from verl.utils.logger import log_with_rank
 
 from .checkpoint_manager import BaseCheckpointManager
@@ -300,7 +300,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         if self.should_save_hf_model:
             # Only rank 0 will save hf model and,
             # offload to cpu to save LLMs which may be too large to fit in one GPU
-            state_dict = get_fsdp_full_state_dict(self.model, offload_to_cpu=True, rank0_only=True)
+            state_dict = get_fsdp_state_dict(self.model, full_state_dict=True, offload_to_cpu=True, rank0_only=True)
 
             if self.rank == 0:
                 hf_local_path = os.path.join(local_path, "huggingface")
