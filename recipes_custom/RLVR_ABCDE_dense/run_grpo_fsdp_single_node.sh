@@ -6,6 +6,8 @@ export VLLM_USE_V1=1
 export VERL_USE_GPT_OSS=0
 export WANDB_MODE=offline
 export PYTHONPATH=/llm-align/liuchonghan/verl_lao:${PYTHONPATH:-}
+export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth0}
 
 ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.main_ppo"}
 TRAIN_FILES=${TRAIN_FILES:-/llm-align/liuchonghan/all_data_merged_rlhf.json}
@@ -38,7 +40,7 @@ python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/c
     data.val_files=$TRAIN_FILES \
     data.val_max_samples=2048 \
     data.return_raw_chat=$RETURN_RAW_CHAT \
-    data.train_batch_size=16 \
+    data.train_batch_size=64 \
     data.max_prompt_length=512 \
     data.max_response_length=512 \
     data.filter_overlong_prompts=False \
