@@ -104,6 +104,19 @@ def create_role_worker_mapping(config):
     else:
         raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
 
+    use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+    if use_legacy_worker_impl == "disable":
+        print(">>>>> Getting start with Engine Workers")
+        from verl.experimental.fully_async_policy.engine_workers import (
+            TrainingWorker,
+            DetachActorWorker,
+            DetachAsyncRolloutWorker,
+        )
+        from verl.single_controller.ray import RayWorkerGroup
+        ray_worker_group_cls = RayWorkerGroup
+        
+        CriticWorker = TrainingWorker
+
     train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
     role_worker_mapping = {
         train_role: ray.remote(DetachActorWorker),
@@ -193,31 +206,31 @@ class FullyAsyncTaskRunner:
         ray.get(self.components["trainer"].set_message_queue_client.remote(self.components["message_queue_client"]))
 
         print("[ASYNC MAIN] Setting up parameter synchronization...")
-        from verl.experimental.fully_async_policy.param_sync import ParameterSynchronizer
+        # from verl.experimental.fully_async_policy.param_sync import ParameterSynchronizer
 
-        param_synchronizer = ParameterSynchronizer.remote(
-            config=config,
-            trainer=self.components["trainer"],
-            rollouter=self.components["rollouter"],
-            mq=self.components["message_queue_client"],
-        )
-        ray.get(self.components["trainer"].set_parameter_synchronizer.remote(param_synchronizer))
+        # param_synchronizer = ParameterSynchronizer.remote(
+        #     config=config,
+        #     trainer=self.components["trainer"],
+        #     rollouter=self.components["rollouter"],
+        #     mq=self.components["message_queue_client"],
+        # )
+        # ray.get(self.components["trainer"].set_parameter_synchronizer.remote(param_synchronizer))
 
         # load checkpoint and sync parameter before doing anything
         val_before_train = config.trainer.get("val_before_train", True)
         # param_version resume from ckpt or default 0
         param_version = ray.get(self.components["trainer"].load_checkpoint.remote())
         ray.get(self.components["rollouter"].load_checkpoint.remote())
-        ray.get(
-            param_synchronizer.sync_weights.remote(
-                version=param_version,
-                validate=val_before_train,
-                use_trainer_do_validate=config.async_training.use_trainer_do_validate,
-            )
-        )
-        ray.get(param_synchronizer.wait_last_valid.remote())
+        # ray.get(
+        #     param_synchronizer.sync_weights.remote(
+        #         version=param_version,
+        #         validate=val_before_train,
+        #         use_trainer_do_validate=config.async_training.use_trainer_do_validate,
+        #     )
+        # )
+        # ray.get(param_synchronizer.wait_last_valid.remote())
 
-        self.components["param_synchronizer"] = param_synchronizer
+        # self.components["param_synchronizer"] = param_synchronizer
         print("[ASYNC MAIN] All components initialized successfully")
 
     def _create_rollouter(self, config) -> None:

@@ -41,12 +41,15 @@ from verl.trainer.ppo.metric_utils import (
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage, compute_response_mask
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role
+from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.metric import (
     reduce_metrics,
 )
 from verl.utils.rollout_skip import RolloutSkip
+from verl.utils.py_functional import rename_dict
+from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
@@ -82,6 +85,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.use_critic:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cfg = omega_conf_to_dataclass(self.config.critic)
+
+            if self.use_legacy_worker_impl == "disable":
+                # convert critic_cfg into TrainingWorkerConfig
+                from verl.workers.engine_workers import TrainingWorkerConfig
+                from verl.workers.config import FSDPEngineConfig
+
+                self.orig_critic_cfg = critic_cfg
+                if self.orig_critic_cfg.strategy == "fsdp":
+                    engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
+                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+                else:
+                    raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
+
+                critic_cfg = TrainingWorkerConfig(
+                    model_type="value_model",
+                    model_config=self.orig_critic_cfg.model_config,
+                    engine_config=engine_config,
+                    optimizer_config=self.orig_critic_cfg.optim,
+                    checkpoint_config=self.orig_critic_cfg.checkpoint,
+                )
+
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
@@ -142,7 +167,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _init_models(self):
         if self.use_critic:
             self.critic_wg = self.all_wg[str(Role.Critic)]
-            self.critic_wg.init_model()
+            if self.use_legacy_worker_impl == "disable":
+                self.critic_wg.reset()
+                # assign critic loss
+                from functools import partial
+
+                from verl.workers.utils.losses import value_loss
+
+                value_loss_ = partial(value_loss, config=self.orig_critic_cfg)
+                self.critic_wg.set_loss_fn(value_loss_)
+            else:
+                self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
@@ -350,7 +385,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with marked_timer("old_log_prob", timing_raw, color="blue"):
 
             def compute_old_log_prob(batch):
-                old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                if self.use_legacy_worker_impl == "disable":
+                    # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
+                    # step 1: convert dataproto to tensordict.
+                    batch_td = batch.to_tensordict()
+                    # step 2: convert from padding to nopadding
+                    batch_td = left_right_2_no_padding(batch_td)
+                    # step 3: add meta info
+                    tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+                    output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                    # gather output
+                    entropy = tu.get(output, "entropy")
+                    log_probs = tu.get(output, "log_probs")
+                    old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+                    # step 4. No padding to padding
+                    entropy = no_padding_2_padding(entropy, batch_td)
+                    log_probs = no_padding_2_padding(log_probs, batch_td)
+                    # step 5: rebuild a tensordict and convert to dataproto
+                    old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
+                    old_log_prob = DataProto.from_tensordict(old_log_prob)
+                else:
+                    old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+
                 entropys = old_log_prob.batch["entropys"]
                 response_masks = batch.batch["response_mask"]
                 actor_config = self.config.actor_rollout_ref.actor
@@ -377,6 +433,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 #  and save a copy for subsequent MIS use.
                 # If local_trigger_step == 2, 3, ..., restore the parameters of version 1 to calculate the old_log_prob,
                 # then restore the parameters of the current version.
+                batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
                 if local_trigger_step == 1:
                     self.actor_rollout_wg.save_model_to_cpu(1)
                     batch = compute_old_log_prob(batch)
@@ -396,17 +453,54 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.use_reference_policy:
             # compute reference log_prob
             with marked_timer("ref", timing_raw, color="olive"):
-                if not self.ref_in_actor:
-                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                if self.use_legacy_worker_impl == "disable":
+                    # step 1: convert dataproto to tensordict.
+                    batch_td = batch.to_tensordict()
+                    # step 2: convert from padding to nopadding
+                    batch_td = left_right_2_no_padding(batch_td)
+                    # step 3: add meta info
+                    metadata = {"calculate_entropy": False, "compute_loss": False}
+                    if self.ref_in_actor:
+                        metadata["no_lora_adapter"] = True
+                    tu.assign_non_tensor(batch_td, **metadata)
+                    if self.ref_in_actor:
+                        output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                    else:
+                        output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+                    # gather output
+                    log_probs = tu.get(output, "log_probs")
+                    # step 4. No padding to padding
+                    log_probs = no_padding_2_padding(log_probs, batch_td)
+                    # step 5: rebuild a tensordict and convert to dataproto
+                    ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
+                    ref_log_prob = DataProto.from_tensordict(ref_log_prob)
                 else:
-                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                    if not self.ref_in_actor:
+                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                    else:
+                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+
+                
                 batch = batch.union(ref_log_prob)
 
         # compute values
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
-                values = self.critic_wg.compute_values(batch)
-                batch = batch.union(values)
+                if self.use_legacy_worker_impl == "disable":
+                    batch_td = batch.to_tensordict()
+                    # step 2: convert from padding to nopadding
+                    batch_td = left_right_2_no_padding(batch_td)
+                    # step 3: add meta info
+                    tu.assign_non_tensor(batch_td, compute_loss=False)
+                    output = self.critic_wg.infer_batch(batch_td)
+                    output = output.get()
+                    values = tu.get(output, "values")
+                    values = no_padding_2_padding(values, batch_td)
+                    values = tu.get_tensordict({"values": values.float()})
+                    values = DataProto.from_tensordict(values)
+                else:
+                    values = self.critic_wg.compute_values(batch)
+                    batch = batch.union(values)
 
         with marked_timer("adv", timing_raw, color="brown"):
             # we combine with rule-based rm
@@ -456,7 +550,34 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
-                critic_output = self.critic_wg.update_critic(batch)
+                if self.use_legacy_worker_impl == "disable":
+                    batch_td = batch.to_tensordict()
+                    # step 2: convert from padding to no-padding
+                    batch_td = left_right_2_no_padding(batch_td)
+                    ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
+                    ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+                    ppo_epochs = self.config.critic.ppo_epochs
+                    seed = self.config.critic.data_loader_seed
+                    shuffle = self.config.critic.shuffle
+                    tu.assign_non_tensor(
+                        batch_td,
+                        global_batch_size=ppo_mini_batch_size,
+                        mini_batch_size=ppo_mini_batch_size,
+                        epochs=ppo_epochs,
+                        seed=seed,
+                        dataloader_kwargs={"shuffle": shuffle},
+                    )
+
+                    output = self.critic_wg.train_mini_batch(batch_td)
+                    output = output.get()
+                    output = tu.get(output, "metrics")
+                    output = rename_dict(output, "critic/")
+                    # modify key name
+                    output["perf/mfu/critic"] = output.pop("critic/mfu")
+                    critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
+                else:
+                    critic_output = self.critic_wg.update_critic(batch)
+
             critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
             metrics.update(critic_output_metrics)
 
@@ -465,7 +586,36 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # update actor
             with marked_timer("update_actor", timing_raw, color="red"):
                 batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                actor_output = self.actor_rollout_wg.update_actor(batch)
+
+                if self.use_legacy_worker_impl == "disable":
+                    batch_td = batch.to_tensordict()
+                    # step 2: convert from padding to no-padding
+                    batch_td = left_right_2_no_padding(batch_td)
+                    calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+                    ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+                    ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+                    ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+                    seed = self.config.actor_rollout_ref.actor.data_loader_seed
+                    shuffle = self.config.actor_rollout_ref.actor.shuffle
+                    tu.assign_non_tensor(
+                        batch_td,
+                        calculate_entropy=calculate_entropy,
+                        global_batch_size=ppo_mini_batch_size,
+                        mini_batch_size=ppo_mini_batch_size,
+                        epochs=ppo_epochs,
+                        seed=seed,
+                        dataloader_kwargs={"shuffle": shuffle},
+                    )
+
+                    actor_output = self.actor_rollout_wg.update_actor(batch_td)
+                    actor_output = tu.get(actor_output, "metrics")
+                    actor_output = rename_dict(actor_output, "actor/")
+                    # modify key name
+                    actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
+                    actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+                else:
+                    actor_output = self.actor_rollout_wg.update_actor(batch)
+
             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             metrics.update(actor_output_metrics)
         return batch, reward_extra_infos_dict

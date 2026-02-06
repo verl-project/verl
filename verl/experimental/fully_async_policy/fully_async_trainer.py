@@ -83,7 +83,13 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         if lora_rank <= 0:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        self.ref_in_actor = lora_rank > 0
+        # self.ref_in_actor = lora_rank > 0
+
+        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        if self.use_legacy_worker_impl == "disable":
+            self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        else:
+            self.ref_in_actor = lora_rank > 0
 
         # define in-reward KL control
         # kl loss control currently not suppoorted
@@ -294,8 +300,8 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         print("[FullyAsyncTrainer] Starting FullyAsyncTrainer...")
         if self.message_queue_client is None:
             raise ValueError("MessageQueue client not set. Call set_message_queue_client() first.")
-        if self.param_synchronizer is None:
-            raise ValueError("param_synchronizer client not set. Call set_parameter_synchronizer() first.")
+        # if self.param_synchronizer is None:
+        #     raise ValueError("param_synchronizer client not set. Call set_parameter_synchronizer() first.")
 
         from verl.utils.tracking import Tracking
 
@@ -340,20 +346,20 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                 f"trigger_parameter_sync_step: {self.trigger_parameter_sync_step} "
                 f"{time_str}"
             )
-            await self._trigger_parameter_sync_after_step(global_steps=self.global_steps)
+            # await self._trigger_parameter_sync_after_step(global_steps=self.global_steps)
             self._log_validation_data()
             self._check_save_checkpoint(timing_raw)
             self.global_steps += 1
 
         # final parameter sync and validate
         # 1. waiting remaining validate task
-        ray.get(self.param_synchronizer.wait_last_valid.remote())
-        self._log_validation_data()
-        # 2. perform addtional parameter_sync and validate if trainer already updated
-        if self.current_param_version % self.config.rollout.test_freq != 0 or self.local_trigger_step > 1:
-            await self._trigger_parameter_sync_after_step(validate=True, global_steps=self.global_steps)
-            ray.get(self.param_synchronizer.wait_last_valid.remote())
-            self._log_validation_data()
+        # ray.get(self.param_synchronizer.wait_last_valid.remote())
+        # self._log_validation_data()
+        # # 2. perform addtional parameter_sync and validate if trainer already updated
+        # if self.current_param_version % self.config.rollout.test_freq != 0 or self.local_trigger_step > 1:
+        #     await self._trigger_parameter_sync_after_step(validate=True, global_steps=self.global_steps)
+        #     ray.get(self.param_synchronizer.wait_last_valid.remote())
+        #     self._log_validation_data()
         self.progress_bar.close()
 
         self._check_save_checkpoint(timing_raw)
@@ -436,7 +442,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                 self.current_param_version,
                 max_ckpt_to_keep=max_critic_ckpt_to_keep,
             )
-        ray.get(self.param_synchronizer.rollouter_save_checkpoint.remote(local_global_step_folder))
+        # ray.get(self.param_synchronizer.rollouter_save_checkpoint.remote(local_global_step_folder))
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
@@ -540,17 +546,17 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         self.progress_bar.update(1)
         self.metrics_aggregator.reset()
         timing_param_sync = {}
-        with marked_timer("timing_s/wait_last_valid", timing_param_sync):
-            ray.get(self.param_synchronizer.wait_last_valid.remote())
-        with marked_timer("timing_s/param_sync", timing_param_sync):
-            ray.get(
-                self.param_synchronizer.sync_weights.remote(
-                    self.current_param_version,
-                    validate=validate,
-                    global_steps=global_steps,
-                    use_trainer_do_validate=self.config.async_training.use_trainer_do_validate,
-                )
-            )
+        # with marked_timer("timing_s/wait_last_valid", timing_param_sync):
+        #     ray.get(self.param_synchronizer.wait_last_valid.remote())
+        # with marked_timer("timing_s/param_sync", timing_param_sync):
+        #     ray.get(
+        #         self.param_synchronizer.sync_weights.remote(
+        #             self.current_param_version,
+        #             validate=validate,
+        #             global_steps=global_steps,
+        #             use_trainer_do_validate=self.config.async_training.use_trainer_do_validate,
+        #         )
+        #     )
 
         #  do trainer validate
         do_validate_param = (
