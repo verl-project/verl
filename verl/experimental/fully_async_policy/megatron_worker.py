@@ -269,6 +269,11 @@ class DetachActorWorker(DetachNcclSync):
 
         return generator
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def update_weights(self):
+        params_generator = self._get_actor_params_generator()
+        await self.checkpoint_engine.send_weights(params_generator)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_actor_weights_info(self):
         assert self._is_actor
