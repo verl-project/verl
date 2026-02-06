@@ -1,0 +1,30 @@
+tokenizer_name: "NousResearch/DeepHermes-3-Llama-3-8B-Preview"
+group_size: 1
+use_wandb: false
+max_num_workers: 1
+max_eval_workers: 0
+batch_size: 1
+total_steps: 100
+rollout_server_url: "http://localhost:8000"
+
+dataset:
+  dataset_name: "gsm8k"
+  dataset_config: "main"
+  split: "train"
+
+  prompt_field: "question"
+  answer_field: "answer"
+
+  system_prompt: "You are a deep thinking AI, you may use extremely long chains of thought to deeply consider the problem and deliberate with yourself via systematic reasoning processes to help come to a correct solution prior to answering. You should enclose your thoughts and internal monologue inside <think> </think> tags, and then provide your solution or response to the problem."
+  shuffle_dataset: true
+  max_generations_per_prompt: 1
+  include_messages_in_scoring: true
+
+  # Using multiple reward functions for testing
+  reward_funcs:
+    - "accuracy_reward"
+    - "format_reward"
+
+  max_tokens: 4096
+  length_warmup_steps: 0
+  min_tokens: 200

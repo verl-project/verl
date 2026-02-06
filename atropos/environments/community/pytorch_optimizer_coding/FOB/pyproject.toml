@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pytorch-fob"
+version = "0.1.0"
+authors = [
+    { name="Simon Blauth", email="blauths@tf.uni-freiburg.de" },
+    { name="Tobias Bürger", email="buergert@tf.uni-freiburg.de" },
+    { name="Zacharias Häringer", email="haeringz@tf.uni-freiburg.de" },
+]
+description = "A fast optimizer benchmark."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/automl/fob"
+Issues = "https://github.com/automl/fob/issues"
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# update pip package
+# https://packaging.python.org/en/latest/guides/distributing-packages-using-setuptools/
+#> pip install build twine
+#> python3 -m build --sdist
+#> python3 -m build --wheel
+#> twine check dist/*
+#> twine upload dist/*
