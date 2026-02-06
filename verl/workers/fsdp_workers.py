@@ -1256,7 +1256,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         )
         self.use_orig_params = self.config.model.fsdp_config.get("use_orig_params", False)
 
-    def _build_critic_model_optimizer(self, config):
+    def _build_critic_model_optimizer(self, config: FSDPCriticConfig):
         # the following line is necessary
         from torch.distributed.fsdp import MixedPrecision
 
