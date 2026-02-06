@@ -52,6 +52,21 @@ class TestHFModelConfigCPU:
         # Verify the list was merged correctly
         assert list(merged.target_modules) == ["k_proj", "o_proj", "q_proj", "v_proj"]
 
+    def test_target_modules_accepts_none_via_omegaconf(self):
+        """Test that target_modules still accepts None values."""
+
+        cfg_from_dataclass = OmegaConf.structured(HFModelConfig)
+
+        cli_config = OmegaConf.create(
+            {
+                "path": self.model_path,
+                "target_modules": None,
+            }
+        )
+
+        merged = OmegaConf.merge(cfg_from_dataclass, cli_config)
+        assert merged.target_modules is None
+
     def test_target_modules_accepts_string_via_omegaconf(self):
         """Test that target_modules still accepts string values."""
 
@@ -77,5 +92,5 @@ class TestHFModelConfigCPU:
             }
         )
         merged_config = OmegaConf.merge(base_config, invalid_cli_config)
-        with pytest.raises(TypeError):  # Or AssertionError with current implementation
+        with pytest.raises(TypeError):
             OmegaConf.to_object(merged_config)
