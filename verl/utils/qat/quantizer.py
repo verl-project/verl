@@ -393,52 +393,6 @@ class QATQuantizer:
             grouped[layer_idx][name] = tensor
         return grouped
 
-    def _fuse_input_global_scales(self, input_global_scales: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Fuse input_global_scales for QKV and GateUp groups."""
-        import re
-
-        fused_scales = dict(input_global_scales)
-        layer_scales = {}
-        for layer_name, scale in input_global_scales.items():
-            match = re.search(r"layers\.(\d+)\.", layer_name)
-            if match:
-                layer_idx = int(match.group(1))
-                if layer_idx not in layer_scales:
-                    layer_scales[layer_idx] = {}
-                layer_scales[layer_idx][layer_name] = scale
-
-        for layer_idx, scales in layer_scales.items():
-            # Fuse QKV
-            qkv_layers = []
-            for layer_name in scales.keys():
-                if any(p in layer_name for p in ["q_proj", "k_proj", "v_proj"]):
-                    if "self_attn" in layer_name:
-                        qkv_layers.append(layer_name)
-
-            if len(qkv_layers) >= 2:
-                qkv_scales = [scales[name] for name in qkv_layers]
-                fused_scale = torch.min(torch.stack(qkv_scales))
-                for name in qkv_layers:
-                    fused_scales[name] = fused_scale.clone()
-
-            # Fuse Gate/Up
-            gate_up_groups = {}
-            for layer_name in scales.keys():
-                if layer_name.endswith("gate_proj") or layer_name.endswith("up_proj"):
-                    parent = layer_name.rsplit(".", 1)[0]
-                    if parent not in gate_up_groups:
-                        gate_up_groups[parent] = []
-                    gate_up_groups[parent].append(layer_name)
-
-            for parent, group_layers in gate_up_groups.items():
-                if len(group_layers) >= 2:
-                    group_scales = [scales[name] for name in group_layers]
-                    fused_scale = torch.min(torch.stack(group_scales))
-                    for name in group_layers:
-                        fused_scales[name] = fused_scale.clone()
-
-        return fused_scales
-
     def quantize_with_fusion(
         self,
         params: dict[str, torch.Tensor],
@@ -465,7 +419,6 @@ class QATQuantizer:
                     else:
                         input_global_scales[layer_name] = tensor.clone()
             logger.info(f"W4A4 mode: found {len(input_global_scales)} input_global_scales")
-            input_global_scales = self._fuse_input_global_scales(input_global_scales)
 
         total_quantized = 0
         total_passthrough = 0
