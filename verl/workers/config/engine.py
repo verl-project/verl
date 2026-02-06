@@ -23,7 +23,44 @@ from ...utils.profiler import ProfilerConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["FSDPEngineConfig", "McoreEngineConfig", "TrainingWorkerConfig", "VeOmniEngineConfig", "EngineConfig"]
+__all__ = [
+    "FSDPEngineConfig",
+    "McoreEngineConfig",
+    "TrainingWorkerConfig",
+    "VeOmniEngineConfig",
+    "EngineConfig",
+    "EngineRouterReplayConfig",
+]
+
+
+# TODO: rename to RouterReplayConfig after removing the legacy implementation
+@dataclass
+class EngineRouterReplayConfig(BaseConfig):
+    """Configuration for router replay in MoE models.
+
+    This configuration controls the routing behavior for Mixture of Experts (MoE) models,
+    allowing for deterministic training through route recording and replay.
+
+    Args:
+        mode (str): Router replay mode. Options: 'disabled', 'R2', 'R3'.
+            - 'disabled': No router replay functionality
+            - 'R2': Use Router Replay routing strategy
+            - 'R3': Use Rollout Router Replay routing strategy
+        record_file (Optional[str]): File path to save recorded routing decisions.
+            Required when mode is 'record', 'R2', or 'R3'.
+        replay_file (Optional[str]): File path to load recorded routing decisions for replay.
+            Required when mode is 'replay'.
+    """
+
+    mode: str = "disabled"
+    record_file: Optional[str] = None
+    replay_file: Optional[str] = None
+
+    def __post_init__(self):
+        """Validate router replay configuration."""
+        valid_modes = ["disabled", "R2", "R3"]
+        if self.mode not in valid_modes:
+            raise ValueError(f"Invalid router_replay mode: {self.mode}. Must be one of {valid_modes}")
 
 
 @dataclass
@@ -37,7 +74,6 @@ class EngineConfig(BaseConfig):
         "use_fused_kernels",
         "use_remove_padding",
     }
-
     # whether to offload param
     param_offload: bool = False
     # whether to offload optimizer
@@ -66,6 +102,7 @@ class EngineConfig(BaseConfig):
     seed: int = 42
 
     full_determinism: bool = False
+    router_replay: EngineRouterReplayConfig = field(default_factory=EngineRouterReplayConfig)
 
     def __post_init__(self):
         pass

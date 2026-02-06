@@ -10,6 +10,12 @@ NODES=6
 
 ROUTING_REPLAY_MODE="R3" 
 
+if [ "$ROUTING_REPLAY_MODE" = "R3" ]; then
+    ENABLE_ROLLOUT_ROUTING_REPLAY=True
+else
+    ENABLE_ROLLOUT_ROUTING_REPLAY=False
+fi
+
 DIST_CKPT_PATH=""
 HF_MODEL_PATH=""
 TRAIN_DATA_PATH=""
@@ -33,7 +39,7 @@ ppo_mini_batch_size=3
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 
-
+USE_LEGACY_WORKER_IMPL="enable" # disable, enable
 exper_name=Node${NODES}_bs${bs}_${PP}${TP}${EP}${ETP}_${SGLANG_INFER_TP}_minbs${ppo_mini_batch_size}_micro_bs${micro_bs}
 
 python3 -m verl.trainer.main_ppo --config-path=config \
@@ -48,9 +54,10 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     data.truncation='error' \
     actor_rollout_ref.model.use_fused_kernels=True \
     actor_rollout_ref.model.path=$HF_MODEL_PATH \
+    actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
-    actor_rollout_ref.actor.router_replay.mode=${ROUTING_REPLAY_MODE} \
+    actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE} \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=flex \
     +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True \
@@ -88,6 +95,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$micro_bs \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=$PP \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=$TP \
@@ -107,4 +115,5 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.test_freq=10 \
     trainer.total_training_steps=50000 \
     trainer.balance_batch=False \
+    trainer.use_legacy_worker_impl=${USE_LEGACY_WORKER_IMPL} \
     trainer.val_before_train=False 2>&1

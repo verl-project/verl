@@ -34,7 +34,10 @@ from megatron.core.tensor_parallel import gather_from_sequence_parallel_region, 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
-from verl.models.mcore.util import postprocess_packed_seqs, preprocess_packed_seqs
+from verl.models.mcore.util import (
+    postprocess_packed_seqs,
+    preprocess_packed_seqs,
+)
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 

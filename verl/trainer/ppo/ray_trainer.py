@@ -1393,7 +1393,7 @@ class RayPPOTrainer:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
                             if curr_step_profile:
-                                self.async_rollout_manager.start_profile(global_step=self.global_steps)
+                                self.async_rollout_manager.start_profile()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                             self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:

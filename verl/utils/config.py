@@ -201,10 +201,10 @@ def validate_config(
     # check LoRA rank in vLLM
     lora_config = config.actor_rollout_ref.model.get("lora", {})
     lora_rank = lora_config.get("rank", 0)
-    if lora_config.get("merge", False):
-        lora_rank = 0
     if lora_rank <= 0:
         lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+    if lora_config.get("merge", False):
+        lora_rank = 0
     if lora_rank > 0 and config.actor_rollout_ref.rollout.name == "vllm":
         from verl.workers.rollout.vllm_rollout.utils import get_vllm_max_lora_rank
 

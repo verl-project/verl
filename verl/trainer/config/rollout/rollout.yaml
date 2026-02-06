@@ -310,10 +310,10 @@ profiler:
   _target_: verl.utils.profiler.ProfilerConfig
 
   # profiler tool, default same as profiler.tool in global config
-  # choices: nsys, npu, torch
+  # choices: npu, torch
   tool: ${oc.select:global_profiler.tool,null}
 
-  # whether enable profile on ref
+  # whether enable profile on rollout
   enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
 
   # Whether to profile all ranks.
@@ -326,7 +326,39 @@ profiler:
   save_path: ${oc.select:global_profiler.save_path,null}
 
   # specific tool config
-  tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
+  tool_config:
+
+    # npu config
+    npu:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NPUToolConfig
+
+      # Contents to profile, can be empty
+      # options: npu, cpu, memory, shapes, module, stack
+      contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+
+      # Collection level, optional values: level_none, level0, level1, level2.
+      level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+
+      # Whether to automatically parse the data.
+      analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+
+    # torch profiler config
+    torch:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
 
 # prometheus configuration for vllm/sglang server mode
 prometheus:
