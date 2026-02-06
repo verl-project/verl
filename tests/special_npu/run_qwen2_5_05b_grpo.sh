@@ -5,7 +5,7 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
 SAVE_PATH="your_path"
 LEVEL="level1"
-CONTENTS=['npu', 'cpu']
+CONTENTS=['npu','cpu']
 ANALYSIS=True
 PROFILE_STEPS="[1]"
 PROFILE_RANKS_ALL=True
