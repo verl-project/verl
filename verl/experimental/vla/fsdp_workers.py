@@ -305,6 +305,7 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
                 lr_scheduler=self.actor_lr_scheduler,
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 checkpoint_config=self.config.actor.checkpoint,
+                trust_remote_code=self.config.model.trust_remote_code,
             )
 
         torch.distributed.barrier()
