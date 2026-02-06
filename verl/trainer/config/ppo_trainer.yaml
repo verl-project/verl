@@ -211,6 +211,9 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
+  #master port range for ray to find a free port
+  master_port_range: null
+
 # profiler configs
 global_profiler:
 
