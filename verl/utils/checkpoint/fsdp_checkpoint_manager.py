@@ -70,6 +70,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         checkpoint_contents DictConfig: Configuration for checkpoint contents.
             - 'load': Components to load; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
             - 'save': Components to save; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
+        trust_remote_code: Whether to trust_remote_code when loading the model configuration
     """
 
     def __init__(
@@ -79,6 +80,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         processing_class: PreTrainedTokenizer | ProcessorMixin = None,
         checkpoint_config: DictConfig = None,
+        trust_remote_code: bool = False,
         **kwargs,
     ):
         if processing_class is None and "tokenizer" in kwargs:
@@ -94,6 +96,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             processing_class=processing_class,
             checkpoint_config=checkpoint_config,
         )
+        self.trust_remote_code = trust_remote_code
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
@@ -333,14 +336,14 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
 
                 with init_empty_weights():
-                    # infer trust_remote_code from model structure
-                    has_remote_code = (
+                    # Only enable trust_remote_code if explicitly set by user AND model requires it
+                    use_trust_remote_code = self.trust_remote_code and (
                         hasattr(model_config, "auto_map")
                         and model_config.auto_map
                         and any(model_config.architectures[0] in val for val in model_config.auto_map.values())
                     )
                     save_model = auto_model_cls.from_config(
-                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=has_remote_code
+                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=use_trust_remote_code
                     )
 
                 save_model.to_empty(device="cpu")
