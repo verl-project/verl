@@ -1789,6 +1789,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             position_ids = micro_batch["position_ids"]
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
+            eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
 
             if self.use_remove_padding:
                 input_ids_rmpad, indices, *_ = unpad_input(
@@ -1827,18 +1828,16 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                         reward_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
                     )
 
-                # pad it back
-                rm_score = pad_input(reward_rmpad, indices=indices, batch=batch_size, seqlen=seqlen).squeeze(-1)
+                target_pos = torch.arange(batch_size, device=reward_rmpad.device) * seqlen + eos_mask_idx
+                rm_score = reward_rmpad[torch.isin(indices, target_pos)]
             else:
                 output = self.reward_module(
                     input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False
                 )
                 rm_score = output.logits  # (batch_size, seq_len, 1)
                 rm_score = rm_score.squeeze(-1)
+                rm_score = rm_score[torch.arange(batch_size), eos_mask_idx]
 
-            # extract the result of the last valid token
-            eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
-            rm_score = rm_score[torch.arange(batch_size), eos_mask_idx]
             return rm_score
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
