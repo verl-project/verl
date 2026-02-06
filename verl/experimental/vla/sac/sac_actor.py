@@ -136,6 +136,17 @@ class RobDataParallelSACActor(BaseSACActor):
         self.replay_pool.load(self.config.replay_pool_save_dir)
 
         self._init_alpha()
+        self._init_critic()
+    
+    def _init_critic(self):
+        """Initialize the critic optimizer."""
+        
+        self.critic_optimizer = torch.optim.Adam(
+            self.actor_module.sac_get_critic_parameters(),
+            lr=self.config.critic_lr,
+            weight_decay=self.config.critic_weight_decay,
+        )
+        self.critic_scheduler = torch.optim.lr_scheduler.ConstantLR(self.critic_optimizer, factor=1.0)
 
     def _init_alpha(self):
         """Initialize the alpha optimizer for automatic entropy tuning."""
@@ -340,7 +351,7 @@ class RobDataParallelSACActor(BaseSACActor):
         actor_loss_list, critic_loss_list, alpha_loss_list = [], [], []
 
         # Training critic
-        self.actor_optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
         for batch_idx, micro_batch in enumerate(micro_batches):
             logger.info(f"[{batch_idx + 1}/{len(micro_batches)}] critic micro batch ")
 
@@ -350,7 +361,10 @@ class RobDataParallelSACActor(BaseSACActor):
             critic_loss_list.append(raw_critic_loss.detach().item())
             critic_qvalues_0_list.append(q_values_0.mean(dim=-1).detach())
             critic_qvalues_1_list.append(q_values_1.detach())
-        critic_grad_norm = self._optimizer_step()
+        critic_grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.sac_get_critic_parameters(), 
+                                                          max_norm=self.config.grad_clip)
+        self.critic_optimizer.step()
+        self.critic_scheduler.step()
 
         if global_steps >= self.config.critic_warmup_steps:
             # Training actor
@@ -419,6 +433,7 @@ class RobDataParallelSACActor(BaseSACActor):
             ),
 
             "critic/loss": sum(critic_loss_list) / len(critic_loss_list) if critic_loss_list else 0.0,
+            "critic/lr": self.critic_optimizer.param_groups[0]["lr"],
             "critic/grad_norm": critic_grad_norm.detach().item(),
             "critic/qvalue0_mean": (
                 valid_mean(torch.cat(critic_qvalues_0_list), batch["valids"]).detach().item()

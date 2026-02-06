@@ -52,6 +52,8 @@ actor_rollout_ref:
       alpha_type: exp
       alpha_lr: 0.0003
       target_entropy: -64.0
+    critic_lr: 0.0001
+    critic_weight_decay: 0.0001
     critic_warmup_steps: 100
     replay_pool_save_interval: 30
     num_images_in_input: 1

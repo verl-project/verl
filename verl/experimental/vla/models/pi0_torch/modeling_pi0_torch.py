@@ -441,6 +441,10 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         q_values = self._multi_heads_value(critic_head, critic_input, method=method)
 
         return q_values
+    
+    @override
+    def sac_get_critic_parameters(self) -> list[torch.nn.Parameter]:
+        return [p for head in self.critic_heads for p in head.parameters()]
 
     @override
     def sac_forward_state_features(
