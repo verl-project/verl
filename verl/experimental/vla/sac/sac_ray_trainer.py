@@ -73,6 +73,21 @@ def compute_response_mask(config, data: DataProto) -> torch.Tensor:
     return mask
 
 
+def compute_avg_positive_trajectory_length(batch: DataProto) -> float:
+    dones = batch.batch["dones"].bool()                    # (B, T)
+    positive_mask = batch.batch["positive_sample_mask"]    # (B, T)
+    positive_traj = positive_mask.any(dim=1)               # (B,)
+
+    if positive_traj.sum() == 0:
+        return 0.0
+
+    B, T = dones.shape
+    done_idx = torch.argmax(dones.int(), dim=1)            # (B,)
+    traj_lens = done_idx + 1
+
+    return traj_lens[positive_traj].float().mean().item()
+
+
 def flatten_trajectories(data: DataProto) -> DataProto:
     batch_size, num_steps = data.batch["action"].shape[:2]
     new_batch_fields = {}
@@ -345,11 +360,11 @@ class RobRaySACTrainer(RayPPOTrainer):
 
                             average_reward = batch.batch["rewards"].any(dim=-1).mean(dtype=torch.float32).item()
                             metrics["data/trajectory_avg_reward"] = average_reward
+                            metrics["data/avg_positive_trajectory_length"] = compute_avg_positive_trajectory_length(batch)
 
                             batch = add_transition_prefixes(batch)
                             batch = flatten_trajectories(batch)
 
-                            # batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
                             batch.meta_info["global_token_num"] = [0]
 
                             # update actor
