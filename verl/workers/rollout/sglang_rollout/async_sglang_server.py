@@ -515,7 +515,7 @@ class SGLangReplica(RolloutReplica):
         """Get rollout worker actor class for colocated and standalone mode."""
         worker_dict_cls = RayClassWithInitArgs(
             cls=_rollout_worker_actor_cls,
-            config=self.config,
+            rollout_config=self.config,
             model_config=self.model_config,
             device_mesh=None,
         )

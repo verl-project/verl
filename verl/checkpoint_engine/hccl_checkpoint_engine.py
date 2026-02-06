@@ -86,7 +86,6 @@ class BroadcastOperation:
         Returns:
             dict[str, TensorMeta]: The bucket meta after broadcast.
         """
-        # await self._task
         return self.metadata
 
 
