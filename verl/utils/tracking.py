@@ -365,6 +365,14 @@ class ValidationGenerationsLogger:
         if "vemlp_wandb" in loggers:
             self.log_generations_to_vemlp_wandb(samples, step)
 
+        if "console" in loggers:
+            for i, sample in enumerate(samples):
+                print(f"Step {step} - Sample {i + 1}:")
+                print(f"Input:\n{sample[0]}")
+                print(f"Output:\n{sample[1]}")
+                print(f"Score: {sample[2]}")
+                print("-" * 50)
+
     def log_generations_to_vemlp_wandb(self, samples, step):
         from volcengine_ml_platform import wandb as vemlp_wandb
 

@@ -29,13 +29,14 @@ from veomni.optim import build_lr_scheduler, build_optimizer
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
+from verl.trainer.distillation import is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import fsdp_version
 from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import log_gpu_memory_usage
-from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
+from verl.workers.config import DistillationConfig, HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 from ..base import BaseEngineCtx, EngineRegistry
@@ -60,6 +61,7 @@ class VeOmniEngine(FSDPEngine):
         engine_config: VeOmniEngineConfig,
         optimizer_config: VeOmniOptimizerConfig,
         checkpoint_config: CheckpointConfig,
+        distillation_config: Optional[DistillationConfig],
         **kwargs,
     ):
         """
@@ -76,6 +78,12 @@ class VeOmniEngine(FSDPEngine):
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
         assert self.engine_config.data_parallel_mode == "fsdp2", "VeOmniEngine only supports fsdp2."
+        self.distillation_config = distillation_config
+        self.distillation_enabled = is_distillation_enabled(distillation_config)
+        if self.distillation_enabled:
+            raise NotImplementedError("Distillation is not supported yet in VeOmniEngine")  # TODO: JacobHelwig
+
+        self.mode = None
 
         self.rank = dist.get_rank()
 

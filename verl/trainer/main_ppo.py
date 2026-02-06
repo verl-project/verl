@@ -26,7 +26,7 @@ from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
-from verl.trainer.ppo.utils import need_critic, need_reference_policy
+from verl.trainer.ppo.utils import need_critic, need_distillation_policy, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
@@ -213,6 +213,16 @@ class TaskRunner:
             reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
 
+        distillation_config = config.actor_rollout_ref.distillation
+        if distillation_config.enabled and distillation_config.enable_resource_pool:
+            if distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+            if distillation_config.nnodes <= 0:
+                raise ValueError("config.distillation.nnodes must be greater than 0")
+
+            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
+
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
@@ -258,6 +268,24 @@ class TaskRunner:
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
 
+    def add_teacher_policy_worker(self, config):
+        """Add distillation policy worker if distillation is used."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        if need_distillation_policy(config):
+            if config.trainer.get("use_legacy_worker_impl", "auto") != "disable":
+                raise NotImplementedError(
+                    "Distillation is not supported with legacy worker implementation. "
+                    "Please set trainer.use_legacy_worker_impl to 'disable' to use distillation."
+                )
+            from verl.workers.engine_workers import TeacherWorker
+
+            self.role_worker_mapping[Role.TeacherPolicy] = ray.remote(TeacherWorker)
+            if config.actor_rollout_ref.distillation.enable_resource_pool:
+                self.mapping[Role.TeacherPolicy] = "teacher_pool"
+            else:
+                self.mapping[Role.TeacherPolicy] = "global_pool"
+
     def run(self, config):
         """Execute the main PPO training workflow.
 
@@ -293,9 +321,13 @@ class TaskRunner:
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
 
+        # Add a distillation policy worker if distillation is used.
+        self.add_teacher_policy_worker(config)
+
         # validate config
         validate_config(
             config=config,
+            use_distillation_policy=need_distillation_policy(config),
             use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )

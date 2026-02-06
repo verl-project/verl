@@ -32,8 +32,20 @@ from io import StringIO
 # used for testing the code that reads from input
 from unittest.mock import mock_open, patch
 
+import types
+
 import numpy as np
-from pyext import RuntimeModule
+
+
+class RuntimeModule:
+    """Replacement for pyext.RuntimeModule, compatible with Python 3.12+"""
+
+    @staticmethod
+    def from_string(module_name, _, code):
+        """Create a module from a string of code."""
+        module = types.ModuleType(module_name)
+        exec(code, module.__dict__)
+        return module
 
 
 def truncatefn(s, length=300):

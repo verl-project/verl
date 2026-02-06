@@ -117,6 +117,9 @@ jobs:
       - name: Testing LinearCrossEntropyTP Correctness, Computation Time and Memory Consumption
         run: |
           LOW_MEMORY=True torchrun --standalone --nnodes=1 --nproc-per-node=8 tests/utils/test_special_linear_cross_entropy_tp.py
+      - name: Testing Megatron KL Loss TP Correctness
+        run: |
+          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/utils/test_special_megatron_kl_loss_tp.py
       - name: Testing FSDP2 actor functionality
         run: |
           torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/actor/test_special_dp_actor.py
