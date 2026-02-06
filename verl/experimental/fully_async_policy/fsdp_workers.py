@@ -136,11 +136,6 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
             get_torch_device().synchronize()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self):
-        per_tensor_param, _ = self.engine.get_per_tensor_param()
-        await self.checkpoint_engine.send_weights(per_tensor_param)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights_by_checkpoint(self, sync_group_name="actor_rollout"):
         assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
         assert hasattr(self, "_weights_info") and self._weights_info is not None
