@@ -42,7 +42,7 @@ model_path: null
 # Inference config for reward models,
 # applicable to both discriminative and generative models
 
-inference:
+rollout:
   _target_: verl.workers.config.RolloutConfig
   name: ???
   dtype: bfloat16
