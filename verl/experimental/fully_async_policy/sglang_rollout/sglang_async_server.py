@@ -171,11 +171,6 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         async with self.lock:
             self.paused = False
 
-    async def reset_prefix_cache(self):
-        async with self.lock:
-            print("Reset prefix cache ...")
-            await self.tokenizer_manager.flush_cache()
-
 
 class FullyAsyncSGLangReplica(SGLangReplica):
     def __init__(
@@ -196,7 +191,3 @@ class FullyAsyncSGLangReplica(SGLangReplica):
     async def resume(self):
         """Resume each rollout server."""
         await asyncio.gather(*[server.resume.remote() for server in self.servers])
-
-    async def reset_prefix_cache(self):
-        """reset kv cache in each rollout server."""
-        await asyncio.gather(*[server.reset_prefix_cache.remote() for server in self.servers])

@@ -160,11 +160,17 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
-        self._create_rollouter(config)
+        from concurrent.futures import ThreadPoolExecutor
 
-        print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
-        self._create_trainer(config)
+        print("[ASYNC MAIN] Creating FullyAsyncRollouter and FullyAsyncTrainer in parallel...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            rollouter_future = executor.submit(self._create_rollouter, config)
+            rollouter_future.result()
+
+            # TODO: keep _create_rollouter and _create_trainer parallel
+            trainer_future = executor.submit(self._create_trainer, config)
+            # Wait for both to complete
+            trainer_future.result()
 
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
