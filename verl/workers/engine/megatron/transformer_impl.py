@@ -607,7 +607,6 @@ class MegatronEngine(BaseEngine):
                 losses_reduced[0]["metrics"] = {}
             losses_reduced[0]["metrics"].update(metrics)
 
-
         if RouterReplayHelper.is_r2_record_action(self.tf_config):
             if self.tf_config.virtual_pipeline_model_parallel_size is not None:
                 # config = self.actor_module[0].module.module.config
@@ -837,7 +836,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 data_format="thd" if self.engine_config.use_remove_padding else "bshd",
                 enable_mtp=self.model_config.mtp.enable_train,
             )
-
 
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
