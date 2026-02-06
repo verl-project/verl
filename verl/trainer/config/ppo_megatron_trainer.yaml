@@ -19,6 +19,8 @@ defaults:
   - critic@critic: megatron_critic
   # Reward model config.
   - reward_model@reward_model: megatron_reward_loop
+  # distillation config
+  - distillation@actor_rollout_ref.distillation: megatron_distillation
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_
