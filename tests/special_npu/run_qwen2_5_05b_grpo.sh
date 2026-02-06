@@ -3,9 +3,9 @@ set -x
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
-SAVE_PATH="your_path"
+SAVE_PATH="outputs/profile_qwen2_5_05b_grpo"
 LEVEL="level1"
-CONTENTS=['npu','cpu']
+CONTENTS="['npu','cpu']"
 ANALYSIS=True
 PROFILE_STEPS="[1]"
 PROFILE_RANKS_ALL=True
@@ -67,8 +67,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.profiler.tool_config.npu.analysis=$ANALYSIS \
     global_profiler.tool=npu \
     global_profiler.steps=$PROFILE_STEPS \
-    global_profiler.save_path=$SAVE_PATH \
-    trainer.device=npu $@
+    global_profiler.save_path=$SAVE_PATH $@
 
 
 
