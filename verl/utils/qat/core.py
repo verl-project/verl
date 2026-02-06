@@ -92,7 +92,7 @@ def apply_qat(
     """Apply QAT to a model by replacing nn.Linear with QATLinear."""
     from verl.utils.qat.linear import QATLinear, QATMode
 
-    if isinstance(config, dict):
+    if not isinstance(config, QATConfig):
         config = QATConfig(**config)
 
     if not config.enable:
@@ -138,119 +138,6 @@ def _set_module(model: nn.Module, name: str, new_module: nn.Module):
     for part in parts[:-1]:
         parent = getattr(parent, part)
     setattr(parent, parts[-1], new_module)
-
-
-def _create_decoder_layer_fuse_hook():
-    """Create a forward pre-hook for DecoderLayer to compute fused scales."""
-    from compressed_tensors.quantization.quant_args import FP4_E2M1_DATA, FP8_E4M3_DATA
-
-    from verl.utils.qat.linear import QATLinear, QATMode
-
-    def _apply_fused_input_scale(modules: list, force: bool = False):
-        """Apply fused input scale to a group of W4A4 modules."""
-        w4a4_modules = []
-        amaxes = []
-        for m in modules:
-            if m.mode != QATMode.W4A4:
-                continue
-            if not hasattr(m, "input_amax"):
-                continue
-            if m.input_amax.item() == m._UNINITIALIZED_SCALE:
-                continue
-            w4a4_modules.append(m)
-            amaxes.append(m.input_amax)
-
-        if len(w4a4_modules) < 2:
-            return
-
-        if not force:
-            first_amax = amaxes[0].item()
-            all_equal = all(abs(a.item() - first_amax) < 1e-6 for a in amaxes)
-            if all_equal:
-                return
-
-        fused_amax = torch.max(torch.stack(amaxes))
-        scale_factor = FP8_E4M3_DATA.max * FP4_E2M1_DATA.max
-        fused_scale = (scale_factor / (fused_amax + 1e-12)).float().view(1)
-
-        for m in w4a4_modules:
-            m.input_amax.copy_(fused_amax.view(1).to(m.input_amax.device))
-            m.input_global_scale.copy_(fused_scale.to(m.input_global_scale.device))
-
-    def fuse_hook(module, inputs):
-        """Fuse INPUT scales for W4A4 mode only."""
-        with torch.no_grad():
-            all_qat_modules = {}
-            for name, submodule in module.named_modules():
-                if isinstance(submodule, QATLinear):
-                    if submodule.weight.device == torch.device("meta"):
-                        continue
-                    all_qat_modules[name] = submodule
-
-            if not all_qat_modules:
-                return None
-
-            # QKV W4A4 input fusion
-            qkv_patterns = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
-            qkv_modules = []
-            for name, m in all_qat_modules.items():
-                if any(p in name or name == p.split(".")[-1] for p in qkv_patterns):
-                    qkv_modules.append(m)
-            _apply_fused_input_scale(qkv_modules, force=module.training)
-
-            # Gate/Up W4A4 input fusion
-            gate_up_groups = {}
-            for name, m in all_qat_modules.items():
-                if name.endswith("gate_proj") or name.endswith("up_proj"):
-                    parent = name.rsplit(".", 1)[0]
-                    proj_type = name.rsplit(".", 1)[1]
-                    if parent not in gate_up_groups:
-                        gate_up_groups[parent] = {}
-                    gate_up_groups[parent][proj_type] = m
-
-            for parent, projs in gate_up_groups.items():
-                if "gate_proj" in projs and "up_proj" in projs:
-                    _apply_fused_input_scale([projs["gate_proj"], projs["up_proj"]], force=module.training)
-
-        return None
-
-    return fuse_hook
-
-
-def register_fused_scale_hooks(model: nn.Module):
-    """Register forward pre-hooks on DecoderLayers to compute fused scales."""
-    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-
-    decoder_layer_classes = set()
-    for name, module in model.named_modules():
-        class_name = module.__class__.__name__
-        if "DecoderLayer" in class_name or "TransformerBlock" in class_name:
-            decoder_layer_classes.add(type(module))
-
-    if not decoder_layer_classes:
-        logger.warning("[QAT Fuse] No DecoderLayer found in model")
-        return []
-
-    logger.info(f"[QAT Fuse] Found DecoderLayer classes: {[c.__name__ for c in decoder_layer_classes]}")
-
-    hooks = []
-    for name, module in model.named_modules():
-        actual_module = module
-        if isinstance(module, FSDP):
-            actual_module = module._fsdp_wrapped_module if hasattr(module, "_fsdp_wrapped_module") else module
-
-        if type(actual_module) in decoder_layer_classes:
-            hook_fn = _create_decoder_layer_fuse_hook()
-            if hook_fn:
-                handle = actual_module.register_forward_pre_hook(hook_fn)
-                hooks.append(handle)
-                logger.debug(f"[QAT Fuse] Registered fuse hook on {name}")
-
-    logger.info(f"[QAT Fuse] Registered {len(hooks)} fused scale hooks on DecoderLayers")
-
-    model._qat_fuse_hooks = hooks
-
-    return hooks
 
 
 def setup_fusion_siblings(model: nn.Module):
@@ -308,9 +195,8 @@ def setup_fusion_siblings(model: nn.Module):
 
 
 def enable_qat_fuse(model: nn.Module):
-    """Enable QAT fuse mode: sets up fusion siblings and registers hooks."""
+    """Enable QAT fuse mode: sets up fusion siblings for weight scale fusion."""
     setup_fusion_siblings(model)
-    register_fused_scale_hooks(model)
     model._qat_fuse_enabled = True
     logger.info("[QAT Fuse] Enabled QAT fuse mode")
 
