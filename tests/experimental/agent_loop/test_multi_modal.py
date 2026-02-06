@@ -233,7 +233,7 @@ def test_multimodal_tool_agent(init_config):
         if i // n == 0:
             # First prompt: "How are you?" - should have 2 turns [user, assistant]
             assert num_turns[i] == 2, f"Expected 2 turns but got {num_turns[i]} for sample {i}"
-        if i // n == 1:
+        elif i // n == 1:
             # TODO: prompt with video not generate tool call as expected sometimes
             assert num_turns[i] == 2 or num_turns[i] == 4, (
                 f"Expected 2 or 4 turns but got {num_turns[i]} for sample {i}"
