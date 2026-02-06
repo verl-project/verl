@@ -1415,9 +1415,18 @@ class RayPPOTrainer:
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
                             if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
-                                router_mode = getattr(
-                                    self.config.actor_rollout_ref.actor.router_replay, "mode", "disabled"
-                                )
+                                if self.use_legacy_worker_impl == "disable":
+                                    router_mode = "disabled"
+                                    if self.config.actor_rollout_ref.actor.strategy == "megatron":
+                                        router_mode = getattr(
+                                            self.config.actor_rollout_ref.actor.megatron.router_replay,
+                                            "mode",
+                                            "disabled",
+                                        )
+                                else:
+                                    router_mode = getattr(
+                                        self.config.actor_rollout_ref.actor.router_replay, "mode", "disabled"
+                                    )
                                 if router_mode == "R2":
                                     batch.batch.pop("routed_experts")
                                 else:
