@@ -1,84 +1,129 @@
-name: docker-build-ascend-a2
+# # Tests layout
+
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts
+# - `special_npu`: tests for NPUs
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of test that are designed to run in dedicated environments
+
+# Accelerators for tests
+# - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
+# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+
+# # Workflow layout
+
+# All CI tests are configured by yaml files in `.github/workflows/`. Here's an overview of all test configs:
+# 1. A list of always triggered CPU sanity tests: `check-pr-title.yml`, `secrets_scan.yml`, `check-pr-title,yml`, `pre-commit.yml`, `doc.yml`
+# 2. Some heavy multi-GPU unit tests, such as `model.yml`, `vllm.yml`, `sgl.yml`
+# 3. End-to-end tests: `e2e_*.yml`
+# 4. Unit tests
+#   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
+#   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
+#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
+#     - new workflow yaml is added to `.github/workflows`
+#     - new tests are added to workflow mentioned in 2.
+
+name: nightly_ci_ascend
 
 on:
-  workflow_dispatch:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  # For push, for now only anti-patterns are specified so it is more conservative
+  # and achieves higher coverage.
   push:
-    branches: ["main"]
+    branches:
+      - main
+      - v0.*
     paths:
-      - "docker/ascend/Dockerfile.ascend_8.3.rc1_a2"
-      - ".github/workflows/docker-build-ascend-a2.yml"
-  release:
-    types: [published]
+      - "**/*.py"
+      - "!**/*.md"
+      - "!**/*.sh"
+      # Other entrypoints
+      - "!examples/*trainer*"
+      - "!verl/trainer/main_*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      - "examples/ppo_trainer**"
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      - "!**/*.md"
+      - "!**/*.sh"
+      # Other entrypoints
+      - "!examples/**"
+      - "!verl/trainer/main_*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      # Home
+      - "examples/ppo_trainer"
+      # Entrypoints
+      - ".github/workflows/nightly_ascend.yml"
+      - "examples/data_preprocess/gsm8k.py"
+      - "examples/ppo_trainer/run_qwen3-8b_npu.sh"
   schedule:
     - cron: "0 16 * * *"
 
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
 jobs:
-  build-ascend-image-a2:
-    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
-    runs-on: ubuntu-latest
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-build-ascend-image-a2
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Test ppo qwen3-8b fsdp+vllm
+  nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2-8
+    timeout-minutes: 60 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      ACTOR_STRATEGY: "fsdp"
     steps:
-      - name: Remove unnecessary parts in github actions runners to free up disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-
-      - name: Checkout code
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Get base image name and tag
-        id: base_image
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
         run: |
-          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend_8.3.rc1_a2 | head -1 | cut -d' ' -f2)
-          echo "Base image full: $BASE_IMAGE_FULL" 
-          BASE_IMAGE_TAG=$(echo "$BASE_IMAGE_FULL" | cut -d':' -f2)
-          echo "Base image tag: $BASE_IMAGE_TAG"
-          NEW_IMAGE_NAME="verl-$BASE_IMAGE_TAG"
-          echo "New image name: $NEW_IMAGE_NAME"  
-          echo "base_image_tag=$BASE_IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          echo "new_image_name=$NEW_IMAGE_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Get image tag
-        id: version
+          pip install -r requirements-npu.txt
+          pip install --no-deps -e .
+      - name: Check final pip list
         run: |
-          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///g' | sed 's/[^a-zA-Z0-9._-]/_/g')
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ steps.base_image.outputs.new_image_name }}-${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          elif [ "$BRANCH_NAME" = "main" ]; then
-            echo "tag=${{ steps.base_image.outputs.new_image_name }}-latest" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Quay.io
-        uses: docker/login-action@v3
-        with:
-          registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
-
-      - name: Clean Docker cache before build
+          pip list
+      - name: Prepare weights
         run: |
-          docker system prune -a -f --volumes || true
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend
+        run: |
+          ray stop --force
+          
+          bash examples/ppo_trainer/run_qwen3-8b_npu.sh
 
-      - name: Build and push images Quay
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          file: ./docker/ascend/Dockerfile.ascend_8.3.rc1_a2
-          push: true
-          tags: |
-            quay.io/ascend/verl:${{ steps.version.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
+  # Test Megatron strategy
+  
