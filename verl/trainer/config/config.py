@@ -30,7 +30,7 @@ class CheckpointConfig(BaseConfig):
         save_contents (list[str]): What to include in saved checkpoints.
             Options: 'model', 'optimizer', 'extra', 'hf_model'.
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
-        async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
+        async_save (bool): Whether to save checkpoints asynchronously. Implemented for both Megatron and FSDP.
     """
 
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])

@@ -14,12 +14,14 @@
 
 import json
 import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.distributed._tensor import Placement, Shard
+from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 
 try:
     # for torch 2.5+
@@ -64,6 +66,60 @@ class FSDPModelMerger(BaseModelMerger):
         merger.merge_and_save()
         ```
     """
+
+    def _is_dcp_format(self) -> bool:
+        """
+        Check if the checkpoint is in DCP format.
+        DCP checkpoints have .distcp files instead of per-rank .pt files.
+        """
+        checkpoint_dir = Path(self.config.local_dir)
+        # Check for DCP shard files (pattern: __N_M.distcp)
+        distcp_files = list(checkpoint_dir.glob("__*_*.distcp"))
+        return len(distcp_files) > 0
+
+    def _load_dcp_checkpoint(self) -> dict[str, torch.Tensor]:
+        """
+        Load DCP format checkpoint by converting it to torch.save format first.
+        Returns the merged state dict directly.
+        """
+        print("Detected DCP format checkpoint. Converting to consolidated checkpoint...")
+
+        # Create temporary file for converted checkpoint
+        temp_file = tempfile.NamedTemporaryFile(suffix=".pt", delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
+
+        try:
+            # Convert DCP checkpoint to torch.save format
+            dcp_to_torch_save(self.config.local_dir, temp_path)
+            print(f"Converted DCP checkpoint to {temp_path}")
+
+            # Load the converted checkpoint
+            state_dict = torch.load(temp_path, map_location="cpu", weights_only=False)
+            print("Loaded converted checkpoint")
+
+            # The DCP checkpoint may contain both model and optimizer states
+            # Extract just the model state if it's nested
+            if isinstance(state_dict, dict):
+                # Check if it has the structure we expect from our DCP save
+                if "fsdp_app_state" in state_dict:
+                    app_state = state_dict["fsdp_app_state"]
+                    if "model" in app_state:
+                        state_dict = app_state["model"]
+                elif "model" in state_dict:
+                    state_dict = state_dict["model"]
+
+            # Convert all tensors to bfloat16 to match the expected dtype
+            # This is consistent with the non-DCP path which also converts to bfloat16
+            for key in state_dict:
+                if isinstance(state_dict[key], torch.Tensor):
+                    state_dict[key] = state_dict[key].bfloat16()
+
+            return state_dict
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def _get_world_size(self) -> int:
         """_summary_
@@ -204,16 +260,22 @@ class FSDPModelMerger(BaseModelMerger):
         return state_dict
 
     def merge_and_save(self):
-        world_size = self._get_world_size()
-        rank_zero_state_dict = self._load_rank_zero_state_dict(world_size)
+        # Check if this is a DCP format checkpoint
+        if self._is_dcp_format():
+            print("Using DCP format loader")
+            merged_state_dict = self._load_dcp_checkpoint()
+        else:
+            print("Using torch.save format loader")
+            world_size = self._get_world_size()
+            rank_zero_state_dict = self._load_rank_zero_state_dict(world_size)
 
-        mesh, mesh_dim_names = self._extract_device_mesh_info(rank_zero_state_dict, world_size)
-        print(f"Got device mesh {mesh}, mesh_dim_names {mesh_dim_names}")
+            mesh, mesh_dim_names = self._extract_device_mesh_info(rank_zero_state_dict, world_size)
+            print(f"Got device mesh {mesh}, mesh_dim_names {mesh_dim_names}")
 
-        total_shards, mesh_shape = self._calculate_shard_configuration(mesh, mesh_dim_names)
-        print(f"Processing model shards with {total_shards} {mesh_shape} in total")
+            total_shards, mesh_shape = self._calculate_shard_configuration(mesh, mesh_dim_names)
+            print(f"Processing model shards with {total_shards} {mesh_shape} in total")
 
-        merged_state_dict = self._load_and_merge_state_dicts(world_size, total_shards, mesh_shape, mesh_dim_names)
+            merged_state_dict = self._load_and_merge_state_dicts(world_size, total_shards, mesh_shape, mesh_dim_names)
 
         if self.config.operation == "test":
             if not self.config.test_hf_dir:
