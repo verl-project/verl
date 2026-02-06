@@ -705,6 +705,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # When sleep_level=2, base model weights are destroyed during each sleep cycle.
         # separately collect and update LoRA weights and base model weights through their respective interfaces.
         # Here: params contains LoRA weights, base_model_params contains base model weights.
+        # Only needed if the rollout engine actually sleeps/frees weights (free_cache_engine=True).
         if (
             peft_config is not None
             and getattr(self.rollout, "sleep_level", None) == 2

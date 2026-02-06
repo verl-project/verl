@@ -615,7 +615,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # main memory can trade sync time to avoid OOM
             self.rollout.sleep_level = 1
 
-            do_lora_base_sync = not self.base_sync_done or self.rollout.sleep_level != 1
+            do_lora_base_sync = (not self.base_sync_done) or (
+                self.rollout.sleep_level != 1 and self.config.rollout.free_cache_engine
+            )
 
         if do_lora_base_sync:
             per_tensor_base_params, _ = self.actor.engine.get_per_tensor_param(

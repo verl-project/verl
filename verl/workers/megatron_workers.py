@@ -694,7 +694,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             # main memory can trade sync time to avoid OOM
             self.rollout.sleep_level = 1
 
-            do_lora_base_sync = not self.base_sync_done or self.rollout.sleep_level != 1
+            do_lora_base_sync = (not self.base_sync_done) or (
+                self.rollout.sleep_level != 1 and self.config.rollout.free_cache_engine
+            )
 
         if self.bridge is not None:
             if self.vanilla_bridge:
