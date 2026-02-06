@@ -14,7 +14,8 @@
 """
 Main PPO trainer differs from original PPO trainer in main_ppo.py:
 1. Use TransferQueue to transfer data between components.
-2. Support multiple agent loop outputs.
+2. Support different `n` sampling for each prompt.
+3. Support multiple outputs for each agent loop.
 """
 
 import asyncio
@@ -64,6 +65,8 @@ from verl.workers.utils.losses import value_loss
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+# ======================================= USER SECTION BEGIN =======================================
+
 
 class ReplayBuffer:
     """Replay buffer periodically polls metadata from transfer queue.
@@ -83,7 +86,8 @@ class ReplayBuffer:
     def _poll_from_transfer_queue(self):
         """Periodically poll metadata from transfer queue."""
         while True:
-            data = tq.kv_list()
+            # data = tq.kv_list()
+            data = None
             if data is not None:
                 for partition_id, items in data.items():
                     self.partitions[partition_id].update(items)
@@ -160,8 +164,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
         try:
+            # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
             config = self.config.actor_rollout_ref.rollout
             n = config.n if not prompt.get("validate", False) else config.val_kwargs.n
+
             tasks = []
             for i in range(n):
                 # mark session_id as running
@@ -189,6 +195,27 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         if not outputs:
             await tq.async_kv_put(f"{uid}_{session_id}_0", tags={"status": "failed"})
             return
+
+        # NOTE: only use the last output to compute reward score, then assign reward score to all agent loop outputs.
+        # User can customize the reward score assignment strategy.
+        final_output = outputs[-1]
+        prompts, responses = torch.Tensor(final_output.prompt_ids), torch.Tensor(final_output.response_ids)
+        input_ids = torch.cat([prompts, responses], dim=0)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+        position_ids = torch.arange(0, input_ids.size(0), dtype=torch.long)
+        await self._compute_score(
+            final_output,
+            prompts=prompts.unsqueeze(0),  # [1, prompt_length]
+            responses=responses.unsqueeze(0),  # [1, response_length]
+            attention_mask=attention_mask.unsqueeze(0),  # [1, prompt_length + response_length]
+            input_ids=input_ids.unsqueeze(0),  # [1, prompt_length + response_length]
+            position_ids=position_ids.unsqueeze(0),  # [1, prompt_length + response_length]
+            kwargs=kwargs,
+        )
+        if final_output.reward_score is not None:
+            for output in outputs[:-1]:
+                output.reward_score = final_output.reward_score
+                output.extra_fields["reward_extra_info"] = final_output.extra_fields["reward_extra_info"]
 
         # NOTE: agent loop may has multiple outputs, put each output into TransferQueue.
         # key format: {uid}_{session_id}_{index}
@@ -229,6 +256,9 @@ class AgentLoopManagerTQ(AgentLoopManager):
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
+
+
+# ======================================= USER SECTION END =======================================
 
 
 class PPOTrainer:
@@ -337,7 +367,13 @@ class PPOTrainer:
             rollout_only (bool, optional): Whether to initialize only rollout workers to debug. Defaults to False.
         """
         if rollout_only:
-            self.agent_loop_manager = AgentLoopManagerTQ(self.config)
+            self.reward_loop_manager = RewardLoopManager(config=self.config)
+            logger.info("reward loop manager initialized")
+
+            self.agent_loop_manager = AgentLoopManagerTQ(
+                config=self.config,
+                reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+            )
             logger.info("agent loop manager initialized")
             return
 

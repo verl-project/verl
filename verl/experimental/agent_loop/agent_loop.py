@@ -160,6 +160,14 @@ class AgentLoopOutput(BaseModel):
             v = output.pop(k, None)
             if v is not None:
                 output[k] = torch.Tensor(v)
+
+        # rm_scores: reward score for each token
+        reward_score = output.pop("reward_score", None)
+        if reward_score is not None:
+            rm_scores = torch.zeros_like(output["response_mask"], dtype=torch.float32)
+            rm_scores[-1] = reward_score
+            output["rm_scores"] = rm_scores
+
         return output
 
 
