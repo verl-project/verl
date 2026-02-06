@@ -176,6 +176,7 @@ class DiffusionAgentLoopWorker:
             height=config.image_height,
             width=config.image_width,
             true_cfg_scale=config.guidance_scale,
+            max_sequence_length=config.max_model_len,
             sde_type=config.sde_type,
             sde_window_size=config.sde_window_size,
             sde_window_range=config.sde_window_range,

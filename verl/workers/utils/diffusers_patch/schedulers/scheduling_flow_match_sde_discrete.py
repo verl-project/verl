@@ -46,14 +46,6 @@ class FlowMatchSDEDiscreteSchedulerOutput(BaseOutput):
 
 
 class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
-    def index_for_timestep(self, timestep, schedule_timesteps=None):
-        if schedule_timesteps is None:
-            schedule_timesteps = self.timesteps
-        indices = (abs(schedule_timesteps - timestep) < 1e-4).nonzero()
-
-        pos = 1 if len(indices) > 1 else 0
-        return indices[pos].item()
-
     def step(
         self,
         model_output: torch.FloatTensor,

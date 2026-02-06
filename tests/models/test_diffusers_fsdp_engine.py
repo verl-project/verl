@@ -25,6 +25,8 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, Ra
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import DiffusersModelConfig, FSDPActorConfig, TrainingWorkerConfig
 from verl.workers.engine_workers import TrainingWorker
+from verl.workers.utils.diffusers_patch.schedulers import FlowMatchSDEDiscreteScheduler
+from verl.workers.utils.diffusers_patch.utils import set_timesteps
 from verl.workers.utils.losses import ppo_loss
 
 
@@ -99,8 +101,13 @@ def create_training_config(model_type, strategy, device_count, model):
     return training_config, actor_config
 
 
-def create_data_samples(num_device: int) -> DataProto:
+def create_data_samples(num_device: int, model_config: DiffusersModelConfig) -> DataProto:
     from tensordict import TensorDict
+
+    scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
+        pretrained_model_name_or_path=model_config.local_path, subfolder="scheduler"
+    )
+    set_timesteps(scheduler, model_config)
 
     batch_size = 8 * num_device
     seq_len = 64
@@ -113,8 +120,7 @@ def create_data_samples(num_device: int) -> DataProto:
     height, width = img_size, img_size
     latent_height, latent_width = height // vae_scale_factor // 2, width // vae_scale_factor // 2
     num_train_timesteps = 10
-    timesteps = np.linspace(20, 1000, num_train_timesteps, dtype=np.float32)[::-1].copy()
-    timesteps = torch.from_numpy(timesteps).to(torch.float32).repeat(batch_size, 1)
+    timesteps = scheduler.timesteps[None].repeat(batch_size, 1)
 
     torch.manual_seed(1)
     np.random.seed(1)
@@ -125,7 +131,7 @@ def create_data_samples(num_device: int) -> DataProto:
             "attention_mask": torch.ones((batch_size, seq_len)),
             "response_mask": torch.ones((batch_size, seq_len)),
             "old_log_probs": torch.randn((batch_size, num_train_timesteps)),
-            "advantages": torch.randn((batch_size, num_train_timesteps)),
+            "advantages": torch.randn((batch_size,)),
             "responses": torch.randn((batch_size, 3, height, width)),
             "all_latents": torch.randn((batch_size, inference_steps, latent_height * latent_width, latent_dim)),
             "rollout_log_probs": torch.randn((batch_size, num_train_timesteps)),
@@ -139,7 +145,6 @@ def create_data_samples(num_device: int) -> DataProto:
         batch_size=batch_size,
     )
     data = DataProto(batch=batch)
-    data.meta_info["cached_steps"] = data.batch["all_timesteps"].shape[1]
     data.meta_info["global_token_num"] = torch.sum(data.batch["attention_mask"], dim=-1).tolist()
     data.meta_info["use_dynamic_bsz"] = False
     data.meta_info["micro_batch_size_per_gpu"] = 4
@@ -167,7 +172,7 @@ def test_diffusers_fsdp_engine(strategy):
     wg.reset()
 
     # forward only without loss function
-    data_td = create_data_samples(device_count).to_tensordict()
+    data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
     tu.assign_non_tensor(data_td, compute_loss=False)
     output = wg.infer_batch(data_td)
     output_dict = output.get()
@@ -182,7 +187,7 @@ def test_diffusers_fsdp_engine(strategy):
     wg.set_loss_fn(loss_fn)
 
     # train batch
-    data_td = create_data_samples(device_count).to_tensordict()
+    data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
     ppo_mini_batch_size = 4
     ppo_epochs = actor_config.ppo_epochs
     seed = 42

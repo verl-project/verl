@@ -109,12 +109,8 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-# TODO: (susan) modify based on actual rollout output
 def compute_response_mask(data: DataProto):
-    """Compute the attention mask for the response part of the sequence.
-
-    This function extracts the portion of the attention mask that corresponds to the model's response,
-    which is used for masking computations that should only apply to response tokens.
+    """Compute the attention mask for latents
 
     Args:
         data (DataProto): The data containing batched model outputs and inputs.
@@ -122,10 +118,11 @@ def compute_response_mask(data: DataProto):
     Returns:
         torch.Tensor: The attention mask for the response tokens.
     """
-    responses = data.batch["responses"]
-    response_length = responses.size(2) * responses.size(3)
-    attention_mask = data.batch["attention_mask"]
-    return attention_mask[:, -response_length:]
+    all_latents = data.batch["all_latents"]
+    b, _, s, _ = all_latents.shape
+    # TODO (mike): not sure the mask is what we expect
+    response_mask = torch.ones((b, s), dtype=torch.int32)
+    return response_mask
 
 
 def compute_advantage(
@@ -562,7 +559,6 @@ class RayFlowGRPOTrainer:
             )
 
             # we only do validation on rule-based rm or async reward_loop
-            # NOTE: (susan) based on testing, colocated reward_loop encounters OOM
             # TODO: (susan) TBD whether support reward model worker
             if (
                 self.config.reward_model.enable
@@ -1181,7 +1177,12 @@ class RayFlowGRPOTrainer:
             batch_td = batch.to_tensordict()
             batch_td["loss_mask"] = batch_td["response_mask"]
             # step 3: add meta info
-            metadata = {"calculate_entropy": False, "compute_loss": False}
+            metadata = {
+                "compute_loss": False,
+                "height": self.config.actor_rollout_ref.model.image_height,
+                "width": self.config.actor_rollout_ref.model.image_width,
+                "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+            }
             if self.ref_in_actor:
                 metadata["no_lora_adapter"] = True
             tu.assign_non_tensor(batch_td, **metadata)
@@ -1208,10 +1209,10 @@ class RayFlowGRPOTrainer:
             # step 3: add meta info
             tu.assign_non_tensor(
                 batch_td,
-                calculate_entropy=True,
                 compute_loss=False,
-                height=self.config.actor_rollout_ref.rollout.image_height,
-                width=self.config.actor_rollout_ref.rollout.image_width,
+                height=self.config.actor_rollout_ref.model.image_height,
+                width=self.config.actor_rollout_ref.model.image_width,
+                vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
             )
             output = self.actor_rollout_wg.compute_log_prob(batch_td)
             # gather output
@@ -1242,13 +1243,14 @@ class RayFlowGRPOTrainer:
                 epochs=ppo_epochs,
                 seed=seed,
                 dataloader_kwargs={"shuffle": shuffle},
+                height=self.config.actor_rollout_ref.model.image_height,
+                width=self.config.actor_rollout_ref.model.image_width,
+                vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
             )
 
             actor_output = self.actor_rollout_wg.update_actor(batch_td)
             actor_output = tu.get(actor_output, "metrics")
             actor_output = rename_dict(actor_output, "actor/")
-            # modify key name
-            actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
             actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
         else:
             actor_output = self.actor_rollout_wg.update_actor(batch)
@@ -1271,6 +1273,9 @@ class RayFlowGRPOTrainer:
                 epochs=ppo_epochs,
                 seed=seed,
                 dataloader_kwargs={"shuffle": shuffle},
+                height=self.config.actor_rollout_ref.model.image_height,
+                width=self.config.actor_rollout_ref.model.image_width,
+                vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
             )
 
             output = self.critic_wg.train_mini_batch(batch_td)

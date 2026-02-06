@@ -380,9 +380,7 @@ class vLLMOmniHttpServer:
             self.model_config.lora.get("rank", 0) > 0 and not self.model_config.lora.get("merge", False)
         ):
             # Make sure we also check that the lora is already loaded in the engine
-            # lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
-            # TODO (mike): fix this
-            lora_loaded = True
+            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
                 lora_request = LoRARequest(
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH

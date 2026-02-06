@@ -325,6 +325,8 @@ actor_rollout_ref:
     tiled_mlp:
       enabled: false
       num_shards: 4
+    image_height: ${oc.select:actor_rollout_ref.rollout.image_height,512}
+    image_width: ${oc.select:actor_rollout_ref.rollout.image_width,512}
     num_inference_steps: ${oc.select:actor_rollout_ref.rollout.num_inference_steps,10}
     noise_level: ${oc.select:actor_rollout_ref.rollout.noise_level,0.7}
     guidance_scale: ${oc.select:actor_rollout_ref.rollout.guidance_scale,1.0}

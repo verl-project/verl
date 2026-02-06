@@ -59,8 +59,9 @@ def init_config() -> DictConfig:
 
     config.data.apply_chat_template_kwargs = dict(max_length=max_length, padding=True, truncation=True)
     config.data.max_prompt_length = max_length
+    config.actor_rollout_ref.rollout.max_model_len = max_length
 
-    # TODO (Mike): test with TP later
+    # TODO (mike): test with TP later
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = 1
     return config
 

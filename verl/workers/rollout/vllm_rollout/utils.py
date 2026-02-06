@@ -381,10 +381,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_fp8_model(self.model_runner.vllm_config):
-                logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
-                # Convert bf16 weights to fp8 format before loading
-                loaded_params = load_quanted_weights(weights, self.model_runner)
-                logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
+                raise NotImplementedError("FP8 model is not supported in vLLM-Omni currently.")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
                 self.model_runner.model.load_weights(weights)

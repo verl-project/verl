@@ -76,6 +76,12 @@ tiled_mlp:
   # number of shards to split the input. Higher values reduce peak memory but may slightly impact performance.
   num_shards: 4
 
+# image height
+image_height: ${oc.select:actor_rollout_ref.rollout.image_height,512}
+
+# image width
+image_width: ${oc.select:actor_rollout_ref.rollout.image_width,512}
+
 # inference steps
 num_inference_steps: ${oc.select:actor_rollout_ref.rollout.num_inference_steps,10}
 
