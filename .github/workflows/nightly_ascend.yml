@@ -1,0 +1,84 @@
+name: docker-build-ascend-a2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "docker/ascend/Dockerfile.ascend_8.3.rc1_a2"
+      - ".github/workflows/docker-build-ascend-a2.yml"
+  release:
+    types: [published]
+  schedule:
+    - cron: "0 16 * * *"
+
+jobs:
+  build-ascend-image-a2:
+    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-build-ascend-image-a2
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - name: Remove unnecessary parts in github actions runners to free up disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Get base image name and tag
+        id: base_image
+        run: |
+          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend_8.3.rc1_a2 | head -1 | cut -d' ' -f2)
+          echo "Base image full: $BASE_IMAGE_FULL" 
+          BASE_IMAGE_TAG=$(echo "$BASE_IMAGE_FULL" | cut -d':' -f2)
+          echo "Base image tag: $BASE_IMAGE_TAG"
+          NEW_IMAGE_NAME="verl-$BASE_IMAGE_TAG"
+          echo "New image name: $NEW_IMAGE_NAME"  
+          echo "base_image_tag=$BASE_IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "new_image_name=$NEW_IMAGE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Get image tag
+        id: version
+        run: |
+          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///g' | sed 's/[^a-zA-Z0-9._-]/_/g')
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ steps.base_image.outputs.new_image_name }}-${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "$BRANCH_NAME" = "main" ]; then
+            echo "tag=${{ steps.base_image.outputs.new_image_name }}-latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Clean Docker cache before build
+        run: |
+          docker system prune -a -f --volumes || true
+
+      - name: Build and push images Quay
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          file: ./docker/ascend/Dockerfile.ascend_8.3.rc1_a2
+          push: true
+          tags: |
+            quay.io/ascend/verl:${{ steps.version.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
