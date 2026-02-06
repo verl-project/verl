@@ -20,6 +20,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import shutil
 from pathlib import Path
 from typing import AsyncIterator, Generator
 
@@ -251,13 +252,6 @@ class ServerAdapter(BaseRollout):
 
                 if lora_items:
                     lora_name = f"verl_policy_{self.replica_rank}_{self.node_rank}"
-                    adapter_dir = Path(f"/dev/shm/verl_sglang_lora_{self.replica_rank}_{self.node_rank}")
-                    adapter_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    try:
-                        adapter_dir.chmod(0o700)
-                    except OSError as e:
-                        logger.warning(f"Failed to chmod LoRA adapter dir '{adapter_dir}' to 0700: {e}")
-
                     # Build a PEFT-compatible adapter config for SGLang.
                     # Note: SGLang needs explicit module names to infer LoRA hidden dims.
                     target_modules_val = engine_kwargs.get("lora_target_modules", None)
@@ -309,6 +303,27 @@ class ServerAdapter(BaseRollout):
                     from safetensors.torch import save_file  # type: ignore
 
                     lora_state = {k: v.detach().cpu() for k, v in lora_items}
+                    required_bytes = sum(int(v.numel()) * int(v.element_size()) for v in lora_state.values())
+                    safety_margin = 8 * 1024 * 1024  # 8 MiB
+                    adapter_root = Path("/dev/shm")
+                    try:
+                        free_bytes = int(shutil.disk_usage(adapter_root).free)
+                    except Exception:
+                        free_bytes = 0
+                    if free_bytes < required_bytes + safety_margin:
+                        logger.warning(
+                            f"Not enough space in {adapter_root} for LoRA adapter "
+                            f"(need={required_bytes}B free={free_bytes}B); falling back to /tmp."
+                        )
+                        adapter_root = Path("/tmp")
+
+                    adapter_dir = adapter_root / f"verl_sglang_lora_{self.replica_rank}_{self.node_rank}"
+                    adapter_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    try:
+                        adapter_dir.chmod(0o700)
+                    except OSError as e:
+                        logger.warning(f"Failed to chmod LoRA adapter dir '{adapter_dir}' to 0700: {e}")
+                    (adapter_dir / "adapter_config.json").write_text(json.dumps(peft_cfg), encoding="utf-8")
                     tmp_path = adapter_dir / "adapter_model.safetensors.tmp"
                     out_path = adapter_dir / "adapter_model.safetensors"
                     save_file(lora_state, str(tmp_path))
