@@ -334,6 +334,10 @@ class ServerAdapter(BaseRollout):
         Args:
             tag: weights or kv_cache.
         """
+        # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
+        # have completed actor offloading to CPU, preventing OOM issue.
+        if "kv_cache" in tags and self.config.free_cache_engine:
+            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
