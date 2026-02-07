@@ -59,6 +59,13 @@ def calculate_log_prob_diff(log_probs1: torch.Tensor, log_probs2: torch.Tensor, 
     full_diff = torch.abs(log_probs1 - log_probs2)
     return torch.masked_select(full_diff, mask)
 
+def calculate_rollout_actor_probs_kl_divergence(rollout_probs: torch.Tensor, rollout_old_log_probs: torch.Tensor, actor_old_log_probs: torch.Tensor, mask: torch.Tensor) -> float:
+    # implemention of https://arxiv.org/pdf/2512.01374
+    kl_terms = rollout_probs * (rollout_old_log_probs - actor_old_log_probs)
+    masked_kl_terms = torch.masked_select(kl_terms, mask)
+    if masked_kl_terms.numel() == 0:
+        return 0.0
+    return masked_kl_terms.mean().detach().item()
 
 def calculate_debug_metrics(data: DataProto) -> dict:
     """
@@ -78,6 +85,7 @@ def calculate_debug_metrics(data: DataProto) -> dict:
             "training/rollout_probs_diff_mean": mean value of logprob diff of rollout vs. actor
             "training/rollout_probs_diff_std": std value of logprob diff of rollout vs. actor
             "training/rollout_actor_probs_pearson_corr": logprob's pearson corrcoef of rollout vs. actor, reference to https://arxiv.org/pdf/2506.13585
+             "training/rollout_actor_probs_kl_divergence": kl divergence of rollout vs. actor, reference to https://arxiv.org/pdf/2512.01374
     """
 
     rollout_old_log_probs = data.batch["rollout_log_probs"]
@@ -100,10 +108,12 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     response_mask_bool = response_mask.bool()
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
+    kl_divergence = calculate_rollout_actor_probs_kl_divergence(rollout_probs, rollout_old_log_probs, actor_old_log_probs, response_mask_bool)
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).detach().item(),
         "training/rollout_actor_probs_pearson_corr": pearson_corrcoef,
+        "training/rollout_actor_probs_kl_divergence": kl_divergence,
     }
