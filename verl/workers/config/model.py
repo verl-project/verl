@@ -249,8 +249,8 @@ class TorchtitanModelConfig(BaseConfig):
     use_remove_padding: bool = True
 
     # Model args overrides
-    attn_type: str = 'sdpa'  # e.g., "sdpa", "flex", "varlen"
-    attn_mask_type: str = 'causal'  # e.g., "causal", "document_mask", "block_causal"
+    attn_type: str = "sdpa"  # e.g., "sdpa", "flex", "varlen"
+    attn_mask_type: str = "causal"  # e.g., "causal", "document_mask", "block_causal"
 
     def __post_init__(self):
         self.local_hf_assets_path = copy_to_local(self.hf_assets_path, use_shm=self.use_shm)
@@ -260,9 +260,7 @@ class TorchtitanModelConfig(BaseConfig):
         self.processor = hf_processor(self.local_hf_assets_path, trust_remote_code=self.trust_remote_code)
 
         # Load hf_config for model architecture info
-        self.hf_config = AutoConfig.from_pretrained(
-            self.local_hf_assets_path, trust_remote_code=self.trust_remote_code
-        )
+        self.hf_config = AutoConfig.from_pretrained(self.local_hf_assets_path, trust_remote_code=self.trust_remote_code)
 
     def get_processor(self):
         return self.processor if self.processor is not None else self.tokenizer

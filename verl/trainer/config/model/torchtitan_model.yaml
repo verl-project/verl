@@ -7,13 +7,13 @@
 _target_: verl.workers.config.TorchtitanModelConfig
 
 # Model name (e.g., "qwen3", "llama3")
-name: llama3
+name: qwen3
 
 # Model flavor/size (e.g., "0.6B", "1.5B", "7B")
-flavor: "8B"
+flavor: "0.6B"
 
 # Path to HuggingFace assets (tokenizer, config, etc.)
-hf_assets_path: ./assets/hf/Llama-3.1-8B
+hf_assets_path: ./assets/hf/Qwen3-0.6B
 
 # whether to use remove padding. Only valid when we use hf model definition
 use_remove_padding: True

@@ -334,9 +334,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # update lr scheduler
         if update_lr_scheduler:
             lr = self.engine.lr_scheduler_step()
-            # DEBUG: Print LR value for comparison
-            if torch.distributed.get_rank() == 0:
-                print(f"DEBUG LR: engine={self.engine.__class__.__name__} lr={lr}")
         else:
             lr = None
 

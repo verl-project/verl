@@ -25,9 +25,7 @@ try:
     from .torchtitan import TorchTitanEngine, TorchTitanEngineWithLMHead
 
     __all__ += ["TorchTitanEngine", "TorchTitanEngineWithLMHead"]
-except ImportError as e:
-    import warnings
-    warnings.warn(f"Failed to import torchtitan engine: {e}")
+except ImportError:
     TorchTitanEngine = None
     TorchTitanEngineWithLMHead = None
 

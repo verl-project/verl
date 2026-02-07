@@ -152,14 +152,13 @@ class McoreOptimizerConfig(OptimizerConfig):
 
 @dataclass
 class TorchtitanOptimizerConfig(OptimizerConfig):
-    """VeOmni optimizer configuration extending base OptimizerConfig.
+    """Torchtitan optimizer configuration extending base OptimizerConfig.
 
     Args:
-        optimizer (str): Optimizer name; default is "AdamW".
-        lr_min (float): Minimum learning rate.
-        lr_start (float): Starting learning rate for warmup.
-        lr_decay_ratio (float): LR decay ratio.
-        decay_type (str): Weight decay_type type: "linear", "sqrt", or "cosine".
+        name (str): Optimizer name; default is "AdamW".
+        eps (float): Epsilon value for AdamW optimizer, default 1e-8.
+        decay_type (str): Weight decay type: "linear", "sqrt", or "cosine".
+        min_lr_factor (float): Minimum learning rate factor.
     """
 
     name: str = "AdamW"

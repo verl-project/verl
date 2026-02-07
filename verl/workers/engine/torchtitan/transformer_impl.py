@@ -18,16 +18,22 @@ The concrete Engine implementation using PyTorch TorchTitan parallelism (FSDP2 +
 import gc
 import logging
 import os
+import re
 from contextlib import nullcontext
-from types import SimpleNamespace
 from typing import Callable, Optional
 
 import torch
 import torch.distributed
 from tensordict import TensorDict
-from torchtitan.config.job_config import (Checkpoint, Compile, JobConfig,
-                                          LRScheduler, Model, Optimizer,
-                                          Parallelism, Training)
+from torchtitan.config.job_config import (
+    Checkpoint,
+    Compile,
+    JobConfig,
+    LRScheduler,
+    Model,
+    Optimizer,
+    Parallelism,
+)
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.train import Trainer
@@ -38,17 +44,18 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id, get_device_name
-from verl.utils.fsdp_utils import (load_fsdp_model_to_gpu, load_fsdp_optimizer,
-                                   offload_fsdp_model_to_cpu,
-                                   offload_fsdp_optimizer)
+from verl.utils.fsdp_utils import (
+    load_fsdp_model_to_gpu,
+    load_fsdp_optimizer,
+    offload_fsdp_model_to_cpu,
+    offload_fsdp_optimizer,
+)
 from verl.utils.model import extract_multi_modal_inputs
 from verl.utils.torch_functional import logprobs_from_logits
-from verl.workers.config import (TorchtitanEngineConfig, TorchtitanModelConfig,
-                                 TorchtitanOptimizerConfig)
+from verl.workers.config import TorchtitanEngineConfig, TorchtitanModelConfig, TorchtitanOptimizerConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import (enable_full_determinism, postprocess_batch_func,
-                     prepare_micro_batches)
+from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -92,6 +99,7 @@ class TorchTitanEngine(BaseEngine):
         # Disable torchtitan's dataloader since verl has its own data loading
         # Ideally torchtitan trainer init should not initialize dataloader
         import torchtitan.protocols.train_spec as train_spec_module
+
         original_get_train_spec = train_spec_module.get_train_spec
 
         def _get_train_spec_without_dataloader(model_name):
@@ -111,7 +119,9 @@ class TorchTitanEngine(BaseEngine):
                 model_args.attn_mask_type = self.model_config.attn_mask_type
 
         model = Model(
-            name=self.model_config.name, flavor=self.model_config.flavor, hf_assets_path=self.model_config.hf_assets_path
+            name=self.model_config.name,
+            flavor=self.model_config.flavor,
+            hf_assets_path=self.model_config.hf_assets_path,
         )
         optimizer = Optimizer(
             name=self.optimizer_config.name,
@@ -296,8 +306,6 @@ class TorchTitanEngine(BaseEngine):
         for micro_batch in micro_batches:
             with ctx:
                 loss, output = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
-                # TODO(jessicazhong): enable forward only in Torchtitan
-                print(f"DEBUG TorchTitan: {torch.distributed.get_rank()=} {loss=} {self.is_mp_src_rank_with_outputs()=}")
                 if not forward_only:
                     loss.backward()
             output_lst.append(output)
@@ -375,13 +383,15 @@ class TorchTitanEngine(BaseEngine):
             for module in self.module:
                 load_fsdp_model_to_gpu(module)
 
-        # self.checkpoint_manager.save_checkpoint(
-        #     local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
-        # )
-        # Torchtitan's checkpoint save
+        # Override TorchTitan's folder to use verl's path
+        parent_dir = os.path.dirname(local_path)
+        self.checkpointer.folder = parent_dir
+
+        if max_ckpt_to_keep is not None:
+            self.checkpointer.keep_latest_k = max_ckpt_to_keep
+
         self.checkpointer.save(curr_step=global_step)
 
-        # TODO(jessicazhong): figure out if this is still needed
         torch.distributed.barrier()
         if self._is_offload_param:
             for module in self.module:
@@ -395,13 +405,19 @@ class TorchTitanEngine(BaseEngine):
             for module in self.module:
                 load_fsdp_model_to_gpu(module)
 
-        # self.checkpoint_manager.load_checkpoint(
-        #     local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
-        # )
-        # Torchtitan's checkpoint load
-        self.checkpointer.load()
+        # Override TorchTitan's folder to use verl's path
+        parent_dir = os.path.dirname(local_path)
+        self.checkpointer.folder = parent_dir
 
-        # TODO(jessicazhong): figure out if this is still needed
+        # Extract step number from path (verl uses global_step_N format)
+        match = re.search(r"global_step_(\d+)", local_path)
+        if match:
+            step = int(match.group(1))
+            self.checkpointer.load(step=step)
+        else:
+            # Fallback to latest
+            self.checkpointer.load(step=-1)
+
         torch.distributed.barrier()
         if self._is_offload_param:
             for module in self.module:
@@ -551,9 +567,7 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 if not self.engine_config.entropy_checkpointing:
                     entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
                 else:
-                    entropy_rmpad = torch.utils.checkpoint.checkpoint(
-                        self.compute_entropy_from_logits, logits_rmpad
-                    )
+                    entropy_rmpad = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad)
 
             # TODO(jessicazhong): how to handle this with TorchTitan SP
             # if self.use_ulysses_sp:
@@ -623,11 +637,10 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 "positions": model_inputs["position_ids"],
                 "attention_masks": model_inputs["attention_mask"],
             }
-
-            _, logits = self.trainer.forward_step(input_dict=input_dict, labels=output_args["input_ids_rmpad_rolled"], global_valid_tokens=torch.tensor(1.0, device=device_name), return_outputs=True)
+            logits = self.trainer.forward_step(input_dict=input_dict, labels=output_args["input_ids_rmpad_rolled"])
 
             if self.is_mp_src_rank_with_outputs():
-                model_output: dict[str, Unknown] = self.prepare_model_outputs(
+                model_output = self.prepare_model_outputs(
                     logits=logits, output_args=output_args, micro_batch=micro_batch
                 )
 
@@ -638,7 +651,7 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 else:
                     assert forward_only, "forward_only must be True when loss_function is None"
                     loss = torch.tensor(1.0, device=device_name)
-                    metrics: dict[Unknown, Unknown] = {}
+                    metrics = {}
 
                 output = {
                     "model_output": model_output,

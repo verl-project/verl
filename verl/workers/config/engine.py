@@ -318,10 +318,11 @@ class TorchtitanEngineConfig(EngineConfig):
 
     Args:
         wrap_policy (Dict[str, Any]): Configuration for FSDP wrap policy.
-        reshard_after_forward (str): The policy for applying `reshard_after_forward` within an FSDP setup, default "default"
+        reshard_after_forward (Literal["default", "always", "never"]): The policy for applying
+            `reshard_after_forward` within an FSDP setup, default "default"
         forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
-        use_orig_params (bool): Whether to use original parameters when initialize FSDP1, default False
-        mixed_precision (bool): Mixed precision configuration for FSDP, default None
+        use_orig_params (bool): Whether to use original parameters when initialize FSDP, default False
+        mixed_precision (bool): Mixed precision configuration for FSDP, default False
         data_parallel_size (int): FSDP group size, default 1
         data_parallel_replicate_size (int): Data parallel replicate size, default 1
         data_parallel_shard_size (int): Data parallel shard degree, default 1

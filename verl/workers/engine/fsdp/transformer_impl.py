@@ -15,7 +15,6 @@
 The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 """
 
-import pdb
 import gc
 import logging
 import os
@@ -80,64 +79,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
-
-
-class TorchRMSNormWrapper(torch.nn.Module):
-    """
-    Wrapper around torch.nn.RMSNorm that mimics vLLM's RMSNorm interface.
-
-    vLLM's RMSNorm accepts (hidden_states, residual) and returns (output, residual),
-    but torch.nn.RMSNorm only accepts (x) and returns a single tensor.
-    """
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.norm = torch.nn.RMSNorm(hidden_size, eps=eps)
-        self.variance_epsilon = eps
-
-    @property
-    def weight(self):
-        return self.norm.weight
-
-    def forward(self, x: torch.Tensor, residual: torch.Tensor = None):
-        if residual is not None:
-            x = x + residual
-            residual = x
-        output = self.norm(x)
-        if residual is not None:
-            return output, residual
-        return output
-
-
-def _replace_hf_rmsnorm_with_torch_rmsnorm(module: torch.nn.Module) -> None:
-    """Replace HuggingFace's Qwen3RMSNorm with TorchRMSNormWrapper (uses native nn.RMSNorm).
-
-    This makes FSDP use PyTorch's native nn.RMSNorm which computes in the input dtype (bfloat16),
-    matching TorchTitan's unpatched behavior. Use this to test if RMSNorm precision differences
-    are causing the loss mismatch.
-    """
-    try:
-        from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
-        has_qwen3_rmsnorm = True
-    except ImportError:
-        has_qwen3_rmsnorm = False
-
-    for name, child in list(module.named_children()):
-        # Replace HuggingFace's Qwen3RMSNorm with TorchRMSNormWrapper
-        if has_qwen3_rmsnorm and isinstance(child, Qwen3RMSNorm):
-            hidden_size = child.weight.shape[0]
-            eps = getattr(child, 'variance_epsilon', 1e-6)
-
-            new_norm = TorchRMSNormWrapper(
-                hidden_size=hidden_size,
-                eps=eps,
-            )
-            # Copy weights
-            new_norm.norm.weight = torch.nn.Parameter(child.weight.data.clone())
-            setattr(module, name, new_norm)
-        else:
-            # Recursively process child modules
-            _replace_hf_rmsnorm_with_torch_rmsnorm(child)
 
 
 class FSDPEngine(BaseEngine):
@@ -316,8 +257,6 @@ class FSDPEngine(BaseEngine):
 
             # some parameters may not in torch_dtype
             module.to(torch_dtype)
-
-            _replace_hf_rmsnorm_with_torch_rmsnorm(module)
 
             if self.model_config.enable_gradient_checkpointing:
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -574,10 +513,6 @@ class FSDPEngine(BaseEngine):
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )
 
-        # DEBUG: Print key values for loss comparison
-        if torch.distributed.get_rank() == 0:
-            print(f"DEBUG FSDP: num_micro_batches={len(micro_batches)}, batch_num_tokens={batch_num_tokens.item()}, dp_size={self.get_data_parallel_size()}")
-
         output_lst = []
 
         ctx = torch.no_grad() if forward_only else nullcontext()
@@ -585,11 +520,12 @@ class FSDPEngine(BaseEngine):
         for micro_batch in micro_batches:
             with ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
-                print(f"DEBUG FSDP: {torch.distributed.get_rank()=} {loss=} {self.is_mp_src_rank_with_outputs()=}")
+
                 if not forward_only:
                     loss.backward()
 
             output_lst.append(meta_info)
+
         # postprocess and return
         return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
 
@@ -610,6 +546,7 @@ class FSDPEngine(BaseEngine):
             grad_norm (float): Norm of gradients before clipping.
         """
         assert self.optimizer_config.clip_grad is not None
+
         if isinstance(self.module, FSDP):
             grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
         elif isinstance(self.module, FSDPModule):
@@ -894,8 +831,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
             output_args["temperature_rmpad"] = temperature_rmpad
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
-            print(f"DEBUG FSDP: input_ids_rmpad={input_ids_rmpad}, min={input_ids_rmpad.min().item():.4f}, max={input_ids_rmpad.max().item(): .4f}, mean={input_ids_rmpad.float().mean().item():.4f}")
-            print(f"DEBUG FSDP: position_ids_rmpad={position_ids_rmpad}, min={position_ids_rmpad.min().item():.4f}, max={position_ids_rmpad.max().item(): .4f}, mean={position_ids_rmpad.float().mean().item():.4f}")
+
             model_inputs = {
                 "input_ids": input_ids_rmpad,
                 "attention_mask": None,
@@ -988,11 +924,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     inplace_backward=inplace_backward,
                 )
 
-                # DEBUG: Compare log_probs statistics
-                if torch.distributed.get_rank() == 0:
-                    print(f"DEBUG FSDP: input_ids_rmpad_rolled shape={input_ids_rmpad_rolled.shape}, min={input_ids_rmpad_rolled.min().item():.4f}, max={input_ids_rmpad_rolled.max().item(): .4f}, mean={input_ids_rmpad_rolled.float().mean().item():.4f}")
-                    print(f"DEBUG FSDP: logits_rmpad shape={logits_rmpad.shape}, min={logits_rmpad.min().item():.4f}, max={logits_rmpad.max().item():.4f}, mean={logits_rmpad.mean().item():.4f}")
-                    print(f"DEBUG FSDP: log_probs shape={log_probs.shape}, min={log_probs.min().item():.4f}, max={log_probs.max().item():.4f}, mean={log_probs.mean().item():.4f}")
                 # compute entropy
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
@@ -1083,22 +1014,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 use_cache=False,
             )  # prevent model thinks we are generating
 
-            # DEBUG: Print raw logits from model
-            if torch.distributed.get_rank() == 0:
-                print(f"DEBUG FSDP: raw logits shape={raw_output.logits.shape}, min={raw_output.logits.min().item():.4f}, max={raw_output.logits.max().item():.4f}, mean={raw_output.logits.mean().item():.4f}")
-
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch
             )
-
-            # DEBUG: Print loss_mask stats for comparison
-            if torch.distributed.get_rank() == 0:
-                loss_mask = micro_batch["loss_mask"]
-                loss_mask_values = loss_mask.values() if hasattr(loss_mask, 'values') else loss_mask
-                print(f"DEBUG FSDP: loss_mask sum={loss_mask_values.sum().item()}, shape={loss_mask_values.shape}")
-                log_probs = model_output["log_probs"]
-                log_probs_values = log_probs.values() if hasattr(log_probs, 'values') else log_probs
-                print(f"DEBUG FSDP: log_probs for loss: sum={log_probs_values.sum().item():.4f}, mean={log_probs_values.mean().item():.4f}")
 
             if loss_function is not None:
                 loss, metrics = loss_function(

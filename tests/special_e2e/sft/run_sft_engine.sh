@@ -19,20 +19,19 @@ VAL_FILES=${DATASET_DIR}/test.parquet
 
 backend=${BACKEND:-fsdp}
 
-project_name=verl_sft_test_llama3.1
+project_name=verl_sft_test
 
 RESUME_MODE=disable
 
 ckpts_home=${ckpts_home:-~/verl/test/gsm8k-sft-${backend}}
 
-# MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
-MODEL_ID=${MODEL_ID:-meta-llama/Llama-3.1-8B-Instruct}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 #hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 SP_SIZE=${SP_SIZE:-1}
-FSDP_SIZE=${FSDP_SIZE:-1}
-FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp2"}
+FSDP_SIZE=${FSDP_SIZE:-${NUM_GPUS}}
+FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp"}
 
 TP_SIZE=${TP_SIZE:-1}
 PP_SIZE=${PP_SIZE:-1}
@@ -42,6 +41,20 @@ CP_SIZE=${CP_SIZE:-1}
 PAD_MODE=${PAD_MODE:-no_padding}
 
 USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-True}
+
+FSDP_ENGINE_CONFIG="\
+    engine=${backend} \
+    optim=${backend} \
+    optim.lr=1e-5 \
+    optim.lr_warmup_steps_ratio=0.2 \
+    optim.weight_decay=0.1 \
+    optim.betas="[0.9,0.95]" \
+    optim.clip_grad=1.0 \
+    optim.min_lr_ratio=0.1 \
+    optim.lr_scheduler_type=cosine \
+    engine.ulysses_sequence_parallel_size=${SP_SIZE} \
+    engine.strategy=${FSDP_STRATEGY} \
+    engine.fsdp_size=${FSDP_SIZE}"
 
 VEOMNI_ENGINE_CONFIG="\
     engine=${backend} \
@@ -74,25 +87,6 @@ MEGATRON_ENGINE_CONFIG="\
     +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
     engine.use_mbridge=True"
 
-FSDP_ENGINE_CONFIG="\
-    engine=${backend} \
-    optim=${backend} \
-    optim.lr=1e-5 \
-    optim.lr_warmup_steps_ratio=0.2 \
-    optim.weight_decay=0.1 \
-    optim.betas="[0.9,0.95]" \
-    optim.clip_grad=1.0 \
-    optim.min_lr_ratio=0.1 \
-    optim.lr_scheduler_type=cosine \
-    optim.total_training_steps=1000 \
-    engine.ulysses_sequence_parallel_size=${SP_SIZE} \
-    engine.strategy=${FSDP_STRATEGY} \
-    engine.fsdp_size=${FSDP_SIZE} \
-    engine.use_torch_compile=False \
-    model=hf_model \
-    model.path=${MODEL_PATH} \
-    +model.override_config.attn_implementation=sdpa"
-
 TORCHTITAN_ENGINE_CONFIG="\
     engine=${backend} \
     optim=${backend} \
@@ -110,8 +104,8 @@ TORCHTITAN_ENGINE_CONFIG="\
     engine.data_parallel_size=${FSDP_SIZE} \
     engine.use_torch_compile=False \
     model=torchtitan_model \
-    model.attn_type=sdpa \
-    model.attn_mask_type=causal \
+    model.attn_type=flex \
+    model.attn_mask_type=document_mask \
     model.hf_assets_path=${MODEL_PATH}"
 
 
@@ -144,19 +138,22 @@ $COMMAND \
     data.use_dynamic_bsz=True \
     data.max_token_len_per_gpu=2048 \
     data.messages_key=messages \
+    model.path=$MODEL_PATH \
+    model.use_remove_padding=${USE_REMOVE_PADDING} \
     data.ignore_input_ids_mismatch=True \
     ${ENGINE_CONFIG} \
     trainer.test_freq=after_each_epoch \
     trainer.save_freq=-1 \
-    trainer.logger=['console','file','wandb'] \
+    trainer.logger=['console','file'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.total_epochs=2 \
-    trainer.total_training_steps=1000 \
+    trainer.total_training_steps=2 \
     trainer.default_local_dir="${ckpts_home}" \
     trainer.resume_mode=${RESUME_MODE} \
 
     # trainer.total_training_steps=${TOTAL_TRAIN_STEP} \
     # trainer.checkpoint.save_contents=[model,optimizer,extra,hf_model] \
     # trainer.max_ckpt_to_keep=1 \
+    
 rm -rf "${ckpts_home:?}/*"
