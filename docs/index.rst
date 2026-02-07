@@ -176,6 +176,7 @@ verl is fast with:
    :caption: FAQ
 
    faq/faq
+   faq/resolving_oom
 
 .. toctree::
    :maxdepth: 1
