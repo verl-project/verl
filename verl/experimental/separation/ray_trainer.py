@@ -83,8 +83,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             resource_pool_manager,
             ray_worker_group_cls,
             processor,
-            reward_fn,
-            val_reward_fn,
             train_dataset,
             val_dataset,
             collate_fn,

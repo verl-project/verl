@@ -56,8 +56,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
         processor=None,
-        reward_fn=None,
-        val_reward_fn=None,
         train_dataset: Optional[Dataset] = None,
         val_dataset: Optional[Dataset] = None,
         collate_fn=None,
@@ -75,8 +73,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             resource_pool_manager (ResourcePoolManager): Manager for Ray resource pools.
             ray_worker_group_cls (RayWorkerGroup, optional): Class for Ray worker groups. Defaults to RayWorkerGroup.
             processor: Optional data processor, used for multimodal data
-            reward_fn: Function for computing rewards during training.
-            val_reward_fn: Function for computing rewards during validation.
             train_dataset (Optional[Dataset], optional): Training dataset. Defaults to None.
             val_dataset (Optional[Dataset], optional): Validation dataset. Defaults to None.
             collate_fn: Function to collate data samples into batches.
@@ -88,8 +84,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self.reward_fn = reward_fn
-        self.val_reward_fn = val_reward_fn
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert not self.hybrid_engine
@@ -299,9 +293,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         # Launch individual reward computations as each generation completes
         future_reward = None
-        if self.config.reward_model.launch_reward_fn_async:
-            # Store the object reference and set up callback
-            future_reward = self._launch_individual_rewards.remote(batch, self.config, self.tokenizer)
 
         # Return the original, now-modified `batch` and the `future_reward`
         return metrics, timing_raw, epoch, batch, future_reward

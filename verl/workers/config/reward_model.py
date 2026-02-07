@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from verl.base_config import BaseConfig
+from verl.trainer.config.config import ModuleConfig
 
 from .model import HFModelConfig
 from .rollout import RolloutConfig
@@ -26,6 +27,41 @@ __all__ = ["SandboxFusionConfig", "RewardModelConfig"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+@dataclass
+class RewardManagerConfig(BaseConfig):
+    """Configuration for reward manager.
+
+        A reward manager defines the mechanism of computing rule-based reward and handling different reward sources.
+
+    Args:
+        source (str): Source of the reward manager. Options: ``"register"``, ``"importlib"``. Default: ``"register"``.
+        name (str, optional):
+            - When ``source`` is ``"register"``, the name is used in `get_reward_manager_cls(name)``.
+                See ``verl/experimental/reward/reward_manager.py`` for options. Default: ``"naive"``.
+            - When ``source`` is ``"importlib"``, the name is used in ``getattr(module, name)``,
+                e.g., ``"DAPORewardManager"``.
+        module (ModuleConfig, optional): Optional configuration for the external module defining the reward manager,
+    """
+
+    source: str = "register"
+    name: str = "naive"
+    module: Optional[ModuleConfig] = field(default_factory=ModuleConfig)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.source == "register":
+            from verl.experimental.reward_loop.reward_manager.registry import REWARD_LOOP_MANAGER_REGISTRY
+
+            assert self.name in REWARD_LOOP_MANAGER_REGISTRY, (
+                f"Reward manager is not registered: {self.name=} ,{REWARD_LOOP_MANAGER_REGISTRY.keys()=}"
+            )
+        elif self.source == "importlib":
+            # NOTE: The existence is not checked since it depends on which machine the config is initialized on.
+            assert self.module is not None and self.module.path is not None, (
+                "When source is importlib, module.path should be set."
+            )
 
 
 @dataclass

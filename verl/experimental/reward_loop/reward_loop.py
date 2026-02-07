@@ -25,11 +25,10 @@ from tensordict import TensorDict
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
-from verl.trainer.ppo.reward import get_custom_reward_fn
+from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 
-from .reward_manager import get_reward_manager_cls
 from .reward_model import RewardModelManager
 
 logger = logging.getLogger(__file__)
@@ -69,37 +68,12 @@ class RewardLoopWorker:
         if self.config.reward_model.enable:
             reward_model_tokenizer_local_path = copy_to_local(self.config.reward_model.model_path)
             self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
-        self.reward_fn = get_custom_reward_fn(self.config)
 
-        # Load reward loop manager class
-        # Support both registry and importlib loading methods
-        reward_loop_source = self.config.reward_model.get("reward_loop_source", "register")
-
-        if reward_loop_source == "register":
-            # Load from registry (default behavior)
-            reward_manager_cls = get_reward_manager_cls(self.config.reward_model.reward_manager)
-        elif reward_loop_source == "importlib":
-            # Load from external module using importlib
-            from verl.utils.import_utils import load_extern_object
-
-            reward_loop_module_path = self.config.reward_model.get("reward_loop_module_path", None)
-            reward_loop_class_name = self.config.reward_model.get("reward_loop_class_name", None)
-
-            assert reward_loop_module_path is not None, (
-                "reward_loop_module_path must be set when reward_loop_source='importlib'"
-            )
-            assert reward_loop_class_name is not None, (
-                "reward_loop_class_name must be set when reward_loop_source='importlib'"
-            )
-
-            reward_manager_cls = load_extern_object(
-                module_path=reward_loop_module_path, object_name=reward_loop_class_name
-            )
-        else:
-            raise ValueError(f"Unknown reward_loop_source: {reward_loop_source}. Must be 'register' or 'importlib'")
-
-        self.reward_loop = reward_manager_cls(
-            self.config, self.input_tokenizer, self.reward_fn, self.reward_router_address, self.reward_model_tokenizer
+        self.reward_manager = load_reward_manager(
+            self.config,
+            self.input_tokenizer,
+            reward_router_address=self.reward_router_address,
+            reward_model_tokenizer=self.reward_model_tokenizer,
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
@@ -113,14 +87,14 @@ class RewardLoopWorker:
         assert len(data) == 1, "RewardLoopWorker only support single data item"
         if self.config.custom_reward_function.path is not None:
             # directly use user-customized reward function
-            return await self.reward_loop.run_single(data)
+            return await self.reward_manager.run_single(data)
         else:
             if self.config.reward_model.enable:
                 # we assume the rm is disrm
                 # genrm must set custom_reward_function
                 return await self.compute_score_disrm(data)
             else:
-                return await self.reward_loop.run_single(data)
+                return await self.reward_manager.run_single(data)
 
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 16):
         url = f"http://{self.reward_router_address}/{endpoint}"
@@ -257,19 +231,19 @@ class RewardLoopManager:
             self.reward_model_manager = None
             self.reward_router_address = None
 
-        self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
+        self.reward_workers_class = ray.remote(RewardLoopWorker)
         self._init_reward_loop_workers()
 
     def _init_reward_loop_workers(self):
-        self.reward_loop_workers = []
+        self.reward_workers = []
         num_workers = self.config.reward_model.num_workers
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
-            self.reward_loop_workers.append(
-                self.reward_loop_workers_class.options(
+            self.reward_workers.append(
+                self.reward_workers_class.options(
                     name=f"reward_loop_worker_{i}",
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id,
@@ -282,11 +256,11 @@ class RewardLoopManager:
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()
 
-        chunks = data.chunk(len(self.reward_loop_workers))
+        chunks = data.chunk(len(self.reward_workers))
         outputs = ray.get(
             [
                 worker.compute_score_batch.remote(chunk)
-                for worker, chunk in zip(self.reward_loop_workers, chunks, strict=True)
+                for worker, chunk in zip(self.reward_workers, chunks, strict=True)
             ]
         )
         outputs_flat = [item for sublist in outputs for item in sublist]

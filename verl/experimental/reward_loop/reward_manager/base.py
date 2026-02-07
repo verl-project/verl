@@ -15,6 +15,7 @@
 import logging
 import os
 from abc import ABC, abstractmethod
+from typing import Any, Callable
 
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
@@ -24,6 +25,9 @@ from verl.utils.ray_utils import get_event_loop
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+RawRewardFn = Callable[..., Any]
 
 
 class RewardManagerBase(ABC):
