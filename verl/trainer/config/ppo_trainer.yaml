@@ -14,9 +14,6 @@ defaults:
   # data: trainer/config/data/legacy_data.yaml
   - data@data: legacy_data
 
-  # (Rule-based) Reward manager config.
-  - reward_manager@reward_manager
-
   # Reference model config.
   # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
   - ref@actor_rollout_ref.ref: dp_ref

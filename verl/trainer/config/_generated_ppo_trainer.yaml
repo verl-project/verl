@@ -381,14 +381,6 @@ data:
     path: null
     name: null
   apply_chat_template_kwargs: {}
-reward_manager:
-  _target_: verl.trainer.config.config.RewardManagerConfig
-  source: register
-  name: ${oc.select:reward_model.reward_manager,naive}
-  module:
-    _target_: verl.trainer.config.config.ModuleConfig
-    path: null
-    name: custom_reward_manager
 critic:
   optim:
     _target_: verl.workers.config.FSDPOptimizerConfig
@@ -502,14 +494,17 @@ reward_model:
   enable: false
   use_reward_loop: true
   num_workers: 8
-  reward_manager: naive
   enable_resource_pool: false
   n_gpus_per_node: 8
   nnodes: 0
-  reward_loop_source: register
-  reward_loop_module_path: null
-  reward_loop_class_name: null
-  launch_reward_fn_async: false
+  reward_manager:
+    _target_: verl.trainer.config.config.RewardManagerConfig
+    source: register
+    name: naive
+    module:
+      _target_: verl.trainer.config.config.ModuleConfig
+      path: null
+      name: custom_reward_manager
   model_path: null
   rollout:
     _target_: verl.workers.config.RolloutConfig

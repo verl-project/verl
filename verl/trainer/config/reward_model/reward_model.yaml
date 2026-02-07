@@ -13,35 +13,26 @@ use_reward_loop: True
 # In reward loop, we will launch num_workers reward manager workers to parallelize the reward computation
 num_workers: 8
 
-# Deprecated. Use `reward_manager.name` instead. See `verl/trainer/config/reward_manager.yaml` for details.
-# Kept for backward compatibility.
-reward_manager: naive
-
 # Whether to deploy the model to a separate resource pool.
 # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
 enable_resource_pool: False
 n_gpus_per_node: 8
 nnodes: 0
 
-# Reward Loop Loading Configuration (for experimental reward system)
-# Source for loading reward loop manager: "register" (default) or "importlib"
-reward_loop_source: register
-
-# Module path when using importlib (e.g., "hytuner/reward/reward_loop/xxx_reward_loop.py")
-reward_loop_module_path: null
-
-# Class name when using importlib (e.g., "XXXRewardManager")
-reward_loop_class_name: null
-
-# Whether to launch custom reward function asynchronously during log_prob
-# custom reward function executed async on CPU, during log_prob
-launch_reward_fn_async: False
-
-model_path: null
+# reward manager, see `verl/trainer/config/reward_manager.yaml` for details.
+reward_manager:
+  _target_: verl.trainer.config.config.RewardManagerConfig
+  source: register
+  name: naive
+  module:
+    _target_: verl.trainer.config.config.ModuleConfig
+    path: null
+    name: custom_reward_manager
 
 # Inference config for reward models,
 # applicable to both discriminative and generative models
 
+model_path: null
 rollout:
   _target_: verl.workers.config.RolloutConfig
   name: ???
