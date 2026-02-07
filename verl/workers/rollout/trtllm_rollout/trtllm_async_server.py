@@ -113,6 +113,8 @@ class TRTLLMHttpServer:
         from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig
         from tensorrt_llm.serve import OpenAIServer
 
+        assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
+
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
         kv_cache_config = KvCacheConfig(
             enable_block_reuse=self.config.enable_prefix_caching,
@@ -135,7 +137,7 @@ class TRTLLMHttpServer:
             "max_num_tokens": self.config.max_num_batched_tokens,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "pipeline_parallel_size": self.config.pipeline_model_parallel_size,
-            "moe_expert_parallel_size": self.config.expert_parallel_size,
+            "moe_expert_parallel_size": engine_kwargs.get("moe_expert_parallel_size", 1),
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
