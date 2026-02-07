@@ -29,6 +29,7 @@ from transformers.models.glm4v.modeling_glm4v import (
 )
 from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
 
+from verl.models.transformers.dense_common import compute_rolled_labels
 from verl.utils.device import is_npu_available
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
@@ -477,13 +478,7 @@ def forward_with_torch_backend(
     outputs = glm4v_forward(self, input_ids, **kwargs)
     hidden_states = outputs[0]
 
-    # Loss calculations
-    if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
-    elif input_ids is not None:
-        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
-    else:
-        raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
+    rolled_labels = compute_rolled_labels(input_ids, labels, "forward_with_torch_backend")
 
     fused_linear_for_ppo = FusedLinearForPPO()
     log_probs, entropy = fused_linear_for_ppo.forward(
@@ -511,13 +506,7 @@ def forward_with_triton_backend(
     outputs = glm4v_forward(self, input_ids, **kwargs)
     hidden_states = outputs[0]
 
-    # Loss calculations
-    if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
-    elif input_ids is not None:
-        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
-    else:
-        raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
+    rolled_labels = compute_rolled_labels(input_ids, labels, "forward_with_triton_backend")
 
     log_probs, entropy = linear_cross_entropy(
         hidden_states,
