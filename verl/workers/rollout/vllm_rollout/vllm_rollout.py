@@ -41,7 +41,7 @@ from torch.multiprocessing.reductions import reduce_tensor
 
 from verl import DataProto
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
-from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_npu_available, is_support_ipc
+from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -78,26 +78,6 @@ class ServerAdapter(BaseRollout):
         self.server_handle: ray.actor.ActorHandle = None
 
         rank = int(os.environ["RANK"])
-
-        # When Ray is launched with `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1`, it will not
-        # set `CUDA_VISIBLE_DEVICES` per actor. In DP setups, vLLM expects `LOCAL_RANK` to be the
-        # local rank within TP×PP (and DP will adjust it internally). If we use Ray's accelerator
-        # IDs directly, it can become out-of-range after DP adjustment.
-        from verl.utils.ray_utils import ray_noset_visible_devices
-
-        if ray_noset_visible_devices():
-            if self.config.data_parallel_size > 1:
-                tp_pp = self.config.tensor_model_parallel_size * self.config.pipeline_model_parallel_size
-                assert tp_pp > 0, (
-                    "Expected tensor_model_parallel_size * pipeline_model_parallel_size > 0, "
-                    f"got tp={self.config.tensor_model_parallel_size}, pp={self.config.pipeline_model_parallel_size}"
-                )
-                local_rank = rank % tp_pp
-            else:
-                device_name = "NPU" if is_npu_available else "GPU"
-                local_rank = int(ray.get_runtime_context().get_accelerator_ids()[device_name][0])
-            os.environ["LOCAL_RANK"] = str(local_rank)
-            get_torch_device().set_device(int(local_rank))
 
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
         rollout_world_size = (

@@ -167,6 +167,47 @@ class vLLMColocateWorkerExtension:
 
         return super().__new__(cls)
 
+    def __init__(self, *args, **kwargs):
+        """vLLM launches worker processes via MP Executor.
+
+        Under Ray + `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1`, the `local_rank` passed to vLLM
+        workers can be inconsistent with vLLM DP expectations (it should be local within TP×PP, while
+        DP adjusts ranks separately).
+        """
+        try:
+            from verl.utils.ray_utils import ray_noset_visible_devices
+
+            if ray_noset_visible_devices():
+                vllm_config = kwargs.get("vllm_config") or (args[0] if len(args) > 0 else None)
+                rank = kwargs.get("rank")
+                if rank is None and len(args) > 2 and isinstance(args[2], int):
+                    rank = args[2]
+                if rank is not None:
+                    rank = int(rank)
+
+                parallel_config = getattr(vllm_config, "parallel_config", None) if vllm_config is not None else None
+                dp_size = getattr(parallel_config, "data_parallel_size", 1) if parallel_config is not None else 1
+
+                if rank is not None and int(dp_size or 1) > 1:
+                    tp = getattr(parallel_config, "tensor_parallel_size", 1) if parallel_config is not None else 1
+                    pp = getattr(parallel_config, "pipeline_parallel_size", 1) if parallel_config is not None else 1
+                    tp_pp = int(tp or 1) * int(pp or 1)
+                    if tp_pp > 0:
+                        corrected_local_rank = rank % tp_pp
+
+                        if "local_rank" in kwargs:
+                            kwargs["local_rank"] = corrected_local_rank
+                        elif len(args) > 1 and isinstance(args[1], int):
+                            args = list(args)
+                            args[1] = corrected_local_rank
+                            args = tuple(args)
+
+                        os.environ["LOCAL_RANK"] = str(corrected_local_rank)
+        except Exception as e:
+            logger.debug("Skip vLLM local_rank adjustment: %s", e)
+
+        super().__init__(*args, **kwargs)
+
     def monkey_patch_model(self, vocab_size: int):
         # patch compute_logits to avoid sampling OOV token
         monkey_patch_compute_logits(self.model_runner.model, vocab_size)
