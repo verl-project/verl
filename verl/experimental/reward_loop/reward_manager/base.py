@@ -27,17 +27,18 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-RawRewardFn = Callable[..., Any]
+RawRewardFn = Callable[..., Any] | None
 
 
 class RewardManagerBase(ABC):
     _class_initialized = False
 
-    def __init__(self, config: DictConfig, tokenizer: AutoTokenizer):
+    def __init__(self, config: DictConfig, compute_score: RawRewardFn, tokenizer: AutoTokenizer):
         """Initialize reward manager.
 
         Args:
             config (DictConfig): YAML config.
+            compute_score (RawRewardFn): Function to compute reward score.
             tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
         """
         self.config = config

@@ -28,7 +28,6 @@ from pprint import pprint
 from typing import Any, Optional
 
 import numpy as np
-import ray
 import tensordict
 import torch
 from omegaconf import OmegaConf, open_dict
@@ -59,7 +58,6 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
     process_validation_metrics,
 )
-from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -630,27 +628,18 @@ class RayPPOTrainer:
             ground_truths = [item.get("ground_truth", None) for item in data.get("reward_model", {})]
             sample_gts.extend(ground_truths)
 
-            compute_reward_fields = [
-                "responses",
-                "prompts",
-                "attention_mask",
-                "reward_model",
-                "data_source",
-            ]
-            if "rm_scores" in batch_meta.field_names:
-                compute_reward_fields = ["rm_scores", *set(batch_meta.extra_info["reward_extra_keys"])]
-
-            val_reward_meta = batch_meta.select_fields(compute_reward_fields)
             reward_tensor = batch_meta["reward_tensor"]
+            reward_extra_keys = batch_meta.meta_info.get("reward_extra_keys", [])
+            reward_extra_info = {key: batch_meta.non_tensor_batch[key] for key in reward_extra_keys}
+
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
             reward_extra_infos_dict["reward"].extend(scores)
             print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
-                    print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+            for key, lst in reward_extra_info.items():
+                reward_extra_infos_dict[key].extend(lst)
+                print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
 
             # collect num_turns of each prompt
             if "__num_turns__" in batch_meta.field_names:
@@ -820,6 +809,12 @@ class RayPPOTrainer:
 
             self.async_rollout_mode = True
 
+            enable_agent_reward_loop = self.use_reward_loop and (
+                not self.use_rm or self.config.reward_model.enable_resource_pool
+            )
+            reward_loop_worker_handles = (
+                self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+            )
             self.async_rollout_manager = AgentLoopManager(
                 config=self.config,
                 worker_group=self.actor_rollout_wg,
@@ -1492,9 +1487,8 @@ class RayPPOTrainer:
                         self._log_rollout_data(log_rollout_meta, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # TODO: validate
-                if (
-                    self.config.trainer.test_freq > 0
-                    and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                if self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()

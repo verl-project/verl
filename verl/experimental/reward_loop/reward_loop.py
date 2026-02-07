@@ -231,19 +231,19 @@ class RewardLoopManager:
             self.reward_model_manager = None
             self.reward_router_address = None
 
-        self.reward_workers_class = ray.remote(RewardLoopWorker)
+        self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self._init_reward_loop_workers()
 
     def _init_reward_loop_workers(self):
-        self.reward_workers = []
+        self.reward_loop_workers = []
         num_workers = self.config.reward_model.num_workers
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
-            self.reward_workers.append(
-                self.reward_workers_class.options(
+            self.reward_loop_workers.append(
+                self.reward_loop_workers_class.options(
                     name=f"reward_loop_worker_{i}",
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id,
@@ -256,11 +256,11 @@ class RewardLoopManager:
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()
 
-        chunks = data.chunk(len(self.reward_workers))
+        chunks = data.chunk(len(self.reward_loop_workers))
         outputs = ray.get(
             [
                 worker.compute_score_batch.remote(chunk)
-                for worker, chunk in zip(self.reward_workers, chunks, strict=True)
+                for worker, chunk in zip(self.reward_loop_workers, chunks, strict=True)
             ]
         )
         outputs_flat = [item for sublist in outputs for item in sublist]
