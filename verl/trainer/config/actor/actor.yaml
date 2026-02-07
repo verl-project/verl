@@ -132,6 +132,9 @@ checkpoint:
 
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
+  
+  # Mbridge config extension.
+  mbridge_config: {}
 
 # optimizer configs
 optim:
