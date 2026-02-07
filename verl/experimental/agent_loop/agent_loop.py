@@ -936,11 +936,13 @@ class AgentLoopManager:
             DataProto: Output batch.
         """
 
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        # Handle case where batch size < num_workers: only use needed workers
+        num_workers_needed = min(len(prompts), len(self.agent_loop_workers))
+        chunkes = prompts.chunk(num_workers_needed)
         outputs = ray.get(
             [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                self.agent_loop_workers[i % len(self.agent_loop_workers)].generate_sequences.remote(chunk)
+                for i, chunk in enumerate(chunkes)
             ]
         )
         output = DataProto.concat(outputs)
