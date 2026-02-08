@@ -45,7 +45,6 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     attention_mask = data["attention_mask"]
     response_mask = data["response_mask"]
     position_ids = data["position_ids"]  # (bs, seq_len) or # (bs, 4, seq_len)
-    routed_experts = data.pop("routed_experts", None)
 
     max_seq_len, max_response_len = input_ids.shape[1], response_mask.shape[1]
     tu.assign_non_tensor_data(data, "max_seq_len", max_seq_len)
@@ -55,12 +54,6 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     tu.assign_non_tensor_data(data, "indices", indices)
 
     input_ids_nested = torch.nested.nested_tensor_from_jagged(input_ids_rmpad.squeeze(-1), offsets=cu_seqlens)
-
-    if routed_experts is not None:
-        routed_experts_rmpad, indices, cu_seqlens, *_ = unpad_input(routed_experts.unsqueeze(-1), attention_mask)
-        routed_experts_nested = torch.nested.nested_tensor_from_jagged(
-            routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
-        )
 
     position_ids_list = []
     for i in range(attention_mask.shape[0]):
@@ -76,7 +69,13 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     data["input_ids"] = input_ids_nested
     data["position_ids"] = position_ids_nested
     data["loss_mask"] = data["response_mask"]
-    if routed_experts is not None:
+
+    routed_experts = data.get("routed_experts", None)
+    if routed_experts is not None and not routed_experts.is_nested:
+        routed_experts_rmpad, indices, cu_seqlens, *_ = unpad_input(routed_experts.unsqueeze(-1), attention_mask)
+        routed_experts_nested = torch.nested.nested_tensor_from_jagged(
+            routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
         data["routed_experts"] = routed_experts_nested
 
     routed_experts = data.get("routed_experts", None)
