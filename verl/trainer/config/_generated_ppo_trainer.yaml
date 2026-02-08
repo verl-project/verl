@@ -498,7 +498,7 @@ reward_model:
   n_gpus_per_node: 8
   nnodes: 0
   reward_manager:
-    _target_: verl.trainer.config.config.RewardManagerConfig
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
     source: register
     name: naive
     module:
