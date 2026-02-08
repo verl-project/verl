@@ -204,7 +204,7 @@ See ``verl/experimental/reward_manager/*`` for reference.
          # your own reward manager
          ...
 
-After defining it, users can specify their custom reward manager by setting ``reward_model.reward_manager=user_costomized``.
+After defining it, users can specify their custom reward manager by setting ``reward_model.reward_manager.name=user_costomized``.
 
 RewardLoopManager
 ~~~~~~~~~~~~~~~~~

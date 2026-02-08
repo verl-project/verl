@@ -15,7 +15,7 @@ DAPO的论文可以参考：[DAPO](https://arxiv.org/pdf/2503.14476)，其中包
   在dapo算法中，必须配置成dapo。
 
 ```
-reward_model.reward_manager=dapo
+reward_model.reward_manager.name=dapo
 ```
 
 - **Clip-Higher 更高裁剪 **
@@ -250,7 +250,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
-    reward_model.reward_manager=dapo \
+    reward_model.reward_manager.name=dapo \
     reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
     reward_model.overlong_buffer.len=${overlong_buffer_len} \
     reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \

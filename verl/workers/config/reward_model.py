@@ -20,7 +20,6 @@ from typing import Optional
 from verl.base_config import BaseConfig
 from verl.trainer.config.config import ModuleConfig
 
-from .model import HFModelConfig
 from .rollout import RolloutConfig
 
 __all__ = ["SandboxFusionConfig", "RewardModelConfig"]

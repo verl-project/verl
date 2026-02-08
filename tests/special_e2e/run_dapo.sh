@@ -44,7 +44,7 @@ exp_name="$(basename "${MODEL_ID,,}")-dapo-minimal"
 python3 -m recipe.dapo.main_dapo \
     data.train_files="${HOME}/data/gsm8k/train.parquet" \
     data.val_files="${HOME}/data/gsm8k/test.parquet" \
-    reward_model.reward_manager=dapo \
+    reward_model.reward_manager.name=dapo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \

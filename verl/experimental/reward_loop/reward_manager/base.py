@@ -33,7 +33,7 @@ RawRewardFn = Callable[..., Any] | None
 class RewardManagerBase(ABC):
     _class_initialized = False
 
-    def __init__(self, config: DictConfig, tokenizer: AutoTokenizer):
+    def __init__(self, config: DictConfig, tokenizer: AutoTokenizer, compute_score: RawRewardFn):
         """Initialize reward manager.
 
         Args:
@@ -42,6 +42,7 @@ class RewardManagerBase(ABC):
         """
         self.config = config
         self.tokenizer = tokenizer
+        self.compute_score = compute_score
         self.loop = get_event_loop()
         self.init_class(config, tokenizer)
 
