@@ -42,8 +42,8 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
     compute_variance_proxy_metrics,
 )
-from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage, compute_response_mask
+from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -101,7 +101,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.metrics = {}
         self.timing_raw = {}
         # reward message
-        self.future_reward = None
         self.reward_tensor = None
         self.reward_extra_infos_dict = {}
 
@@ -317,7 +316,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.metrics = {"training/global_step": self.global_steps, "training/epoch": self.epoch}
         self.timing_raw = {}
         # reward message
-        self.future_reward = None
         self.reward_tensor = None
         self.reward_extra_infos_dict = {}
 
@@ -527,7 +525,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
     def _fit_compute_advantage(self, batch) -> DataProto:
         metrics = self.metrics
         timing_raw = self.timing_raw
-        future_reward = self.future_reward
         reward_tensor = self.reward_tensor
         reward_extra_infos_dict = self.reward_extra_infos_dict
 

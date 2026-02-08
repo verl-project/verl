@@ -18,6 +18,7 @@ import multiprocessing
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional, cast
 
+from verl import DataProto
 from verl.utils.reward_score import default_compute_score
 
 if TYPE_CHECKING:
