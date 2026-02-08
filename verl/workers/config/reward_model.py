@@ -51,10 +51,10 @@ class RewardManagerConfig(BaseConfig):
     def __post_init__(self):
         super().__post_init__()
         if self.source == "register":
-            from verl.experimental.reward_loop.reward_manager.registry import REWARD_LOOP_MANAGER_REGISTRY
+            from verl.experimental.reward_loop.reward_manager.registry import REWARD_MANAGER
 
-            assert self.name in REWARD_LOOP_MANAGER_REGISTRY, (
-                f"Reward manager is not registered: {self.name=} ,{REWARD_LOOP_MANAGER_REGISTRY.keys()=}"
+            assert self.name in REWARD_MANAGER, (
+                f"Reward manager is not registered: {self.name=} ,{REWARD_MANAGER.keys()=}"
             )
         elif self.source == "importlib":
             # NOTE: The existence is not checked since it depends on which machine the config is initialized on.
