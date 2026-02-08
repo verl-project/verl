@@ -71,6 +71,14 @@ from verl.utils.transferqueue_utils import create_transferqueue_client, get_tran
 
 
 @tqbridge(put_data=False)
+def compute_reward_decorated(data):
+    reward_tensor = data.batch["rm_scores"]
+    reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
+    reward_extra_info = {key: data.non_tensor_batch[key] for key in reward_extra_keys}
+    return reward_tensor, reward_extra_info
+
+
+@tqbridge(put_data=False)
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -291,6 +299,7 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_rm = need_reward_model(self.config)
+        self.use_reward_loop = self.config.reward_model.use_reward_loop
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
@@ -628,9 +637,7 @@ class RayPPOTrainer:
             ground_truths = [item.get("ground_truth", None) for item in data.get("reward_model", {})]
             sample_gts.extend(ground_truths)
 
-            reward_tensor = batch_meta["reward_tensor"]
-            reward_extra_keys = batch_meta.meta_info.get("reward_extra_keys", [])
-            reward_extra_info = {key: batch_meta.non_tensor_batch[key] for key in reward_extra_keys}
+            reward_tensor, reward_extra_info = compute_reward_decorated(batch_meta)
 
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
@@ -1244,9 +1251,7 @@ class RayPPOTrainer:
                                 ["rm_scores", *set(batch_meta.extra_info["reward_extra_keys"])]
                             )
 
-                        reward_tensor = batch.batch["rm_scores"]
-                        reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
-                        reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+                        reward_tensor, reward_extra_infos_dict = compute_reward_decorated(batch_meta)
 
                         compute_reward_meta = batch_meta.select_fields(compute_reward_fields)
                         batch_meta = batch_meta.union(compute_reward_meta)

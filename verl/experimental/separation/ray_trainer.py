@@ -25,7 +25,6 @@ from pprint import pprint
 from typing import Any, Optional
 
 import numpy as np
-import ray
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import Dataset, Sampler
@@ -43,6 +42,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
     compute_variance_proxy_metrics,
 )
+from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage, compute_response_mask
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
@@ -452,9 +452,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 batch = batch.union(batch_reward)
 
             # Compute or extract reward_tensor and reward_extra_infos_dict for training
-            self.reward_tensor = batch.batch["rm_scores"]
-            reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
-            self.reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+            reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+            self.reward_tensor = reward_tensor
+            self.reward_extra_infos_dict = reward_extra_infos_dict
         return batch
 
     def _fit_compute_log_prob(self, batch: DataProto) -> DataProto:

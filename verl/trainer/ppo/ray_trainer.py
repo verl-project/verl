@@ -34,6 +34,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl import DataProto
+from verl.trainer.ppo.reward import extract_reward
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -584,9 +585,7 @@ class RayPPOTrainer:
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
             # evaluate using reward_function
-            reward_tensor = test_batch.batch["rm_scores"]
-            reward_extra_keys = test_batch.meta_info.get("reward_extra_keys", [])
-            reward_extra_info = {key: test_batch.non_tensor_batch[key] for key in reward_extra_keys}
+            reward_tensor, reward_extra_info = extract_reward(test_batch)
 
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
@@ -1396,10 +1395,8 @@ class RayPPOTrainer:
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
 
-                        # Compute or extract reward_tensor and reward_extra_infos_dict for training
-                        reward_tensor = batch.batch["rm_scores"]
-                        reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
-                        reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+                        # extract reward_tensor and reward_extra_infos_dict for training
+                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)

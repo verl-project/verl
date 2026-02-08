@@ -32,6 +32,7 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from verl import DataProto
+from verl.trainer.ppo.reward import extract_reward
 from verl.experimental.one_step_off_policy.utils import need_critic
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
@@ -299,10 +300,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
     @staticmethod
     @ray.remote
     def _launch_individual_rewards(batch, config, tokenizer):
-        reward_tensor = batch.batch["rm_scores"]
-        reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
-        reward_extra_info = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
-        return combined_reward_tensor, combined_extras_dict
+        reward_tensor, reward_extra_info = extract_reward(batch)
+        return reward_tensor, reward_extra_info
 
     async def fit(self):
         """
