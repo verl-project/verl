@@ -21,7 +21,7 @@ nnodes: 0
 
 # reward manager, see `verl/trainer/config/reward_manager.yaml` for details.
 reward_manager:
-  _target_: verl.trainer.config.config.RewardManagerConfig
+  _target_: verl.workers.config.reward_model.RewardManagerConfig
   source: register
   name: naive
   module:
