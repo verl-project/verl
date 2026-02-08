@@ -70,6 +70,14 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     data["position_ids"] = position_ids_nested
     data["loss_mask"] = data["response_mask"]
 
+    routed_experts = data.get("routed_experts", None)
+    if routed_experts is not None and not routed_experts.is_nested:
+        routed_experts_rmpad, indices, cu_seqlens, *_ = unpad_input(routed_experts.unsqueeze(-1), attention_mask)
+        routed_experts_nested = torch.nested.nested_tensor_from_jagged(
+            routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
+        data["routed_experts"] = routed_experts_nested
+
     return data
 
 
