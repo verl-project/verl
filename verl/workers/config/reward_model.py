@@ -84,25 +84,19 @@ class RewardModelConfig(BaseConfig):
     _mutable_fields = BaseConfig._mutable_fields
 
     use_reward_loop: bool = True
-    num_workers: int = 8
-    reward_manager: Optional[str] = None
 
     enable: bool = False
     enable_resource_pool: bool = False
     n_gpus_per_node: int = 0
     nnodes: int = 0
 
+    # reward manager args
+    num_workers: int = 8
+    reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
+
     # reward model args
     model_path: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
-    model: HFModelConfig = field(default_factory=HFModelConfig)
-    sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)
 
-    def __post_init__(self):
-        super().__post_init__()
-        if self.reward_manager is not None:
-            logger.warning(
-                f"`reward_model.reward_manager` is deprecated, but got value {self.reward_manager}. "
-                "Please use `reward_manager.name instead. "
-                "See `verl/trainer/config/config.py:RewardManagerConfig` for more details."
-            )
+    # sandbox fusion args
+    sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)

@@ -16,6 +16,7 @@ import os
 import ray
 from hydra import compose, initialize_config_dir
 from torchdata.stateful_dataloader import StatefulDataLoader
+from omegaconf import OmegaConf
 
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
@@ -59,7 +60,7 @@ def test_agent_reward_loop_standalone():
     config.trainer.n_gpus_per_node = 4
     config.trainer.nnodes = 1
 
-    config.reward_model.reward_manager = "dapo"
+    config.reward_model.reward_manager.name = "dapo"
     config.reward_model.enable = True
     config.reward_model.enable_resource_pool = True
     config.reward_model.n_gpus_per_node = 4
