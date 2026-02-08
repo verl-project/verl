@@ -40,7 +40,6 @@ from verl.trainer.ppo.ray_trainer import (
     ResourcePoolManager,
     compute_response_mask,
 )
-from verl.trainer.ppo.reward import compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
@@ -300,41 +299,9 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
     @staticmethod
     @ray.remote
     def _launch_individual_rewards(batch, config, tokenizer):
-        # Get generation results
-        gen_batch_result = batch
-        original_non_tensor_batch = batch.non_tensor_batch
-
-        # Repeat non_tensor_batch to match the number of responses
-        n = config.actor_rollout_ref.rollout.n
-        repeated_non_tensor_batch = {}
-        for key, value in original_non_tensor_batch.items():
-            repeated_non_tensor_batch[key] = np.repeat(value, n, axis=0)
-
-        # Split into individual responses with preserved non_tensor_batch
-        responses_split = []
-        for i in range(len(gen_batch_result)):
-            response_data = gen_batch_result[i : i + 1]  # Get single response
-            # Add repeated non_tensor_batch values
-            for key in repeated_non_tensor_batch:
-                response_data.non_tensor_batch[key] = repeated_non_tensor_batch[key][i : i + 1]
-            responses_split.append(response_data)
-
-        # Launch async reward computation
-        reward_futures = [
-            compute_reward_async.remote(response_data, config, tokenizer) for response_data in responses_split
-        ]
-
-        # Wait for results and combine
-        results = ray.get(reward_futures)
-        rewards_list = [r[0] for r in results]
-        extras_list = [r[1] for r in results]
-
-        combined_reward_tensor = torch.cat(rewards_list, dim=0)
-        combined_extras_dict = {}
-        if extras_list and extras_list[0]:
-            for key in extras_list[0].keys():
-                combined_extras_dict[key] = [d[key] for d in extras_list if key in d]
-
+        reward_tensor = batch.batch["rm_scores"]
+        reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
+        reward_extra_info = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
         return combined_reward_tensor, combined_extras_dict
 
     async def fit(self):

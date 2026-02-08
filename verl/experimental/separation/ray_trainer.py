@@ -44,7 +44,6 @@ from verl.trainer.ppo.metric_utils import (
     compute_variance_proxy_metrics,
 )
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage, compute_response_mask
-from verl.trainer.ppo.reward import compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -410,12 +409,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                     batch = batch.union(batch_reward)
 
                 # Compute or extract reward for REMAX baseline
-                if not self.use_reward_loop:
-                    reward_baseline_tensor = self._compute_reward_legacy(
-                        batch, reward_fn=self.reward_fn, sum_reward=True
-                    )
-                else:
-                    reward_baseline_tensor = batch.batch["rm_scores"].sum(dim=-1)
+                reward_baseline_tensor = batch.batch["rm_scores"].sum(dim=-1)
 
                 keys_to_pop = set(gen_baseline_output.batch.keys())
                 if rm_scores is not None:
@@ -458,19 +452,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 batch = batch.union(batch_reward)
 
             # Compute or extract reward_tensor and reward_extra_infos_dict for training
-            if not self.use_reward_loop:
-                if self.config.reward_model.launch_reward_fn_async:
-                    self.future_reward = compute_reward_async.remote(
-                        data=batch, config=self.config, tokenizer=self.tokenizer
-                    )
-                else:
-                    self.reward_tensor, self.reward_extra_infos_dict = self._compute_reward_legacy(
-                        batch, reward_fn=self.reward_fn, reward_for_val=False
-                    )
-            else:
-                self.reward_tensor = batch.batch["rm_scores"]
-                reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
-                self.reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+            self.reward_tensor = batch.batch["rm_scores"]
+            reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
+            self.reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
         return batch
 
     def _fit_compute_log_prob(self, batch: DataProto) -> DataProto:
@@ -550,8 +534,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         with marked_timer("adv", timing_raw, color="brown"):
             # we combine with rule-based rm
             reward_extra_infos_dict: dict[str, list]
-            if self.config.reward_model.launch_reward_fn_async:
-                reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
             batch.batch["token_level_scores"] = reward_tensor
 
             if reward_extra_infos_dict:
