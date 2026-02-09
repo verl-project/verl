@@ -49,6 +49,8 @@ class TestConfigComparison(unittest.TestCase):
         "profile_steps",
         "worker_nsight_options",
         "controller_nsight_options",
+        "reward_model",
+        "custom_reward_function",
     ]
     ignored_paths = ["reward_model"]
 
