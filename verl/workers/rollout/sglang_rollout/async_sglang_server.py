@@ -310,8 +310,8 @@ class SGLangHttpServer:
             logger.info("skip sleep in standalone mode")
 
     async def clear_kv_cache(self):
-        obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
-        await self.tokenizer_manager.release_memory_occupation(obj, None)
+        if self.node_rank == 0:
+            await self.tokenizer_manager.flush_cache()
 
     async def generate(
         self,

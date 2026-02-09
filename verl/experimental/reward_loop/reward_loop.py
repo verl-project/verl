@@ -67,7 +67,7 @@ class RewardLoopWorker:
         self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
         self.reward_model_tokenizer = None
         if self.config.reward_model.enable:
-            reward_model_tokenizer_local_path = copy_to_local(self.config.reward_model.model.path)
+            reward_model_tokenizer_local_path = copy_to_local(self.config.reward_model.model_path)
             self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
         self.reward_fn = get_custom_reward_fn(self.config)
 
@@ -201,7 +201,7 @@ class RewardLoopWorker:
     async def compute_score_disrm(self, data: DataProto) -> dict:
         disrm_prompt = await self._preprocess_reward_inputs(data)
         engine_name = self.config.reward_model.rollout.name
-        model_name = self.config.reward_model.model.path
+        model_name = self.config.reward_model.model_path
         if engine_name == "vllm":
             # TODO (dyy): the "activation" has been changed to "use_activation" in vllm 0.11.2
             payloads = {
@@ -246,7 +246,6 @@ class RewardLoopManager:
     """
     RewardLoopManager run in single controller.
     This class will create reward loop workers and manage them.
-    RewardLoopManager will deprecate fsdp/megatron RewardModelWorker in the future.
     """
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):

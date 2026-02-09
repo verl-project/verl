@@ -6,7 +6,7 @@ RUN apt-get update -y && \
     apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
-    pip install --upgrade pip setuptools packaging && \
+    pip install --upgrade pip packaging setuptools==80.10.2 && \
     pip cache purge
 
 # Prepare repositories with low update frequency

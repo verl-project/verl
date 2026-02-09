@@ -129,7 +129,6 @@ def validate_config(
             ValueError: If both parameters are set or neither is set.
         """
         settings = {
-            "reward_model": "micro_batch_size",
             "actor_rollout_ref.ref": "log_prob_micro_batch_size",
             "actor_rollout_ref.rollout": "log_prob_micro_batch_size",
         }
@@ -165,16 +164,6 @@ def validate_config(
             config.actor_rollout_ref.rollout.log_prob_micro_batch_size,
             config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu,
             "actor_rollout_ref.rollout",
-        )
-
-    # Check for reward model micro-batch size conflicts
-    if (
-        config.reward_model.enable
-        and not config.reward_model.use_dynamic_bsz
-        and not config.reward_model.use_reward_loop
-    ):
-        check_mutually_exclusive(
-            config.reward_model.micro_batch_size, config.reward_model.micro_batch_size_per_gpu, "reward_model"
         )
 
     if config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:

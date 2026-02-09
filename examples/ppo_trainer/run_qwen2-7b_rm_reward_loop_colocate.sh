@@ -45,7 +45,7 @@ python3 -m verl.trainer.main_ppo \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.optimizer_offload=False \
     reward_model.enable=True \
-    reward_model.model.path="$HOME/models/Skywork-Reward-V2-Llama-3.2-3B" \
+    reward_model.model_path="$HOME/models/Skywork-Reward-V2-Llama-3.2-3B" \
     reward_model.use_reward_loop=True \
     reward_model.rollout.name=vllm \
     reward_model.rollout.gpu_memory_utilization=0.8 \
@@ -53,9 +53,6 @@ python3 -m verl.trainer.main_ppo \
     reward_model.rollout.response_length=4096 \
     reward_model.rollout.tensor_model_parallel_size=1 \
     reward_model.num_workers=8 \
-    reward_model.model.use_remove_padding=True \
-    reward_model.model.fsdp_config.param_offload=True \
-    reward_model.micro_batch_size_per_gpu=32 \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 import logging
 import os
 from contextlib import nullcontext
@@ -47,6 +48,21 @@ from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _with_routing_replay_flag(enabled: bool):
+    """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, data: TensorDict, *args, **kwargs):
+            if self.enable_routing_replay:
+                tu.assign_non_tensor_data(data, "enable_routing_replay", enabled)
+            return func(self, data, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 class TrainingWorker(Worker, DistProfilerExtension):
@@ -144,7 +160,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         self.engine.initialize()
 
-    def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only):
+    def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
         """
 
         Args:
@@ -187,7 +203,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
         if global_token_num is not None:
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(
+                global_token_num, delta_time, images_seqlens=images_seqlens
+            )
             final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
             if forward_only:
                 final_metrics["mfu"] /= 3.0
@@ -270,7 +288,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
                         # flattn dp and micro batch
                         if isinstance(val, list):
                             output[key] = (
-                                Metric.chain(val) if isinstance(val[0], Metric) else list(chain.from_iterable(val))
+                                Metric.aggregate_dp(val)
+                                if isinstance(val[0], Metric)
+                                else list(chain.from_iterable(val))
                             )
                     append_to_dict(metrics, output)
 
@@ -286,6 +306,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
+        images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         # inject engineering parameters if not specified
         default_keys = dict(
@@ -322,7 +343,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if lr is not None:
                 output["metrics"]["lr"] = lr
             final_output = self._postprocess_output(
-                output, global_token_num=global_token_num, delta_time=delta_time, forward_only=False
+                output,
+                global_token_num=global_token_num,
+                delta_time=delta_time,
+                forward_only=False,
+                images_seqlens=images_seqlens,
             ).cpu()
         else:
             final_output = None
@@ -336,6 +361,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         compute_loss = tu.get(data, key="compute_loss", default=True)
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
+        images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         default_keys = dict(
             use_remove_padding=self.model_config.use_remove_padding,
@@ -363,7 +389,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if self.engine.is_mp_src_rank_with_outputs():
             final_output = self._postprocess_output(
-                output, global_token_num=global_token_num, delta_time=delta_time, forward_only=True
+                output,
+                global_token_num=global_token_num,
+                delta_time=delta_time,
+                forward_only=True,
+                images_seqlens=images_seqlens,
             ).cpu()
         else:
             final_output = None
@@ -414,6 +444,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
         else:
             tool_config = None
+
+        self.enable_routing_replay = (
+            self.config.actor.strategy == "megatron" and self.config.actor.megatron.router_replay.mode != "disabled"
+        )
 
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
@@ -471,7 +505,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
-
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",
                 model_config=actor_config.model_config,
@@ -549,18 +582,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
+    @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+    @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
+
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
+    @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
@@ -614,7 +651,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # main memory can trade sync time to avoid OOM
             self.rollout.sleep_level = 1
 
-            do_lora_base_sync = not self.base_sync_done or self.rollout.sleep_level != 1
+            do_lora_base_sync = (not self.base_sync_done) or (
+                self.rollout.sleep_level != 1 and self.config.rollout.free_cache_engine
+            )
 
         if do_lora_base_sync:
             per_tensor_base_params, _ = self.actor.engine.get_per_tensor_param(
