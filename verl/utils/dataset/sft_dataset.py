@@ -83,7 +83,7 @@ class SFTDataset(Dataset):
             import pandas
 
             while isinstance(ls, pandas.core.series.Series | numpy.ndarray) and len(ls) == 1:
-                if isinstance(ls, pandas.Series):  # for pandas3
+                if isinstance(ls, pandas.Series):  # for pandas v3
                     ls = ls.iloc[0]
                 else:
                     ls = ls[0]
