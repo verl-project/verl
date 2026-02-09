@@ -99,9 +99,12 @@ class MegatronEngine(BaseEngine):
         if self.enable_routing_replay:
             apply_router_replay_patch()
         # Apply checkpoint patch for MoE models
-        from verl.models.mcore.patch import apply_patch_checkpoint
+        from verl.utils.device import is_cuda_available
 
-        apply_patch_checkpoint()
+        if is_cuda_available:
+            from verl.models.mcore.patch import apply_patch_checkpoint
+
+            apply_patch_checkpoint()
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
