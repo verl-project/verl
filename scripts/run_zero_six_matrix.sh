@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# DeepSpeed six-case benchmark driver:
-# - ZeRO1/2/3 x {no_offload, cpu_offload}
-# - default target is 60 training steps
-# - writes per-case logs + summary.tsv under outputs/<RUN_TAG>_<timestamp>
-
 BASE=/home/ubuntu/verl
 STAMP=$(date +%Y%m%d_%H%M%S)
 STEPS=${STEPS:-60}

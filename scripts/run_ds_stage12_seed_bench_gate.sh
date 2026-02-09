@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# DeepSpeed ZeRO1/2 crossover gate benchmark:
-# - runs stage1 and stage2 across a seed list
-# - summarizes score/throughput/memory deltas for parity checks
-# - writes summary.tsv/compare.tsv/overall.tsv under outputs/<RUN_TAG>_<timestamp>
-
 BASE=/home/ubuntu/verl
 STAMP=$(date +%Y%m%d_%H%M%S)
 STEPS=${STEPS:-60}
