@@ -12,15 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Unified helpers for DeepSpeed TP/DP/SP layout and batch normalization.
+Shared DeepSpeed parallel-layout helpers.
 
-DeepSpeed workers historically fetched SP/DP/TP settings from multiple
-locations (top-level config, deepspeed_config block, rollout config)
-and reimplemented batch-size normalization per role. This module provides
-one entry point to:
-  - resolve and synchronize the Ulysses SP size for a role
-  - build a parallel layout (dp_rank, sp_rank, collect mask)
-  - normalize per-rank batch sizes consistently
+Design note:
+- DeepSpeed workers in this branch run with SP disabled.
+- Layout information is still exposed through `ParallelLayout` so call sites can
+  keep a uniform interface with other backends.
+- Batch normalization is handled once here to avoid role-specific drift.
 """
 
 from __future__ import annotations
@@ -44,12 +42,12 @@ class ParallelLayout:
 
     @property
     def collect(self) -> bool:
-        """Whether this rank should participate in collect for DP mesh."""
-        return self.sp_rank == 0
+        """All ranks collect when SP is disabled."""
+        return True
 
 
 def _get_attr(cfg: Any, name: str, default: int | None = None) -> int | None:
-    """Read attribute/key from either dataclass-like or dict-like configs."""
+    """Read one field from dataclass-like, DictConfig, or dict configs."""
     if hasattr(cfg, name):
         return getattr(cfg, name)
     if isinstance(cfg, DictConfig) and name in cfg:
@@ -67,57 +65,55 @@ def _get_attr(cfg: Any, name: str, default: int | None = None) -> int | None:
     return default
 
 
+def _set_attr(cfg: Any, name: str, value: Any) -> None:
+    """Set one field on common config containers (best effort)."""
+    if cfg is None:
+        return
+    if isinstance(cfg, DictConfig):
+        if name in cfg:
+            cfg[name] = value
+        return
+    if isinstance(cfg, dict):
+        cfg[name] = value
+        return
+    if hasattr(cfg, name):
+        try:
+            setattr(cfg, name, value)
+        except FrozenInstanceError:
+            pass
+
+
 def resolve_and_sync_sp_size(role_cfg: Any) -> int:
     """
-    Resolve SP size from the role config and its deepspeed_config block.
-    Make sure the two places are kept in sync to avoid silent mismatches.
+    Force SP to `1` for DeepSpeed workers.
+
+    We also write back the normalized value to config views so later reads are
+    consistent (`role_cfg` and its `deepspeed_config` section).
     """
-    top_sp = _get_attr(role_cfg, "ulysses_sequence_parallel_size", None)
     ds_cfg = _get_attr(role_cfg, "deepspeed_config", None)
-    ds_sp = _get_attr(ds_cfg, "ulysses_sequence_parallel_size", None) if ds_cfg is not None else None
+    sp_size = 1
 
-    # Pick the first non-None value, default to 1
-    sp_candidates = [x for x in (top_sp, ds_sp) if x is not None]
-    sp_size = sp_candidates[0] if len(sp_candidates) > 0 else 1
-
-    # Enforce consistency
-    if top_sp is not None and ds_sp is not None and top_sp != ds_sp:
-        raise ValueError(
-            f"ulysses_sequence_parallel_size mismatch: top-level={top_sp}, deepspeed_config={ds_sp}. "
-            "Please set them to the same value."
-        )
-
-    # Sync both views
-    if hasattr(role_cfg, "ulysses_sequence_parallel_size"):
-        if _get_attr(role_cfg, "ulysses_sequence_parallel_size") != sp_size:
-            try:
-                role_cfg.ulysses_sequence_parallel_size = sp_size
-            except FrozenInstanceError:
-                pass
-    if ds_cfg is not None and hasattr(ds_cfg, "ulysses_sequence_parallel_size"):
-        if _get_attr(ds_cfg, "ulysses_sequence_parallel_size") != sp_size:
-            try:
-                ds_cfg.ulysses_sequence_parallel_size = sp_size
-            except FrozenInstanceError:
-                pass
+    # Keep both config views aligned with the enforced value.
+    if _get_attr(role_cfg, "ulysses_sequence_parallel_size", None) != sp_size:
+        _set_attr(role_cfg, "ulysses_sequence_parallel_size", sp_size)
+    if _get_attr(ds_cfg, "ulysses_sequence_parallel_size", None) != sp_size:
+        _set_attr(ds_cfg, "ulysses_sequence_parallel_size", sp_size)
 
     return int(sp_size)
 
 
 def build_parallel_layout(role_cfg: Any, tp_size: int = 1) -> ParallelLayout:
-    """Construct a ParallelLayout for a role using its SP size and global world info."""
+    """Build per-rank layout metadata for DeepSpeed workers."""
     if not dist.is_initialized():
         raise RuntimeError("torch.distributed must be initialized before building ParallelLayout.")
 
     world_size = dist.get_world_size()
     rank = dist.get_rank()
-    sp_size = resolve_and_sync_sp_size(role_cfg)
-    if sp_size < 1 or world_size % sp_size != 0:
-        raise ValueError(f"world_size {world_size} must be divisible by ulysses sp_size {sp_size}")
-
-    dp_size = world_size // sp_size
-    dp_rank = rank // sp_size
-    sp_rank = rank % sp_size
+    _ = resolve_and_sync_sp_size(role_cfg)
+    sp_size = 1
+    dp_size = world_size
+    dp_rank = rank
+    sp_rank = 0
 
     return ParallelLayout(
         world_size=world_size,
@@ -130,10 +126,8 @@ def build_parallel_layout(role_cfg: Any, tp_size: int = 1) -> ParallelLayout:
     )
 
 
-def normalize_actor_batches(actor_cfg: Any, rollout_n: int, dp_size: int, sp_size: int = 1):
-    """
-    Normalize actor batch config to per-DP-rank values.
-    """
+def normalize_actor_batches(actor_cfg: Any, rollout_n: int, dp_size: int):
+    """Normalize actor PPO batch sizes to per-rank values."""
     actor_cfg.ppo_mini_batch_size *= rollout_n
     actor_cfg.ppo_mini_batch_size //= dp_size
     if actor_cfg.ppo_mini_batch_size <= 0:
@@ -160,10 +154,8 @@ def normalize_actor_batches(actor_cfg: Any, rollout_n: int, dp_size: int, sp_siz
         )
 
 
-def normalize_critic_batches(critic_cfg: Any, dp_size: int, sp_size: int = 1):
-    """
-    Normalize critic batch config to per-DP-rank values.
-    """
+def normalize_critic_batches(critic_cfg: Any, dp_size: int):
+    """Normalize critic PPO batch sizes to per-rank values."""
     critic_cfg.ppo_mini_batch_size //= dp_size
     if critic_cfg.ppo_mini_batch_size <= 0:
         raise ValueError(f"Normalized critic ppo_mini_batch_size {critic_cfg.ppo_mini_batch_size} must be > 0")
