@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import logging
 import os.path
 import time
 
