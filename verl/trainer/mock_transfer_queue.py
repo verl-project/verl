@@ -12,8 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import defaultdict
+from dataclasses import dataclass
 
 import ray
+
+
+@dataclass
+class Batch:
+    keys: list[str]
+    """Keys of the sampled items."""
+    tags: list[dict]
+    """Tags of the sampled items."""
+    meta_info: dict = {}
+    """Meta info of the batch."""
 
 
 @ray.remote(name="transfer_queue_controller")
@@ -35,7 +46,7 @@ class TransferQueueController:
     def batch_get(self, partition_id: str, keys: list[str]) -> dict[str, dict]:
         return {key: self.storage_unit[partition_id][key] for key in keys}
 
-    def kv_list(self):
+    def kv_list(self) -> dict[str, dict]:
         return self.tags
 
 

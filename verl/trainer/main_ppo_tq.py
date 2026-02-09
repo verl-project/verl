@@ -68,6 +68,8 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 # ======================================= USER SECTION BEGIN =======================================
+
+
 class ReplayBuffer:
     """Replay buffer periodically polls metadata from transfer queue.
 
@@ -111,7 +113,7 @@ class ReplayBuffer:
                     partition[key] = {}
                 partition[key].update(tags)
 
-    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> list[str]:
+    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> tq.Batch:
         """Sample a batch of data from the replay buffer.
 
         Args:
@@ -121,7 +123,7 @@ class ReplayBuffer:
             batch_size (int, optional): Batch size. Defaults to None.
 
         Returns:
-            TensorDict: A batch of data.
+            Batch: A batch of data.
         """
         assert (global_steps or batch_size) and (not (global_steps and batch_size)), (
             "Either global_steps or batch_size must be specified, but not both."
@@ -130,21 +132,22 @@ class ReplayBuffer:
         while True:
             time.sleep(self.poll_interval)
             with self.lock:
-                keys = []
+                keys, tags = [], []
                 should_wait = False
                 partition = self.partitions[partition_id]
-                for key, tags in partition.items():
-                    if tags["global_steps"] == global_steps:
-                        if tags["status"] == "running":
+                for key, tag in partition.items():
+                    if tag["global_steps"] == global_steps:
+                        if tag["status"] == "running":
                             should_wait = True
                             break
-                        elif tags["status"] == "success":
+                        elif tag["status"] == "success":
                             keys.append(key)
+                            tags.append(tag)
                         else:
-                            logger.warning(f"Unknown status {tags['status']} for key {key}")
+                            logger.warning(f"Unknown status {tag['status']} for key {key}")
                 logger.info("partitions", self.partitions)
                 if not should_wait:
-                    return keys
+                    return tq.Batch(keys, tags)
 
 
 @ray.remote
@@ -256,17 +259,27 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - uid: raw prompt uid from dataset
         # - session_id: session id for rollout.n sampling
         # - index: index of agent loop output
-        keys, fields = [], []
+        keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):
             keys.append(f"{uid}_{session_id}_{i}")
             field = output.as_dict()
             field.update(kwargs)
             fields.append(field)
+            prompt_len, response_len = field["prompt_ids"].size(0), field["response_ids"].size(0)
+            tags.append(
+                {
+                    "global_steps": kwargs["global_steps"],
+                    "status": "success",
+                    "prompt_len": prompt_len,
+                    "response_len": response_len,
+                    "seq_len": prompt_len + response_len,
+                }
+            )
 
         await tq.async_kv_batch_put(
             keys=keys,
             fields=fields,
-            tags=[{"global_steps": kwargs["global_steps"], "status": "success"}] * len(keys),
+            tags=tags,
             partition_id="train" if not kwargs.get("validate", False) else "val",
         )
 
