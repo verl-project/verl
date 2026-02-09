@@ -172,7 +172,7 @@ def qwen3_moe_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) ->
     hidden_dim = hidden_states.shape[-1]
     hidden_states = hidden_states.view(-1, hidden_dim)
     # router_logits: (batch * sequence_length, n_experts)
-    router_logits = RouterGatingLinearFunction.apply(hidden_states, self.gate.weight, None, torch.float32)
+    router_logits = RouterGatingLinearFunction.apply(hidden_states, self.gate.weight, torch.float32)
 
     routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
     routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
@@ -281,7 +281,7 @@ class NPUQwen3VLMoeTextSparseMoeBlock(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size = hidden_states.shape[0]
         hidden_states = hidden_states.reshape(-1, self.hidden_size)
-        router_logits = RouterGatingLinearFunction.apply(hidden_states, self.gate.weight, None, torch.float32)
+        router_logits = RouterGatingLinearFunction.apply(hidden_states, self.gate.weight, torch.float32)
         routing_weights = torch.nn.functional.softmax(router_logits, dim=-1, dtype=torch.float)
         routing_weights, router_indices = torch.topk(routing_weights, self.top_k, dim=-1)
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
