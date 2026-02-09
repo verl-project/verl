@@ -49,7 +49,7 @@ gen_prompt_bsz=$((train_prompt_bsz * 1))
 n_resp_per_prompt=16
 train_prompt_mini_bsz=64 # mini_bsz * n >= micro_bsz * pp * dp
 
-NNODES=${NNODES:-8}
+NNODES=${NNODES:-16}
 MODEL_PATH=./Qwen3-235B-A22B-Thinking-2507
 MCORE_MODEL_PATH=""
 
@@ -143,7 +143,7 @@ python3 -m verl.trainer.main_ppo --config-path=/verl/trainer/config  --config-na
     trainer.logger=['console'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.n_gpus_per_node=16 \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=False \
     trainer.test_freq=-1 \
