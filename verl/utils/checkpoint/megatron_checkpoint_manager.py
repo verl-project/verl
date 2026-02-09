@@ -503,9 +503,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     extended_args = {}
                     mbridge_config = getattr(self.checkpoint_config, "mbridge_config", None) or {}
                     for sig in inspect.signature(self.bridge.save_weights).parameters:
-                        if sig == 'weights_path' or sig == 'models':
+                        if sig == "weights_path" or sig == "models":
                             continue
-                        extended_args[sig] = getattr(mbridge_config, sig, True)
+                        if sig in mbridge_config:
+                            extended_args[sig] = mbridge_config[sig]
                     self.bridge.save_weights(self.model, hf_ckpt_path, **extended_args)
                 else:
                     self.bridge.save_hf_weights(self.model, hf_ckpt_path)
@@ -579,10 +580,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     extended_args = {}
                     mbridge_config = getattr(self.checkpoint_config, "mbridge_config", None) or {}
                     for sig in inspect.signature(self.bridge.save_weights).parameters:
-                        if sig == 'weights_path' or sig == 'models':
+                        if sig == "weights_path" or sig == "models":
                             continue
-                        extended_args[sig] = getattr(mbridge_config, sig, True)
-                    self.bridge.save_weights(self.model, hf_ckpt_path, **extended_args)
+                        if sig in mbridge_config:
+                            extended_args[sig] = mbridge_config[sig]
+                    self.bridge.save_weights(self.model, hf_model_ckpt_path, **extended_args)
                 else:
                     self.bridge.save_hf_weights(self.model, hf_model_ckpt_path)
             else:
