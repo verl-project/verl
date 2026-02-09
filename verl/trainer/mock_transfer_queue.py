@@ -12,18 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 
 import ray
+import torch
+from tensordict import TensorDict
 
 
 @dataclass
-class Batch:
+class KVBatchMeta:
+    partition_id: str
+    """Partition id of the batch."""
     keys: list[str]
     """Keys of the sampled items."""
     tags: list[dict]
     """Tags of the sampled items."""
-    meta_info: dict = field(default_factory=dict)
+    extra_info: dict = dataclass_field(default_factory=dict)
     """Meta info of the batch."""
 
     def __len__(self):
@@ -48,11 +53,19 @@ class TransferQueueController:
             self.storage_unit[partition_id][key].update(fields)
 
     def batch_put(self, partition_id: str, keys: list[str], fields: list[dict], tags: list[dict] = None):
+        if tags is None:
+            tags = [{}] * len(keys)
         for key, value, tag in zip(keys, fields, tags, strict=True):
             self.put(partition_id, key, value, tag)
 
-    def batch_get(self, partition_id: str, keys: list[str]) -> dict[str, dict]:
-        return {key: self.storage_unit[partition_id][key] for key in keys}
+    def batch_get(self, batch: KVBatchMeta, fields: list[str]) -> TensorDict:
+        tensors = {}
+        for field in fields:
+            values = []
+            for key in batch.keys:
+                values.append(self.storage_unit[batch.partition_id][key][field])
+            tensors[field] = torch.nested.nested_tensor(values, layout=torch.jagged)
+        return TensorDict(tensors, batch_size=len(batch))
 
     def kv_list(self) -> dict[str, dict]:
         return self.tags
@@ -71,6 +84,9 @@ def init(config=None):
     _TQ_HANDLE = transfer_queue
 
 
+# ======================================= ASYNC API =======================================
+
+
 async def async_kv_put(partition_id: str, key: str, fields: dict = None, tags: dict = None):
     await _TQ_HANDLE.put.remote(partition_id, key, fields, tags)
 
@@ -79,9 +95,16 @@ async def async_kv_batch_put(partition_id: str, keys: list[str], fields: list[di
     await _TQ_HANDLE.batch_put.remote(partition_id, keys, fields, tags)
 
 
+# ======================================= SYNC API =======================================
+
+
 def kv_list():
     return ray.get(_TQ_HANDLE.kv_list.remote())
 
 
-def kv_batch_get(partition_id: str, keys: list[str]):
-    return ray.get(_TQ_HANDLE.batch_get.remote(partition_id, keys))
+def kv_batch_get(batch: KVBatchMeta, fields: list[str]) -> TensorDict:
+    return ray.get(_TQ_HANDLE.batch_get.remote(batch, fields))
+
+
+def kv_batch_put(partition_id: str, keys: list[str], fields: list[dict], tags: list[dict] = None):
+    return ray.get(_TQ_HANDLE.batch_put.remote(partition_id, keys, fields, tags))
