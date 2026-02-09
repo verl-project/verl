@@ -91,6 +91,9 @@ class CriticConfig(BaseConfig):
         """Validate critic configuration parameters."""
         assert self.strategy != MISSING
 
+        if isinstance(self.model, dict):
+            object.__setattr__(self, "model", HFModelConfig(**self.model))
+
         if self.model_config is None:
             warnings.warn("using model in Critic Config is deprecated, please use model_config instead", stacklevel=2)
             self.model_config = HFModelConfig(
@@ -240,11 +243,15 @@ class DeepSpeedCriticConfig(CriticConfig):
 
     def __post_init__(self):
         super().__post_init__()
-        self.engine = self.deepspeed_config
+        object.__setattr__(self, "engine", self.deepspeed_config)
         offload_enabled = self.deepspeed_config.offload in {"cpu", "nvme", "auto"}
         if offload_enabled:
-            self.deepspeed_config.param_offload = True
-            self.deepspeed_config.optimizer_offload = self.deepspeed_config.zero_stage >= 2
+            object.__setattr__(self.deepspeed_config, "param_offload", True)
+            object.__setattr__(
+                self.deepspeed_config,
+                "optimizer_offload",
+                self.deepspeed_config.zero_stage >= 2,
+            )
 
 
 @dataclass

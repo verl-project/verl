@@ -345,18 +345,29 @@ class DeepSpeedActorConfig(ActorConfig):
 
     strategy: str = "deepspeed"
     grad_clip: float = 1.0
+    ulysses_sequence_parallel_size: int = 1
+    entropy_from_logits_with_chunking: bool = False
+    entropy_checkpointing: bool = False
     deepspeed: DeepSpeedEngineConfig = field(default_factory=DeepSpeedEngineConfig)
+    # Alias for backward compatibility with configs that use `deepspeed_config`
+    deepspeed_config: Optional[DeepSpeedEngineConfig] = None
     use_remove_padding: bool = False
     use_rollout_log_probs: bool = False
     calculate_sum_pi_squared: bool = False
     sum_pi_squared_checkpointing: bool = False
 
     def __post_init__(self):
+        if self.deepspeed_config is not None:
+            object.__setattr__(self, "deepspeed", self.deepspeed_config)
+
         super().__post_init__()
         self.engine = self.deepspeed
         # Align offload flags with offload shorthand.
         offload_enabled = self.deepspeed.offload in {"cpu", "nvme", "auto"}
         if offload_enabled:
-            self.deepspeed.param_offload = True
+            object.__setattr__(self.deepspeed, "param_offload", True)
             # Optimizer offload requires ZeRO-2 or ZeRO-3.
-            self.deepspeed.optimizer_offload = self.deepspeed.zero_stage >= 2
+            object.__setattr__(self.deepspeed, "optimizer_offload", self.deepspeed.zero_stage >= 2)
+
+        # Keep both names in sync for callers that expect either field.
+        object.__setattr__(self, "deepspeed_config", self.deepspeed)

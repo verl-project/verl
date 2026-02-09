@@ -247,6 +247,8 @@ class DeepSpeedEngineConfig(EngineConfig):
     zero_stage: int = 2
     offload: Literal["none", "cpu", "nvme", "auto"] = "none"
     offload_dir: Optional[str] = None
+    param_offload: bool = False
+    optimizer_offload: bool = False
 
     model_dtype: str = "fp32"
     mixed_precision: Optional[dict[str, Any]] = None

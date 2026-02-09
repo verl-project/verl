@@ -34,7 +34,11 @@ try:
     import deepspeed
     from deepspeed import DeepSpeedEngine
     from deepspeed.runtime.zero import GatheredParameters
-    from deepspeed.runtime.zero.stage2 import DeepSpeedZeroOptimizer
+    try:
+        # Newer DeepSpeed versions keep the ZeRO-1/2 optimizer here.
+        from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+    except Exception:  # pragma: no cover - compatibility with older DeepSpeed
+        from deepspeed.runtime.zero.stage2 import DeepSpeedZeroOptimizer
 
     DEEPSPEED_AVAILABLE = True
 except Exception:  # pragma: no cover - DeepSpeed not installed
@@ -45,9 +49,82 @@ except Exception:  # pragma: no cover - DeepSpeed not installed
     DEEPSPEED_AVAILABLE = False
 
 
-def _ensure_deepspeed():
+def _maybe_patch_zero2_grad_accum_dtype() -> None:
+    """Patch ZeRO-2 grad accumulation to honor gradient_accumulation_dtype."""
     if not DEEPSPEED_AVAILABLE:
-        raise ImportError("DeepSpeed is not available. Please install deepspeed to use the DeepSpeed engine.")
+        return
+    # Emergency off-switch.
+    if os.getenv("VERL_DS_ZERO2_FP32_ACCUM_PATCH", "1").lower() in {"0", "false", "off", "no"}:
+        return
+    try:
+        import torch
+        from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer as Zero12Opt
+    except Exception:
+        return
+    if getattr(Zero12Opt, "_verl_zero2_grad_accum_patched", False):
+        return
+
+    original_get_all_grad_tensors = Zero12Opt.get_all_grad_tensors
+    original_ipg_epilogue = Zero12Opt.independent_gradient_partition_epilogue
+    _accum_marker = object()
+
+    def _patched_get_all_grad_tensors(self, tensor_list, dtype):  # type: ignore[override]
+        out = original_get_all_grad_tensors(self, tensor_list, dtype)
+        # ZeRO-2 (partition_gradients=True) can otherwise accumulate in model dtype
+        # (bf16/fp16). Upcast to gradient_accumulation_dtype to reduce drift.
+        if not getattr(self, "partition_gradients", False):
+            return out
+        casted = []
+        for grad in out:
+            if grad is None:
+                casted.append(grad)
+            elif grad.dtype != dtype:
+                casted.append(grad.to(dtype))
+            else:
+                casted.append(grad)
+        return casted
+
+    def _patched_independent_gradient_partition_epilogue(self):  # type: ignore[override]
+        # ZeRO-2 should accumulate per-micro partition grads in all_grad_tensors.
+        # Upstream condition keys off averaged_gradients, which stays None until
+        # boundary and can overwrite previously accumulated micro grads.
+        try:
+            if not getattr(self, "cpu_offload", False) and getattr(self, "partition_gradients", False):
+                averaged = getattr(self, "averaged_gradients", None)
+                all_grad = getattr(self, "all_grad_tensors", None)
+                if isinstance(averaged, dict) and isinstance(all_grad, dict):
+                    for i, _ in enumerate(getattr(self, "bit16_groups", [])):
+                        if averaged.get(i, None) is None and all_grad.get(i, None) is not None:
+                            averaged[i] = _accum_marker
+        except Exception:
+            # Fall back to upstream behavior if internals differ.
+            pass
+        return original_ipg_epilogue(self)
+
+    Zero12Opt.get_all_grad_tensors = _patched_get_all_grad_tensors  # type: ignore[assignment]
+    Zero12Opt.independent_gradient_partition_epilogue = _patched_independent_gradient_partition_epilogue  # type: ignore[assignment]
+    Zero12Opt._verl_zero2_grad_accum_patched = True  # type: ignore[attr-defined]
+    logger.info("Applied VERL ZeRO-2 grad accumulation dtype patch")
+
+
+_maybe_patch_zero2_grad_accum_dtype()
+
+
+def _ensure_deepspeed():
+    global DEEPSPEED_AVAILABLE, deepspeed, DeepSpeedEngine, GatheredParameters
+    if DEEPSPEED_AVAILABLE:
+        return
+    try:
+        import deepspeed as _ds
+        from deepspeed import DeepSpeedEngine as _DSE
+        from deepspeed.runtime.zero import GatheredParameters as _GatheredParameters
+    except Exception as exc:  # pragma: no cover - runtime import guard
+        raise ImportError("DeepSpeed is not available. Please install deepspeed to use the DeepSpeed engine.") from exc
+    deepspeed = _ds
+    DeepSpeedEngine = _DSE
+    GatheredParameters = _GatheredParameters
+    DEEPSPEED_AVAILABLE = True
+    _maybe_patch_zero2_grad_accum_dtype()
 
 
 def get_deepspeed_config(
@@ -73,6 +150,20 @@ def get_deepspeed_config(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Build a DeepSpeed configuration dictionary."""
+
+    # Backward-compatible shorthands used by worker configs
+    cpu_offload = kwargs.pop("cpu_offload", False)
+    offload_optimizer_flag = kwargs.pop("offload_optimizer", False)
+    offload_dir = kwargs.pop("offload_dir", None)
+
+    if cpu_offload and offload_param_device is None:
+        offload_param_device = "cpu"
+        if offload_param_nvme_path is None and offload_dir is not None:
+            offload_param_nvme_path = offload_dir
+    if offload_optimizer_flag and offload_optimizer_device is None:
+        offload_optimizer_device = "cpu"
+        if offload_optimizer_nvme_path is None and offload_dir is not None:
+            offload_optimizer_nvme_path = offload_dir
 
     if betas is None:
         betas = (0.9, 0.999)
@@ -127,6 +218,10 @@ def get_deepspeed_config(
             # a conservative bucket size to keep memory use predictable
             zero_opt["stage3_prefetch_bucket_size"] = 2e7
 
+        if zero_stage >= 3:
+            # Enable CPU gathering so _zero3_consolidated_16bit_state_dict works
+            zero_opt.setdefault("gather_16bit_weights_on_model_save", True)
+
         if zero_optimization_overrides:
             zero_opt.update(zero_optimization_overrides)
 
@@ -163,6 +258,16 @@ def get_zero_stage(engine: DeepSpeedEngine) -> int:
 def is_zero3_engine(engine: DeepSpeedEngine) -> bool:
     try:
         return get_zero_stage(engine) >= 3
+    except Exception:
+        return False
+
+
+def _engine_has_param_offload(engine: DeepSpeedEngine) -> bool:
+    """Best-effort check for ZeRO-3 param offload in the engine config."""
+    try:
+        zero_cfg = getattr(engine, "_config", {}).get("zero_optimization", {})
+        offload_cfg = zero_cfg.get("offload_param", None)
+        return bool(offload_cfg)
     except Exception:
         return False
 
@@ -211,7 +316,10 @@ def get_global_grad_norm(engine: DeepSpeedEngine) -> Optional[float]:
 def save_deepspeed_checkpoint(engine: DeepSpeedEngine, save_dir: str, tag: Optional[str] = None, **kwargs):
     """Thin wrapper over engine.save_checkpoint with a consistent signature."""
     if hasattr(engine, "save_checkpoint"):
-        return engine.save_checkpoint(save_dir, client_state=kwargs.get("client_state"), tag=tag)
+        client_state = kwargs.get("client_state")
+        if client_state is None:
+            return engine.save_checkpoint(save_dir, tag=tag)
+        return engine.save_checkpoint(save_dir, client_state=client_state, tag=tag)
     raise RuntimeError("DeepSpeed engine does not expose save_checkpoint")
 
 

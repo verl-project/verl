@@ -133,7 +133,13 @@ class DeepSpeedEngine(BaseEngine):
 
     def optimizer_zero_grad(self):
         if self.ds_engine is not None:
-            self.ds_engine.zero_grad(set_to_none=True)
+            try:
+                if getattr(self.ds_engine, "optimizer", None) is not None:
+                    self.ds_engine.optimizer.zero_grad(set_to_none=True)
+                else:
+                    self.ds_engine.zero_grad()
+            except Exception as exc:  # pragma: no cover - best-effort fallback
+                logger.warning("DeepSpeed zero_grad failed: %s", exc)
         elif self.optimizer is not None:
             self.optimizer.zero_grad(set_to_none=True)
 
@@ -155,6 +161,9 @@ class DeepSpeedEngine(BaseEngine):
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False):
         tu.assign_non_tensor(data, sp_size=1)
 
+        # DeepSpeed forward pre-hooks expect the underlying module to be attached.
+        self._ensure_ds_engine_module()
+
         batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
         torch.distributed.all_reduce(
             batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
@@ -166,7 +175,7 @@ class DeepSpeedEngine(BaseEngine):
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )
 
-        if self.ds_engine is not None:
+        if self.ds_engine is not None and hasattr(self.ds_engine, "set_gradient_accumulation_steps"):
             self.ds_engine.set_gradient_accumulation_steps(max(1, len(micro_batches)))
 
         output_lst = []
@@ -258,6 +267,16 @@ class DeepSpeedEngine(BaseEngine):
         return nullcontext()
 
     # ----- helpers -----
+    def _ensure_ds_engine_module(self):
+        """DeepSpeed forward pre-hooks require engine.module to exist; guard against it being None."""
+        if self.ds_engine is None:
+            return
+        try:
+            if getattr(self.ds_engine, "module", None) is None:
+                self.ds_engine.module = self.module
+        except Exception:  # pragma: no cover - defensive
+            self.ds_engine.module = self.module
+
     def _build_model_optimizer(self):
         module = self._build_module()
 
@@ -289,6 +308,13 @@ class DeepSpeedEngine(BaseEngine):
             config=ds_config,
             model_parameters=module.parameters(),
         )
+
+        # Ensure module attribute is present for older DeepSpeed versions.
+        try:
+            if getattr(ds_engine, "module", None) is None:
+                ds_engine.module = module
+        except Exception:
+            ds_engine.module = module
 
         self.ds_engine = ds_engine
         self.module = ds_engine.module
@@ -441,7 +467,6 @@ class EngineEvalModeCtx(BaseEngineCtx):
         self.engine.module.eval()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_val, exc_tb)
 
 
@@ -629,8 +654,10 @@ class DeepSpeedEngineWithLMHead(DeepSpeedEngine):
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
+        self._ensure_ds_engine_module()
+
         with torch.autocast(device_type=device_name, dtype=self.autocast_dtype):
-            raw_output = self.ds_engine(
+            raw_output = self.module(
                 **model_inputs,
                 use_cache=False,
             )
