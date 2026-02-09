@@ -202,7 +202,7 @@ class TaskRunner:
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
-        
+
         if config.reward.reward_model.enable_resource_pool:
             if config.reward.reward_model.n_gpus_per_node <= 0:
                 raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")

@@ -162,7 +162,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_rm:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward.reward_model)
+            rm_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.RewardModel], config=self.config.reward.reward_model
+            )
             self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
 
     def _init_worker_groups(self):
