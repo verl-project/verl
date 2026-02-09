@@ -17,6 +17,7 @@
 import torch
 
 from verl.utils.megatron_utils import unwrap_model
+from verl.workers.config import MtpConfig
 
 from .util import (
     postprocess_bshd,
@@ -41,6 +42,7 @@ def model_forward_gen(vision_model: bool = False):
         logits_processor_args: dict = None,
         value_model=False,
         data_format: str = "thd",
+        mtp_config: MtpConfig = None,
     ):
         """Forward pass for models with sequence packing."""
         assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
@@ -65,9 +67,18 @@ def model_forward_gen(vision_model: bool = False):
         batch_size, seq_len = attention_mask.shape[:2]
         if data_format == "thd":
             input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(
-                input_ids, attention_mask, pre_process=pre_process, use_fp8_padding=use_fp8_padding
+                input_ids, attention_mask, pre_process=pre_process or post_process, use_fp8_padding=use_fp8_padding
             )
             input_ids_rmpad = input_ids_rmpad.contiguous()
+
+            # when pp > 1 and processor is not None, we need to pass the labels and loss_mask to the model
+            if mtp_config and mtp_config.enable_train and post_process:
+                args = {
+                    k: preprocess_packed_seqs(v, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding)[0]
+                    for k, v in logits_processor_args.items()
+                }
+                model_kwargs["labels"] = args["label"].contiguous()
+                model_kwargs["loss_mask"] = args["label_mask"].contiguous()
 
             input_args = dict(
                 input_ids=input_ids_rmpad,
@@ -86,6 +97,7 @@ def model_forward_gen(vision_model: bool = False):
                 input_args["attention_mask"] = attention_mask
 
             output_orig = model(**input_args)
+
             if post_process and logits_processor is not None:
                 args = {
                     k: preprocess_packed_seqs(v, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding)[0]
@@ -156,6 +168,7 @@ def gptmodel_forward_no_padding(
     vision_model=False,
     pad_token_id=None,
     data_format: str = "thd",
+    enable_mtp: bool = False,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -177,6 +190,16 @@ def gptmodel_forward_no_padding(
     if data_format == "thd":
         input_ids_rmpad, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=pre_process)
         input_ids_rmpad = input_ids_rmpad.contiguous()
+
+        if enable_mtp and post_process:
+            args = {
+                k: preprocess_thd_no_padding(v, pre_process=True, need_roll=(k == "label" or k == "loss_mask"))[0]
+                for k, v in logits_processor_args.items()
+            }
+            model_kwargs["labels"] = args["label"].contiguous()
+            model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
+        if logits_processor_args and "loss_mask" in logits_processor_args:
+            logits_processor_args.pop("loss_mask")
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         attention_mask = None
@@ -221,6 +244,17 @@ def gptmodel_forward_no_padding(
         input_ids_bshd, attention_mask_bshd, position_ids_bshd = preprocess_bshd_no_padding(
             input_ids, pre_process=pre_process
         )
+
+        if enable_mtp and post_process:
+            args = {
+                k: preprocess_bshd_no_padding(v, pre_process=True, need_roll=(k == "label" or k == "loss_mask"))[0]
+                for k, v in logits_processor_args.items()
+            }
+            model_kwargs["labels"] = args["label"].contiguous()
+            model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
+        if logits_processor_args and "loss_mask" in logits_processor_args:
+            logits_processor_args.pop("loss_mask")
+
         output_orig = model(
             input_ids=input_ids_bshd,
             attention_mask=attention_mask_bshd,

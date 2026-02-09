@@ -43,11 +43,11 @@ on:
     paths:
       - "**/*.py"
       # Other entrypoints
-      - "!verl/trainer/fsdp_sft_trainer.py"
-      # Recipes
-      - "!recipe/**"
-      # FSDP
+      - "!verl/trainer/fsdp_sft_trainer.py" # FSDP
       - "!verl/workers/**/*dp_*.py"
+      - "!verl/utils/fsdp_utils.py"
+      - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
+      - "!verl/model_merger/fsdp_model_merger.py"
   pull_request:
     branches:
       - main
@@ -62,11 +62,11 @@ on:
       - "!examples/**"
       - "!tests/**"
       - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py"
-      # Recipes
-      - "!recipe/**"
-      # FSDP
+      - "!verl/trainer/fsdp_sft_trainer.py" # FSDP
       - "!verl/workers/**/*dp_*.py"
+      - "!verl/utils/fsdp_utils.py"
+      - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
+      - "!verl/model_merger/fsdp_model_merger.py"
       # Entrypoints
       - "verl/worksers/rollout/sglang_rollout/*"
       - ".github/workflows/e2e_ppo_trainer_megatron_sglang.yml"
@@ -86,12 +86,12 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl055.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl056.latest"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -122,7 +122,8 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install --no-deps -e .[test]
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -168,7 +169,8 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install --no-deps -e .[test]
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -188,11 +190,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs:
-      [
-        setup,
-        e2e_ppo_trainer_megatron-deepseek,
-        e2e_ppo_trainer_megatron-qwen3,
-      ]
+      [setup, e2e_ppo_trainer_megatron-deepseek, e2e_ppo_trainer_megatron-qwen3]
     if: always()
     steps:
       - id: destroy-runner

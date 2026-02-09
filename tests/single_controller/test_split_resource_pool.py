@@ -26,6 +26,7 @@ from verl.single_controller.ray.base import (
     RayWorkerGroup,
     split_resource_pool,
 )
+from verl.utils.device import get_device_name, get_nccl_backend
 
 
 @ray.remote
@@ -33,12 +34,12 @@ class Actor(Worker):
     def __init__(self, worker_id) -> None:
         super().__init__()
         self.worker_id = worker_id
-        self.temp_tensor = torch.rand(4096, 4096).to("cuda")
+        self.temp_tensor = torch.rand(4096, 4096).to(get_device_name())
 
         if not torch.distributed.is_initialized():
             rank = int(os.environ.get("RANK", 0))
             world_size = int(os.environ.get("WORLD_SIZE", 1))
-            torch.distributed.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+            torch.distributed.init_process_group(backend=get_nccl_backend(), world_size=world_size, rank=rank)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def add(self, data: DataProto):
@@ -50,19 +51,17 @@ def test_split_resource_pool_with_split_size():
     ray.init()
     # assume we have 2 nodes, with 4 GPUs each
     global_resource_pool = RayResourcePool(process_on_nodes=[4, 4])
-    global_resource_pool.get_placement_groups()
+    global_resource_pool.get_placement_groups(device_name=get_device_name())
 
     # first 4 gpus for actor_1, last 4 gpus for actor_2
     actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(resource_pool=global_resource_pool, split_size=4)
     actor_cls_1 = RayClassWithInitArgs(cls=Actor, worker_id=0)
     actor_cls_2 = RayClassWithInitArgs(cls=Actor, worker_id=100)
     actor_worker_1 = RayWorkerGroup(
-        resource_pool=actor_1_resource_pool,
-        ray_cls_with_init=actor_cls_1,
+        resource_pool=actor_1_resource_pool, ray_cls_with_init=actor_cls_1, device_name=get_device_name()
     )
     actor_worker_2 = RayWorkerGroup(
-        resource_pool=actor_2_resource_pool,
-        ray_cls_with_init=actor_cls_2,
+        resource_pool=actor_2_resource_pool, ray_cls_with_init=actor_cls_2, device_name=get_device_name()
     )
     assert actor_worker_1.world_size == 4
     assert actor_worker_2.world_size == 4
@@ -80,7 +79,7 @@ def test_split_resource_pool_with_split_size_list():
     ray.init()
     # assume we have 4 nodes, with 2 GPUs each
     global_resource_pool = RayResourcePool(process_on_nodes=[2, 2, 2, 2])
-    global_resource_pool.get_placement_groups()
+    global_resource_pool.get_placement_groups(device_name=get_device_name())
 
     # first 2 gpus for actor_1, last 6 gpus for actor_2
     actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(
@@ -90,12 +89,10 @@ def test_split_resource_pool_with_split_size_list():
     actor_cls_1 = RayClassWithInitArgs(cls=Actor, worker_id=0)
     actor_cls_2 = RayClassWithInitArgs(cls=Actor, worker_id=100)
     actor_worker_1 = RayWorkerGroup(
-        resource_pool=actor_1_resource_pool,
-        ray_cls_with_init=actor_cls_1,
+        resource_pool=actor_1_resource_pool, ray_cls_with_init=actor_cls_1, device_name=get_device_name()
     )
     actor_worker_2 = RayWorkerGroup(
-        resource_pool=actor_2_resource_pool,
-        ray_cls_with_init=actor_cls_2,
+        resource_pool=actor_2_resource_pool, ray_cls_with_init=actor_cls_2, device_name=get_device_name()
     )
     assert actor_worker_1.world_size == 2
     assert actor_worker_2.world_size == 6
@@ -116,7 +113,7 @@ def test_split_resource_pool_with_split_size_list_cross_nodes():
     ray.init()
     # assume we have 4 nodes, with 2 GPUs each
     global_resource_pool = RayResourcePool(process_on_nodes=[4, 4])
-    global_resource_pool.get_placement_groups()
+    global_resource_pool.get_placement_groups(device_name=get_device_name())
 
     # first 2 gpus for actor_1, last 6 gpus for actor_2
     actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(
@@ -126,12 +123,10 @@ def test_split_resource_pool_with_split_size_list_cross_nodes():
     actor_cls_1 = RayClassWithInitArgs(cls=Actor, worker_id=0)
     actor_cls_2 = RayClassWithInitArgs(cls=Actor, worker_id=100)
     actor_worker_1 = RayWorkerGroup(
-        resource_pool=actor_1_resource_pool,
-        ray_cls_with_init=actor_cls_1,
+        resource_pool=actor_1_resource_pool, ray_cls_with_init=actor_cls_1, device_name=get_device_name()
     )
     actor_worker_2 = RayWorkerGroup(
-        resource_pool=actor_2_resource_pool,
-        ray_cls_with_init=actor_cls_2,
+        resource_pool=actor_2_resource_pool, ray_cls_with_init=actor_cls_2, device_name=get_device_name()
     )
 
     assert actor_worker_1.world_size == 2
@@ -154,7 +149,7 @@ def test_split_resource_pool_with_split_twice():
 
     # assume we have 4 nodes, with 2 GPUs each
     global_resource_pool = RayResourcePool(process_on_nodes=[2, 2, 2, 2])
-    global_resource_pool.get_placement_groups()
+    global_resource_pool.get_placement_groups(device_name=get_device_name())
 
     # actors with [2, 1, 1, 1, 1, 2] (split twice)
     rp_1, rp_2, rp_3 = split_resource_pool(
@@ -177,10 +172,7 @@ def test_split_resource_pool_with_split_twice():
     ]
     for idx, rp in enumerate(fp_list):
         actor_cls = RayClassWithInitArgs(cls=Actor, worker_id=idx * 100)
-        actor_worker = RayWorkerGroup(
-            resource_pool=rp,
-            ray_cls_with_init=actor_cls,
-        )
+        actor_worker = RayWorkerGroup(resource_pool=rp, ray_cls_with_init=actor_cls, device_name=get_device_name())
         data = DataProto.from_dict({"a": torch.zeros(4)})
         actor_output = actor_worker.add(data)
         assert actor_worker.world_size == correct_world_size[idx]

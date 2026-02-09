@@ -70,6 +70,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         checkpoint_contents DictConfig: Configuration for checkpoint contents.
             - 'load': Components to load; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
             - 'save': Components to save; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
+        trust_remote_code: Whether to trust_remote_code when loading the model configuration
     """
 
     def __init__(
@@ -79,6 +80,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         processing_class: PreTrainedTokenizer | ProcessorMixin = None,
         checkpoint_config: DictConfig = None,
+        trust_remote_code: bool = False,
         **kwargs,
     ):
         if processing_class is None and "tokenizer" in kwargs:
@@ -94,6 +96,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             processing_class=processing_class,
             checkpoint_config=checkpoint_config,
         )
+        self.trust_remote_code = trust_remote_code
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
@@ -201,17 +204,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # record the previous global step
         self.previous_global_step = global_step
 
-        # remove previous local_path, only rank 0 should do this
-        if (
-            self.rank == 0
-            and max_ckpt_to_keep
-            and isinstance(max_ckpt_to_keep, int)
-            and max_ckpt_to_keep > 0
-            and len(self.previous_saved_paths) >= max_ckpt_to_keep
-        ):
-            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
-            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
-            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
+        if self.rank == 0:
+            self.ensure_checkpoint_capacity(max_ckpt_to_keep)
 
         local_path = local_mkdir_safe(local_path)
         torch.distributed.barrier()
@@ -342,7 +336,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
 
                 with init_empty_weights():
-                    save_model = auto_model_cls.from_config(model_config, torch_dtype=torch.bfloat16)
+                    save_model = auto_model_cls.from_config(
+                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=self.trust_remote_code
+                    )
+
                 save_model.to_empty(device="cpu")
 
                 if save_model.can_generate():
@@ -367,4 +364,5 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             # wait for rank0 to dump hf_model to local
             torch.distributed.barrier()
 
-        self.previous_saved_paths.append(local_path)
+        if self.rank == 0:
+            self.register_checkpoint(local_path, max_ckpt_to_keep)

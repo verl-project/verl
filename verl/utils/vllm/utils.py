@@ -15,7 +15,12 @@
 
 from msgspec import field
 from packaging import version as vs
-from vllm.lora.models import LoRAModel
+
+try:
+    from vllm.lora.lora_model import LoRAModel
+except ImportError:
+    from vllm.lora.models import LoRAModel
+
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -75,36 +80,37 @@ class VLLMHijack:
                 if hasattr(model, "hf_to_vllm_mapper") and model.hf_to_vllm_mapper is not None:
                     hf_to_vllm_mapper = model.hf_to_vllm_mapper
 
+                lora_request_kwargs = {
+                    "peft_helper": peft_helper,
+                    "lora_model_id": lora_request.lora_int_id,
+                    "device": "cpu",
+                    "dtype": self.lora_config.lora_dtype,
+                    "weights_mapper": hf_to_vllm_mapper,
+                }
+                if hasattr(self, "embedding_padding_modules"):
+                    lora_request_kwargs["embedding_modules"] = self.embedding_modules
+                    lora_request_kwargs["embedding_padding_modules"] = self.embedding_padding_modules
+                else:
+                    lora_request_kwargs["model_vocab_size"] = self.vocab_size
+                if hasattr(self.lora_config, "lora_extra_vocab_size"):
+                    lora_request_kwargs["target_embedding_padding"] = (
+                        self.vocab_size + self.lora_config.lora_extra_vocab_size
+                    )
                 if isinstance(lora_request, TensorLoRARequest):
                     lora = self._lora_model_cls.from_lora_tensors(
-                        lora_model_id=lora_request.lora_int_id,
                         tensors=lora_tensors,
-                        peft_helper=peft_helper,
-                        device="cpu",
-                        dtype=self.lora_config.lora_dtype,
-                        embeddings=None,
-                        target_embedding_padding=self.vocab_size + self.lora_config.lora_extra_vocab_size,
-                        embedding_modules=self.embedding_modules,
-                        embedding_padding_modules=self.embedding_padding_modules,
-                        weights_mapper=hf_to_vllm_mapper,
+                        **lora_request_kwargs,
                     )
                 else:
                     lora = self._lora_model_cls.from_local_checkpoint(
                         lora_path,
                         expected_lora_modules,
-                        peft_helper=peft_helper,
-                        lora_model_id=lora_request.lora_int_id,
-                        device="cpu",
-                        dtype=self.lora_config.lora_dtype,
-                        target_embedding_padding=self.vocab_size + self.lora_config.lora_extra_vocab_size,
-                        embedding_modules=self.embedding_modules,
-                        embedding_padding_modules=self.embedding_padding_modules,
-                        weights_mapper=hf_to_vllm_mapper,
+                        **lora_request_kwargs,
                     )
-            except Exception as e:
-                raise e
+            except Exception:
+                raise
 
-            if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
+            if getattr(lora, "extra_vocab_size", 0) > getattr(self.lora_config, "lora_extra_vocab_size", 0):
                 raise ValueError(
                     f"LoRA added vocab size {lora.extra_vocab_size} is greater than lora_extra_vocab_size "
                     f"{self.lora_config.lora_extra_vocab_size}."

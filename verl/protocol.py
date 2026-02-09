@@ -810,7 +810,7 @@ class DataProto:
 
     def make_iterator(self, mini_batch_size, epochs, seed=None, dataloader_kwargs=None):
         r"""Make an iterator from the DataProto. This is built upon that TensorDict can be used as a normal Pytorch
-        dataset. See https://pytorch.org/tensordict/tutorials/data_fashion for more details.
+        dataset. See https://pytorch.org/tensordict/stable/tutorials/data_fashion for more details.
 
 
         Args:

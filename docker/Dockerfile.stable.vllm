@@ -1,87 +1,106 @@
-FROM vllm/vllm-openai:v0.11.0
+FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y \
+    git \
+    wget \
+    cmake \
+    build-essential \
+    libibverbs-dev \
+    libnuma-dev \
+    librdmacm-dev \
+    numactl \
+    software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa -y && \
+    apt-get update && \
+    apt-get install -y \
+    python3.12 \
+    python3.12-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN wget https://bootstrap.pypa.io/get-pip.py && \
+    python3.12 get-pip.py && \
+    rm get-pip.py
+
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python
+
+# use torch2.9.1+cudnn9.16 to avoid conflict
+RUN pip install torch==2.9.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
+RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1+cu129.dist-info/METADATA
+RUN pip install --no-deps --force-reinstall nvidia-cudnn-cu12==9.16.0.29
+
+RUN git clone --depth 1 -b v0.12.0 https://github.com/vllm-project/vllm.git && \
+    cd vllm && \
+    find requirements -name "*.txt" -print0 | xargs -0 sed -i '/torch/d' && \
+    pip install -r requirements/build.txt && \
+    pip install -e . --no-build-isolation --no-deps && \
+    pip install -r requirements/cuda.txt
 
 RUN pip install pybind11
 
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
-    apt-get -y install cudnn
+    apt-get -y install cudnn && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN pip install nvidia-mathdx
 
-RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
+RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
 
-RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 pip3 install --resume-retries 999 --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.8
+RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.10
 
-RUN pip install --upgrade --no-cache-dir transformers tokenizers
+RUN pip install --upgrade transformers tokenizers
 
 RUN pip install codetiming tensordict mathruler pylatexenc qwen_vl_utils
 
-RUN pip install flash_attn==2.8.1
+RUN pip install flash_attn==2.8.1 --no-build-isolation
 
-RUN apt update && apt install numactl
-
-RUN wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_5/nsight-systems-2025.5.1_2025.5.1.121-1_amd64.deb && \
-    apt-get update && apt-get install -y libxcb-cursor0
-
-RUN apt-get install -y ./nsight-systems-2025.5.1_2025.5.1.121-1_amd64.deb && \
+RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
+    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
+    apt-get update && apt-get install -y libxcb-cursor0 && \
+    apt-get install -y ./nsight-systems-${NSIGHT_VERSION}.deb && \
     rm -rf /usr/local/cuda/bin/nsys && \
-    ln -s /opt/nvidia/nsight-systems/2025.3.1/target-linux-x64/nsys  /usr/local/cuda/bin/nsys && \
+    ln -s /opt/nvidia/nsight-systems/2025.6.1/nsys  /usr/local/cuda/bin/nsys && \
     rm -rf /usr/local/cuda/bin/nsys-ui && \
-    ln -s /opt/nvidia/nsight-systems/2025.3.1/target-linux-x64/nsys-ui /usr/local/cuda/bin/nsys-ui && \
-    rm nsight-systems-2025.5.1_2025.5.1.121-1_amd64.deb
+    ln -s /opt/nvidia/nsight-systems/2025.6.1/nsys-ui /usr/local/cuda/bin/nsys-ui && \
+    rm nsight-systems-${NSIGHT_VERSION}.deb && \
+    rm -rf /var/lib/apt/lists/*
 
 # =========================
 # Install DeepEP
 # =========================
-# the dependency of IBGDA
-# RUN ln -s /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
-
 # Clone and build deepep and deepep-nvshmem
 WORKDIR /home/dpsk_a2a
-RUN git clone -b v2.3.1 https://github.com/NVIDIA/gdrcopy.git && \
-    git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout a84a248 && \
-    cd /home/dpsk_a2a && \
-    wget https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz && \
-    tar -xvf nvshmem_src_3.2.5-1.txz && mv nvshmem_src deepep-nvshmem && \
-    cd deepep-nvshmem && git apply /home/dpsk_a2a/DeepEP/third-party/nvshmem.patch && \
-    sed -i '16i#include <getopt.h>' /home/dpsk_a2a/deepep-nvshmem/examples/moe_shuffle.cu
+RUN git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
+    cd gdrcopy && \
+    make prefix=/usr/local lib_install && \
+    cd .. && rm -rf gdrcopy
 
-ENV CUDA_HOME=/usr/local/cuda
-# Set MPI environment variables. Having errors when not set.
-ENV CPATH=/usr/local/mpi/include:$CPATH
-ENV LD_LIBRARY_PATH=/usr/local/mpi/lib:$LD_LIBRARY_PATH
-ENV LD_LIBRARY_PATH=/usr/local/x86_64-linux-gnu:$LD_LIBRARY_PATH
-ENV GDRCOPY_HOME=/home/dpsk_a2a/gdrcopy
+ENV GDRCOPY_HOME=/usr/local
 
-# Build deepep-nvshmem
-WORKDIR /home/dpsk_a2a/deepep-nvshmem
-RUN NVSHMEM_SHMEM_SUPPORT=0 \
-    NVSHMEM_UCX_SUPPORT=0 \
-    NVSHMEM_USE_NCCL=0 \
-    NVSHMEM_MPI_SUPPORT=0 \
-    NVSHMEM_IBGDA_SUPPORT=1 \
-    NVSHMEM_PMIX_SUPPORT=0 \
-    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-    NVSHMEM_USE_GDRCOPY=1 \
-    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=/home/dpsk_a2a/deepep-nvshmem/install -DCMAKE_CUDA_ARCHITECTURES=90 && cd build && make install -j
+RUN git clone -b v1.2.1 https://github.com/deepseek-ai/DeepEP.git && \
+    export NVSHMEM_DIR=/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem && \
+    export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH" && \
+    export PATH="${NVSHMEM_DIR}/bin:$PATH" && \
+    cd ${NVSHMEM_DIR}/lib && \
+    ln -s libnvshmem_host.so.3 libnvshmem_host.so && \
+    cd /home/dpsk_a2a/DeepEP && \
+    python setup.py install
 
-RUN ln -s /usr/bin/python3 /usr/bin/python
-
-# Build deepep
-WORKDIR /home/dpsk_a2a/DeepEP
-ENV NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install
-RUN NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install python setup.py install
-
-
-RUN pip3 install --no-cache-dir --no-deps trl
+RUN pip3 install --no-deps trl
 
 RUN pip3 install nvtx matplotlib liger_kernel
 
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
 
-RUN pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.14.0rc7
+RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.15.0
 
-RUN pip install git+https://github.com/volcengine/verl.git@v0.6.0
+RUN pip install git+https://github.com/volcengine/verl.git@v0.6.0 && \
+    pip uninstall -y verl
 
-RUN pip uninstall -y verl
+RUN apt-get update && apt-get install -y curl \
+    && rm -rf /var/lib/apt/lists/*

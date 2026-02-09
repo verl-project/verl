@@ -1,5 +1,4 @@
 set -x
-export VLLM_ASCEND_ENABLE_NZ=0
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}  # TODO: change to Qwen3-0.6B when CI server is ready
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
@@ -31,6 +30,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enforce_eager=False \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
     critic.model.path="${MODEL_PATH}" \

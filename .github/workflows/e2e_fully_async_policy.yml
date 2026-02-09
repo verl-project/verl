@@ -29,7 +29,6 @@
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
 
-
 name: e2e_fully_async_policy
 
 on:
@@ -50,8 +49,7 @@ on:
       - "!tests/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
-      - "!recipe/**"
-      - "recipe/fully_async_policy/**"
+      - "verl/experimental/fully_async_policy"
   pull_request:
     branches:
       - main
@@ -65,10 +63,8 @@ on:
       - "!tests/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
-      # Other recipes
-      - "!recipe/**"
       # Home
-      - "recipe/fully_async_policy"
+      - "verl/experimental/fully_async_policy"
       # Entrypoints
       - ".github/workflows/e2e_fully_async_policy.yml"
       - "examples/data_preprocess/gsm8k.py"
@@ -84,13 +80,12 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm011.dev7"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
-  TRANSFORMERS_VERSION: "4.56.2"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -107,7 +102,7 @@ jobs:
   # Test FSDP2 strategy
   e2e_fully_async_policy_fsdp2:
     needs: setup
-    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 10 # Increase timeout for async training
     env:
       HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
@@ -122,8 +117,8 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install --no-deps -e .[test,gpu]
-          pip3 install transformers==$TRANSFORMERS_VERSION
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -135,7 +130,7 @@ jobs:
   # Test Megatron strategy
   e2e_fully_async_policy_megatron:
     needs: setup
-    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 10 # Increase timeout for async training
     env:
       HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
@@ -150,8 +145,8 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install --no-deps -e .[test,gpu]
-          pip3 install transformers==$TRANSFORMERS_VERSION
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -162,11 +157,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs:
-      [
-        setup,
-        e2e_fully_async_policy_fsdp2
-      ]
+    needs: [setup, e2e_fully_async_policy_fsdp2]
     if: always()
     steps:
       - id: destroy-runner

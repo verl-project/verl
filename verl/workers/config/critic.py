@@ -248,3 +248,5 @@ class FSDPCriticModelCfg(BaseModelConfig):
     lora_rank: int = 0
     lora_alpha: int = 16
     target_modules: str | list[str] = "all-linear"
+    # TiledMLP configuration for memory-efficient MLP computation
+    tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})

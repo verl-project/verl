@@ -1182,7 +1182,7 @@ def test_serialize_deserialize_tensordict_with_device():
     tensor2 = torch.randint(0, 10, (*batch_size, 2))
 
     # Create TensorDict with device information
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
     original_tensordict = TensorDict({"tensor1": tensor1, "tensor2": tensor2}, batch_size=batch_size, device=device)
 
     # Serialize

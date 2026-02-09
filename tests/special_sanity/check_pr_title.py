@@ -19,7 +19,7 @@ import re
 pr_title = os.environ.get("PR_TITLE", "").strip()
 
 # Define rules
-allowed_modules = ["fsdp", "megatron", "sglang", "vllm", "rollout", "trainer"]
+allowed_modules = ["fsdp", "megatron", "veomni", "sglang", "vllm", "trtllm", "rollout", "trainer"]
 allowed_modules += ["tests", "training_utils", "recipe", "hardware", "deployment"]
 allowed_modules += ["ray", "worker", "single_controller", "misc", "docker", "ci"]
 allowed_modules += ["perf", "model", "algo", "env", "tool", "ckpt", "doc", "data", "cfg", "reward"]

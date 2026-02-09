@@ -1,7 +1,7 @@
 # Target class for this configuration
 _target_: verl.workers.config.RolloutConfig
 
-# actor_rollout_ref.rollout.name: hf/vllm/sglang. The default value will be removed in the future
+# actor_rollout_ref.rollout.name: hf/vllm/sglang/trtllm. The default value will be removed in the future
 name: ???
 
 # sync: LLM, async: AsyncLLM
@@ -28,7 +28,7 @@ response_length: ${oc.select:data.max_response_length,512}
 # Rollout model parameters type. Align with actor model's FSDP/Megatron type.
 dtype: bfloat16
 
-# Fraction of GPU memory used by vLLM/SGLang for KV cache.
+# Fraction of GPU memory used by vLLM/SGLang/TRTLLM for KV cache.
 gpu_memory_utilization: 0.5
 
 # Whether to ignore EOS and continue generating after EOS is hit.
@@ -73,6 +73,12 @@ enable_chunked_prefill: True
 # Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
 enable_prefix_caching: True
 
+# logprobs mode for rollout logprobs
+logprobs_mode: processed_logprobs
+
+# scheduling policy for vllm rollout
+scheduling_policy: fcfs
+
 # Which loader to use for rollout model weights: dummy, hf, megatron, etc.
 # safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
 load_format: dummy
@@ -110,7 +116,7 @@ over_sample_rate: 0
 # This is only effective for SGLang rollout.
 multi_stage_wake_up: false
 
-# Extra inference engine arguments (vllm, sglang), please refer vllm/sglang official doc for detail
+# Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail
 engine_kwargs:
 
   # vllm engine config
@@ -118,6 +124,9 @@ engine_kwargs:
 
   # sglang engine config
   sglang: {}
+
+  # trtllm engine config
+  trtllm: {}
 
 # Sampling parameters used during validation.
 val_kwargs:
@@ -208,7 +217,7 @@ agent:
   # default agent loop to use if `agent_name` not set in RL dataset
   default_agent_loop: single_turn_agent
 
-  # custom agent loop config path, which should contain list of configs to intialize AgentLoop instances.
+  # custom agent loop config path, which should contain list of configs to initialize AgentLoop instances.
   # https://hydra.cc/docs/advanced/instantiate_objects/overview/
   #
   # - name: react_agent
@@ -232,19 +241,31 @@ agent:
     # Class name of the custom async server class (e.g. AsyncvLLMServer)
     name: null
 
-# Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
-# This parameter controls the maximum payload size for a single weight update request.
-# Reference: https://github.com/volcengine/verl/pull/2418
-# Currently only supported in SGLang rollout implementations
-# Larger values may improve throughput but increase memory overhead
-# Detailed performance comparison:
-# https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/169#issuecomment-3070686720
-# Default value (512MB) is optimized for typical GPU memory configurations
-# For the best performance of `rebuild_cuda_tensor`, it is recommended to:
-# 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
-# 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
-# when using Tensor Parallelism (TP) >= 8.
-update_weights_bucket_megabytes: 512
+# Checkpoint Engine config for update weights from trainer to rollout
+checkpoint_engine:
+
+  # Target class for checkpoint engine config
+  _target_: verl.workers.config.CheckpointEngineConfig
+
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  backend: naive
+
+  # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
+  # This parameter controls the maximum payload size for a single weight update request.
+  # Reference: https://github.com/volcengine/verl/pull/2418
+  # Currently only supported in SGLang rollout implementations
+  # Larger values may improve throughput but increase memory overhead
+  # Detailed performance comparison:
+  # https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/169#issuecomment-3070686720
+  # Default value (512MB) is optimized for typical GPU memory configurations
+  # For the best performance of `rebuild_cuda_tensor`, it is recommended to:
+  # 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
+  # 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+  # when using Tensor Parallelism (TP) >= 8.
+  update_weights_bucket_megabytes: 2048
+
+  # Additional keyword arguments to pass to the checkpoint engine constructor
+  engine_kwargs: {}
 
 # trace rollout data
 trace:
@@ -282,17 +303,17 @@ skip_tokenizer_init: True
 enable_rollout_routing_replay: False
 
 
-# profile the rollout model in `generate_sequence` 
+# profile the rollout model in `generate_sequence`
 profiler:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.utils.profiler.ProfilerConfig
 
   # profiler tool, default same as profiler.tool in global config
-  # choices: nsys, npu, torch
+  # choices: npu, torch
   tool: ${oc.select:global_profiler.tool,null}
 
-  # whether enable profile on ref
+  # whether enable profile on rollout
   enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
 
   # Whether to profile all ranks.
@@ -305,7 +326,39 @@ profiler:
   save_path: ${oc.select:global_profiler.save_path,null}
 
   # specific tool config
-  tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
+  tool_config:
+
+    # npu config
+    npu:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NPUToolConfig
+
+      # Contents to profile, can be empty
+      # options: npu, cpu, memory, shapes, module, stack
+      contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+
+      # Collection level, optional values: level_none, level0, level1, level2.
+      level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+
+      # Whether to automatically parse the data.
+      analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+
+    # torch profiler config
+    torch:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
 
 # prometheus configuration for vllm/sglang server mode
 prometheus:
@@ -325,3 +378,11 @@ prometheus:
   # Specify served_model_name to avoid displaying overly long model paths in Grafana
   served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
 
+# type of quantization in vllm, currently support fp8 and torchao
+quantization: null
+
+# extra quantization information serialized in a config file, e.g. torchao_config.json
+quantization_config_file: null
+
+# MTP configuration, reuse model configuration
+mtp: ${oc.select:actor_rollout_ref.model.mtp, null}

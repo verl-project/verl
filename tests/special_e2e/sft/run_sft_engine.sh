@@ -27,7 +27,7 @@ ckpts_home=${ckpts_home:-~/verl/test/gsm8k-sft-${backend}}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 SP_SIZE=${SP_SIZE:-1}
 FSDP_SIZE=${FSDP_SIZE:-${NUM_GPUS}}
@@ -56,6 +56,20 @@ FSDP_ENGINE_CONFIG="\
     engine.strategy=${FSDP_STRATEGY} \
     engine.fsdp_size=${FSDP_SIZE}"
 
+VEOMNI_ENGINE_CONFIG="\
+    engine=${backend} \
+    optim=${backend} \
+    optim.lr=1e-5 \
+    optim.lr_warmup_steps_ratio=0.2 \
+    optim.weight_decay=0.1 \
+    optim.betas="[0.9,0.95]" \
+    optim.clip_grad=1.0 \
+    optim.lr_min=1e-6 \
+    optim.lr_scheduler_type=cosine \
+    engine.ulysses_parallel_size=${SP_SIZE} \
+    engine.data_parallel_mode=${FSDP_STRATEGY} \
+    engine.data_parallel_size=${FSDP_SIZE}"
+
 
 MEGATRON_ENGINE_CONFIG="\
     engine=${backend} \
@@ -71,13 +85,18 @@ MEGATRON_ENGINE_CONFIG="\
     engine.tensor_model_parallel_size=${TP_SIZE} \
     engine.pipeline_model_parallel_size=${PP_SIZE} \
     engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
-    engine.context_parallel_size=${CP_SIZE}
+    engine.context_parallel_size=${CP_SIZE} \
+    +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
     engine.use_mbridge=True"
 
 if [ "$backend" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
     echo "Using fsdp engine"
     exp_name=gsm8k-${backend}-${FSDP_STRATEGY}-sp${SP_SIZE}-fsdp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+elif [ "$backend" = "veomni" ]; then
+    ENGINE_CONFIG="$VEOMNI_ENGINE_CONFIG"
+    echo "Using veomni engine"
+    exp_name=gsm8k-${backend}-sp${SP_SIZE}-fsdp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
 else
     ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
     echo "Using megatron engine"

@@ -1,0 +1,84 @@
+# Pull base image
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.3.rc1-910b-ubuntu22.04-py3.11
+
+ARG ASCEND_CANN_PATH="/usr/local/Ascend"
+ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+ARG PTA_BASE_VERSION="torch_npu-2.7.1.post2-cp311-cp311-manylinux_2_28"
+ARG PTA_URL="https://gitcode.com/Ascend/pytorch/releases/download/v7.3.0-pytorch2.7.1"
+
+# Prepare required system dependencies
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential net-tools iputils-ping && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    pip config set global.index-url ${PIP_INDEX_URL} && \
+    pip config set install.trusted-host mirrors.aliyun.com && \
+    pip install --upgrade pip setuptools packaging && \
+    pip cache purge
+
+# Prepare repositories with low update frequency
+RUN ARCH=$(uname -m) && \
+    echo "[LOG INFO] Detected architecture: $ARCH" && \
+    # Set extra pip index for x86_64 platform
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
+    fi && \
+    # Clone libs
+    git clone --depth 1 --branch v0.5.8 https://github.com/sgl-project/sglang.git && \
+    git clone https://github.com/sgl-project/sgl-kernel-npu.git && cd sgl-kernel-npu && git checkout 46b73de && cd .. && \
+    git clone https://gitcode.com/Ascend/MindSpeed.git && \
+    cd MindSpeed && git checkout f2b0977e && cd .. 
+
+# Install repositories with low update frequency
+RUN cd sglang && \
+    # Install sglang
+    mv python/pyproject.toml python/pyproject.toml.backup && \
+    mv python/pyproject_other.toml python/pyproject.toml && \
+    pip install -e "python[srt_npu]" && \
+    pip install torch==2.7.1 torchvision==0.22.1 && \
+    # Install torch_npu
+    ARCH=$(uname -m) && wget ${PTA_URL}/${PTA_BASE_VERSION}_${ARCH}.whl && pip install ${PTA_BASE_VERSION}_${ARCH}.whl && \
+    echo "[LOG INFO] Torch_npu version is: ${PTA_BASE_VERSION}_${ARCH}.whl" && \
+    cd .. 
+
+# Install sgl-kernel-npu
+RUN ARCH=$(uname -m) && \
+    # Export and source env
+    export LD_LIBRARY_PATH=${ASCEND_CANN_PATH}/ascend-toolkit/8.3.RC1/${ARCH}-linux/devlib/linux/${ARCH}:$LD_LIBRARY_PATH && \
+    source ${ASCEND_CANN_PATH}/ascend-toolkit/set_env.sh && \
+    source ${ASCEND_CANN_PATH}/nnal/atb/set_env.sh && \
+    pip install pybind11 && \
+    cd sgl-kernel-npu && \
+    bash build.sh  && \
+    pip install output/torch_memory_saver*.whl && \
+    pip install output/sgl_kernel_npu*.whl && \
+    # Deep_ep package is compiled for A3 by default; Recompile in deepep2 mode for A2, following https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/deep_ep/README.md.
+    bash build.sh -a deepep2 && \
+    pip install output/deep_ep*.whl && \
+    cd "$(pip show deep-ep | grep -E '^Location:' | awk '{print $2}')" && ln -s deep_ep/deep_ep_cpp*.so && cd - && \
+    cd ..
+
+# Install MindSpeed & Megatron
+RUN pip install -e MindSpeed && \
+    pip install git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.12.1 && \
+    # Remove existing triton or triton-ascend installed by some third-party packages
+    pip uninstall -y triton timm && \
+    # Install mbridge
+    pip install mbridge && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+# Prepare and install verl (update frequently)
+RUN git clone --recursive https://github.com/volcengine/verl.git && \
+    cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
+    pip install ray==2.46.0 click==8.2.1 cachetools && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+# Show install results
+RUN pip list
+
+# Setting Default Commands
+CMD ["/bin/bash"]

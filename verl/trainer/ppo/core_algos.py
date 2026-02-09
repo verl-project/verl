@@ -105,6 +105,8 @@ class AdvantageEstimator(str, Enum):
     GPG = "gpg"
     RLOO_VECTORIZED = "rloo_vectorized"
     GRPO_VECTORIZED = "grpo_vectorized"
+    OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
+    TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -346,7 +348,7 @@ def compute_grpo_vectorized_outcome_advantage(
     with torch.no_grad():
         scores = token_level_rewards.sum(dim=-1)
         g = as_torch_index(index, device=scores.device)
-        mean_g, std_g, _ = group_mean_std(scores, g, eps=epsilon)
+        mean_g, std_g, _ = group_mean_std(scores, g, eps=epsilon, device=scores.device)
         if norm_adv_by_std_in_grpo:
             scalars = (scores - mean_g[g]) / (std_g[g] + epsilon)
         else:
@@ -753,6 +755,257 @@ def compute_rloo_vectorized_outcome_advantage(
     return adv, adv
 
 
+@register_adv_est(AdvantageEstimator.OPTIMAL_TOKEN_BASELINE)
+def compute_optimal_token_baseline_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    old_log_probs: torch.Tensor,
+    sum_pi_squared: torch.Tensor,
+    rollout_is_weights: torch.Tensor = None,
+    handle_zero_tail: bool = False,
+    epsilon: float = 1e-8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantages using Optimal Token Baseline (OTB).
+
+    Unlike the group mean based baseline which uses a single baseline per trajectory,
+    this computes a unique baseline for each timestep using cumulative path variance.
+
+    Theory:
+        For each timestep t in each prompt group:
+            B_t* = E[G_t × W_t] / E[W_t]
+        where W_t = Σ_{j=1}^t ||s_j||² (cumulative path-variance proxy)
+        and ||s_j||² = 1 - 2π_j + Σπ²
+
+    The cumulative sum W_t captures the "realized energy" of trajectory has been up to timestep t,
+    giving higher weight to predicting rewards on high-variance paths.
+
+    Args:
+        token_level_rewards: Rewards at each token position [shape: (bs, response_length)]
+        response_mask: Binary mask for valid tokens (1) vs padding (0) [shape: (bs, response_length)]
+        index: Prompt indices for grouping trajectories from same prompt [shape: (bs,)]
+        old_log_probs: Log probabilities from training policy during generation [shape: (bs, response_length)]
+        sum_pi_squared: Sum of squared probabilities over vocabulary Σπ² [shape: (bs, response_length)]
+        rollout_is_weights: Pre-computed IS weights for W correction [shape: (bs, response_length)],
+            None if not using IS
+        handle_zero_tail: If True, zero baselines will be set in the portion of the longest trajectory
+            that extends beyond the second-longest trajectory in the prompt group.
+            Default: False
+        epsilon: Small constant for numerical stability (default: 1e-8)
+
+    Returns:
+        advantages: OTB advantage estimates [shape: (bs, response_length)]
+        returns: Cumulative rewards (returns) from each position [shape: (bs, response_length)]
+
+    Note on Rollout Importance Sampling:
+        When rollout_is_weights is provided, W_t is scaled by ρ̄²(t) to minimize MSE under truncated IS:
+            B_t* = Σ[G_t × ρ̄²(t) × W_t] / Σ[ρ̄²(t) × W_t]
+    """
+    with torch.no_grad():
+        batch_size, seq_len = token_level_rewards.shape
+        device = token_level_rewards.device
+
+        # Compute returns (reward-to-go) for each timestep
+        returns = (token_level_rewards * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+
+        # Step 1: Compute w_per_timestep = 1 - 2π_t + Σπ²)
+        pi_t = torch.exp(old_log_probs)
+        w_per_timestep = 1 - 2 * pi_t + sum_pi_squared
+
+        # Step 2: Apply rollout importance sampling correction (if enabled)
+        if rollout_is_weights is not None:
+            # Scale W by ρ̄² to minimize MSE under truncated IS
+            w_per_timestep = w_per_timestep * (rollout_is_weights**2)
+
+        # Step 3: Compute cumulative path-variance proxy: W_t = Σ_{j=1}^t w_j
+        # This measures accumulated variance from the start of the trajectory up to timestep t
+        w_cumulative = (w_per_timestep * response_mask).cumsum(dim=-1)
+
+        # Group trajectories by prompt
+        prompt_groups = defaultdict(list)
+        for i in range(batch_size):
+            prompt_groups[index[i]].append(i)
+
+        # Initialize baselines tensor [batch_size, seq_len]
+        baselines = torch.zeros_like(returns)
+
+        # Compute per-step baseline for each prompt group
+        for _, trajectory_indices in prompt_groups.items():
+            N = len(trajectory_indices)
+            if N == 1:
+                # Single trajectory - no baseline (advantage = return)
+                continue
+
+            traj_idx = torch.tensor(trajectory_indices, device=device)
+
+            # Extract group data [N, seq_len]
+            returns_group = returns[traj_idx]
+            w_cumulative_group = w_cumulative[traj_idx]
+            mask_group = response_mask[traj_idx]
+
+            # Compute per-timestep baseline: B_t = Σ[G_t × W_t] / Σ[W_t]
+            # where W_t = Σ_{j=1}^t ||s_j||² (cumulative path variance)
+            # Shape: [seq_len]
+            numerator = (returns_group * w_cumulative_group * mask_group).sum(dim=0)  # Sum over trajectories
+            denominator = (w_cumulative_group * mask_group).sum(dim=0) + epsilon
+
+            baseline_per_step = numerator / denominator  # [seq_len]
+
+            # Assign to all trajectories in this group
+            baselines[traj_idx] = baseline_per_step.unsqueeze(0).expand(N, -1)
+
+            if handle_zero_tail:
+                # Optionally zero out the portion of the longest trajectory that extends
+                # beyond the second-longest trajectory in the prompt group.
+                response_lengths = mask_group.sum(dim=-1)
+                sorted_lengths, _ = torch.sort(response_lengths)
+                max_length = int(sorted_lengths[-1].item())
+                second_max_length = int(sorted_lengths[-2].item())
+                max_length_idx = (response_lengths == max_length).nonzero(as_tuple=True)[0]
+                if max_length_idx.numel() == 1 and max_length > second_max_length:
+                    max_length_traj_idx = trajectory_indices[int(max_length_idx[0])]
+                    baselines[max_length_traj_idx, second_max_length:] = 0.0
+
+        # Compute advantages: A_t = G_t - B_t
+        advantages = (returns - baselines) * response_mask
+
+    return advantages, returns
+
+
+@register_adv_est(AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE)
+def compute_multi_turn_optimal_token_baseline_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    old_log_probs: torch.Tensor,
+    sum_pi_squared: torch.Tensor,
+    rollout_is_weights: torch.Tensor = None,
+    handle_zero_tail: bool = True,
+    epsilon: float = 1e-8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantages using Optimal Token Baseline (OTB).
+
+    Unlike the group mean based baseline which uses a single baseline per trajectory,
+    this computes a unique baseline for each timestep using cumulative path variance.
+
+    Theory:
+        For each timestep t in each prompt group:
+            B_t* = E[G_t × W_t] / E[W_t]
+        where W_t = Σ_{j=1}^t ||s_j||² (cumulative path-variance proxy)
+        and ||s_j||² = 1 - 2π_j + Σπ²
+
+    The cumulative sum W_t captures the "realized energy" of trajectory has been up to timestep t,
+    giving higher weight to predicting rewards on high-variance paths.
+
+    Args:
+        token_level_rewards: Rewards at each token position [shape: (bs, response_length)]
+        response_mask: Binary mask for valid tokens (1) vs padding (0) [shape: (bs, response_length)]
+        index: Prompt indices for grouping trajectories from same prompt [shape: (bs,)]
+        old_log_probs: Log probabilities from training policy during generation [shape: (bs, response_length)]
+        sum_pi_squared: Sum of squared probabilities over vocabulary Σπ² [shape: (bs, response_length)]
+        rollout_is_weights: Pre-computed IS weights for W correction [shape: (bs, response_length)],
+            None if not using IS
+        handle_zero_tail: If True, zero baselines will be set in the portion of the longest trajectory
+            that extends beyond the second-longest trajectory in the prompt group.
+            Default: False
+        epsilon: Small constant for numerical stability (default: 1e-8)
+
+    Returns:
+        advantages: OTB advantage estimates [shape: (bs, response_length)]
+        returns: Cumulative rewards (returns) from each position [shape: (bs, response_length)]
+
+    Note on Rollout Importance Sampling:
+        When rollout_is_weights is provided, W_t is scaled by ρ̄²(t) to minimize MSE under truncated IS:
+            B_t* = Σ[G_t × ρ̄²(t) × W_t] / Σ[ρ̄²(t) × W_t]
+    """
+    with torch.no_grad():
+        # Compute returns (reward-to-go) for each timestep
+        token_returns = (token_level_rewards * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+
+        # Step 1: Compute w_per_timestep = 1 - 2π_t + Σπ²)
+        pi_t = torch.exp(old_log_probs)
+        w_per_timestep = 1 - 2 * pi_t + sum_pi_squared
+
+        # Step 2: Apply rollout importance sampling correction (if enabled)
+        if rollout_is_weights is not None:
+            # Scale W by ρ̄² to minimize MSE under truncated IS
+            w_per_timestep = w_per_timestep * (rollout_is_weights**2)
+
+        # Step 3: Compute cumulative path-variance proxy: W_t = Σ_{j=1}^t w_j
+        # This measures accumulated variance from the start of the trajectory up to timestep t
+        w_cumulative = (w_per_timestep * response_mask).cumsum(dim=-1)
+
+        # Step 4: Concatenate returns and w_cumulative for each trajectory
+        # This allows us to compute baseline per timestep for each trajectory
+        response_lengths = response_mask.sum(dim=-1).to(dtype=torch.long)  # [shape: (bs * n, )]
+        max_response_length = int(response_lengths.max().item()) if response_lengths.numel() > 0 else 0
+        all_w_values = w_cumulative.new_zeros(
+            (len(response_lengths), max_response_length)
+        )  # [shape: (bs * n, max_response_length)]
+        all_returns = torch.zeros_like(all_w_values)
+        for i in range(len(response_lengths)):
+            length = int(response_lengths[i].item())
+            if length == 0:
+                continue
+            mask = response_mask[i].bool()
+            all_w_values[i, :length] = w_cumulative[i, mask]
+            all_returns[i, :length] = token_returns[i, mask]
+
+        # Group trajectories by prompt
+        prompt_groups = defaultdict(list)
+        for i in range(len(response_lengths)):
+            if response_lengths[i] == 0:
+                continue
+            prompt_groups[index[i]].append(i)
+
+        # Compute optimal baseline for each prompt group
+        baselines = torch.zeros_like(all_returns)
+
+        for _, trajectory_indices in prompt_groups.items():
+            N = len(trajectory_indices)
+            traj_idx = torch.tensor(trajectory_indices, device=all_returns.device)
+
+            if N == 1:
+                # Single trajectory - no baseline (keep original reward as advantage)
+                baselines[traj_idx[0]] = 0.0
+                continue
+
+            # Extract group data
+            w_group = all_w_values[traj_idx]  # [shape: (N, max_response_length)]
+            R_group = all_returns[traj_idx]  # [shape: (N, max_response_length)]
+            # Direct optimal baseline - single value for all in group
+            b_star = (R_group * w_group).sum(dim=0) / (w_group.sum(dim=0) + epsilon)
+            # Convert to match baselines dtype (epsilon can cause float64 promotion)
+            baselines[traj_idx] = b_star.to(baselines.dtype)
+
+            if handle_zero_tail:
+                # Optionally zero out the portion of the longest trajectory that extends
+                # beyond the second-longest trajectory in the prompt group.
+                response_lengths_group = response_lengths[traj_idx]
+                sorted_lengths, _ = torch.sort(response_lengths_group)
+                max_length = int(sorted_lengths[-1].item())
+                second_max_length = int(sorted_lengths[-2].item())
+                max_length_idx = (response_lengths_group == max_length).nonzero(as_tuple=True)[0]
+                if max_length_idx.numel() == 1 and max_length > second_max_length:
+                    max_length_traj_idx = trajectory_indices[int(max_length_idx[0])]
+                    baselines[max_length_traj_idx, second_max_length:] = 0.0
+
+        # Compute advantages
+        all_advantages = all_returns - baselines  # [shape: (bs * n, max_response_length)]
+
+        advantages = torch.zeros_like(token_returns)  # [shape: (bs * n, turn * response_length)]
+        for i in range(len(response_lengths)):
+            if response_lengths[i] == 0:
+                continue
+            advantages[i, response_mask[i].bool()] = all_advantages[i, : response_lengths[i]]
+
+        advantages = advantages * response_mask  # [shape: (bs * n * turn, response_length)]
+
+    return advantages, token_returns
+
+
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     """Compute token-level rewards with KL penalty.
 
@@ -781,21 +1034,15 @@ def agg_loss(
     """
     Aggregate the loss across global batch to ensure the loss is invariant to fsdp/megatron parallelism.
 
-    NOTE: ``dp_size``, ``batch_num_tokens``, and ``global_batch_size`` are only compatible with the new model engine
-        for now, while the legacy model engines conduct the aggregation outside ``agg_loss``.
-
     NOTE: The returned loss has different behaviors for different backend:
     - FSDP: the loss is directly used for backward.
     - Megatron: the loss should be scaled by `num_microbatches` and `cp_size` for pp schedule.
-
-    # TODO: Consider the numerical stability?
 
     Args:
         loss_mat: micro batch loss matrix, (bs, response_length)
         loss_mask: micro batch loss mask, (bs, response_length)
         loss_agg_mode: method to aggregate the loss matrix into a scalar
-        dp_size: data parallel size. When appling manual aggregation,
-            scaling up the ``loss`` by ``dp_size`` can cancel out FSDP averaging.
+        dp_size: data parallel size
         batch_num_tokens: number of valid tokens in global batch
         global_batch_size: global batch size
         loss_scale_factor: scale factor for "seq-mean-token-sum-norm" mode. If None, uses loss_mask.shape[-1].
@@ -805,39 +1052,30 @@ def agg_loss(
         loss: `a scalar torch.Tensor`
             aggregated loss
     """
-    # NOTE: `masked_sum` is more robust than multiplying the `mask`.
     if loss_agg_mode == "token-mean":
         if batch_num_tokens is None:
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
-    elif loss_agg_mode.startswith("seq-mean"):
-        # TODO: Correct and unify the denominator logic.
-        if global_batch_size is not None:
-            seq_denominator = global_batch_size * dp_size
-        else:  # The default logic which is only correct when the batch sizes are even.
-            local_bsz = loss_mat.shape[0]
-            seq_denominator = local_bsz
-
-        if loss_agg_mode.startswith("seq-mean-token-sum"):
-            seq_losses = verl_F.masked_sum(loss_mat, loss_mask, axis=-1)  # token-sum per sequence
-
-            if loss_agg_mode == "seq-mean-token-sum":
-                pass  # TODO: Add assertation.
-            elif loss_agg_mode == "seq-mean-token-sum-norm":
-                if loss_scale_factor is None:
-                    loss_scale_factor = loss_mask.shape[-1]
-                seq_losses = seq_losses / loss_scale_factor
-            else:
-                raise ValueError(f"Invalid {loss_agg_mode=}")
-        elif loss_agg_mode == "seq-mean-token-mean":
-            token_counts = torch.sum(loss_mask, dim=-1)  # per-sequence token count
-            # token-mean per sequence
-            seq_losses = verl_F.masked_sum(loss_mat, loss_mask, axis=-1) / (token_counts + 1e-8)
-        else:
-            raise ValueError(f"Invalid {loss_agg_mode=}")
-        loss = torch.sum(seq_losses) / seq_denominator  # seq-mean
+    elif loss_agg_mode == "seq-mean-token-sum":
+        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
+        seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
+        if global_batch_size is None:
+            global_batch_size = seq_mask.sum()
+        loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
+    elif loss_agg_mode == "seq-mean-token-mean":
+        seq_mask = torch.sum(loss_mask, dim=-1)  # per-sequence token count
+        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
+        seq_mask = (seq_mask > 0).float()  # exclude fully masked sequences
+        if global_batch_size is None:
+            global_batch_size = seq_mask.sum()
+        loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
+    elif loss_agg_mode == "seq-mean-token-sum-norm":
+        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
+        if loss_scale_factor is None:
+            loss_scale_factor = loss_mask.shape[-1]
+        loss = torch.sum(seq_losses) / loss_scale_factor
     else:
-        raise ValueError(f"Invalid {loss_agg_mode=}")
+        raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 
     return loss
 
@@ -1085,6 +1323,91 @@ def compute_policy_loss_gspo(
         "actor/ppo_kl": ppo_kl.detach().item(),
         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
     }
+    return pg_loss, pg_metrics
+
+
+@register_policy_loss("sapo")
+def compute_policy_loss_sapo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """
+    Compute the smoothed policy objective and related metrics for SAPO.
+
+    See https://arxiv.org/pdf/2511.20347 for more details.
+
+    Args:
+        old_log_prob (torch.Tensor):
+            Log-probabilities of actions under the old policy, shape (batch_size, response_length).
+        log_prob (torch.Tensor):
+            Log-probabilities of actions under the current policy, shape (batch_size, response_length).
+        advantages (torch.Tensor):
+            Advantage estimates for each action, shape (batch_size, response_length).
+        response_mask (torch.Tensor):
+            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        loss_agg_mode (str, optional):
+            Aggregation mode for `agg_loss`. For SAPO, it is recommended to use "seq-mean-token-mean".
+    """
+
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+
+    # temperature for positive and negative token updates
+    tau_pos = torch.as_tensor(config.tau_pos, dtype=advantages.dtype, device=advantages.device)
+    tau_neg = torch.as_tensor(config.tau_neg, dtype=advantages.dtype, device=advantages.device)
+
+    def gate_function(x, tau):
+        """The gating function used in SAPO"""
+        return torch.sigmoid(tau * (x - 1.0)) * (4.0 / tau)
+
+    # compute IS at token level:
+    # r_{i,t}(θ) = π_θ(y_{i,t}|x, y_{i,<t}) / π_θold(y_{i,t}|x, y_{i,<t})]
+    # In log space: log(r_{i,t}(θ)) = log_prob - ol_log_prob
+    negative_approx_kl = log_prob - old_log_prob
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    # finally exp() to remove log and get r_{i,t}(θ)
+    ratio = torch.exp(negative_approx_kl)
+
+    # tau_{i,t} is tau_pos if adv > 0 else tau_neg
+    taus = torch.where(
+        condition=advantages > 0,
+        input=tau_pos,  # if A_{i,t} > 0 we set to tau_pos
+        other=tau_neg,  # if A_{i,t} <= 0 we set to tau_neg
+    )
+
+    # compute the gates f_{i,t}(r_{i,t}(θ)) at token level
+    gates = gate_function(ratio, taus)
+
+    # compute policy gradient loss
+    pg_losses = -gates * advantages
+
+    # Apply rollout correction weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean", **config.global_batch_info
+    )
+
+    # For compatibility, return zero for both pg_clipfrac and pg_clipfrac_lower (not used in SAPO)
+    pg_clipfrac = torch.tensor(0.0, device=pg_loss.device)
+    pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
+    # compute KL for metrics tracking
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    # return metrics dict
+    pg_metrics = {
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+    }
+
     return pg_loss, pg_metrics
 
 
@@ -1387,6 +1710,67 @@ def compute_policy_loss_geo_mean(
     clipped = torch.ne(negative_approx_kl, negative_approx_kl_clamp)
     pg_clipfrac = verl_F.masked_mean((clipped * (advantages > 0)).float(), response_mask)
     pg_clipfrac_lower = verl_F.masked_mean((clipped * (advantages < 0)).float(), response_mask)
+    pg_metrics = {
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
+@register_policy_loss("cispo")
+def compute_policy_loss_cispo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """
+    Compute the clipped policy objective and related metrics for CISPO.
+
+    See https://arxiv.org/pdf/2506.13585 for more details.
+    """
+
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
+
+    # Compute importance sampling ratio: π_θ / π_θ_old
+    negative_approx_kl = log_prob - old_log_prob
+    # Clamp for numerical stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    # CISPO: Clip the importance sampling weights
+    # KEY: Apply stop gradient to the clipped ratio
+    # This prevents gradients from flowing through the ratio computation and clipping
+    # Gradients only flow through log_prob in the final loss term
+    clipped_ratio = torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    clipped_ratio_sg = clipped_ratio.detach()
+
+    # CISPO objective function (to maximize): J = sg(clip(ratio)) * A * log π_θ
+    # Loss function (to minimize): L = -J = -sg(clip(ratio)) * A * log_prob
+    pg_losses = -clipped_ratio_sg * advantages * log_prob
+
+    # Track clipping statistics
+    pg_clipfrac = verl_F.masked_mean((ratio != clipped_ratio).float(), response_mask)
+
+    # Apply rollout importance sampling weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+
+    # For compatibility, return zero for pg_clipfrac_lower (not used in CISPO)
+    pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
+
     pg_metrics = {
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
         "actor/ppo_kl": ppo_kl.detach().item(),
@@ -1725,10 +2109,8 @@ def compute_policy_loss_bypass_mode(
         loss_type: "ppo_clip" (default) or "reinforce"
         rollout_is: IS aggregation level ("token", "sequence", or None)
         rollout_is_threshold: Upper threshold for truncating IS weights (default: 2.0)
-        rollout_rs: Rejection sampling level ("token", "sequence", "geometric", or None)
-        rollout_rs_threshold: Upper threshold for rejection sampling
-        rollout_rs_threshold_lower: Lower threshold for rejection sampling
-        rollout_token_veto_threshold: Per-token veto threshold for catastrophic outliers
+        rollout_rs: Rejection sampling level (see rollout_corr_helper for supported modes)
+        rollout_rs_threshold: Threshold specification for rejection sampling
         rollout_is_batch_normalize: Whether to normalize IS weights to mean=1.0
 
     Returns:
@@ -1753,11 +2135,9 @@ def compute_policy_loss_bypass_mode(
     loss_type = rollout_corr_config.get("loss_type", "ppo_clip")
     rollout_is = rollout_corr_config.get("rollout_is", None)
     rollout_is_threshold = rollout_corr_config.get("rollout_is_threshold", 2.0)
+    rollout_is_batch_normalize = rollout_corr_config.get("rollout_is_batch_normalize", False)
     rollout_rs = rollout_corr_config.get("rollout_rs", None)
     rollout_rs_threshold = rollout_corr_config.get("rollout_rs_threshold", None)
-    rollout_rs_threshold_lower = rollout_corr_config.get("rollout_rs_threshold_lower", None)
-    rollout_token_veto_threshold = rollout_corr_config.get("rollout_token_veto_threshold", None)
-    rollout_is_batch_normalize = rollout_corr_config.get("rollout_is_batch_normalize", False)
 
     # In bypass mode: old_log_prob IS rollout_log_prob
     rollout_log_prob = old_log_prob
@@ -1772,11 +2152,9 @@ def compute_policy_loss_bypass_mode(
                 response_mask=response_mask,
                 rollout_is=rollout_is,
                 rollout_is_threshold=rollout_is_threshold,
+                rollout_is_batch_normalize=rollout_is_batch_normalize,
                 rollout_rs=rollout_rs,
                 rollout_rs_threshold=rollout_rs_threshold,
-                rollout_rs_threshold_lower=rollout_rs_threshold_lower,
-                rollout_token_veto_threshold=rollout_token_veto_threshold,
-                rollout_is_batch_normalize=rollout_is_batch_normalize,
             )
         )
 

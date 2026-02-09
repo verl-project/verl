@@ -44,10 +44,11 @@ on:
       - "**/*.py"
       # Other entrypoints
       - "!verl/trainer/fsdp_sft_trainer.py"
-      # Recipes
-      - "!recipe/**"
       # FSDP
       - "!verl/workers/**/*dp_*.py"
+      - "!verl/utils/fsdp_utils.py"
+      - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
+      - "!verl/model_merger/fsdp_model_merger.py"
   pull_request:
     branches:
       - main
@@ -63,10 +64,11 @@ on:
       - "!tests/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
-      # Recipes
-      - "!recipe/**"
       # FSDP
       - "!verl/workers/**/*dp_*.py"
+      - "!verl/utils/fsdp_utils.py"
+      - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
+      - "!verl/model_merger/fsdp_model_merger.py"
       # Entrypoints
       - ".github/workflows/e2e_ppo_trainer_megatron_vllm.yml"
       - "examples/data_preprocess/gsm8k.py"
@@ -85,13 +87,12 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm011.dev7"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
-  TRANSFORMERS_VERSION: "4.56.2"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -122,9 +123,10 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install --no-deps -e .[test]
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps --force-reinstall .
           pip3 install mbridge
-          pip3 install math-verify transformers==$TRANSFORMERS_VERSION
+          pip3 install math-verify
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -143,8 +145,8 @@ jobs:
       - name: clean up and install Megatron-Bridge
         run: |
           rm -rf checkpoints
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@a489bed --no-deps --no-build-isolation
-          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@2d398b4 --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@83a7c11 --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@5455f0a --no-deps --no-build-isolation
           pip3 install "nvidia-modelopt[torch]>=0.37.0" transformers==4.57.1
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge LoRA e2e to pre-load and save (Deepseek)
         run: |
@@ -177,8 +179,9 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install --no-deps -e .[test]
-          pip3 install math-verify transformers==$TRANSFORMERS_VERSION
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install math-verify
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -198,11 +201,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs:
-      [
-        setup,
-        e2e_ppo_trainer_megatron-deepseek,
-        e2e_ppo_trainer_megatron-qwen3,
-      ]
+      [setup, e2e_ppo_trainer_megatron-deepseek, e2e_ppo_trainer_megatron-qwen3]
     if: always()
     steps:
       - id: destroy-runner

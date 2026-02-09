@@ -103,6 +103,8 @@ class ActorConfig(BaseConfig):
         loss_scale_factor (Optional[int]): Scale factor for 'seq-mean-token-sum-norm' loss aggregation mode.
             If None, uses response_length. Set to a constant to ensure consistent normalization.
         entropy_coeff (float): Entropy coefficient for regularization.
+        tau_pos (float): Positive tau for SAPO smoothing (>= 1.0 keeps rewards stable).
+        tau_neg (float): Negative tau for SAPO smoothing (> tau_pos for asymmetry).
         use_kl_loss (bool): Whether to use KL divergence loss.
         use_torch_compile (bool): Whether to use torch.compile for optimization.
         kl_loss_coef (float): KL divergence loss coefficient.
@@ -142,8 +144,12 @@ class ActorConfig(BaseConfig):
     loss_agg_mode: str = "token-mean"
     loss_scale_factor: Optional[int] = None
     entropy_coeff: float = 0
+    tau_pos: float = 1.0
+    tau_neg: float = 1.05
     calculate_entropy: bool = False
     use_kl_loss: bool = False
+    # Whether to enable PrefixGrouper-based shared-prefix forward
+    use_prefix_grouper: bool = False
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001
     kl_loss_type: str = "low_var_kl"
@@ -278,8 +284,9 @@ class FSDPActorConfig(ActorConfig):
     entropy_checkpointing: bool = False
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     use_remove_padding: bool = False
-    profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     use_rollout_log_probs: bool = False
+    calculate_sum_pi_squared: bool = False
+    sum_pi_squared_checkpointing: bool = False
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""

@@ -36,6 +36,7 @@ class CheckpointConfig(BaseConfig):
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
+    mbridge_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

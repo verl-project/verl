@@ -49,6 +49,7 @@ if os.getenv("VERL_USE_MODELSCOPE", "False").lower() == "true":
 
     patch_hub()
 
+
 if is_npu_available:
     # Workaround for torch-npu's lack of support for creating nested tensors from NPU tensors.
     #

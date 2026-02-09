@@ -47,6 +47,8 @@ class SandboxFusionConfig(BaseConfig):
 class RewardModelConfig(BaseConfig):
     _mutable_fields = BaseConfig._mutable_fields
 
+    use_reward_loop: bool = True
+    num_workers: int = 8
     reward_manager: Optional[str] = None
 
     enable: bool = False
@@ -55,7 +57,8 @@ class RewardModelConfig(BaseConfig):
     nnodes: int = 0
 
     # reward model args
-    rollout: RolloutConfig = field(default_factory=RolloutConfig)
+    model_path: Optional[str] = None
+    inference: RolloutConfig = field(default_factory=RolloutConfig)
     model: HFModelConfig = field(default_factory=HFModelConfig)
     sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)
 

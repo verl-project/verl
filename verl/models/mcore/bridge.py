@@ -153,9 +153,15 @@ def freeze_moe_router(model):
                     if hasattr(layer.mlp.router, "bias"):
                         layer.mlp.router.bias.requires_grad = False
                 if hasattr(layer.mlp, "shared_experts"):
-                    if hasattr(layer.mlp.shared_experts, "gate_weight"):
+                    if (
+                        hasattr(layer.mlp.shared_experts, "gate_weight")
+                        and layer.mlp.shared_experts.gate_weight is not None
+                    ):
                         layer.mlp.shared_experts.gate_weight.requires_grad = False
-                    if hasattr(layer.mlp.shared_experts, "gate_bias"):
+                    if (
+                        hasattr(layer.mlp.shared_experts, "gate_bias")
+                        and layer.mlp.shared_experts.gate_bias is not None
+                    ):
                         layer.mlp.shared_experts.gate_bias.requires_grad = False
 
     return model

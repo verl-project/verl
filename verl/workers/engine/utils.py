@@ -85,7 +85,7 @@ def prepare_micro_batches(
         )
     else:
         micro_batch_size_per_gpu = data["micro_batch_size_per_gpu"]
-        micro_batches = data.split(micro_batch_size_per_gpu)
+        micro_batches = tu.chunk_tensordict(data, len(data) // micro_batch_size_per_gpu)
         batch_idx_list = None
     return micro_batches, batch_idx_list
 

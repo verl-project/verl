@@ -1,0 +1,69 @@
+# dockerfile for verlai/verl:vll012.exp
+FROM nvcr.io/nvidia/pytorch:25.11-py3
+
+RUN git clone -b v0.12.0 --depth 1 https://github.com/vllm-project/vllm.git /opt/vllm
+
+RUN pip install setuptools_scm
+
+RUN cd /opt/vllm && pip install --no-deps --no-build-isolation --no-cache-dir -e .
+
+RUN pip install -r /opt/vllm/requirements/common.txt
+
+
+RUN pip install pybind11
+
+RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 pip3 install --resume-retries 999 --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.11
+
+RUN pip install --upgrade --no-cache-dir transformers tokenizers
+
+RUN pip install codetiming tensordict mathruler pylatexenc qwen_vl_utils
+
+RUN pip install flash_attn
+#==2.8.1
+
+RUN apt update && apt install numactl
+
+RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
+    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
+    apt-get update && apt-get install -y libxcb-cursor0 && \
+    apt-get install -y ./nsight-systems-${NSIGHT_VERSION}.deb && \
+    rm -rf /usr/local/cuda/bin/nsys && \
+    ln -s /opt/nvidia/nsight-systems/2025.6.1/nsys  /usr/local/cuda/bin/nsys && \
+    rm -rf /usr/local/cuda/bin/nsys-ui && \
+    ln -s /opt/nvidia/nsight-systems/2025.6.1/nsys-ui /usr/local/cuda/bin/nsys-ui && \
+    rm nsight-systems-${NSIGHT_VERSION}.deb
+
+
+# =========================
+# Install HybridEP
+# =========================
+WORKDIR /home/
+RUN git clone --branch hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
+    cd DeepEP && git checkout 3f601f7ac1c062c46502646ff04c535013bfca00 && \
+    TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
+
+# =========================
+# Install Qwen3-Next dependencies
+# =========================
+WORKDIR /home/
+# Install causal-conv1d and flash-linear-attention
+RUN cd /tmp && \
+    git clone https://github.com/Dao-AILab/causal-conv1d.git && \
+    cd causal-conv1d && \
+    unset PIP_CONSTRAINT && \
+    CAUSAL_CONV1D_FORCE_BUILD=TRUE pip install --no-build-isolation . && \
+    cd .. && \
+    rm -rf causal-conv1d && \
+    pip install flash-linear-attention
+
+RUN pip3 install --no-cache-dir --no-deps trl
+
+RUN pip3 install nvtx matplotlib liger_kernel
+
+RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
+
+RUN pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@1d462bd37dac21cfa14177405d4921eedb987052 # latest dev branch on 20251209
+
+RUN pip install git+https://github.com/volcengine/verl.git@v0.6.1
+
+RUN pip uninstall -y verl

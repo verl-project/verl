@@ -22,6 +22,7 @@ import verl.utils.tensordict_utils as tu
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import make_nd_compute_dataproto_dispatch_fn, register
+from verl.utils.device import get_device_name, get_nccl_backend
 
 
 @ray.remote
@@ -31,12 +32,12 @@ class TestActor(Worker):
 
         import torch.distributed
 
-        torch.distributed.init_process_group(backend="nccl")
+        torch.distributed.init_process_group(backend=get_nccl_backend())
         self.infer_device_mesh = torch.distributed.device_mesh.init_device_mesh(
-            device_type="cuda", mesh_shape=[2, 4], mesh_dim_names=["dp", "tp"]
+            device_type=get_device_name(), mesh_shape=[2, 4], mesh_dim_names=["dp", "tp"]
         )
         self.train_device_mesh = torch.distributed.device_mesh.init_device_mesh(
-            device_type="cuda", mesh_shape=[2, 2, 2], mesh_dim_names=["pp", "dp", "tp"]
+            device_type=get_device_name(), mesh_shape=[2, 2, 2], mesh_dim_names=["pp", "dp", "tp"]
         )
 
         self._register_dispatch_collect_info(
@@ -107,7 +108,7 @@ def test_dist_global_info_wg():
 
     ray_cls = RayClassWithInitArgs(TestActor)
     resource_pool = RayResourcePool(process_on_nodes=[8])
-    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls)
+    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls, device_name=get_device_name())
 
     infer_input_data_proto = DataProto.from_single_dict(data={"a": torch.tensor([1, 2])})
     infer_output_data_proto = wg.generate_data_proto(infer_input_data_proto)

@@ -6,7 +6,7 @@ RUN apt-get update -y && \
     apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
-    pip install --upgrade pip setuptools packaging && \
+    pip install --upgrade pip packaging setuptools==80.10.2 && \
     pip cache purge
 
 # Prepare repositories with low update frequency
@@ -34,14 +34,13 @@ RUN ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     # Install torch & torch_npu & torchvision
-    pip install torch==2.7.1 torch_npu==2.7.1 torchvision==0.22.1 && \
+    pip install torch==2.7.1 torch_npu==2.7.1 torchvision==0.22.1 transformers==4.57.6 && \
     # Install vllm
     cd vllm && VLLM_TARGET_DEVICE=empty pip install -v -e . && cd .. && \
     # Install vllm-ascend
     cd vllm-ascend && pip install -v -e . && cd .. && \
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
-    echo "export PYTHONPATH=\$PYTHONPATH:/Megatron-LM" >> ~/.bashrc && \
     # Remove existing triton or triton-ascend installed by some third-party packages
     pip uninstall -y triton triton-ascend && \
     # Install mbridge
@@ -49,6 +48,8 @@ RUN ARCH=$(uname -m) && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
+
+ENV PYTHONPATH="/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Prepare and install verl (update frequently)
 RUN git clone --depth 1 https://github.com/volcengine/verl.git && \

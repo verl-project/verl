@@ -117,6 +117,9 @@ class Worker(WorkerHelper):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def _query_collect_info(self, mesh_name: str):
+        return self.query_collect_info(mesh_name)
+
+    def query_collect_info(self, mesh_name: str):
         """Query the collect info for a given mesh name.
 
         Args:

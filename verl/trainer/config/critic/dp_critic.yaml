@@ -52,6 +52,15 @@ model:
   # LoRA target modules: "all-linear" or list of linear projection layers
   target_modules: all-linear
 
+  # TiledMLP configuration for memory-efficient MLP computation.
+  tiled_mlp:
+
+    # whether to enable TiledMLP
+    enabled: False
+
+    # number of shards to split the input
+    num_shards: 4
+
 # Forward-only batch size during inference (global)
 forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
 

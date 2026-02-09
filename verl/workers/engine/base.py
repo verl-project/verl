@@ -16,12 +16,14 @@ The abstract base class defining the interface for model training engines.
 """
 
 from abc import abstractmethod
-from typing import Any, Callable, Generator, Optional
+from contextlib import nullcontext
+from typing import Any, Callable, ContextManager, Generator, Optional
 
 import torch
 from tensordict import TensorDict
 
 from verl.utils.device import get_device_name
+from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 
 
 class BaseEngine:
@@ -118,6 +120,8 @@ class BaseEngine:
         Returns:
             dict[str, torch.Tensor]: A dictionary containing the aggregated training metrics for the batch.
         """
+        maybe_fix_3d_position_ids(data)
+
         self.optimizer_zero_grad()
         outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
         grad_norm = self.optimizer_step()
@@ -136,6 +140,9 @@ class BaseEngine:
         Returns:
             Any: The output of the inference, which can be used for predictions or other purposes.
         """
+        # see comments from train_batch
+        maybe_fix_3d_position_ids(data)
+
         with torch.no_grad():
             outputs = self.forward_backward_batch(data, loss_function, forward_only=True)
         return outputs
@@ -212,6 +219,12 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def disable_adapter(self) -> ContextManager:
+        """
+        Disable all adapters temporarily under the context in the model for LoRA
+        """
+        return nullcontext()
+
 
 class BaseEngineCtx:
     def __init__(self, engine: BaseEngine, mode, **kwargs):
@@ -229,14 +242,16 @@ class BaseEngineCtx:
     def _context_switch(self, device):
         if self.disable_auto_offload:
             return
+        should_move_model = self.engine.is_param_offload_enabled if device == "cpu" else True
+        should_move_optimizer = self.engine.is_optimizer_offload_enabled if device == "cpu" else True
         if self.mode == "eval":
-            self.engine.to(device=device, model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
+            self.engine.to(device=device, model=should_move_model, optimizer=False, grad=False)
         elif self.mode == "train":
             self.engine.to(
                 device=device,
-                model=self.engine.is_param_offload_enabled,
-                optimizer=self.engine.is_optimizer_offload_enabled,
-                grad=self.engine.is_param_offload_enabled,
+                model=should_move_model,
+                optimizer=should_move_optimizer,
+                grad=should_move_model,
             )
 
     def __enter__(self):

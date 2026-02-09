@@ -58,11 +58,11 @@ def test_sim_env_creation_and_step(simulator_type):
 
     sim_env = None
     if simulator_type == "isaac":
-        from recipe.vla.envs.isaac_env.isaac_env import IsaacEnv
+        from verl.experimental.vla.envs.isaac_env.isaac_env import IsaacEnv
 
         sim_env = IsaacEnv(cfg, rank=0, world_size=1)
     elif simulator_type == "libero":
-        from recipe.vla.envs.libero_env.libero_env import LiberoEnv
+        from verl.experimental.vla.envs.libero_env.libero_env import LiberoEnv
 
         sim_env = LiberoEnv(cfg, rank=0, world_size=1)
     else:

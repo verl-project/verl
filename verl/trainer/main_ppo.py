@@ -28,7 +28,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
-from verl.utils.device import auto_set_ascend_device_name, is_cuda_available
+from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
 
 
@@ -37,10 +37,10 @@ def main(config):
     """Main entry point for PPO training with Hydra configuration management.
 
     Args:
-        config_dict: Hydra configuration dictionary containing training parameters.
+        config: Hydra configuration dictionary containing training parameters.
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
-    auto_set_ascend_device_name(config)
+    auto_set_device(config)
 
     run_ppo(config)
 
@@ -133,9 +133,14 @@ class TaskRunner:
 
             actor_rollout_cls = ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
+
+            lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+            if lora_rank <= 0:
+                lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+            ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
             # NOTE: In new model engine, ref policy and actor rollout are in same ActorRolloutRefWorker,
             # while in legacy model engine, ref policy is in a separate ActorRolloutRefWorker.
-            if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+            if need_reference_policy(config) and not ref_in_actor:
                 role = Role.ActorRolloutRef
             else:
                 role = Role.ActorRollout
@@ -143,30 +148,18 @@ class TaskRunner:
             self.mapping[role] = "global_pool"
             return actor_rollout_cls, ray_worker_group_cls
 
-        if config.actor_rollout_ref.rollout.mode == "sync":
-            raise ValueError(
-                "Rollout mode 'sync' has been removed. Please set "
-                "`actor_rollout_ref.rollout.mode=async` to use the native server rollout."
-            )
-
+        # Note: sync mode validation is now handled in RolloutConfig.__post_init__
+        # Always use async worker since sync mode is deprecated and rejected
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
+            from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 
-            actor_rollout_cls = (
-                AsyncActorRolloutRefWorker
-                if config.actor_rollout_ref.rollout.mode == "async"
-                else ActorRolloutRefWorker
-            )
+            actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
-            from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
+            from verl.workers.megatron_workers import AsyncActorRolloutRefWorker
 
-            actor_rollout_cls = (
-                AsyncActorRolloutRefWorker
-                if config.actor_rollout_ref.rollout.mode == "async"
-                else ActorRolloutRefWorker
-            )
+            actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
         else:
@@ -219,33 +212,22 @@ class TaskRunner:
 
             reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
+        else:
+            config.reward_model.nnodes = config.trainer.nnodes
+            config.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
         return resource_pool_manager
 
-    def add_reward_model_worker(self, config):
+    def add_reward_model_resource_pool(self, config):
         """Add reward model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
         if config.reward_model.enable:
-            use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-            if use_legacy_worker_impl in ["auto", "enable", "disable"]:
-                if config.reward_model.strategy in {"fsdp", "fsdp2"}:
-                    from verl.workers.fsdp_workers import RewardModelWorker
-                elif config.reward_model.strategy == "megatron":
-                    from verl.workers.megatron_workers import RewardModelWorker
-                else:
-                    raise NotImplementedError
-            # elif use_legacy_worker_impl == "disable":
-            #     from verl.workers.engine_workers import RewardModelWorker
-            #
-            #     print("Using new worker implementation")
-            else:
-                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
-
-            self.role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
+            # we do not use reward model workers, so we only register reward model in resource pool
+            # without continue to register reward model worker in role mapping
             if config.reward_model.enable_resource_pool:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
@@ -261,7 +243,7 @@ class TaskRunner:
         if use_legacy_worker_impl == "disable":
             return
 
-        if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+        if need_reference_policy(config):
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
 
@@ -289,13 +271,7 @@ class TaskRunner:
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
 
-        # We should adopt a multi-source reward function here:
-        # - for rule-based rm, we directly call a reward score
-        # - for model-based rm, we call a model
-        # - for code related prompt, we send to a sandbox if there are test cases
-        # finally, we combine all the rewards together
-        # The reward type depends on the tag of the data
-        self.add_reward_model_worker(config)
+        self.add_reward_model_resource_pool(config)
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
@@ -303,7 +279,7 @@ class TaskRunner:
         # validate config
         validate_config(
             config=config,
-            use_reference_policy=need_reference_policy(self.role_worker_mapping),
+            use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )
 
@@ -321,13 +297,24 @@ class TaskRunner:
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
+        use_reward_loop = config.reward_model.use_reward_loop
+        if not use_reward_loop:
+            print(
+                "WARNING: Init reward manager in single controller will be deprecated. "
+                "Please set config.reward_model.use_reward_loop to use distributed reward manager."
+            )
+            # Load the reward manager for training and validation.
+            reward_fn = load_reward_manager(
+                config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
+            )
+            val_reward_fn = load_reward_manager(
+                config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
+            )
+        else:
+            # reward_loop will use init a reward loop manager in ray_trainer
+            # and use it to compute reward score
+            reward_fn = None
+            val_reward_fn = None
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
@@ -386,31 +373,11 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
     Returns:
         dataset (Dataset): The dataset.
     """
-    from torch.utils.data import Dataset
 
-    from verl.utils.dataset.rl_dataset import RLHFDataset
+    from verl.utils.dataset.rl_dataset import get_dataset_class
 
-    # Check if a custom dataset class is specified in the data configuration
-    # and if the path to the custom class is provided
-    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
-        # Dynamically load the custom dataset class
-        dataset_cls = load_extern_object(data_config.custom_cls.path, data_config.custom_cls.name)
-        # Verify that the custom dataset class inherits from torch.utils.data.Dataset
-        if not issubclass(dataset_cls, Dataset):
-            raise TypeError(
-                f"The custom dataset class '{data_config.custom_cls.name}' from "
-                f"'{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
-            )
-    elif "datagen" in data_config and data_config.datagen.get("path", None) is not None and is_train:
-        # If a data generation strategy is specified, use the DynamicGenDataset class
-        from verl.utils.dataset.dynamicgen_dataset import DynamicGenDataset
-
-        dataset_cls = DynamicGenDataset
-        print("Using DynamicGenDataset for data generation.")
-    else:
-        # Use the default RLHFDataset class if no custom class is specified
-        dataset_cls = RLHFDataset
-    print(f"Using dataset class: {dataset_cls.__name__}")
+    # Get the dataset class
+    dataset_cls = get_dataset_class(data_config)
 
     # Instantiate the dataset using the determined dataset class
     dataset = dataset_cls(

@@ -1,9 +1,13 @@
 # TransferQueue Data System
 
-Last updated: 11/17/2025.
+Last updated: 01/07/2026.
 
-This doc introduce [TransferQueue](https://github.com/TransferQueue/TransferQueue), an asynchronous streaming data management system for efficient post-training.
+This doc introduce [TransferQueue](https://gitcode.com/Ascend/TransferQueue), an asynchronous streaming data management system for efficient post-training.
 
+🔥 **Now TransferQueue is formally open-sourced at [GitCode](https://gitcode.com/Ascend/TransferQueue). We will soon provide a [Github Mirror Repo](https://github.com/Ascend/TransferQueue) for community contributions. <span style="color: #FF0000;">You are welcome to submit contributions or propose new ideas on either platform!**</span>
+
+
+> At the mean time, the early development history remains accessible at: https://github.com/TransferQueue/TransferQueue.
 
 <h2 id="overview"> Overview</h2>
 
@@ -21,6 +25,8 @@ TransferQueue offers **fine-grained, sample-level** data management and **load-b
 
 <h2 id="updates"> Updates</h2>
 
+ - **Dec 30, 2025**:  **TransferQueue x verl** integration is tested with the DAPO algorithm at scale **(64 nodes, 1024 cards)**. It significantly optimizes host memory utilization and accelerates data transfers. Stay tuned for more details!
+ - **Dec 20, 2025**: 🔥 The official [tutorial](https://github.com/TransferQueue/TransferQueue/tree/main/tutorial) is released! Feel free to check it out.
  - **Nov 10, 2025**: We disentangle the data retrieval logic from TransferQueueController [PR#101](https://github.com/TransferQueue/TransferQueue/pull/101). Now you can implement your own `Sampler` to control how to consume the data.
  - **Nov 5, 2025**: We provide a `KVStorageManager` that simplifies the integration with KV-based storage backends [PR#96](https://github.com/TransferQueue/TransferQueue/pull/96). The first available KV-based backend is [Yuanrong](https://gitee.com/openeuler/yuanrong-datasystem).
  - **Nov 4, 2025**: Data partition capability is available in [PR#98](https://github.com/TransferQueue/TransferQueue/pull/98). Now you can define logical data partitions to manage your train/val/test datasets.
@@ -61,9 +67,9 @@ This class encapsulates the core interaction logic within the TransferQueue syst
 Currently, we support the following storage backends:
 
 - SimpleStorageUnit: A basic CPU memory storage with minimal data format constraints and easy usability.
-- [Yuanrong](https://gitee.com/openeuler/yuanrong-datasystem): An Ascend native data system that provides hierarchical storage interfaces including HBM/DRAM/SSD.
-- [MoonCakeStore](https://github.com/kvcache-ai/Mooncake) (WIP): A high-performance, KV-based hierarchical storage that supports RDMA transport between GPU and DRAM.
-- [Ray Direct Transport](https://docs.ray.io/en/master/ray-core/direct-transport.html) ([WIP](https://github.com/TransferQueue/TransferQueue/pull/108)): Ray's new feature that allows Ray to store and pass objects directly between Ray actors.
+- [Yuanrong](https://gitcode.com/openeuler/yuanrong-datasystem) (beta, [#PR107](https://github.com/TransferQueue/TransferQueue/pull/107), [#PR96](https://github.com/TransferQueue/TransferQueue/pull/96)): An Ascend native data system that provides hierarchical storage interfaces including HBM/DRAM/SSD.
+- [Mooncake Store](https://github.com/kvcache-ai/Mooncake) (alpha, [#PR162](https://github.com/TransferQueue/TransferQueue/pull/162)): A high-performance, KV-based hierarchical storage that supports RDMA transport between GPU and DRAM.
+- [Ray Direct Transport](https://docs.ray.io/en/master/ray-core/direct-transport.html) (alpha, [#PR167](https://github.com/TransferQueue/TransferQueue/pull/167)): Ray's new feature that allows Ray to store and pass objects directly between Ray actors.
 
 Among them, `SimpleStorageUnit` serves as our default storage backend, coordinated by the `AsyncSimpleStorageManager` class. Each storage unit can be deployed on a separate node, allowing for distributed data management.
 
@@ -98,12 +104,12 @@ The primary interaction points are `AsyncTransferQueueClient` and `TransferQueue
 
 Core interfaces:
 
-- (async_)get_meta(data_fields: list[str], batch_size:int, global_step:int, get_n_samples:bool, task_name:str) -> BatchMeta
-- (async_)get_data(metadata:BatchMeta) -> TensorDict
-- (async_)put(data:TensorDict, metadata:BatchMeta, global_step)
-- (async_)clear(global_step: int)
+- `(async_)get_meta(data_fields: list[str], batch_size:int, partition_id: str, mode: str, task_name:str, sampling_config: Optional[dict[str, Any]]) -> BatchMeta`
+- `(async_)get_data(metadata: BatchMeta) -> TensorDict`
+- `(async_)put(data: TensorDict, metadata: Optional[BatchMeta], partition_id: Optional[str])`
+- `(async_)clear_partition(partition_id: str)` and `(async_)clear_samples(metadata: BatchMeta)`
 
-We will soon release a detailed tutorial and API documentation.
+<span style="color: #FF0000;">**Refer to our [tutorial](https://github.com/TransferQueue/TransferQueue/tree/main/tutorial) for detailed examples.**</span>
 
 
 ### verl Example
@@ -127,7 +133,7 @@ You may refer to the [recipe](https://github.com/TransferQueue/TransferQueue/tre
 
 ### Use Python package
 ```bash
-pip install TransferQueue==0.1.1.dev2
+pip install TransferQueue
 ```
 
 ### Build wheel package from source code
@@ -159,6 +165,8 @@ Follow these steps to build and install:
 > Note: The above benchmark for TransferQueue is based on our naive `SimpleStorageUnit` backend. By introducing high-performance storage backends and optimizing serialization/deserialization, we expect to achieve even better performance. Warmly welcome contributions from the community!
 
 For detailed performance benchmarks, please refer to [this blog](https://www.yuque.com/haomingzi-lfse7/hlx5g0/tml8ke0zkgn6roey?singleDoc#).
+
+We also provide a [stress test report](https://www.yuque.com/haomingzi-lfse7/hlx5g0/ydbwgo5k2umaag78?singleDoc#) that demonstrates **768 concurrent clients writing 1.4 TB of data** into TransferQueue across 4 nodes. The system remains stable without any crashes or data loss, achieving 80% bandwidth.
 
 <h2 id="customize"> 🛠️ Customize TransferQueue</h2>
 
@@ -219,6 +227,9 @@ batch_meta = client.get_meta(
 )
 ```
 
+<span style="color: #FF0000;">**Refer to [tutorial/04_custom_sampler.py](https://github.com/TransferQueue/TransferQueue/blob/main/tutorial/04_custom_sampler.py) for more details.**</span>
+
+
 ### How to integrate a new storage backend
 
 The data plane is organized as follows:
@@ -226,7 +237,7 @@ The data plane is organized as follows:
   transfer_queue/
   ├── storage/
   │   ├── __init__.py
-  │   │── simple_backend.py             # SimpleStorageUnit、StorageUnitData、StorageMetaGroup
+  │   │── simple_backend.py             # Default distributed storage backend (SimpleStorageUnit) by TQ 
   │   ├── managers/                     # Managers are upper level interfaces that encapsulate the interaction logic with TQ system.
   │   │   ├── __init__.py
   │   │   ├──base.py                    # TransferQueueStorageManager, KVStorageManager
@@ -237,8 +248,9 @@ The data plane is organized as follows:
   │   └── clients/                      # Clients are lower level interfaces that directly manipulate the target storage backend.
   │   │   ├── __init__.py
   │   │   ├── base.py                   # TransferQueueStorageKVClient
-  │   │   ├── yuanrong_client.py         # YRStorageClient
-  │   │   ├── mooncake_client.py         # MooncakeStoreClient
+  │   │   ├── yuanrong_client.py        # YuanrongStorageClient
+  │   │   ├── mooncake_client.py        # MooncakeStorageClient
+  │   │   ├── ray_storage_client.py     # RayStorageClient
   │   │   └── factory.py                # TransferQueueStorageClientFactory
 ```
 
@@ -248,6 +260,21 @@ Distributed storage backends often come with their own native clients serving as
 
 Factory classes are provided for both `StorageManager` and `StorageClient` to facilitate easy integration. Adding necessary descriptions of required parameters in the factory class helps enhance the overall user experience.
 
+<h2 id="contribution"> ✏️ Contribution Guide</h2>
+
+<span style="color: #FF0000;">**Contributions are warmly welcome!**</span>
+
+New ideas, feature suggestions, and user experience feedback are all encouraged—feel free to submit issues or PRs. We will respond as soon as possible.
+
+We recommend using pre-commit for better code format.
+
+```bash
+# install pre-commit
+pip install pre-commit
+
+# run the following command in your repo folder, then fix the check before committing your code
+pre-commit install && pre-commit run --all-files --show-diff-on-failure --color=always
+```
 
 
 <h2 id="citation"> Citation</h2>

@@ -1,6 +1,6 @@
 # Recipe: One Step Off Policy Async Trainer
 
-**Author:**  `https://github.com/meituan-search`
+**Author:** `https://github.com/meituan-search`
 
 Last updated: 07/17/2025.
 
@@ -18,8 +18,8 @@ The more severe the long-tail problem in sample generation, the lower the overal
 For example, in DAPO 32B training, the Rollout phase accounts for approximately 70% of the total time,
 and increasing resources does not reduce the Rollout duration.
 
-![DAPO 32B Math Performance](
-https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/docs/dapo_32b_math.png)
+![DAPO 32B Math Performance](https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/docs/dapo_32b_math.png)
+
 > source data: https://wandb.ai/verl-org/DAPO%20Reproduction%20on%20verl/workspace?nw=nwusertongyuxuan361
 
 ### Solution
@@ -31,10 +31,9 @@ assigning the remainder to training. By reducing resources allocated to the gene
 during long-tail sample generation. Throughout this process, generation and training parameters maintain a one-step off
 policy.
 
-![One Step Off Policy Diagram](
-https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/docs/one_step_off_policy.png)
-> reference: [AReaL: A Large-Scale Asynchronous Reinforcement Learning System for Language Reasoning](
-> https://arxiv.org/abs/2505.24298)
+![One Step Off Policy Diagram](https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/docs/one_step_off_policy.png)
+
+> reference: [AReaL: A Large-Scale Asynchronous Reinforcement Learning System for Language Reasoning](https://arxiv.org/abs/2505.24298)
 
 Our core contributions include:
 
@@ -51,26 +50,25 @@ Our core contributions include:
 ### Experimental Results
 
 - **Machine Configuration**: 2 nodes with 16 H20 GPUs each
-   - Generation: 4 GPUs
-   - Training: 12 GPUs
+  - Generation: 4 GPUs
+  - Training: 12 GPUs
 - **Model**: Qwen2.5-Math-7B
 - **Rollout Configuration**:
 - **Max Response Length**: FSDP2: 20,480 tokens; Megatron: 8,192 tokens
 - **Algorithm**: DAPO
 - **Rollout Engine**: vLLM
 
-| training mode          | engine        | step | gen | wait_prev_gen | generate_sequences | old_log_prob | update_actor | total time    | acc/best@32/mean | acc/maj@32/mean |
-|------------------------|---------------|------|-----|---------------|--------------------|--------------|--------------|---------------|------------------|-----------------|
-| colocate sync          | VLLM+FSDP2    | 749  | 321 | -             | 247                | 88           | 286          | 19h18m        | 0.5948           | 0.417           |
-| one-step-overlap async | VLLM+FSDP2    | 520  | -   | 45            | 458                | 108          | 337          | 15h34m（+23%）  | 0.6165           | 0.494           |
-| colocate sync          | VLLM+Megatron | 699  | 207 | -             | 162                | 119          | 344          | 18h21m        | 0.605            | 0.4217          |
-| one-step-overlap async | VLLM+Megatron | 566  | -   | 59            | 501                | 120          | 347          | 13h06m (+40%) | 0.6569           | 0.4038          |
+| training mode          | engine        | step | gen | wait_prev_gen | generate_sequences | old_log_prob | update_actor | total time     | acc/best@32/mean | acc/maj@32/mean |
+| ---------------------- | ------------- | ---- | --- | ------------- | ------------------ | ------------ | ------------ | -------------- | ---------------- | --------------- |
+| colocate sync          | VLLM+FSDP2    | 749  | 321 | -             | 247                | 88           | 286          | 19h18m         | 0.5948           | 0.417           |
+| one-step-overlap async | VLLM+FSDP2    | 520  | -   | 45            | 458                | 108          | 337          | 15h34m（+23%） | 0.6165           | 0.494           |
+| colocate sync          | VLLM+Megatron | 699  | 207 | -             | 162                | 119          | 344          | 18h21m         | 0.605            | 0.4217          |
+| one-step-overlap async | VLLM+Megatron | 566  | -   | 59            | 501                | 120          | 347          | 13h06m (+40%)  | 0.6569           | 0.4038          |
 
-* colocate sync: step ≈ gen + old_log_prob + update_actor
-* one-step-overlap async: step ≈ wait_prev_gen + old_log_prob + update_actor
+- colocate sync: step ≈ gen + old_log_prob + update_actor
+- one-step-overlap async: step ≈ wait_prev_gen + old_log_prob + update_actor
 
-![One Step Off Megatron Performance](
-https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/docs/one_step_off_megatron.png)
+![One Step Off Megatron Performance](https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/docs/one_step_off_megatron.png)
 
 > source data: https://wandb.ai/hou-zg-meituan/one-step-off-policy?nw=nwuserhouzg
 
@@ -223,12 +221,14 @@ def sync_rollout_weights(self):
 ```
 
 ### PPO Correctness
-To ensure the correctness of the PPO algorithm, we use rollout log_probs for PPO importance sampling. 
+
+To ensure the correctness of the PPO algorithm, we use rollout log_probs for PPO importance sampling.
 For the related algorithm details, please refer to: https://verl.readthedocs.io/en/latest/algo/rollout_corr_math.html
 The default mode is `bypass_ppo_clip`, but other modification strategies can also be explored.
 
 ### AgentLoop
-In the current implementation, we no longer provide SPMD model rollout mode. 
+
+In the current implementation, we no longer provide SPMD model rollout mode.
 Instead, we have switched to AgentLoop mode, which also supports multi-turn tool calling.
 
 ## Usage
@@ -236,7 +236,7 @@ Instead, we have switched to AgentLoop mode, which also supports multi-turn tool
 ### FSDP2 Configuration Example
 
 ```shell
-python3 -m recipe.one_step_off_policy.async_main_ppo \
+python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
     --config-path=config \
     --config-name='one_step_off_ppo_trainer.yaml' \
     actor_rollout_ref.actor.strategy=fsdp2 \
@@ -252,7 +252,7 @@ python3 -m recipe.one_step_off_policy.async_main_ppo \
 ### Megatron Configuration Example
 
 ```shell
-python3 -m recipe.one_step_off_policy.async_main_ppo \
+python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
     --config-path=config \
     --config-name='one_step_off_ppo_megatron_trainer.yaml' \
     actor_rollout_ref.actor.strategy=megatron \
@@ -269,49 +269,51 @@ python3 -m recipe.one_step_off_policy.async_main_ppo \
 
 1. **Card Number Relationships**
    Maintain either of these relationships for optimal batch distribution:
+
    - `actor_rollout_ref.rollout.n` should be an integer divisor of:
      `trainer.n_gpus_per_node * trainer.nnodes`
    - `actor_rollout_ref.rollout.n * data.train_batch_size` should be evenly divisible by:
      `trainer.n_gpus_per_node * trainer.nnodes`
 
    > Rationale: Ensures training samples can be evenly distributed across training GPUs when using partial resources for
-   generation.
+   > generation.
 
 2. **Dynamic Resource Tuning**
    Adjust `trainer.nnodes` `trainer.n_gpus_per_node` `rollout.nnodes` `rollout.n_gpus_per_node` based on phase
    durations:
    - **Ideal state**: Rollout and training phases have comparable durations
    - **Diagnostic metrics**:
-      - Monitor `wait_prev_gen` duration
-      - Analyze `sequence_length` distribution
+     - Monitor `wait_prev_gen` duration
+     - Analyze `sequence_length` distribution
    - **Adjustment strategy**:
-      - High `wait_prev_gen` + uniform sequence lengths → Increase rollout resources
-      - High `wait_prev_gen` + long-tail sequences → Optimize stopping criteria (resource increase won't help)
-   > **wait_prev_gen**：The time consumed waiting for the previous rollout to end (the part that is not fully
-   overlapped).
-   **Resource Configuration Strategies:**
+     - High `wait_prev_gen` + uniform sequence lengths → Increase rollout resources
+     - High `wait_prev_gen` + long-tail sequences → Optimize stopping criteria (resource increase won't help)
+       > **wait_prev_gen**：The time consumed waiting for the previous rollout to end (the part that is not fully
+       > overlapped).
+       > **Resource Configuration Strategies:**
    - **Resource-constrained scenario**: Optimize resource utilization by adjusting GPU allocation ratios,
      keeping the number of nodes equal to allow training and rollout to share nodes;
-      - Configure `trainer.nnodes = rollout.nnodes` with
-        `trainer.n_gpus_per_node + rollout.n_gpus_per_node = physical_gpus_per_node`. Control rollout resource
-        allocation by adjusting `n_gpus_per_node`.
+     - Configure `trainer.nnodes = rollout.nnodes` with
+       `trainer.n_gpus_per_node + rollout.n_gpus_per_node = physical_gpus_per_node`. Control rollout resource
+       allocation by adjusting `n_gpus_per_node`.
    - **Resource-abundant scenario**: Optimize performance by adjusting the number of nodes,
      keeping the number of GPUs per node equal to enable independent scaling of training and rollout
      parallelism.
-      - Configure `trainer.n_gpus_per_node = rollout.n_gpus_per_node` and control rollout resource allocation by
-        adjusting `trainer.nnodes` and `rollout.nnodes`to achieve optimal performance.
-   > **Note**: The total number of nodes required by the system is not simply `trainer.nnodes + rollout.nnodes`. The
-   > actual calculation depends on GPU capacity:
-   > - When `trainer.n_gpus_per_node + rollout.n_gpus_per_node <= physical_gpus_per_node`,
-       > the required node count is `max(trainer.nnodes, rollout.nnodes)`
-   > - When `trainer.n_gpus_per_node + rollout.n_gpus_per_node > physical_gpus_per_node`,
-       > the required node count is `trainer.nnodes + rollout.nnodes`
+     - Configure `trainer.n_gpus_per_node = rollout.n_gpus_per_node` and control rollout resource allocation by
+       adjusting `trainer.nnodes` and `rollout.nnodes`to achieve optimal performance.
+       > **Note**: The total number of nodes required by the system is not simply `trainer.nnodes + rollout.nnodes`. The
+       > actual calculation depends on GPU capacity:
+       >
+       > - When `trainer.n_gpus_per_node + rollout.n_gpus_per_node <= physical_gpus_per_node`,
+       >   the required node count is `max(trainer.nnodes, rollout.nnodes)`
+       > - When `trainer.n_gpus_per_node + rollout.n_gpus_per_node > physical_gpus_per_node`,
+       >   the required node count is `trainer.nnodes + rollout.nnodes`
 
 ## Functional Support
 
 | Category           | Support Situation                                                                                               |
-|--------------------|-----------------------------------------------------------------------------------------------------------------|
-| train engine       | FSDP2  <br/> Megatron                                                                                           |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| train engine       | FSDP2 <br/> Megatron                                                                                            |
 | rollout engine     | vLLM                                                                                                            |
 | AdvantageEstimator | GRPO <br/> GRPO_PASSK <br/> REINFORCE_PLUS_PLUS <br/> RLOO <br/> OPO <br/> REINFORCE_PLUS_PLUS_BASELINE<br/>GPG |
 | Reward             | all                                                                                                             |

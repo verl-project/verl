@@ -31,7 +31,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install the current repository
         run: |
-          pip install -e .
+          pip install pre-commit hydra-core
+          pip install --no-deps -e .
       - name: Set ruff --output-format=github
         run: |
           sed -i 's/--output-format=full/--output-format=github/' .pre-commit-config.yaml

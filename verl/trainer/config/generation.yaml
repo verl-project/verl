@@ -16,7 +16,11 @@ model:
 rollout:
   _target_: verl.workers.config.RolloutConfig
   name: vllm
-  mode: sync # sync: LLM, async: AsyncLLM
+  # NOTE: 'sync' mode was removed in PR #4411. Only 'async' mode is supported.
+  # WARNING: The main_generation.py workflow is currently broken for vLLM async rollout
+  # as it requires synchronous generate_sequences() which vLLMAsyncRollout doesn't support.
+  # See issue #4682 for discussion and workarounds.
+  mode: async
   temperature: 1.0
   top_k: 50 # 0 for hf rollout, -1 for vllm rollout
   top_p: 0.7

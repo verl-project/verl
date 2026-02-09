@@ -59,6 +59,11 @@ model:
       # - 'linear_fc2': Apply LoRA to the second fully-connected layer in MLP
       # Target modules can also contain wildcards. For example, you can specify
       # target_modules=['*.layers.0.*.linear_qkv', '*.layers.1.*.linear_qkv'] to add LoRA to only linear_qkv on the first two layers
+      # 
+      # Note:
+      # For MLA (e.g., DeepSeek), you should use ["linear_kv_down_proj","linear_kv_up_proj","linear_q_down_proj","linear_q_up_proj","linear_q_proj"]
+      # Instead of "linear_qkv" or ["linear_q","linear_k","linear_v"]
+      # By default, MoE routers are excluded from LoRA adaptation, and you will need to specify "router" in target_modules to include them.
       target_modules:
         - linear_qkv
         - linear_proj

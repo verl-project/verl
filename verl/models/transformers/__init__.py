@@ -11,3 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from verl.models.transformers.monkey_patch import apply_monkey_patch
+from verl.models.transformers.tiled_mlp import apply_tiled_mlp_monkey_patch
+
+__all__ = [
+    "apply_monkey_patch",
+    "apply_tiled_mlp_monkey_patch",
+]

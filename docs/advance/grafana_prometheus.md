@@ -10,18 +10,15 @@ We provide an additional training monitoring capability, leveraging Prometheus a
 
 The system automatically configures Prometheus to scrape metrics from rollout servers, eliminating manual configuration steps.
 
-
 ## Overview
 
 The figures below show the performance of Qwen235B on the AIME2024 dataset with a response length of 20k, where the emergence of a long-tail problem is clearly observable.
 
-![fully_async_policy_structure](
-https://github.com/ArronHZG/verl-community/blob/main/docs/grafana_validate.png?raw=true)
+![fully_async_policy_structure](https://github.com/ArronHZG/verl-community/blob/main/docs/grafana_validate.png?raw=true)
 
 The following figure presents the fully asynchronous training of the Qwen235B model. Here, resource idleness is distinctly noticeable, indicating that rollout resources can be reduced.
 
-![fully_async_policy_structure](
-https://github.com/ArronHZG/verl-community/blob/main/docs/grafana_fully_async_train.png?raw=true)
+![fully_async_policy_structure](https://github.com/ArronHZG/verl-community/blob/main/docs/grafana_fully_async_train.png?raw=true)
 
 Through the above two examples, we also illustrate the necessity of system observability.
 
@@ -101,20 +98,22 @@ Start verl training with the following parameters configured:
 
 **Required Configuration:**
 
-* `actor_rollout_ref.rollout.mode="async"`
-* `actor_rollout_ref.rollout.disable_log_stats=False`
-* `actor_rollout_ref.rollout.prometheus.enable=True`
+- `actor_rollout_ref.rollout.mode="async"`
+- `actor_rollout_ref.rollout.disable_log_stats=False`
+- `actor_rollout_ref.rollout.prometheus.enable=True`
 
 If use default port, this parameter can be omitted.
-* `actor_rollout_ref.rollout.prometheus.port=9090`
+
+- `actor_rollout_ref.rollout.prometheus.port=9090`
 
 If use default path, this parameter can be omitted.
-* `actor_rollout_ref.rollout.prometheus.file="/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"`
 
-served_model_name uses `model_path.split("/")[-1]` for data statistics by default. 
+- `actor_rollout_ref.rollout.prometheus.file="/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"`
+
+served_model_name uses `model_path.split("/")[-1]` for data statistics by default.
 Users can also customize other aliases:
 
-* `actor_rollout_ref.rollout.prometheus.served_model_name="Qwen3-235B"`
+- `actor_rollout_ref.rollout.prometheus.served_model_name="Qwen3-235B"`
 
 **Shell Script Example:**
 
@@ -139,11 +138,11 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.rollout.disable_log_stats=False \
     actor_rollout_ref.rollout.prometheus.enable=True
     ...
-    
+
 # Asynchronous training
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
-    -- python3 recipe.fully_async_policy.fully_async_main \
+    -- python3 verl.experimental.fully_async_policy.fully_async_main \
     data.return_raw_chat=${return_raw_chat} \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
@@ -156,12 +155,13 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
 
 After task execution, verify that Prometheus is correctly collecting metrics.
 
-**Verification:** Visit the Prometheus interface at `http://master_ip:9090` and search for `vllm:` or `sglang:` to 
+**Verification:** Visit the Prometheus interface at `http://master_ip:9090` and search for `vllm:` or `sglang:` to
 confirm metrics are being reported correctly.
 
 **Troubleshooting:**
 
 If no metrics appear:
+
 1. Check logs for `AgentLoopManager` to find the server port
 2. Visit `http://master_ip:server_port/metrics` to verify server metrics are available
 3. Confirm that `actor_rollout_ref.rollout.disable_log_stats=False` is set
@@ -178,10 +178,11 @@ After task execution, log in to Grafana to view and customize monitoring dashboa
 2. Upload a pre-built dashboard JSON file
 
 **Available Dashboards:**
-* [vLLM Grafana Dashboard style 1](https://github.com/ArronHZG/verl-community/blob/main/docs/grafana/vllm_grafana.json)
-* [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/performance_statistics.json)
-* [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/query_statistics.json)
-* [SGLang Grafana Dashboard](https://github.com/sgl-project/sglang/blob/main/examples/monitoring/grafana/dashboards/json/sglang-dashboard.json)
+
+- [vLLM Grafana Dashboard style 1](https://github.com/ArronHZG/verl-community/blob/main/docs/grafana/vllm_grafana.json)
+- [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/performance_statistics.json)
+- [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/query_statistics.json)
+- [SGLang Grafana Dashboard](https://github.com/sgl-project/sglang/blob/main/examples/monitoring/grafana/dashboards/json/sglang-dashboard.json)
 
 ## Additional Resources
 

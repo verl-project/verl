@@ -24,7 +24,48 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
-__all__ = ["HFModelConfig"]
+__all__ = ["HFModelConfig", "MtpConfig"]
+
+
+@dataclass
+class MtpConfig(BaseConfig):
+    """
+    Configuration for MTP model.
+
+    enable: Enable loading and saving of MTP parameters, but do not use them
+
+    enable_train: Whether to enable using MTP parameters during training
+    enable_rollout: Whether to enable using MTP parameters during rollout
+
+    Training parameters:
+        detach_encoder: Whether to detach encoder parameters during MTP training
+        mtp_loss_scaling_factor: Loss scaling factor during MTP training
+
+    vLLM rollout parameters:
+        method: "mtp"
+        num-speculative-tokens: 1
+
+    SGLang rollout parameters:
+        speculative-algorithm: EAGLE
+        speculative-num-steps: 3
+        speculative-eagle-topk: 1
+        speculative-num-draft-tokens: 4
+    """
+
+    enable: bool = False
+    enable_train: bool = False
+    enable_rollout: bool = False
+
+    detach_encoder: bool = False
+    mtp_loss_scaling_factor: float = 0.1
+
+    speculative_algorithm: str = "EAGLE"
+    speculative_num_steps: int = 3
+    speculative_eagle_topk: int = 1
+    speculative_num_draft_tokens: int = 4
+
+    method: str = "mtp"
+    num_speculative_tokens: int = 1
 
 
 @dataclass
@@ -79,6 +120,7 @@ class HFModelConfig(BaseConfig):
     lora_rank: int = 0
     lora_alpha: int = 16
     target_modules: Optional[str] = "all-linear"
+    target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
 
     exclude_modules: Optional[str] = None
 
@@ -92,7 +134,12 @@ class HFModelConfig(BaseConfig):
     use_fused_kernels: bool = False
     fused_kernel_options: dict = field(default_factory=dict)
 
+    # TiledMLP configuration for memory-efficient MLP computation
+    tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
+
     architectures: Optional[list[str]] = None
+
+    mtp: MtpConfig = field(default_factory=MtpConfig)
 
     def __post_init__(self):
         import_external_libs(self.external_lib)
@@ -121,7 +168,7 @@ class HFModelConfig(BaseConfig):
             self.local_hf_config_path, trust_remote_code=self.trust_remote_code
         )
 
-        # constuct hf_config
+        # construct hf_config
         attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation

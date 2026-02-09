@@ -46,7 +46,7 @@ def get_rope_index(
     video_token_id = processor.video_token_id
     vision_start_token_id = processor.vision_start_token_id
 
-    # Since we use timestamps to seperate videos,
+    # Since we use timestamps to separate videos,
     # like <t1> <vision_start> <frame1> <vision_end> <t2> <vision_start> <frame2> <vision_end>,
     # the video_grid_thw should also be split
     if video_grid_thw is not None:

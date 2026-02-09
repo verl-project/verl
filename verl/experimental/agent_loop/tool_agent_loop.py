@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import copy
 import json
 import logging
 import os
@@ -20,6 +19,8 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
+import torch
+from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.agent_loop import (
@@ -35,7 +36,6 @@ from verl.interactions.base import BaseInteraction
 from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
 from verl.tools.schemas import ToolResponse
 from verl.tools.utils.tool_registry import initialize_tools_from_config
-from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 
@@ -58,7 +58,8 @@ class AgentData:
     def __init__(
         self,
         messages: list[dict[str, Any]],
-        image_data: Any,
+        image_data: list[Image.Image],
+        video_data: list[tuple[torch.Tensor, dict[str, Any]]],
         metrics: dict[str, Any],
         request_id: str,
         tools_kwargs: dict[str, Any],
@@ -67,6 +68,7 @@ class AgentData:
     ):
         self.messages = messages
         self.image_data = image_data
+        self.video_data = video_data
         self.metrics = metrics
         self.request_id = request_id
         self.tools_kwargs = tools_kwargs
@@ -118,10 +120,8 @@ class ToolAgentLoop(AgentLoopBase):
         )
         self.tool_parser_name = config.actor_rollout_ref.rollout.multi_turn.format
 
-        self.apply_chat_template_kwargs = config.data.get("apply_chat_template_kwargs", {})
         self.prompt_length = config.actor_rollout_ref.rollout.prompt_length
         self.response_length = config.actor_rollout_ref.rollout.response_length
-        self.system_prompt = initialize_system_prompt(self.tokenizer, **self.apply_chat_template_kwargs)
 
         # Initialize interactions from config file
         self.interaction_config_file = config.actor_rollout_ref.rollout.multi_turn.interaction_config_path
@@ -133,7 +133,12 @@ class ToolAgentLoop(AgentLoopBase):
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
-        image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
+
+        # extract images and videos from messages
+        multi_modal_data = await self.process_vision_info(messages)
+        images = multi_modal_data.get("images")
+        videos = multi_modal_data.get("videos")
+
         metrics = {}
         request_id = uuid4().hex
         tools_kwargs = kwargs.get("tools_kwargs", {})
@@ -156,7 +161,8 @@ class ToolAgentLoop(AgentLoopBase):
         # Create AgentData instance to encapsulate all state
         agent_data = AgentData(
             messages=messages,
-            image_data=image_data,
+            image_data=images,
+            video_data=videos,
             metrics=metrics,
             request_id=request_id,
             tools_kwargs=tools_kwargs,
@@ -182,7 +188,11 @@ class ToolAgentLoop(AgentLoopBase):
         # Finalize output
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
-        multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
+        multi_modal_data = {}
+        if agent_data.image_data is not None:
+            multi_modal_data["images"] = agent_data.image_data
+        if agent_data.video_data is not None:
+            multi_modal_data["videos"] = agent_data.video_data
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
@@ -200,30 +210,13 @@ class ToolAgentLoop(AgentLoopBase):
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
-        if self.processor is not None:
-            raw_prompt = await self.loop.run_in_executor(
-                None,
-                lambda: self.processor.apply_chat_template(
-                    agent_data.messages,
-                    tools=self.tool_schemas,
-                    add_generation_prompt=True,
-                    tokenize=False,
-                    **self.apply_chat_template_kwargs,
-                ),
-            )
-            model_inputs = self.processor(text=[raw_prompt], images=agent_data.image_data, return_tensors="pt")
-            agent_data.prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
-        else:
-            agent_data.prompt_ids = await self.loop.run_in_executor(
-                None,
-                lambda: self.tokenizer.apply_chat_template(
-                    agent_data.messages,
-                    tools=self.tool_schemas,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    **self.apply_chat_template_kwargs,
-                ),
-            )
+        prompt_ids = await self.apply_chat_template(
+            agent_data.messages,
+            tools=self.tool_schemas,
+            images=agent_data.image_data,
+            videos=agent_data.video_data,
+        )
+        agent_data.prompt_ids = prompt_ids
         return AgentState.GENERATING
 
     async def _handle_generating_state(
@@ -238,7 +231,14 @@ class ToolAgentLoop(AgentLoopBase):
                 prompt_ids=agent_data.prompt_ids,
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
+                video_data=agent_data.video_data,
             )
+        # first time to set num_preempted
+        if agent_data.metrics.get("num_preempted") is None:
+            agent_data.metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
+        # then add num_preempted to the metrics
+        else:
+            agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
@@ -342,34 +342,21 @@ class ToolAgentLoop(AgentLoopBase):
                 agent_data.tool_rewards.append(tool_reward)
 
         agent_data.messages.extend(add_messages)
-        # Update prompt with tool responses
-        if self.processor is not None:
-            raw_tool_response = await self.loop.run_in_executor(
-                None,
-                lambda: self.processor.apply_chat_template(
-                    add_messages,
-                    add_generation_prompt=True,
-                    tokenize=False,
-                    **self.apply_chat_template_kwargs,
-                ),
+
+        if self.tool_parser_name == "gpt-oss":
+            logger.info("manually format tool responses for gpt-oss")
+            tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
+            response_ids = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
-            # Use only the new images from this turn for processing tool responses
-            current_images = new_images_this_turn if new_images_this_turn else None  # Using local variable
-            model_inputs = self.processor(text=[raw_tool_response], images=current_images, return_tensors="pt")
-            response_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
         else:
-            if self.tool_parser_name == "gpt-oss":
-                logger.info("manually format tool responses for gpt-oss")
-                tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
-                response_ids = await self.loop.run_in_executor(
-                    None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
-                )
-            else:
-                response_ids = await self.loop.run_in_executor(
-                    None,
-                    lambda: self.tokenizer.apply_chat_template(add_messages, add_generation_prompt=True, tokenize=True),
-                )
-                response_ids = response_ids[len(self.system_prompt) :]
+            response_ids = await self.apply_chat_template(
+                add_messages,
+                images=new_images_this_turn,  # Using local variable
+                videos=None,
+                remove_system_prompt=True,
+            )
+
         if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
             return AgentState.TERMINATED
         # Update prompt_ids and response_mask
@@ -408,24 +395,10 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.turn_scores.append(reward)
 
         # Update prompt with user responses (similar to _handle_processing_tools_state)
-        if self.processor is not None:
-            raw_user_response = await self.loop.run_in_executor(
-                None,
-                lambda: self.processor.apply_chat_template(
-                    add_messages,
-                    add_generation_prompt=True,
-                    tokenize=False,
-                    **self.apply_chat_template_kwargs,
-                ),
-            )
-            model_inputs = self.processor(text=[raw_user_response], images=None, return_tensors="pt")
-            response_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
-        else:
-            response_ids = await self.loop.run_in_executor(
-                None,
-                lambda: self.tokenizer.apply_chat_template(add_messages, add_generation_prompt=True, tokenize=True),
-            )
-        response_ids = response_ids[len(self.system_prompt) :]
+        response_ids = await self.apply_chat_template(
+            add_messages,
+            remove_system_prompt=True,
+        )
 
         # Update prompt_ids and response_mask
         agent_data.prompt_ids += response_ids

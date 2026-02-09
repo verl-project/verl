@@ -19,21 +19,26 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from verl.utils.torch_functional import distributed_masked_mean, distributed_mean_max_min_std, masked_mean
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
+from verl.utils.torch_functional import (
+    distributed_masked_mean,
+    distributed_mean_max_min_std,
+    expand_as_nested,
+    masked_mean,
+)
 
 
 def _worker_mean(rank: int, world_size: int, rendezvous_file: str):
     # 1) set GPU and init NCCL
-    torch.cuda.set_device(rank)
+    get_torch_device().set_device(rank)
     dist.init_process_group(
-        backend="nccl",
+        backend=get_nccl_backend(),
         init_method=f"file://{rendezvous_file}",
         rank=rank,
         world_size=world_size,
     )
-
     # each rank holds tensor [rank+1]
-    local = torch.tensor([float(rank + 1)], device=f"cuda:{rank}")
+    local = torch.tensor([float(rank + 1)], device=f"{get_device_name()}:{rank}")
     mean, gmax, gmin, gstd = distributed_mean_max_min_std(local, True, True, True)
 
     values = [float(i + 1) for i in range(world_size)]
@@ -80,20 +85,20 @@ def test_distributed_mean_max_min_std(world_size, tmp_path):
 
 
 def _worker_mask(rank: int, world_size: int, rendezvous_file: str):
-    torch.cuda.set_device(rank)
+    get_torch_device().set_device(rank)
     dist.init_process_group(
-        backend="nccl",
+        backend=get_nccl_backend(),
         init_method=f"file://{rendezvous_file}",
         rank=rank,
         world_size=world_size,
     )
 
     # build per‐rank tensor and mask
-    local_tensor = torch.tensor([rank * 2 + 1.0, rank * 2 + 2.0], device=f"cuda:{rank}")
+    local_tensor = torch.tensor([rank * 2 + 1.0, rank * 2 + 2.0], device=f"{get_device_name()}:{rank}")
     if rank == 0:
-        mask = torch.tensor([1, 0], device=f"cuda:{rank}", dtype=torch.float32)
+        mask = torch.tensor([1, 0], device=f"{get_device_name()}:{rank}", dtype=torch.float32)
     else:
-        mask = torch.tensor([0, 1], device=f"cuda:{rank}", dtype=torch.float32)
+        mask = torch.tensor([0, 1], device=f"{get_device_name()}:{rank}", dtype=torch.float32)
 
     gmean = distributed_masked_mean(local_tensor, mask)
 
@@ -115,3 +120,33 @@ def test_distributed_masked_mean(world_size, tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+def test_expand_as_nested():
+    a = torch.randn(2)
+    b = torch.randn(3)
+    c = torch.randn(4)
+    nested_tensor = torch.nested.as_nested_tensor([a, b, c], layout=torch.jagged)
+    tensor = torch.tensor([1, 2, 3])
+
+    output = expand_as_nested(tensor, nested_tensor)
+
+    assert output.values().tolist() == [1, 1, 2, 2, 2, 3, 3, 3, 3]
+    assert torch.all(output.offsets() == nested_tensor.offsets()).item()
+
+    # test exceptions
+    with pytest.raises(AssertionError):
+        expand_as_nested(tensor, tensor)
+
+    other_tensor = torch.tensor([1, 2, 3, 4])
+
+    with pytest.raises(AssertionError):
+        expand_as_nested(other_tensor, nested_tensor)
+
+    other_tensor = torch.tensor([[1, 2, 3]])
+
+    with pytest.raises(AssertionError):
+        expand_as_nested(other_tensor, nested_tensor)
+
+    with pytest.raises(AssertionError):
+        expand_as_nested(tensor, nested_tensor.unsqueeze(-1))

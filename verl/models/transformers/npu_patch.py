@@ -185,7 +185,12 @@ class NPUQwen3VLMoeTextExperts(nn.Module):
             )
             intermediate_activations = torch_npu.npu_swiglu(intermediate_hidden_states, dim=-1)
             output = NPUGmmFunction.apply(intermediate_activations, self.down_proj, tokens_per_expert)
-            next_states = torch_npu.npu_moe_token_unpermute(output, row_ids_map, probs=routing_weights)
+            num_tokens = hidden_states.shape[0]
+            top_k = router_indices.shape[1]
+            batch_idx = torch.arange(num_tokens, device=routing_weights.device)
+            batch_idx = batch_idx.unsqueeze(1).expand(-1, top_k)
+            selected_probs = routing_weights[batch_idx, router_indices]
+            next_states = torch_npu.npu_moe_token_unpermute(output, row_ids_map, probs=selected_probs)
             next_states = next_states.view(batch_size, -1, self.hidden_size)
         else:
             hidden_states = hidden_states.repeat(self.num_experts, 1)

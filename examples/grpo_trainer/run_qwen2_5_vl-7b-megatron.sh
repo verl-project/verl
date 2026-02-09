@@ -5,7 +5,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation ov
 HF_MODEL_PATH=Qwen/Qwen2.5-VL-7B-Instruct
 DIST_CKPT_PATH=${DIST_CKPT_PATH}
 
-# convert HF model to meagatron format offlinely
+# convert HF model to megatron format offlinely
 # python scripts/converter_hf_to_mcore.py --hf_model_path $HF_MODEL_PATH --output_path $DIST_CKPT_PATH
 
 

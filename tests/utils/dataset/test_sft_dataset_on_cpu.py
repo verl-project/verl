@@ -19,13 +19,13 @@ from verl.utils.dataset.sft_dataset import SFTDataset
 
 def get_gsm8k_data():
     # prepare test dataset
-    local_folder = os.path.expanduser("~/verl-data/gsm8k/")
+    local_folder = os.path.expanduser("~/data/gsm8k/")
     local_path = os.path.join(local_folder, "train.parquet")
     return local_path
 
 
 def test_sft_cot_dataset():
-    tokenizer = hf_tokenizer("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct")
+    tokenizer = hf_tokenizer(os.path.expanduser("~/models/deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"))
     local_path = get_gsm8k_data()
     from omegaconf import OmegaConf
 
@@ -50,7 +50,7 @@ def test_sft_cot_dataset():
 
 
 def test_sft_dataset():
-    tokenizer = hf_tokenizer("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct")
+    tokenizer = hf_tokenizer(os.path.expanduser("~/models/deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"))
     local_path = get_gsm8k_data()
     from omegaconf import OmegaConf
 
@@ -75,7 +75,7 @@ def test_sft_dataset():
 
 
 def test_sft_dataset_with_max_samples():
-    tokenizer = hf_tokenizer("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct")
+    tokenizer = hf_tokenizer(os.path.expanduser("~/models/deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"))
     local_path = get_gsm8k_data()
     from omegaconf import OmegaConf
 

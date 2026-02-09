@@ -49,8 +49,6 @@ on:
       - "!tests/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
-      # Recipes
-      - "!recipe/**"
       # FSDP
       - "!verl/workers/**/*dp_*.py"
       # Megatron
@@ -74,12 +72,12 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm011.dev7"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -109,14 +107,16 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -e .[test]
-#      - name: Download Model to Use
-#        run: |
-#          huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct
-#          huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-1.5B-Instruct
-#          huggingface-cli download Qwen/Qwen2.5-VL-3B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-VL-3B-Instruct
-#          huggingface-cli download OldKingMeister/Qwen2.5-1.5B-Instruct-YaRN --local-dir ${HOME}/models/OldKingMeister/Qwen2.5-1.5B-Instruct-YaRN
-#          export HF_HUB_OFFLINE=1
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install --upgrade "transformers<5.0"
+      #      - name: Download Model to Use
+      #        run: |
+      #          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct
+      #          hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-1.5B-Instruct
+      #          hf download Qwen/Qwen2.5-VL-3B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-VL-3B-Instruct
+      #          hf download OldKingMeister/Qwen2.5-1.5B-Instruct-YaRN --local-dir ${HOME}/models/OldKingMeister/Qwen2.5-1.5B-Instruct-YaRN
+      #          export HF_HUB_OFFLINE=1
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
@@ -127,11 +127,34 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
-      # Note(haibin.lin): for any new test, please update gpu_unit_tests.yaml to avoid repeated tests
+
+  vllm_checkpoint_engine:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 35 # Increase this timeout value as needed
+    env:
+      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install cupy-cuda12x pytest-asyncio
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install --upgrade "transformers<5.0"
+      - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
+        run: |
+          ROLLOUT_NAME=vllm pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, vllm]
+    needs: [setup, vllm, vllm_checkpoint_engine]
     if: always()
     steps:
       - id: destroy-runner

@@ -18,7 +18,8 @@ optimizer_offload: false
 # Only for FSDP2: offload param/grad/optimizer during train
 offload_policy: false
 
-# Only for FSDP2: Reshard after forward pass to reduce memory footprint
+# Reshard after forward pass to reduce memory footprint
+# For FSDP1, `false` enables `ShardingStrategy.SHARD_GRAD_OP`
 reshard_after_forward: true
 
 # Number of GPUs in each FSDP shard group; -1 means auto

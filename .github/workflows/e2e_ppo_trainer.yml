@@ -13,8 +13,7 @@ on:
       - "**/*.py"
       # Other entrypoints
       - "!verl/trainer/fsdp_sft_trainer.py"
-      # Recipes
-      - "!recipe/**"
+
       # Megatron
       - "!verl/workers/**/megatron_*.py"
 
@@ -33,8 +32,7 @@ on:
       - "!verl/trainer/fsdp_sft_trainer.py"
       # Docs
       - "!docs/**"
-      # Recipes
-      - "!recipe/**"
+
       # Megatron
       - "!verl/workers/**/megatron_*.py"
       # Entrypoints
@@ -68,7 +66,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install the current repository
         run: |
-          pip install -e .
+          pip install pre-commit hydra-core
+          pip3 install --no-deps -e .
       - name: Set ruff --output-format=github
         run: |
           sed -i 's/--output-format=full/--output-format=github/' .pre-commit-config.yaml

@@ -20,8 +20,10 @@ from tensordict import TensorDict
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
+from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.utils.padding import no_padding_2_padding
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -93,16 +95,30 @@ def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) ->
 
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
-    log_prob = _slice_response_from_unpad_output(model_output["log_probs"], data)
+    """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+    log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
-        entropy = _slice_response_from_unpad_output(entropy, data)
+        entropy = no_padding_2_padding(entropy, data)
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
     config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
     config.global_batch_info["global_batch_size"] = data["global_batch_size"]
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+
+    # assumes that if any of the global batch info is set, the policy_loss_fn will
+    # normalize using dp_size/global_bsz/global_token; in this case, metric aggregation should be SUM
+    # to reflect the mean loss over the global batch
+    if (
+        data["dp_size"] > 1
+        or data["batch_num_tokens"] is not None
+        or data["global_batch_size"] is not None
+        or config.loss_scale_factor is not None
+    ):
+        metric_aggregation = AggregationType.SUM
+    else:
+        metric_aggregation = AggregationType.MEAN
 
     metrics = {}
 
@@ -127,8 +143,12 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         rollout_is_weights=rollout_is_weights,
     )
 
+    # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
+    # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+
     metrics.update(pg_metrics)
-    metrics["actor/pg_loss"] = pg_loss.detach().item()
+    metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
     policy_loss = pg_loss
 
     # add entropy loss
@@ -138,6 +158,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
+        metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
 
     # add kl loss
     if config.use_kl_loss:
@@ -149,7 +170,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         )
 
         policy_loss += kl_loss * config.kl_loss_coef
-        metrics["kl_loss"] = kl_loss.detach().item()
+        metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
         metrics["kl_coef"] = config.kl_loss_coef
 
     return policy_loss, metrics

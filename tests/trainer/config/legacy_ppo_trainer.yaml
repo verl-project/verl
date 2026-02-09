@@ -1015,7 +1015,7 @@ trainer:
       roles: ["all"]
 
       # Collection level, optional values: level_none, level0, level1, level2.
-      level: level1
+      level: level0
 
       # Whether to enable memory analysis.
       with_memory: False

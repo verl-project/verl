@@ -41,3 +41,10 @@ entropy_checkpointing: False
 
 # Whether to remove padding tokens in inputs during training
 use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+
+# This computes Σπ² needed for the Logit-Gradient Norm proxy W(τ) = Σ_t[1 - 2π_t + Σπ²]
+# c.f. https://yingru.notion.site/The-Optimal-Token-Baseline-399211a558b782cfa936014c0d42dfb8
+calculate_sum_pi_squared: False
+
+# Enable gradient checkpointing for sum_pi_squared computation (saves memory)
+sum_pi_squared_checkpointing: False

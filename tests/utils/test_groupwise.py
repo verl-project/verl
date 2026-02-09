@@ -70,3 +70,29 @@ def test_group_mean_std_empty():
     gidx = torch.tensor([], dtype=torch.long)
     mean_g, std_g, cnt_g = group_mean_std(scores, gidx)
     assert mean_g.numel() == 0 and std_g.numel() == 0 and cnt_g.numel() == 0
+
+
+def test_group_mean_std_default_device_no_force_env(monkeypatch):
+    """
+    Regression test:
+    - group_mean_std(device=None) must not pass a device *module* (e.g., torch.cuda)
+      into Tensor.to(device=...), which crashes with:
+      TypeError: to() received an invalid combination of arguments - got (..., device=module, ...)
+    """
+    # Simulate a non-pytest environment (training code path) while keeping the test CPU-only.
+    monkeypatch.delenv("VERL_FORCE_DEVICE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    # Force device selection to CPU even if CUDA is available on the test machine.
+    import verl.utils.device as device_mod
+
+    monkeypatch.setattr(device_mod, "is_cuda_available", False)
+    monkeypatch.setattr(device_mod, "is_npu_available", False)
+
+    scores = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+    gidx = torch.tensor([0, 1, 0], dtype=torch.long)
+
+    mean_g, std_g, cnt_g = group_mean_std(scores, gidx)
+    assert mean_g.device.type == "cpu"
+    assert std_g.device.type == "cpu"
+    assert cnt_g.device.type == "cpu"

@@ -10,7 +10,7 @@ In this example, we train an LLM to tackle the GSM8k task.
 
 Paper: https://arxiv.org/pdf/2110.14168
 
-Dataset: https://huggingface.co/datasets/gsm8k
+Dataset: https://huggingface.co/datasets/openai/gsm8k
 
 Note that the original paper mainly focuses on training a verifier (a
 reward model) to solve math problems via Best-of-N sampling. In this
@@ -57,7 +57,7 @@ There're three ways to prepare the model checkpoints for post-training:
 
 .. code:: bash
 
-   huggingface-cli download deepseek-ai/deepseek-math-7b-instruct --local-dir ~/models/deepseek-math-7b-instruct --local-dir-use-symlinks False
+   hf download deepseek-ai/deepseek-math-7b-instruct --local-dir ~/models/deepseek-math-7b-instruct --local-dir-use-symlinks False
    # or
    modelscope download --model deepseek-ai/deepseek-math-7b-instruct --local_dir ~/models/deepseek-math-7b-instruct
 

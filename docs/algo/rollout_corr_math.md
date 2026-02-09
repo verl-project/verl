@@ -234,7 +234,6 @@ The rollout correction framework in `verl` is built from **orthogonal components
 1. **Operating Mode**: How $\pi_{\text{old}}$ is computed (Decoupled vs Bypass)
 2. **Loss Function**: PPO (with clipping) vs Pure IS (policy gradient only)
 3. **IS/RS Aggregation Level**: Token, Sequence, or Geometric
-4. **Safety Mechanisms**: Veto for catastrophic outliers
 
 This section explains each component and their valid combinations.
 
@@ -393,7 +392,7 @@ The aggregation level determines how per-token probability ratios are combined i
 **Configuration:**
 ```python
 rollout_is = "token"  # IS weights
-rollout_rs = "token"  # Optional: rejection sampling
+rollout_rs = "token_k1"  # Optional: rejection sampling (ratio bounds)
 ```
 
 **Properties:**
@@ -423,7 +422,7 @@ where $w_t = \min(\rho_t, C_{\text{IS}})$ are the truncated token-level IS weigh
 **Configuration:**
 ```python
 rollout_is = "sequence"  # IS weights
-rollout_rs = "sequence"  # Optional: rejection sampling
+rollout_rs = "seq_sum_k1"  # Optional: rejection sampling
 ```
 
 **Properties:**
@@ -444,20 +443,20 @@ $$
 
 where $w_{\text{seq}}$ is broadcast to all tokens in the sequence. The stopgrad operator ensures correct IS gradient computation (see §3.2.2). This formulation can also be combined with PPO clipping.
 
-#### 3.3.3 Geometric Aggregation (Geo-RS)
+#### 3.3.3 Geometric Mean Aggregation (Geo-RS)
 
-**IS weights (for rejection only):** $\rho_{\text{geo}} = \exp\left( \frac{1}{|T|} \sum_{t \in T} \log \rho_t \right) = \left(\prod_{t \in T} \rho_t\right)^{1/|T|}$ (broadcast to all tokens)
+**Geometric mean ratio:** $\rho_{\text{geo}} = \exp\left( \frac{1}{|T|} \sum_{t \in T} \log \rho_t \right) = \left(\prod_{t \in T} \rho_t\right)^{1/|T|}$ (broadcast to all tokens)
 
 **Configuration:**
 ```python
 rollout_is = null  # No IS weights, pure rejection
-rollout_rs = "geometric"  # Rejection sampling only
+rollout_rs = "seq_mean_k1"  # Geometric mean rejection sampling (ratio bounds)
 ```
 
 **Properties:**
-- Geometric mean of per-token ratios
-- More sensitive than arithmetic product (sequence-level)
-- Typical threshold: 1.0001 - 1.001 (tighter than sequence/token level)
+- Length-invariant (normalizes by sequence length)
+- Ideal ratio = 1.0 (policies match)
+- Typical bounds: `"0.999_1.001"` (~±0.1%)
 - **Used for rejection sampling only, not IS weighting**
 
 **The Length Trap Problem:**
@@ -487,11 +486,11 @@ Now both sequences have the same "trust score":
 - **Long (100 tokens):** $(1.1^{100})^{1/100} = 1.1$
 
 **Why tight thresholds?**
-For 100 tokens with $\rho_t = 1.01$ each:
-- Arithmetic product: $\prod_{t=1}^{100} \rho_t = 1.01^{100} \approx 2.7$
-- Geometric mean: $(1.01)^{1} = 1.01$
+For 100 tokens with per-token log-ratio = 0.01 each:
+- Arithmetic product ratio: $e^{100 \times 0.01} \approx 2.7$
+- Geometric ratio: $e^{0.01} \approx 1.010$
 
-A threshold of 1.001 means rejecting sequences with average per-token deviation > 0.1%.
+A ratio bound of `"0.999_1.001"` rejects sequences whose average per-token log-deviation exceeds ≈0.1%.
 
 **Loss function (REINFORCE + Geometric RS):**
 
@@ -501,69 +500,102 @@ $$
 
 where $\mathcal{A}_{\text{geo}} = \{ \text{seq} : C_{\text{RS-lower}} \leq \rho_{\text{geo}} \leq C_{\text{RS-upper}} \}$ is the acceptance set (rejection mask). No IS weights are used, so no stopgrad needed. This formulation can also be combined with PPO clipping.
 
-**Combined Estimator (Geo-RS-Seq-TIS):**
+**Combined Estimator (Geo-RS-Token-TIS):**
 
-For best results, combine the **Geometric Filter** (length-invariant validity check) with **Clipped Sequence Weight** (debiasing):
+For best results, combine the **Geometric Filter** (length-invariant validity check) with **Token-level IS weights** (lower variance):
 
 $$
-\hat{g}_{\text{geo-rs-seq-tis}}(y) = \underbrace{\mathbb{I}\left( C_{\text{low}} \le \rho(y)^{1/T} \le C_{\text{high}} \right)}_{\text{Geometric Filter}} \cdot \min(\rho(y), C) \cdot f(y)
+\hat{g}_{\text{geo-rs-token-tis}}(y) = \underbrace{\mathbb{I}\left( C_{\text{low}} \le \rho(y)^{1/T} \le C_{\text{high}} \right)}_{\text{Geometric Filter}} \cdot \prod_t \min(\rho_t, C) \cdot f(y)
 $$
 
-This is implemented by combining `rollout_rs="geometric"` with `rollout_is="sequence"`.
+This is implemented by combining `rollout_rs="seq_mean_k1"` with `rollout_is="token"`.
 
----
+#### 3.3.4 K2 Divergence Aggregation
 
-### 3.4 Rejection Sampling (RS)
+**Per-token statistic:**
 
-Rejection sampling can be added to **any combination** of operating mode and aggregation level. It modifies the `response_mask` to exclude outlier tokens/sequences.
+$$
+K2_t = \frac{1}{2} \left(\log \rho_t\right)^2
+$$
+
+where $\rho_t = \frac{\pi_{\text{old}}(a_t|s_t)}{\pi_{\text{rollout}}(a_t|s_t)}$ and the implementation clips $\log \rho_t$ to $[-20, 20]$ for numerical safety.
+
+**Sequence aggregations (share the same per-token $K2_t$):**
+- `seq_sum_k2`: $K2_{\text{sum}} = \sum_{t \in T} K2_t$
+- `seq_mean_k2`: $K2_{\text{mean}} = \frac{1}{|T|} \sum_{t \in T} K2_t$
+- `seq_max_k2`: $K2_{\text{max}} = \max_{t \in T} K2_t$
 
 **Configuration:**
 ```python
-rollout_rs = "token"  # or "sequence" or "geometric"
-rollout_rs_threshold = 2.0  # Upper threshold
-rollout_rs_threshold_lower = 0.5  # Lower threshold (auto-reciprocal if null)
+rollout_is = null            # Optional: pair with token IS weights for lower variance
+rollout_rs = "token_k2"      # or "seq_sum_k2", "seq_mean_k2", "seq_max_k2"
+rollout_rs_threshold = 2.0   # Positive upper bound only
 ```
 
-**Acceptance set:**
-- **Token-level**: $\mathcal{A}_{\text{token}} = \{ t : C_{\text{RS-lower}} \leq \rho_t \leq C_{\text{RS-upper}} \}$
-- **Sequence-level**: $\mathcal{A}_{\text{seq}} = \{ \text{seq} : C_{\text{RS-lower}} \leq \prod_{t \in T} \rho_t \leq C_{\text{RS-upper}} \}$
-- **Geometric**: $\mathcal{A}_{\text{geo}} = \{ \text{seq} : C_{\text{RS-lower}} \leq \rho_{\text{geo}} \leq C_{\text{RS-upper}} \}$
-
 **Properties:**
-- Separate from IS weighting (can use RS without IS)
-- Reduces effective sample size
-- Filters extreme outliers
+- Symmetric quadratic penalty in $\log \rho_t$; equals zero when policies match.
+- Approximates $\tfrac{1}{2}\operatorname{Var}[\log \rho]$ for small policy drift, making it a smooth detector of mismatch.
+- Upper-threshold only: typical ranges are 1.5-3.0 for `token_k2`, 2.0-2.5 for `seq_mean_k2`, and 2.5-4.0 for `seq_sum_k2`.
+- `seq_max_k2` isolates single-token spikes even when the rest of the sequence is clean.
+- Can co-exist with token-level IS weights (`rollout_is="token"`) to keep useful samples while clipping variance.
 
-**Implementation:** `compute_rollout_rejection_mask()` in [rollout_corr_helper.py](../../verl/trainer/ppo/rollout_corr_helper.py#L80-L188)
+**Combined Estimator (K2-RS-Token-TIS):**
 
----
+For combined filtering and weighting, let $K2_{\text{agg}}$ denote the selected aggregation (token, sum, mean, or max):
 
-### 3.5 Veto Mechanism
+$$
+\hat{g}_{\text{k2-rs-token-tis}}(y) = \underbrace{\mathbb{I}\left( K2_{\text{agg}}(y) \le C_{\text{k2}} \right)}_{\text{K2 Filter}} \cdot \prod_t \min(\rho_t, C) \cdot f(y)
+$$
 
-An **independent** safety layer that rejects sequences with catastrophically low token probabilities.
+This is implemented via `rollout_rs="seq_mean_k2"` (or another `k2` mode) together with `rollout_is="token"`.
+
+#### 3.3.5 K3 Divergence Aggregation
+
+**K3 divergence at sequence level:**
+
+$$
+K3_{\text{seq}} = \frac{1}{|T|} \sum_{t \in T} \left( \rho_t - \log \rho_t - 1 \right)
+$$
+
+where $\rho_t = \frac{\pi_{\text{old}}(a_t|s_t)}{\pi_{\text{rollout}}(a_t|s_t)}$ is the per-token ratio.
+
+**K3 equals the reverse KL:** In expectation, $K3 = \text{KL}(\pi_{\text{rollout}} \| \pi_{\text{old}})$. This follows from:
+- $\mathbb{E}_{\pi_\text{rollout}}[\rho] = 1$
+- $\mathbb{E}_{\pi_\text{rollout}}[\log \rho] = -\text{KL}(\pi_{\text{rollout}} \| \pi_{\text{old}})$
+- Therefore: $K3 = 1 - (-\text{KL}) - 1 = \text{KL}(\pi_{\text{rollout}} \| \pi_{\text{old}})$
 
 **Configuration:**
 ```python
-rollout_token_veto_threshold = 1e-4  # null = disabled
+rollout_is = null          # No IS weights, pure rejection
+rollout_rs = "seq_mean_k3" # K3 rejection sampling
 ```
 
-**Veto condition:**
-
-$$
-\text{Reject entire sequence if } \exists t \in T \text{ such that } \rho_t < C_{\text{veto}}
-$$
-
 **Properties:**
-- Prevents catastrophic updates from tokens with near-zero probability
-- **Independent** of IS/RS settings (always applied if enabled)
-- Checks **unclamped per-token ratios** before safety bounds
-- Typical values: $10^{-4}$ to $10^{-6}$
+- K3 divergence is always >= 0 per token (equals 0 when ρ = 1)
+- More stable than geometric ratio checks because each token term is non-negative
+- Only upper threshold applies (no lower threshold since K3 >= 0)
+- Typical threshold: 0.001 - 0.01
 
-**Implementation:** [rollout_corr_helper.py](../../verl/trainer/ppo/rollout_corr_helper.py#L620-L640)
+**Why K3 over geometric ratio?**
+- Geometric ratio uses average log-ratio; small numerical bias can flip sign
+- K3 = E[ρ - log ρ - 1] is non-negative per token, offering a smoother detector
+- Both estimate the same quantity: KL(π_rollout || π_old)
+- For small divergences, K3 ≈ 0.5 × Var(log_ratio)
+
+**Combined Estimator (K3-RS-Token-TIS):**
+
+For best results, combine K3 filter with token-level IS weights:
+
+$$
+\hat{g}_{\text{k3-rs-token-tis}}(y) = \underbrace{\mathbb{I}\left( K3_{\text{seq}} \le C_{\text{k3}} \right)}_{\text{K3 Filter}} \cdot \prod_t \min(\rho_t, C) \cdot f(y)
+$$
+
+This is implemented by combining `rollout_rs="k3"` with `rollout_is="token"`.
+
 
 ---
 
-### 3.6 Batch Normalization
+### 3.4 Batch Normalization
 
 An optional variance reduction technique that normalizes IS weights to have mean 1.0 within each batch.
 
@@ -604,7 +636,37 @@ where $\bar{w}_j = \frac{1}{T_j}\sum_{t=1}^{T_j} w_{j,t} \cdot m_{j,t}$ is the p
 
 ---
 
-### 3.7 Combination Matrix
+### 3.5 Rejection Sampling (RS)
+
+Rejection sampling can be added to **any combination** of operating mode and aggregation level. It modifies the `response_mask` to exclude outlier tokens/sequences.
+
+**Configuration examples:**
+```python
+rollout_rs = "token_k1"    # Token-level ratio bounds
+rollout_rs_threshold = "0.6_1.6"
+
+rollout_rs = "seq_sum_k1"  # Sequence sum of log ratios
+rollout_rs_threshold = "0.5_2.0"
+
+rollout_rs = "seq_mean_k3" # Sequence mean of K3 divergence
+rollout_rs_threshold = 0.01
+```
+
+**Acceptance set:**
+- **Token-level**: $\mathcal{A}_{\text{token}} = \{ t : C_{\text{RS-lower}} \leq \rho_t \leq C_{\text{RS-upper}} \}$
+- **Sequence-level**: $\mathcal{A}_{\text{seq}} = \{ \text{seq} : C_{\text{RS-lower}} \leq \prod_{t \in T} \rho_t \leq C_{\text{RS-upper}} \}$
+- **Geometric**: $\mathcal{A}_{\text{geo}} = \{ \text{seq} : C_{\text{RS-lower}} \leq \rho_{\text{geo}} \leq C_{\text{RS-upper}} \}$
+
+**Properties:**
+- Separate from IS weighting (can use RS without IS)
+- Reduces effective sample size
+- Filters extreme outliers
+
+**Implementation:** `compute_rollout_rejection_mask()` in [rollout_corr_helper.py](../../verl/trainer/ppo/rollout_corr_helper.py#L80-L188)
+
+---
+
+### 3.6 Combination Matrix
 
 **Key insight:** Estimators (how IS/RS is computed) and operating modes (decoupled PPO vs bypass PG) are **orthogonal**. Any estimator can be combined with any operating mode.
 
@@ -614,9 +676,11 @@ where $\bar{w}_j = \frac{1}{T_j}\sum_{t=1}^{T_j} w_{j,t} \cdot m_{j,t}$ is the p
 |-----------|---------------|------------------|
 | **Token-TIS** | `rollout_is="token"` | Decoupled PPO, Bypass PG |
 | **Seq-TIS** | `rollout_is="sequence"` | Decoupled PPO, Bypass PG |
-| **Seq-MIS** | `rollout_is="sequence"` + `rollout_rs="sequence"` | Decoupled PPO, Bypass PG |
-| **Geo-RS** | `rollout_rs="geometric"` | Decoupled PPO, Bypass PG |
-| **Geo-RS-Seq-TIS** | `rollout_is="sequence"` + `rollout_rs="geometric"` | Decoupled PPO, Bypass PG |
+| **Seq-MIS** | `rollout_is="sequence"` + `rollout_rs="seq_sum_k1"` | Decoupled PPO, Bypass PG |
+| **Geo-RS** | `rollout_rs="seq_mean_k1"` (geometric mean) | Decoupled PPO, Bypass PG |
+| **Geo-RS-Token-TIS** | `rollout_is="token"` + `rollout_rs="seq_mean_k1"` | Decoupled PPO, Bypass PG |
+| **K3-RS** | `rollout_rs="seq_mean_k3"` | Decoupled PPO, Bypass PG |
+| **K3-RS-Token-TIS** | `rollout_is="token"` + `rollout_rs="seq_mean_k3"` | Decoupled PPO, Bypass PG |
 
 **Note:** In bypass mode, `loss_type` controls the loss function. Use "ppo_clip" (default) or "reinforce".
 
@@ -628,15 +692,19 @@ where $\bar{w}_j = \frac{1}{T_j}\sum_{t=1}^{T_j} w_{j,t} \cdot m_{j,t}$ is the p
 | `decoupled_token_is()` | Token-TIS | Decoupled PPO | Per-token IS weights |
 | `decoupled_seq_is()` | Seq-TIS | Decoupled PPO | Sequence-level IS weights |
 | `decoupled_seq_is_rs()` | Seq-MIS | Decoupled PPO | Sequence IS + sequence RS |
-| `decoupled_geo_rs()` | Geo-RS | Decoupled PPO | Geometric RS + veto |
-| `geo_rs_seq_tis()` | Geo-RS-Seq-TIS | Decoupled PPO | Geometric filter + seq IS |
+| `decoupled_geo_rs()` | Geo-RS | Decoupled PPO | Geometric RS + seq\_max\_k2 guard |
+| `decoupled_geo_rs_token_tis()` | Geo-RS-Token-TIS | Decoupled PPO | Geometric filter + token IS |
+| **K3 KL Estimator** (more stable for small KL values) |
+| `decoupled_k3_rs()` | K3-RS | Decoupled PPO | K3 rejection, no IS weights |
+| `decoupled_k3_rs_token_tis()` | K3-RS-Token-TIS | Decoupled PPO | K3 filter + token clipped weight |
 | **Bypass Mode (PPO-clip)** (ratio handles IS, RS masks outliers) |
 | `bypass_ppo_clip()` | - | Bypass (PPO-clip) | PPO-clip only |
-| `bypass_ppo_clip_geo_rs()` | Geo-RS | Bypass (PPO-clip) | PPO-clip + Geo-RS |
+| `bypass_ppo_clip_geo_rs()` | Geo-RS | Bypass (PPO-clip) | PPO-clip + Geo-RS (ratio) |
+| `bypass_ppo_clip_k3_rs()` | K3-RS | Bypass (PPO-clip) | PPO-clip + K3-RS |
 | **Bypass Mode (REINFORCE)** (explicit IS weights, no PPO clipping) |
 | `bypass_pg_is()` | Seq-TIS | Bypass (REINFORCE) | REINFORCE + Seq IS |
-| `bypass_pg_rs()` | Geo-RS | Bypass (REINFORCE) | REINFORCE + Geo-RS |
-| `bypass_pg_geo_rs_seq_tis()` | Geo-RS-Seq-TIS | Bypass (REINFORCE) | REINFORCE + Geo filter + seq IS |
+| `bypass_pg_geo_rs()` | Geo-RS | Bypass (REINFORCE) | REINFORCE + Geo-RS (ratio) |
+| `bypass_pg_geo_rs_token_tis()` | Geo-RS-Token-TIS | Bypass (REINFORCE) | REINFORCE + Geo filter + token IS |
 | **Other** |
 | `disabled()` | - | - | Metrics only |
 
@@ -651,8 +719,8 @@ These combinations are **fully supported** but require manual configuration:
 config = RolloutCorrectionConfig(
     rollout_is="token",
     rollout_is_threshold=2.0,
-    rollout_rs="token",
-    rollout_rs_threshold=2.0,
+    rollout_rs="token_k1",
+    rollout_rs_threshold="0.5_2.0",
 )
 ```
 **Properties:** Token-level IS weights + token-level RS mask.
@@ -661,8 +729,8 @@ config = RolloutCorrectionConfig(
 ```python
 config = RolloutCorrectionConfig(
     rollout_is=None,
-    rollout_rs="token",
-    rollout_rs_threshold=2.0,
+    rollout_rs="token_k1",
+    rollout_rs_threshold="0.5_2.0",
 )
 ```
 **Properties:** Token-level RS mask only, no IS weights.
@@ -671,8 +739,8 @@ config = RolloutCorrectionConfig(
 ```python
 config = RolloutCorrectionConfig(
     rollout_is=None,
-    rollout_rs="sequence",
-    rollout_rs_threshold=2.0,
+    rollout_rs="seq_sum_k1",
+    rollout_rs_threshold="0.5_2.0",
 )
 ```
 **Properties:** Sequence-level RS mask only, no IS weights.
@@ -680,14 +748,13 @@ config = RolloutCorrectionConfig(
 **Key properties:**
 - Any IS aggregation level (token/sequence) can be used in either decoupled or bypass mode
 - Rejection sampling can be added to any combination
-- Veto is independent and can be added to any combination
 - Geometric aggregation is typically used for RS only (not IS weighting)
 - Pure RS (`bypass_pg_rs`) uses bypass + geometric RS with `loss_type="reinforce"` for REINFORCE (no IS weights)
 - All combinations in the table above are valid and supported by the implementation
 
 ---
 
-### 3.8 Common Implementation Mistake
+### 3.7 Common Implementation Mistake
 
 #### Incorrect LLM-RL Implementation (PPO Without Rollout Correction)
 
@@ -796,17 +863,17 @@ $$
 | `loss_type="reinforce"` | Off-policy REINFORCE | 2 (rollout, θ) | ❌ | ✅ (explicit IS weights) | ✅ Correct | **Fast** |
 | **Bypass Mode Presets (PPO-clip)** |
 | `bypass_ppo_clip` | PPO only | 2 (rollout, θ) | ✅ | - | ✅ Correct | **Fast** |
-| `bypass_ppo_clip_geo_rs` | PPO + Geo-RS | 2 (rollout, θ) | ✅ | Geo-RS mask | ✅ Correct | **Fast** |
+| `bypass_ppo_clip_geo_rs` | PPO + Geo-RS | 2 (rollout, θ) | ✅ | Geo-RS mask (ratio) | ✅ Correct | **Fast** |
 | **Bypass Mode Presets (REINFORCE)** |
 | `bypass_pg_is` | REINFORCE + Seq-TIS | 2 (rollout, θ) | ❌ | ✅ Seq-TIS | ✅ Correct | **Fast** |
-| `bypass_pg_rs` | REINFORCE + Geo RS | 2 (rollout, θ) | ❌ | Geo-RS only | ✅ Correct | **Fast** |
-| `bypass_pg_geo_rs_seq_tis` | REINFORCE + Geo RS + Seq IS | 2 (rollout, θ) | ❌ | ✅ Geo-RS-Seq-TIS | ✅ Correct | **Fast** |
+| `bypass_pg_geo_rs` | REINFORCE + Geo-RS | 2 (rollout, θ) | ❌ | Geo-RS only (ratio) | ✅ Correct | **Fast** |
+| `bypass_pg_geo_rs_token_tis` | REINFORCE + Geo RS + Token IS | 2 (rollout, θ) | ❌ | ✅ Geo-RS-Token-TIS | ✅ Correct | **Fast** |
 | **Decoupled PPO Mode** (IS weights = π_old / π_rollout) |
 | `decoupled_token_is` | Decoupled PPO | 3 (rollout, old, θ) | ✅ | ✅ Token-TIS | ✅ Correct | Standard |
 | `decoupled_seq_is` | Decoupled PPO | 3 (rollout, old, θ) | ✅ | ✅ Seq-TIS | ✅ Correct | Standard |
 | `decoupled_seq_is_rs` | Decoupled PPO + RS | 3 (rollout, old, θ) | ✅ | ✅ Seq-MIS | ✅ Correct | Standard |
-| `decoupled_geo_rs` | Decoupled PPO + Geo RS | 3 (rollout, old, θ) | ✅ | Geo-RS only | ✅ Correct | Standard |
-| `geo_rs_seq_tis` | Decoupled PPO + Geo RS + Seq IS | 3 (rollout, old, θ) | ✅ | ✅ Geo-RS-Seq-TIS | ✅ Correct | Standard |
+| `decoupled_geo_rs` | Decoupled PPO + Geo-RS | 3 (rollout, old, θ) | ✅ | Geo-RS only (ratio) | ✅ Correct | Standard |
+| `decoupled_geo_rs_token_tis` | Decoupled PPO + Geo RS + Token IS | 3 (rollout, old, θ) | ✅ | ✅ Geo-RS-Token-TIS | ✅ Correct | Standard |
 | **Incorrect (for reference)** |
 | Naive LLM-RL | Incorrect PPO usage | 2 (old, θ) | ✅ | ❌ | ⚠️ Incorrect | Standard |
 
@@ -822,11 +889,13 @@ These estimators define **how IS weights and rejection masks are computed**. The
 
 | Estimator | Configuration | Mechanism | Best For |
 |-----------|---------------|-----------|----------|
-| **Token-TIS** | `rollout_is="token"` | Clips per-token ratios | Legacy; stable but biased ($O(T^2\Delta_{\max})$) |
-| **Seq-TIS** | `rollout_is="sequence"` | Clips sequence ratio $\rho(\tau) \to \min(\rho(\tau), C)$ | Clean data with moderate mismatch; optimal bias/variance |
-| **Seq-MIS** | `rollout_is="sequence"` + `rollout_rs="sequence"` | Rejects sequences with $\rho(\tau) > C$ | Severe mismatch; filters "toxic tail" (garbage data) |
-| **Geo-RS** | `rollout_rs="geometric"` | Rejects on per-token geometric mean drift | Long sequences (CoT, agents); solves Length Trap |
-| **Geo-RS-Seq-TIS** | `rollout_is="sequence"` + `rollout_rs="geometric"` | Geometric filter + clipped weight | Length-invariant safety + correct debiasing |
+| **Token-TIS** | `rollout_is="token"` | Clips per-token ratios | Lower variance IS with acceptable bias |
+| **Seq-TIS** | `rollout_is="sequence"` | Clips sequence ratio $\rho(\tau) \to \min(\rho(\tau), C)$ | Clean data with moderate mismatch; unbiased |
+| **Seq-MIS** | `rollout_is="sequence"` + `rollout_rs="seq_sum_k1"` | Rejects sequences with $\rho(\tau) > C$ | Severe mismatch; filters "toxic tail" (garbage data) |
+| **Geo-RS** | `rollout_rs="seq_mean_k1"` | Rejects on geometric mean ratio exp(E[log(r)]) | Length-invariant trust region |
+| **Geo-RS-Token-TIS** | `rollout_is="token"` + `rollout_rs="seq_mean_k1"` | Geometric filter + token IS weights | Ratio-based length normalization + lower variance IS |
+| **K3-RS** | `rollout_rs="seq_mean_k3"` | Rejects on K3 KL divergence | Small KL values; smooth detector |
+| **K3-RS-Token-TIS** | `rollout_is="token"` + `rollout_rs="seq_mean_k3"` | K3 filter + token IS weights | Small KL + lower variance IS |
 
 **Note:** Each estimator can be used with either:
 - **Decoupled PPO** (`bypass_mode=false`): Three policies with PPO clipping
@@ -843,7 +912,7 @@ These estimators define **how IS weights and rejection masks are computed**. The
 
 **Choosing estimator by sequence length:**
 - **Short sequences** (standard chat): Seq-TIS is optimal
-- **Long sequences** (CoT, agents): Geo-RS or Geo-RS-Seq-TIS to avoid Length Trap
+- **Long sequences** (CoT, agents): K1-RS or K1-RS-Token-TIS to avoid Length Trap
 
 **Choosing operating mode:**
 - **Batch size invariance needed**: Use decoupled mode (`bypass_mode=false`)
