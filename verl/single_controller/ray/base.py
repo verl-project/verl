@@ -99,11 +99,13 @@ def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple
         while port < master_port_range[1]:
             try:
                 with socket.socket() as s:
-                    s.bind(("", port))
+                    s.bind(('', port))
                     break
             except OSError:
                 port += 1  # Increment port number if already in use
                 logger.info("Port %d is already in use, trying port %d", port - 1, port)
+        else:
+            raise RuntimeError(f"Could not find a free port in range {master_port_range}")
     return addr, str(port)
 
 
