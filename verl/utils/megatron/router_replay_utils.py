@@ -207,13 +207,14 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
             .contiguous()
         )
 
-        batch_size, seq_len = attention_mask.shape[:2]
         if input_ids.is_nested:
+            batch_size = input_ids.shape[0]
             _, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=True)
             layers_topk_idx = postprocess_thd_no_padding(
                 layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
             )
         else:
+            batch_size, seq_len = attention_mask.shape[:2]
             _, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
             layers_topk_idx = postprocess_packed_seqs(
                 layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
