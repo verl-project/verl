@@ -80,16 +80,6 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         )
         data["routed_experts"] = routed_experts_nested
 
-    routed_experts = data.get("routed_experts", None)
-    if routed_experts is not None and not routed_experts.is_nested:
-        if routed_experts.max() <= 255:
-            routed_experts = routed_experts.to(torch.uint8)
-        routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
-        routed_experts_nested = torch.nested.nested_tensor_from_jagged(
-            routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
-        )
-        data["routed_experts"] = routed_experts_nested
-
     return data
 
 
