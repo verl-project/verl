@@ -162,7 +162,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_rm:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
+            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward.reward_model)
             self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
 
     def _init_worker_groups(self):
@@ -217,19 +217,16 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.actor_rollout_wg.init_model()
 
     def _init_reward_loop(self):
-        if self.use_reward_loop:
-            # create reward loop manager
-            if self.use_reward_loop:
-                from verl.experimental.reward_loop import RewardLoopManager
+        from verl.experimental.reward_loop import RewardLoopManager
 
-                # initalize reward loop manager
-                # reward model (colocate or standalone): get resource_pool
-                # no reward model: resource_pool = None
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-                self.reward_loop_manager = RewardLoopManager(
-                    config=self.config,
-                    rm_resource_pool=resource_pool,
-                )
+        # initalize reward loop manager
+        # reward model (colocate or standalone): get resource_pool
+        # no reward model: resource_pool = None
+        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        self.reward_loop_manager = RewardLoopManager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+        )
 
     def _init_async_rollout_manager(self):
         pass

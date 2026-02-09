@@ -299,7 +299,6 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_rm = need_reward_model(self.config)
-        self.use_reward_loop = self.config.reward_model.use_reward_loop
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
@@ -552,11 +551,11 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
-        reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
+        reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
 
         # pop those keys for generation
         batch_keys_to_pop = []
-        non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_model_keys
+        non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_keys
         gen_batch = batch.pop(
             batch_keys=batch_keys_to_pop,
             non_tensor_batch_keys=list(non_tensor_batch_keys_to_pop),
@@ -594,7 +593,7 @@ class RayPPOTrainer:
             test_batch: TensorDict = self.dict_to_tensordict(repeated_test_data)
 
             # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0]["reward_model"]["style"] == "model":
+            if self.config.reward.reward_model.enable and test_batch[0]["reward_model"]["style"] == "model":
                 return {}
 
             batch_meta = self.tq_client.put(data=test_batch, partition_id=f"val_{self.global_steps - 1}")
@@ -797,17 +796,16 @@ class RayPPOTrainer:
             wg.create_transferqueue_client(self.config)
 
         # create reward loop manager
-        if self.use_reward_loop:
-            from verl.experimental.reward_loop import RewardLoopManager
+        from verl.experimental.reward_loop import RewardLoopManager
 
-            # initalize reward loop manager
-            # reward model (colocate or standalone): get resource_pool
-            # no reward model: resource_pool = None
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-            self.reward_loop_manager = RewardLoopManager(
-                config=self.config,
-                rm_resource_pool=resource_pool,
-            )
+        # initalize reward loop manager
+        # reward model (colocate or standalone): get resource_pool
+        # no reward model: resource_pool = None
+        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        self.reward_loop_manager = RewardLoopManager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+        )
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -816,9 +814,8 @@ class RayPPOTrainer:
 
             self.async_rollout_mode = True
 
-            enable_agent_reward_loop = self.use_reward_loop and (
-                not self.use_rm or self.config.reward_model.enable_resource_pool
-            )
+            enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+
             reward_loop_worker_handles = (
                 self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
             )

@@ -22,5 +22,11 @@ from .reward import *  # noqa: F401
 from .rollout import *  # noqa: F401
 
 __all__ = (
-    actor.__all__ + critic.__all__ + reward__ + engine.__all__ + optimizer.__all__ + rollout.__all__ + model.__all__
+    actor.__all__
+    + critic.__all__
+    + reward.__all__
+    + engine.__all__
+    + optimizer.__all__
+    + rollout.__all__
+    + model.__all__
 )

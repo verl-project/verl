@@ -56,8 +56,8 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.custom_cls.path=$PROJECT_DIR/recipe/retool/retool.py \
     data.custom_cls.name=CustomRLHFDataset \
-    custom_reward_function.path=$PROJECT_DIR/recipe/retool/retool.py \
-    custom_reward_function.name=compute_score \
+    reward.custom_reward_function.path=$PROJECT_DIR/recipe/retool/retool.py \
+    reward.custom_reward_function.name=compute_score \
     actor_rollout_ref.model.path=font-info/qwen3-4b-sft-SGLang-RL \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \

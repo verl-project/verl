@@ -36,7 +36,6 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/experimental/transfer_queue/ray_trainer.py",  # appear in docstring as default device_name
     "verl/experimental/one_step_off_policy/ray_trainer.py",  # appear in docstring as default device_name
     "verl/utils/reward_score/sandbox_fusion/utils.py",  # appear in sandbox language type
-    "verl/workers/reward_model/megatron/reward_model.py",  # appear in default device_name
     "verl/third_party/torch/distributed/_state_dict_utils.py",  # torch monkey patch fixes
     "verl/third_party/torch/distributed/checkpoint/state_dict.py",  # torch monkey patch fixes
     "verl/workers/engine/base.py",  # appear in default device_name
