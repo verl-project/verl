@@ -426,7 +426,14 @@ def _materialize_futures(*args, **kwargs):
     return new_args, kwargs
 
 
-def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocking=True, materialize_futures=True):
+def register(
+    dispatch_mode=Dispatch.ALL_TO_ALL,
+    execute_mode=Execute.ALL,
+    blocking=True,
+    materialize_futures=True,
+    put_data=True,
+    convert_type="DataProto",
+):
     """Register a function with distributed execution configuration.
 
     This decorator registers a function with specific dispatch and execution modes
@@ -442,6 +449,10 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
             Whether the execution should be blocking. Defaults to True.
         materialize_futures:
             Whether to materialize the data before dispatching. Defaults to True.
+        put_data:
+            Whether to put data into TransferQueue. Defaults to True.
+        convert_type:
+            The data type of target real data. Defaults to "DataProto".
 
     Returns:
         A decorator that wraps the original function with distributed execution
@@ -453,7 +464,11 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
     _check_execute_mode(execute_mode=execute_mode)
 
     def decorator(func):
-        func = tqbridge(dispatch_mode=dispatch_mode)(func)
+        func = tqbridge(
+            dispatch_mode=dispatch_mode,
+            put_data=put_data,
+            convert_type=convert_type,
+        )(func)
 
         @wraps(func)
         def inner(*args, **kwargs):
