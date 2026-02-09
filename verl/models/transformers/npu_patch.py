@@ -56,6 +56,7 @@ def apply_rotary_pos_emb_npu(q, k, cos, sin, position_ids=None, unsqueeze_dim=1)
 
 class RouterGatingLinearFunction(torch.autograd.Function):
     """
+    Copied from Megatron-LM megatron/core/transformer/moe/moe_utils.py
     Autograd function for router gating linear.
     """
 
