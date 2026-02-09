@@ -419,6 +419,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self._init_async_objects()
         self._init_resource_pools()
         self._create_worker_classes()
+        self._init_reward_loop()
         await self._init_async_rollout_manager()
 
     def _create_actor_rollout_classes(self):
