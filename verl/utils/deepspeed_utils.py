@@ -50,7 +50,14 @@ except Exception:  # pragma: no cover - DeepSpeed not installed
 
 
 def _maybe_patch_zero2_grad_accum_dtype() -> None:
-    """Patch ZeRO-2 grad accumulation to honor gradient_accumulation_dtype."""
+    """Patch ZeRO-2 grad accumulation to honor ``gradient_accumulation_dtype``.
+
+    Why this exists:
+    - ZeRO-2 may accumulate partitioned grads in the model dtype (bf16/fp16),
+      which can diverge from ZeRO-1/3 when accumulation precision differs.
+    - We upcast accumulation tensors to the requested accumulation dtype and keep
+      micro-batch accumulation state intact across non-boundary micros.
+    """
     if not DEEPSPEED_AVAILABLE:
         return
     # Emergency off-switch.
@@ -197,6 +204,8 @@ def get_deepspeed_config(
     if zero_stage > 0:
         zero_opt = {
             "stage": zero_stage,
+            # Keep communication behavior explicit. We intentionally avoid extra
+            # overlap knobs here to reduce stage1/2 comparison noise.
             "overlap_comm": False,
             "contiguous_gradients": True,
             "reduce_scatter": True,

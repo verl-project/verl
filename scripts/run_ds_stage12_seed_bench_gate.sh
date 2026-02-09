@@ -219,6 +219,8 @@ worker_loop() {
   return $failed
 }
 
+# Static strided assignment keeps stage/seed scheduling deterministic while
+# utilizing all configured GPU pairs.
 declare -a PIDS=()
 for wid in "${!GPU_PAIRS[@]}"; do
   worker_loop "$wid" &
@@ -267,21 +269,34 @@ for case in case_dirs:
         if not mm:
             continue
         step = int(mm.group(1))
-        sm = re.search(r'critic/score/mean:([^\s-]+)', line)
-        tm = re.search(r'perf/throughput:([^\s-]+)', line)
+        sm = re.search(r'critic/score/mean:([-+0-9.eE]+)', line)
+        tm = re.search(r'perf/throughput:([-+0-9.eE]+)', line)
+        ma = re.search(r'perf/max_memory_allocated_gb:([-+0-9.eE]+)', line)
+        mr = re.search(r'perf/max_memory_reserved_gb:([-+0-9.eE]+)', line)
         score = float(sm.group(1)) if sm else None
         thru = float(tm.group(1)) if tm else None
-        rows.append((step, score, thru))
+        mem_alloc = float(ma.group(1)) if ma else None
+        mem_reserved = float(mr.group(1)) if mr else None
+        rows.append((step, score, thru, mem_alloc, mem_reserved))
 
     last_step = max([r[0] for r in rows], default=0)
     step_target_score = None
-    for step, score, _ in rows:
+    step_target_mem_alloc = None
+    step_target_mem_reserved = None
+    for step, score, _, mem_alloc, mem_reserved in rows:
         if step == steps and score is not None:
             step_target_score = score
+        if step == steps and mem_alloc is not None:
+            step_target_mem_alloc = mem_alloc
+        if step == steps and mem_reserved is not None:
+            step_target_mem_reserved = mem_reserved
 
     tail = [r for r in rows if start_tail <= r[0] <= steps]
     tail_scores = [r[1] for r in tail if r[1] is not None]
     tail_thru = [r[2] for r in tail if r[2] is not None]
+    tail_mem_alloc = [r[3] for r in tail if r[3] is not None]
+    tail_mem_reserved = [r[4] for r in tail if r[4] is not None]
+    peak_mem_reserved = [r[4] for r in rows if r[4] is not None]
 
     summary_rows.append({
         'case': case,
@@ -291,6 +306,11 @@ for case in case_dirs:
         'step_target_score': step_target_score,
         'avg_score_tail5': (sum(tail_scores) / len(tail_scores)) if tail_scores else None,
         'avg_throughput_tail5': (sum(tail_thru) / len(tail_thru)) if tail_thru else None,
+        'step_target_mem_alloc': step_target_mem_alloc,
+        'step_target_mem_reserved': step_target_mem_reserved,
+        'avg_mem_alloc_tail5': (sum(tail_mem_alloc) / len(tail_mem_alloc)) if tail_mem_alloc else None,
+        'avg_mem_reserved_tail5': (sum(tail_mem_reserved) / len(tail_mem_reserved)) if tail_mem_reserved else None,
+        'peak_mem_reserved': max(peak_mem_reserved) if peak_mem_reserved else None,
         'status': 'ok' if last_step >= steps else 'incomplete',
     })
 
@@ -299,7 +319,10 @@ with open(summary_file, 'w', encoding='utf-8', newline='') as f:
     w.writerow([
         'case','seed','stage','last_step',
         f'step{steps}_score_mean',f'avg_score_{start_tail}_{steps}',
-        f'avg_throughput_{start_tail}_{steps}','status'
+        f'avg_throughput_{start_tail}_{steps}',
+        f'step{steps}_max_memory_allocated_gb',f'avg_max_memory_allocated_{start_tail}_{steps}_gb',
+        f'step{steps}_max_memory_reserved_gb',f'avg_max_memory_reserved_{start_tail}_{steps}_gb',
+        'peak_max_memory_reserved_gb','status'
     ])
     for r in summary_rows:
         w.writerow([
@@ -307,6 +330,11 @@ with open(summary_file, 'w', encoding='utf-8', newline='') as f:
             'NA' if r['step_target_score'] is None else f"{r['step_target_score']:.6f}",
             'NA' if r['avg_score_tail5'] is None else f"{r['avg_score_tail5']:.6f}",
             'NA' if r['avg_throughput_tail5'] is None else f"{r['avg_throughput_tail5']:.6f}",
+            'NA' if r['step_target_mem_alloc'] is None else f"{r['step_target_mem_alloc']:.6f}",
+            'NA' if r['avg_mem_alloc_tail5'] is None else f"{r['avg_mem_alloc_tail5']:.6f}",
+            'NA' if r['step_target_mem_reserved'] is None else f"{r['step_target_mem_reserved']:.6f}",
+            'NA' if r['avg_mem_reserved_tail5'] is None else f"{r['avg_mem_reserved_tail5']:.6f}",
+            'NA' if r['peak_mem_reserved'] is None else f"{r['peak_mem_reserved']:.6f}",
             r['status'],
         ])
 
@@ -344,6 +372,9 @@ for seed in sorted(by_seed.keys()):
         'stage1_avg_throughput_tail5': s1['avg_throughput_tail5'],
         'stage2_avg_throughput_tail5': s2['avg_throughput_tail5'],
         'delta_avg_throughput_s2_minus_s1': None if s1['avg_throughput_tail5'] is None or s2['avg_throughput_tail5'] is None else s2['avg_throughput_tail5'] - s1['avg_throughput_tail5'],
+        'stage1_avg_mem_reserved_tail5': s1['avg_mem_reserved_tail5'],
+        'stage2_avg_mem_reserved_tail5': s2['avg_mem_reserved_tail5'],
+        'delta_avg_mem_reserved_tail5_s2_minus_s1': None if s1['avg_mem_reserved_tail5'] is None or s2['avg_mem_reserved_tail5'] is None else s2['avg_mem_reserved_tail5'] - s1['avg_mem_reserved_tail5'],
     })
 
 with open(compare_file, 'w', encoding='utf-8', newline='') as f:
@@ -353,6 +384,7 @@ with open(compare_file, 'w', encoding='utf-8', newline='') as f:
         f'stage1_step{steps}_score',f'stage2_step{steps}_score','delta_step_target_score_s2_minus_s1',
         'stage1_avg_score_tail5','stage2_avg_score_tail5','delta_avg_score_s2_minus_s1',
         'stage1_avg_throughput_tail5','stage2_avg_throughput_tail5','delta_avg_throughput_s2_minus_s1',
+        'stage1_avg_mem_reserved_tail5','stage2_avg_mem_reserved_tail5','delta_avg_mem_reserved_tail5_s2_minus_s1',
     ])
     for r in compare_rows:
         w.writerow([
@@ -366,6 +398,9 @@ with open(compare_file, 'w', encoding='utf-8', newline='') as f:
             'NA' if r['stage1_avg_throughput_tail5'] is None else f"{r['stage1_avg_throughput_tail5']:.6f}",
             'NA' if r['stage2_avg_throughput_tail5'] is None else f"{r['stage2_avg_throughput_tail5']:.6f}",
             'NA' if r['delta_avg_throughput_s2_minus_s1'] is None else f"{r['delta_avg_throughput_s2_minus_s1']:.6f}",
+            'NA' if r['stage1_avg_mem_reserved_tail5'] is None else f"{r['stage1_avg_mem_reserved_tail5']:.6f}",
+            'NA' if r['stage2_avg_mem_reserved_tail5'] is None else f"{r['stage2_avg_mem_reserved_tail5']:.6f}",
+            'NA' if r['delta_avg_mem_reserved_tail5_s2_minus_s1'] is None else f"{r['delta_avg_mem_reserved_tail5_s2_minus_s1']:.6f}",
         ])
 
 mean_delta = statistics.mean(delta_vals) if delta_vals else float('nan')

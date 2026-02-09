@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
+"""Build a markdown report from ZeRO benchmark artifacts.
+
+The script accepts one or more six-case runs plus optional stage1/2 gate runs,
+then renders a compact PR-facing report with score/throughput/memory metrics.
+"""
+
 from __future__ import annotations
 
 import argparse
 import csv
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +47,18 @@ def to_float(s: str | None) -> float | None:
         return None
 
 
+def pick(row: dict[str, str], keys: list[str], default: str = "NA") -> str:
+    """Return the first non-empty value for keys, otherwise default."""
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        value = value.strip()
+        if value and value != "NA":
+            return value
+    return default
+
+
 @dataclass
 class SixRunSummary:
     run_root: Path
@@ -59,8 +76,8 @@ class SixRunSummary:
         rb = self.case(b)
         if not ra or not rb:
             return None
-        sa = to_float(ra.get('avg_score_tail5') or ra.get('avg_score_mean_26_30'))
-        sb = to_float(rb.get('avg_score_tail5') or rb.get('avg_score_mean_26_30'))
+        sa = to_float(pick(ra, ["avg_score_tail5", "avg_score_mean_26_30"]))
+        sb = to_float(pick(rb, ["avg_score_tail5", "avg_score_mean_26_30"]))
         if sa is None or sb is None:
             return None
         return sa - sb
@@ -146,8 +163,17 @@ def main() -> None:
             )
 
             headers = [
-                'case', 'status', 'last_step', 'step_target_score', 'avg_score_tail5', 'step_target_throughput',
-                'avg_throughput_tail5', 'skip_zero_grad_warn_count'
+                'case',
+                'status',
+                'last_step',
+                'step_target_score',
+                'avg_score_tail5',
+                'step_target_throughput',
+                'avg_throughput_tail5',
+                'step_target_mem_reserved_gb',
+                'avg_mem_reserved_tail5_gb',
+                'peak_mem_reserved_gb',
+                'skip_zero_grad_warn_count',
             ]
             rows = []
             for r in run.rows:
@@ -155,10 +181,27 @@ def main() -> None:
                     r.get('case', 'NA'),
                     r.get('status', 'NA'),
                     r.get('last_step', 'NA'),
-                    r.get('step_target_score_mean', r.get('step30_score_mean', 'NA')),
-                    r.get('avg_score_tail5', r.get('avg_score_mean_26_30', 'NA')),
-                    r.get('step_target_throughput', r.get('step30_throughput', 'NA')),
-                    r.get('avg_throughput_tail5', r.get('avg_throughput_26_30', 'NA')),
+                    pick(r, ['step_target_score_mean', 'step30_score_mean']),
+                    pick(r, ['avg_score_tail5', 'avg_score_mean_26_30']),
+                    pick(r, ['step_target_throughput', 'step30_throughput']),
+                    pick(r, ['avg_throughput_tail5', 'avg_throughput_26_30']),
+                    pick(
+                        r,
+                        [
+                            'step_target_max_memory_reserved_gb',
+                            'step60_max_memory_reserved_gb',
+                            'step30_max_memory_reserved_gb',
+                        ],
+                    ),
+                    pick(
+                        r,
+                        [
+                            'avg_max_memory_reserved_tail5_gb',
+                            'avg_max_memory_reserved_56_60_gb',
+                            'avg_max_memory_reserved_26_30_gb',
+                        ],
+                    ),
+                    pick(r, ['peak_max_memory_reserved_gb']),
                     r.get('skip_zero_grad_warn_count', 'NA'),
                 ])
             lines.append('')

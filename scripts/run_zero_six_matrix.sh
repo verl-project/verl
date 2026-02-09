@@ -185,6 +185,9 @@ run_wave() {
   done
 }
 
+# Keep GPU pressure balanced:
+# - wave1 runs ZeRO-1/2 + offload variants together (4 x 2GPU jobs)
+# - wave2 runs ZeRO-3 variants after wave1 completes
 # Wave 1: 4-way parallel on 8 GPUs
 run_wave \
   "zero1_no_offload:0,1:1:none" \
@@ -208,7 +211,15 @@ cases = [
 start_tail = max(1, target_steps - 4)
 
 with open(out_file, 'w', encoding='utf-8') as f:
-    f.write('case\tstatus\tlast_step\tstep_target_score_mean\tavg_score_tail5\tstep_target_throughput\tavg_throughput_tail5\tskip_zero_grad_warn_count\tlast_error\n')
+    f.write(
+        'case\tstatus\tlast_step\t'
+        'step_target_score_mean\tavg_score_tail5\t'
+        'step_target_throughput\tavg_throughput_tail5\t'
+        'step_target_max_memory_allocated_gb\tavg_max_memory_allocated_tail5_gb\t'
+        'step_target_max_memory_reserved_gb\tavg_max_memory_reserved_tail5_gb\t'
+        'peak_max_memory_reserved_gb\t'
+        'skip_zero_grad_warn_count\tlast_error\n'
+    )
     for case in cases:
         log = os.path.join(run_root, case, 'train.log')
         txt = ''
@@ -220,29 +231,45 @@ with open(out_file, 'w', encoding='utf-8') as f:
             if not m:
                 continue
             step = int(m.group(1))
-            sm = re.search(r'critic/score/mean:([^\s-]+)', line)
-            tm = re.search(r'perf/throughput:([^\s-]+)', line)
+            sm = re.search(r'critic/score/mean:([-+0-9.eE]+)', line)
+            tm = re.search(r'perf/throughput:([-+0-9.eE]+)', line)
+            ma = re.search(r'perf/max_memory_allocated_gb:([-+0-9.eE]+)', line)
+            mr = re.search(r'perf/max_memory_reserved_gb:([-+0-9.eE]+)', line)
             score = float(sm.group(1)) if sm else None
             thru = float(tm.group(1)) if tm else None
-            rows.append((step, score, thru, line))
+            mem_alloc = float(ma.group(1)) if ma else None
+            mem_reserved = float(mr.group(1)) if mr else None
+            rows.append((step, score, thru, mem_alloc, mem_reserved, line))
 
         last_step = 0
         step_target_score = 'NA'
         step_target_thru = 'NA'
+        step_target_mem_alloc = 'NA'
+        step_target_mem_reserved = 'NA'
         if rows:
             last_step = max(r[0] for r in rows)
-            for step, score, thru, _ in rows:
+            for step, score, thru, mem_alloc, mem_reserved, _ in rows:
                 if step == target_steps:
                     if score is not None:
                         step_target_score = str(score)
                     if thru is not None:
                         step_target_thru = str(thru)
+                    if mem_alloc is not None:
+                        step_target_mem_alloc = str(mem_alloc)
+                    if mem_reserved is not None:
+                        step_target_mem_reserved = str(mem_reserved)
 
         tail = [r for r in rows if start_tail <= r[0] <= target_steps]
         scores = [r[1] for r in tail if r[1] is not None]
         thrus = [r[2] for r in tail if r[2] is not None]
+        mem_allocs = [r[3] for r in tail if r[3] is not None]
+        mem_reserved = [r[4] for r in tail if r[4] is not None]
         avg_score = f"{(sum(scores)/len(scores)):.6f}" if scores else 'NA'
         avg_thru = f"{(sum(thrus)/len(thrus)):.6f}" if thrus else 'NA'
+        avg_mem_alloc = f"{(sum(mem_allocs)/len(mem_allocs)):.6f}" if mem_allocs else 'NA'
+        avg_mem_reserved = f"{(sum(mem_reserved)/len(mem_reserved)):.6f}" if mem_reserved else 'NA'
+        peak_mem_reserved_candidates = [r[4] for r in rows if r[4] is not None]
+        peak_mem_reserved = f"{max(peak_mem_reserved_candidates):.6f}" if peak_mem_reserved_candidates else 'NA'
 
         status = 'PASS' if last_step >= target_steps else 'FAIL'
         warn_skip = txt.count('Skip zero_grad because DeepSpeed engine.module is missing')
@@ -256,7 +283,11 @@ with open(out_file, 'w', encoding='utf-8') as f:
 
         f.write(
             f"{case}\t{status}\t{last_step}\t{step_target_score}\t{avg_score}\t"
-            f"{step_target_thru}\t{avg_thru}\t{warn_skip}\t{last_error}\n"
+            f"{step_target_thru}\t{avg_thru}\t"
+            f"{step_target_mem_alloc}\t{avg_mem_alloc}\t"
+            f"{step_target_mem_reserved}\t{avg_mem_reserved}\t"
+            f"{peak_mem_reserved}\t"
+            f"{warn_skip}\t{last_error}\n"
         )
 PY
 
