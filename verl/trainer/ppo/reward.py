@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from verl.experimental.reward_loop.reward_manager.base import RawRewardFn, RewardManagerBase
     from verl.trainer.config.config import ModuleConfig
-    from verl.workers.config.reward_model import RewardManagerConfig
+    from verl.workers.config.reward import RewardManagerConfig
 
 
 def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
