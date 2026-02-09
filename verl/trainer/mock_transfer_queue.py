@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import ray
 
@@ -23,8 +23,16 @@ class Batch:
     """Keys of the sampled items."""
     tags: list[dict]
     """Tags of the sampled items."""
-    meta_info: dict = {}
+    meta_info: dict = field(default_factory=dict)
     """Meta info of the batch."""
+
+    def __len__(self):
+        return len(self.keys)
+
+    def reorder(self, indices: list[int]):
+        """Reorder the batch items by the given indices."""
+        self.keys = [self.keys[i] for i in indices]
+        self.tags = [self.tags[i] for i in indices]
 
 
 @ray.remote(name="transfer_queue_controller")
@@ -40,8 +48,8 @@ class TransferQueueController:
             self.storage_unit[partition_id][key].update(fields)
 
     def batch_put(self, partition_id: str, keys: list[str], fields: list[dict], tags: list[dict] = None):
-        for key, field, tag in zip(keys, fields, tags, strict=True):
-            self.put(partition_id, key, field, tag)
+        for key, value, tag in zip(keys, fields, tags, strict=True):
+            self.put(partition_id, key, value, tag)
 
     def batch_get(self, partition_id: str, keys: list[str]) -> dict[str, dict]:
         return {key: self.storage_unit[partition_id][key] for key in keys}

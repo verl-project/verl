@@ -49,15 +49,18 @@ from verl.single_controller.ray import (
     create_colocated_worker_cls,
 )
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.mock_transfer_queue import Batch
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass, validate_config
 from verl.utils.dataset.rl_dataset import collate_fn
+from verl.utils.debug import marked_timer
 from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tracking import Tracking
 from verl.workers.config import CriticConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
@@ -113,7 +116,7 @@ class ReplayBuffer:
                     partition[key] = {}
                 partition[key].update(tags)
 
-    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> tq.Batch:
+    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> Batch:
         """Sample a batch of data from the replay buffer.
 
         Args:
@@ -147,7 +150,7 @@ class ReplayBuffer:
                             logger.warning(f"Unknown status {tag['status']} for key {key}")
                 logger.info("partitions", self.partitions)
                 if not should_wait:
-                    return tq.Batch(keys, tags)
+                    return Batch(keys, tags)
 
 
 @ray.remote
@@ -334,7 +337,6 @@ class PPOTrainer:
         self.config = config
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_rm = need_reward_model(self.role_worker_mapping)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
         self.replay_buffer = ReplayBuffer()
@@ -422,12 +424,17 @@ class PPOTrainer:
             rollout_only (bool, optional): Whether to initialize only rollout workers to debug. Defaults to False.
         """
         if rollout_only:
-            self.reward_loop_manager = RewardLoopManager(config=self.config)
+            resource_pool = (
+                self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+                if self.config.reward_model.enable
+                else None
+            )
+            self.reward_loop_manager = RewardLoopManager(config=self.config, rm_resource_pool=resource_pool)
             logger.info("reward loop manager initialized")
 
             self.agent_loop_manager = AgentLoopManagerTQ(
                 config=self.config,
-                reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+                reward_loop_worker_handles=self.reward_loop_manager.reward_loop_worker_handles,
                 replay_buffer=self.replay_buffer,
             )
             logger.info("agent loop manager initialized")
@@ -510,7 +517,9 @@ class PPOTrainer:
             self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
 
         # 7. initialize reward loop manager
-        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        resource_pool = (
+            self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.config.reward_model.enable else None
+        )
         self.reward_loop_manager = RewardLoopManager(
             config=self.config,
             rm_resource_pool=resource_pool,
@@ -632,6 +641,32 @@ class PPOTrainer:
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
+    def _balance_batch(self, batch: Batch, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
+        """Reorder the data on single controller such that each dp rank gets similar total tokens."""
+        global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
+        workload_lst = calculate_workload(global_seqlen_lst)
+
+        # get actor dp size
+        role, worker_group = "actor", self.actor_rollout_wg
+        if role not in worker_group._dispatch_info:
+            dp_rank_mapping = worker_group._query_dispatch_info(role)
+            worker_group._dispatch_info[role] = dp_rank_mapping
+        else:
+            dp_rank_mapping = worker_group._dispatch_info[role]
+        dp_size = max(dp_rank_mapping) + 1
+
+        # TODO: up sampling if batch is not divisible by dp_size
+        if len(batch) % dp_size != 0:
+            raise ValueError(f"Batch size {len(batch)} is not divisible by dp_size {dp_size}")
+
+        # reorder based on index. The data will be automatically equally partitioned by dispatch function
+        global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
+        batch.reorder([j for partition in global_partition_lst for j in partition])
+        global_balance_stats = log_seqlen_unbalance(
+            seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
+        )
+        metrics.update(global_balance_stats)
+
     def fit(self):
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -642,7 +677,7 @@ class PPOTrainer:
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
-        # self.checkpoint_manager.update_weights()
+        self.checkpoint_manager.update_weights()
 
         # TODO(wuxibin): validate before train
 
@@ -661,14 +696,16 @@ class PPOTrainer:
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
+                metrics, timing_raw = {}, {}
                 self._start_profiling()
-                metrics = self.step(batch_dict)
+                with marked_timer("step", timing_raw):
+                    metrics = self.step(batch_dict, metrics, timing_raw)
                 self._stop_profiling()
                 self.logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
                 self.global_steps += 1
 
-    def step(self, batch_dict: dict) -> dict:
+    def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> dict:
         # 1. put batch to agent loop manager
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         batch = tu.get_tensordict(batch_dict)
@@ -676,10 +713,35 @@ class PPOTrainer:
         self.agent_loop_manager.generate_sequences(batch)
 
         # 2. get batch from replay buffer
-        batch = self.replay_buffer.sample(partition_id="train", global_steps=self.global_steps)
+        with marked_timer("gen", timing_raw, color="red"):
+            batch = self.replay_buffer.sample(partition_id="train", global_steps=self.global_steps)
+
+        # 3. [OPTIONAL] compute reward score with colocated reward model
+        if self.reward_loop_manager.reward_loop_worker_handles is None:
+            with marked_timer("reward", timing_raw, color="yellow"):
+                self._compute_reward_colocate(batch)
+
+        # 4. balance batch across data parallel groups
+        self._balance_batch(batch, metrics=metrics)
         breakpoint()
-        td = tq.kv_batch_get("train", batch)
-        len(td)
+
+        # 5. compute old_log_prob
+        with marked_timer("old_log_prob", timing_raw, color="blue"):
+            self._compute_old_log_prob(batch)
+
+        # 6. [OPTIONAL] compute ref_log_prob
+        if self.use_reference_policy:
+            with marked_timer("ref", timing_raw, color="olive"):
+                self._compute_ref_log_prob(batch)
+
+        # 7. [OPTIONAL] compute critic values
+        if self.use_critic:
+            with marked_timer("values", timing_raw, color="cyan"):
+                self._compute_values(batch)
+
+        # 8. compute advantage and return
+        with marked_timer("adv", timing_raw, color="brown"):
+            self._compute_advantage(batch)
 
 
 @ray.remote
@@ -717,7 +779,7 @@ class TaskRunner:
         }
 
         # Add separate resource pool for reward model if enabled
-        if config.reward_model.enable_resource_pool:
+        if config.reward_model.enable and config.reward_model.enable_resource_pool:
             assert config.reward_model.n_gpus_per_node > 0 and config.reward_model.nnodes > 0
             reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
@@ -745,7 +807,7 @@ class TaskRunner:
             role_worker_mapping=self.role_worker_mapping,
             resource_pool_manager=self.resource_pool_manager,
         )
-        trainer.init_workers(rollout_only=True)
+        trainer.init_workers(rollout_only=False)
         trainer.fit()
 
 
