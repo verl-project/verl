@@ -173,7 +173,6 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
-
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null # choose between nsys, npu, torch, torch_memory

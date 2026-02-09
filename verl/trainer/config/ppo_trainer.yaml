@@ -211,7 +211,6 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
-
 # profiler configs
 global_profiler:
 
