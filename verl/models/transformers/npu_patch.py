@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -65,7 +64,6 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         ctx,
         inp: torch.Tensor,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor],
         router_dtype: torch.dtype,
     ) -> torch.Tensor:
         """
@@ -74,13 +72,12 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         Args:
             inp (torch.Tensor): The input tensor.
             weight (torch.Tensor): The weight tensor.
-            bias (torch.Tensor): The bias tensor. Could be None.
             router_dtype (torch.dtype): The router dtype.
 
         Returns:
             torch.Tensor: The output tensor.
         """
-        ctx.save_for_backward(inp, weight, bias)
+        ctx.save_for_backward(inp, weight)
         ctx.router_dtype = router_dtype
         ctx.input_dtype = inp.dtype
         ctx.weight_dtype = weight.dtype
@@ -93,7 +90,7 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None]:
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
         """
         Backward pass of the RouterGatingLinearFunction function.
 
@@ -104,7 +101,7 @@ class RouterGatingLinearFunction(torch.autograd.Function):
             Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None]:
                 The gradient input, gradient weight, gradient bias, and None.
         """
-        inp, weight, bias = ctx.saved_tensors
+        inp, weight = ctx.saved_tensors
         inp_shape = inp.shape
         grad_shape = grad_output.shape
         inp = inp.view(-1, inp_shape[-1])
@@ -113,9 +110,8 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         grad_input = torch.mm(grad_output, weight.to(ctx.router_dtype)).to(ctx.input_dtype)
         grad_weight = torch.mm(grad_output.t(), inp.to(ctx.router_dtype)).to(ctx.weight_dtype)
 
-        grad_bias = grad_output.sum(dim=0).to(ctx.weight_dtype) if bias is not None else None
         grad_input = grad_input.view(*inp_shape)
-        return grad_input, grad_weight, grad_bias, None
+        return grad_input, grad_weight, None
 
 
 class NPUGmmFunction(torch.autograd.Function):
