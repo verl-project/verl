@@ -32,14 +32,13 @@ import hydra
 import numpy as np
 import ray
 import torch
+import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
+from transfer_queue import KVBatchMeta
 
-# import transfer_queue as tq
-# from transfer_queue import KVBatchMeta
-import verl.trainer.mock_transfer_queue as tq
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
 from verl.experimental.reward_loop import RewardLoopManager
@@ -50,7 +49,6 @@ from verl.single_controller.ray import (
     create_colocated_worker_cls,
 )
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
-from verl.trainer.mock_transfer_queue import KVBatchMeta
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -223,10 +221,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 )
                 tasks.append(task)
             await asyncio.gather(*tasks)
-            await tq.async_kv_put(partition_id=partition_id, key=uid, tags={"status": "finished"})
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tags={"status": "finished"})
         except Exception as e:
             logger.exception(f"Error in _run_prompt: {e}")
-            await tq.async_kv_put(partition_id=partition_id, key=uid, tags={"status": "failure"})
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tags={"status": "failure"})
 
     async def _agent_loop_postprocess(self, output: AgentLoopOutput | list[AgentLoopOutput], **kwargs) -> None:
         """Put agent loop outputs into TransferQueue."""
@@ -678,9 +676,9 @@ class PPOTrainer:
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
         breakpoint()
         if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-            data = tq.kv_batch_get(batch, fields=["rollout_log_probs"])
+            data = tq.kv_batch_get(keys=batch.keys, fields=["rollout_log_probs"])
             fields = [{"old_log_probs": rollout_log_probs} for rollout_log_probs in data["rollout_log_probs"].unbind()]
-            tq.kv_batch_put(batch.partition_id, batch.keys, fields=fields)
+            tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
             return
 
         batch.extra_info = {"calculate_entropy": True, "compute_loss": False}
