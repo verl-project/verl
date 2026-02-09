@@ -161,7 +161,7 @@ class AgentLoopOutput(BaseModel):
 
         response_logprobs = output.pop("response_logprobs", None)
         if response_logprobs is not None:
-            output["response_logprobs"] = torch.tensor(response_logprobs, dtype=torch.float32)
+            output["rollout_log_probs"] = torch.tensor(response_logprobs, dtype=torch.float32)
 
         routed_experts = output.pop("routed_experts", None)
         if routed_experts is not None:

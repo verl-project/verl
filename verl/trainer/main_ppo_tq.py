@@ -38,6 +38,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 # import transfer_queue as tq
+# from transfer_queue import KVBatchMeta
 import verl.trainer.mock_transfer_queue as tq
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
@@ -49,7 +50,7 @@ from verl.single_controller.ray import (
     create_colocated_worker_cls,
 )
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
-from verl.trainer.mock_transfer_queue import Batch
+from verl.trainer.mock_transfer_queue import KVBatchMeta
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -116,7 +117,7 @@ class ReplayBuffer:
                     partition[key] = {}
                 partition[key].update(tags)
 
-    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> Batch:
+    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> KVBatchMeta:
         """Sample a batch of data from the replay buffer.
 
         Args:
@@ -126,7 +127,7 @@ class ReplayBuffer:
             batch_size (int, optional): Batch size. Defaults to None.
 
         Returns:
-            Batch: A batch of data.
+            KVBatchMeta: A batch of data.
         """
         assert (global_steps or batch_size) and (not (global_steps and batch_size)), (
             "Either global_steps or batch_size must be specified, but not both."
@@ -150,7 +151,7 @@ class ReplayBuffer:
                             logger.warning(f"Unknown status {tag['status']} for key {key}")
                 logger.info("partitions", self.partitions)
                 if not should_wait:
-                    return Batch(keys, tags)
+                    return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
 
 
 @ray.remote
@@ -641,7 +642,7 @@ class PPOTrainer:
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
-    def _balance_batch(self, batch: Batch, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
+    def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
         """Reorder the data on single controller such that each dp rank gets similar total tokens."""
         global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
         workload_lst = calculate_workload(global_seqlen_lst)
@@ -666,6 +667,25 @@ class PPOTrainer:
             seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
         )
         metrics.update(global_balance_stats)
+
+    def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict):
+        """Compute the old log prob of the batch."""
+        # Operating Mode Selection:
+        # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
+        # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
+        #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
+        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        breakpoint()
+        if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+            data = tq.kv_batch_get(batch, fields=["rollout_log_probs"])
+            fields = [{"old_log_probs": rollout_log_probs} for rollout_log_probs in data["rollout_log_probs"].unbind()]
+            tq.kv_batch_put(batch.partition_id, batch.keys, fields=fields)
+            return
+
+        batch.extra_info = {"calculate_entropy": True, "compute_loss": False}
+        output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
+        len(output)
 
     def fit(self):
         self.logger = Tracking(
@@ -723,11 +743,10 @@ class PPOTrainer:
 
         # 4. balance batch across data parallel groups
         self._balance_batch(batch, metrics=metrics)
-        breakpoint()
 
         # 5. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
-            self._compute_old_log_prob(batch)
+            self._compute_old_log_prob(batch, metrics=metrics)
 
         # 6. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
