@@ -13,16 +13,21 @@
 # limitations under the License.
 from .base import BaseEngine, EngineRegistry
 from .fsdp import FSDPEngine, FSDPEngineWithLMHead
-from .deepspeed import DeepSpeedEngineWithLMHead, DeepSpeedEngineWithValueHead
 
 __all__ = [
     "BaseEngine",
     "EngineRegistry",
     "FSDPEngine",
     "FSDPEngineWithLMHead",
-    "DeepSpeedEngineWithLMHead",
-    "DeepSpeedEngineWithValueHead",
 ]
+
+try:
+    from .deepspeed import DeepSpeedEngineWithLMHead, DeepSpeedEngineWithValueHead
+
+    __all__ += ["DeepSpeedEngineWithLMHead", "DeepSpeedEngineWithValueHead"]
+except ImportError:
+    DeepSpeedEngineWithLMHead = None
+    DeepSpeedEngineWithValueHead = None
 
 try:
     from .veomni import VeOmniEngine, VeOmniEngineWithLMHead
