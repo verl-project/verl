@@ -96,7 +96,6 @@ from verl.workers.config import DeepSpeedCriticConfig, DeepSpeedEngineConfig, HF
 from verl.workers.actor import DataParallelPPOActor
 from verl.workers.critic import DataParallelPPOCritic
 from verl.workers.rollout import get_rollout_class
-from verl.workers.sharding_manager.deepspeed_ulysses import DeepSpeedUlyssesShardingManager
 from verl.utils.ulysses import get_ulysses_sequence_parallel_group, set_ulysses_sequence_parallel_group
 
 logger = logging.getLogger(__file__)
@@ -111,6 +110,29 @@ def _log_ds_engine_state(prefix, engine):
 
 
 device_name = get_device_name()
+
+
+class DeepSpeedUlyssesShardingManager:
+    """Scoped switch for the global Ulysses sequence-parallel process group."""
+
+    def __init__(self, process_group: Optional[torch.distributed.ProcessGroup]):
+        self.process_group = process_group
+        self._prev_group: Optional[torch.distributed.ProcessGroup] = None
+
+    def __enter__(self):
+        if self.process_group is None:
+            return self
+
+        self._prev_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.process_group)
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        if self.process_group is None:
+            return
+
+        set_ulysses_sequence_parallel_group(self._prev_group)
+        self._prev_group = None
 
 _BACKGROUND_LOOP: asyncio.AbstractEventLoop | None = None
 _BACKGROUND_LOOP_THREAD: threading.Thread | None = None
