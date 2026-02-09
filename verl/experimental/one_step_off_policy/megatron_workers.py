@@ -33,7 +33,6 @@ from verl.workers.megatron_workers import (
     ActorRolloutRefWorker,
     AsyncActorRolloutRefWorker,
     CriticWorker,
-    RewardModelWorker,
 )
 
 logger = logging.getLogger(__file__)
@@ -41,7 +40,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
 
-__all__ = ["DetachActorWorker", "DetachAsyncRolloutWorker", "CriticWorker", "RewardModelWorker"]
+__all__ = ["DetachActorWorker", "DetachAsyncRolloutWorker", "CriticWorker"]
 
 
 class DetachSync(AsyncActorRolloutRefWorker):

@@ -116,14 +116,8 @@ class ParameterSynchronizer:
 
         # sync weights
         # For sglang, always use sync_rollout_weights instead of sync_rollout_weights_by_checkpoint
-        rollout_name = getattr(self.config.actor_rollout_ref.rollout, "name", None)
-        use_checkpoint_engine = self.config.async_training.checkpoint_engine.enable and rollout_name != "sglang"
 
-        if use_checkpoint_engine:
-            self.checkpoint_manager.update_weights()
-        else:
-            self.actor_wg.sync_rollout_weights(self.sync_group_name)
-            ray.get(self.rollout_wg.sync_rollout_weights(self.sync_group_name))
+        self.checkpoint_manager.update_weights()
         end_time = time.time()
         print(
             f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds, "

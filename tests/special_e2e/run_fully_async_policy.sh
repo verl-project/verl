@@ -15,7 +15,7 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 
 
 rollout_mode="async"
-rollout_name="sglang" # sglang or vllm
+rollout_name="vllm" # sglang or vllm
 if [ "$rollout_mode" = "async" ]; then
     export VLLM_USE_V1=1
     return_raw_chat="True"
@@ -123,6 +123,7 @@ common_params=(
     trainer.resume_mode=disable
     trainer.nnodes=1
     trainer.n_gpus_per_node=${n_gpus_training}
+    trainer.log_val_generations=10
     rollout.nnodes=1
     rollout.n_gpus_per_node=${n_gpus_rollout}
     rollout.total_rollout_steps=${total_rollout_steps}

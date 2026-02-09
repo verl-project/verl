@@ -22,7 +22,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 from verl.utils import omega_conf_to_dataclass
-from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, RewardModelWorker
+from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
 
 def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerGroup:
@@ -33,8 +33,6 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(actor_rollout_cls),
     }
-    if config.reward_model.enable:
-        role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
 
     global_pool_id = "global_pool"
     resource_pool_spec = {
@@ -62,12 +60,6 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
         cls=role_worker_mapping[Role.ActorRollout], config=config.actor_rollout_ref, role="actor_rollout"
     )
     resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
-
-    if config.reward_model.enable:
-        # we create a RM here
-        resource_pool = resource_pool_manager.get_resource_pool(Role.RewardModel)
-        rm_cls = RayClassWithInitArgs(role_worker_mapping[Role.RewardModel], config=config.reward_model)
-        resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
     all_wg = {}
     for resource_pool, class_dict in resource_pool_to_cls.items():

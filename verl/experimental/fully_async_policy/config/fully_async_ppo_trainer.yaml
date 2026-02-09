@@ -21,12 +21,6 @@ async_training:
   # When synchronizing parameters, whether to interrupt rollouter and perform partial rollout
   partial_rollout: True
 
-  # Whether to use rollout log probs for training
-  use_rollout_log_probs: True
-
-  # compute_prox_log_prob
-  compute_prox_log_prob: False
-
   # whether to use trainer do_validate
   use_trainer_do_validate: False
 
@@ -71,6 +65,21 @@ actor_rollout_ref:
   # checkpoint_engine config for accelerating parameter synchronization between rollouter and trainer
   checkpoint_engine: ${oc.select:async_training.checkpoint_engine, null}
 
+  rollout:
+    # Must be turned off! Otherwise, Parameter synchronization cannot be performed.
+    free_cache_engine: False
+    # Must be enabled! Otherwise, log_probs cannot be calculated.
+    calculate_log_probs: True
+    # Set to auto mode to prevent incorrect rollout outputs when parameters are not synced.
+    # TODO: Can be removed in the future once parameter synchronization is ready.
+    load_format: "auto"
+
   actor:
-    # Whether to use rollout log probs for training
-    use_rollout_log_probs: ${oc.select:async_training.use_rollout_log_probs, True}
+    # Must use rollout log probs for training
+    use_rollout_log_probs: True
+
+# Only then will the use of log probs be correct.
+# And it can be used in conjunction with other rollout_correction algorithms.
+algorithm:
+  rollout_correction:
+    bypass_mode: True

@@ -347,27 +347,5 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
     async def sleep(self):
         await asyncio.gather(*[replica.sleep() for replica in self.rollout_replicas])
 
-    async def reset_prefix_cache(self):
-        print("[FullyAsyncAgentLoopManager] Reset prefix cache ...")
-        # await asyncio.gather(*[replica.reset_prefix_cache() for replica in self.rollout_replicas])
-        # Note: debug
-        timeout = 5.0
-
-        async def reset_one(idx, replica):
-            print(f"[reset_prefix_cache] start replica={idx}")
-            try:
-                await asyncio.wait_for(replica.reset_prefix_cache(), timeout=timeout)
-            except asyncio.TimeoutError:
-                print(f"[reset_prefix_cache] TIMEOUT replica={idx} after {timeout}s")
-                return
-            except Exception as e:
-                print(f"[reset_prefix_cache] ERROR replica={idx}: {e!r}")
-                return
-            print(f"[reset_prefix_cache] done  replica={idx}")
-
-        tasks = [reset_one(i, replica) for i, replica in enumerate(self.rollout_replicas)]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        print("[FullyAsyncAgentLoopManager] Reset prefix cache finished")
-
     async def clear_kv_cache(self):
         await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])

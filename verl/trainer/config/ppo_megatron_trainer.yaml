@@ -18,7 +18,7 @@ defaults:
   # Critic model config.
   - critic@critic: megatron_critic
   # Reward model config.
-  - reward_model@reward_model: megatron_reward_loop
+  - reward_model@reward_model: reward_model
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_

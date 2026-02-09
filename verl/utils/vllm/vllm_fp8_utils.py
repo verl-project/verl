@@ -31,13 +31,6 @@ from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 
 logger = logging.getLogger(__name__)
 
-FP8_BLOCK_QUANT_KWARGS = {
-    "activation_scheme": "dynamic",
-    "fmt": "e4m3",
-    "quant_method": "fp8",
-    "weight_block_size": [128, 128],
-}
-
 
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
 @dataclass()

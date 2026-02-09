@@ -21,7 +21,7 @@ import signal
 import threading
 from multiprocessing import shared_memory
 from types import MethodType
-from typing import Any, Callable, TypedDict, get_args
+from typing import Any, Callable, Literal, TypedDict, get_args
 
 import torch
 import zmq
@@ -74,7 +74,11 @@ def get_vllm_max_lora_rank(lora_rank: int):
     """
     assert lora_rank > 0, f"lora_rank must be greater than 0, get {lora_rank}"
 
-    from vllm.config.lora import MaxLoRARanks
+    try:
+        from vllm.config.lora import MaxLoRARanks
+    except Exception:
+        # FIXME: migrate vllm version https://github.com/vllm-project/vllm/blob/main/vllm/config/lora.py#L25
+        MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 
     vllm_max_lora_ranks = sorted(get_args(MaxLoRARanks))
     if lora_rank > vllm_max_lora_ranks[-1]:
@@ -205,6 +209,14 @@ class vLLMColocateWorkerExtension:
             shm_size = comm_metadata["size"]
             buffer, shm = rebuild_shared_memory(shm_name, shm_size, dtype=torch.uint8)
         socket.send(b"")
+
+        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
+            self.model_runner.vllm_config
+        )
+
+        # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
+        if use_standard_weight_load:
+            patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
         # receive bucket and update weights
         while True:
