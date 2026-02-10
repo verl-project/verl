@@ -26,7 +26,7 @@ Retool论文参考([Retool](https://arxiv.org/pdf/2504.11536))
 
 环境依赖
 
-| software | version|
+| software | version |
 | --- | --- |
 | Python| >= 3.10, <3.12 |
 | CANN | == 8.3.RC1 |
