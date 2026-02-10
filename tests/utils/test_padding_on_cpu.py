@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import random
 
 import torch
 from tensordict import TensorDict
 
-from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+from verl.workers.utils.padding import extract_response_from_unpad_output, left_right_2_no_padding, no_padding_2_padding
 
 
 def test_padding_conversion_with_log_probs():
@@ -236,6 +237,25 @@ def test_no_padding_2_padding_varying_lengths():
             msg=f"Batch {i} (prompt_len={prompt_lens[i]}, resp_len={resp_len}): values incorrect",
         )
     print("All varied length tests passed")
+
+
+def test_extract_response_from_unpad_output():
+    batch_size = 10
+    log_probs = [torch.rand(random.randint(2, 100)) for _ in range(batch_size)]
+    log_probs_nt = torch.nested.as_nested_tensor(
+        log_probs,
+        layout=torch.jagged,
+    )
+    response_mask = [torch.ones(random.randint(1, log_probs[i].shape[0] - 1)) for i in range(batch_size)]
+    response_mask_nt = torch.nested.as_nested_tensor(
+        response_mask,
+        layout=torch.jagged,
+    )
+    response_log_probs = extract_response_from_unpad_output(log_probs_nt, response_mask_nt)
+    for i, tensor in enumerate(response_log_probs.unbind()):
+        response_len = response_mask[i].shape[0]
+        expected = log_probs[i][-response_len - 1 : -1]
+        torch.testing.assert_close(tensor, expected)
 
 
 if __name__ == "__main__":

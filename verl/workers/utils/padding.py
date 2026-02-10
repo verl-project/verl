@@ -124,3 +124,22 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     output = torch.stack(response_list, dim=0)
     return output
+
+
+def extract_response_from_unpad_output(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Extract response from nested model output.
+
+    Args:
+        tensor: a nested tensor with shape (bsz, prompt_len + response_len)
+        response_mask: a nested tensor with shape (bsz, response_len)
+
+    Returns:
+        tensor: a nested tensor with shape (bsz, response_len)
+    """
+    values, offsets = tensor.values(), tensor.offsets()
+    response_lens = response_mask.offsets().diff()
+    response_list = []
+    for resp_len, seq_offset in zip(response_lens, offsets[1:], strict=True):
+        # left-shift model output by one token for log_probs/values
+        response_list.append(values[seq_offset - resp_len - 1 : seq_offset - 1])
+    return torch.nested.as_nested_tensor(response_list, layout=torch.jagged)

@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Main PPO trainer differs from original PPO trainer in main_ppo.py:
+Synchronous PPO trainer with colocated actor and rollout.
+
+Differs from original PPO trainer in main_ppo.py:
 1. Use TransferQueue to transfer data between components.
-2. Support different `n` sampling for each prompt.
-3. Support multiple outputs for each agent loop.
+2. Use ReplayBuffer to sample data from TransferQueue.
+3. Support different `n` sampling for each prompt.
+4. Support multiple outputs for each agent loop.
 """
 
 import asyncio
@@ -42,6 +45,7 @@ from transfer_queue import KVBatchMeta
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
 from verl.experimental.reward_loop import RewardLoopManager
+from verl.protocol import DataProto
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
     RayWorkerGroup,
@@ -49,6 +53,7 @@ from verl.single_controller.ray import (
     create_colocated_worker_cls,
 )
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
+from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -56,6 +61,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass, validate_config
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
+from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_class_from_fqn
@@ -65,6 +71,7 @@ from verl.utils.tracking import Tracking
 from verl.workers.config import CriticConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.utils.losses import value_loss
+from verl.workers.utils.padding import extract_response_from_unpad_output
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -677,7 +684,7 @@ class PPOTrainer:
         )
         metrics.update(global_balance_stats)
 
-    def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict):
+    def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the old log prob of the batch."""
         # Operating Mode Selection:
         # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -693,8 +700,41 @@ class PPOTrainer:
 
         batch.extra_info.update({"calculate_entropy": True, "compute_loss": False})
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
-        len(output)
+        assert len(output) == len(batch)
+
+        fields = ["entropy", "log_probs", "response_mask"]
+        if self.config.actor_rollout_ref.rollout.calculate_log_probs:
+            fields.extend(["responses", "old_log_probs", "rollout_log_probs"])
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
         breakpoint()
+        # write old_log_probs and entropy back to TransferQueue
+        data["old_log_probs"] = extract_response_from_unpad_output(data.pop("log_probs"), data["response_mask"])
+        data["entropy"] = extract_response_from_unpad_output(data.pop("entropy"), data["response_mask"])
+        tq.kv_batch_put(
+            keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
+        )
+
+        data = DataProto(batch=data.to_padded_tensor())
+
+        # calculate actor entroy metrics
+        actor_config = self.config.actor_rollout_ref.actor
+        entropy_agg = agg_loss(
+            loss_mat=data.batch["entropy"],
+            loss_mask=data.batch["response_mask"],
+            loss_agg_mode=actor_config.loss_agg_mode,
+            loss_scale_factor=actor_config.loss_scale_factor,
+        )
+        old_log_prob_metrics = {
+            "actor/entropy": entropy_agg.detach().item(),
+            # "perf/mfu/actor_infer": old_log_prob_mfu,
+        }
+        metrics.update(old_log_prob_metrics)
+
+        # calculate rollout vs actor logprobs diff
+        if self.config.actor_rollout_ref.rollout.calculate_log_probs:
+            metrics.update(calculate_debug_metrics(data))
+
+        return batch
 
     def fit(self):
         self.logger = Tracking(
@@ -815,8 +855,6 @@ class TaskRunner:
             self.mapping[Role.RewardModel] = "reward_pool"
         else:
             self.mapping[Role.RewardModel] = "global_pool"
-
-        # TODO(wuxibin): Add separate resource pool for disaggregated rollout
 
         self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 
