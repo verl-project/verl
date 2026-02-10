@@ -184,7 +184,7 @@ ppo_mini_batch_size=16
 n_resp_per_prompt=16
 n_resp_per_prompt_val=30
 
-# ================= perfomance =================
+# ================= performance =================
 infer_tp=2 # vllm
 train_sp=4 # train
 offload=True
@@ -258,7 +258,6 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.use_torch_compile=False \
     actor_rollout_ref.actor.entropy_checkpointing=True \
     actor_rollout_ref.ref.entropy_checkpointing=True \
-    actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.ref.use_torch_compile=False \
     trainer.total_epochs=1 $@ > $LOG_FILE 2>&1 &
 
