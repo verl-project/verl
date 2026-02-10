@@ -117,7 +117,7 @@ async def _async_update_meta_with_output(output: TensorDict, meta: KVBatchMeta, 
     if not is_empty:
         for key in meta_data.keys():
             output.pop(key)
-        await tq.async_kv_batch_put(keys=meta.keys, partition_id=meta.partition_id, fields=list(output.keys()))
+        await tq.async_kv_batch_put(keys=meta.keys, partition_id=meta.partition_id, fields=output)
 
         meta.fields = list(output.keys())
 
