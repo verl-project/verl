@@ -15,9 +15,8 @@ TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/geo3k/test.parquet"}
 rollout_is=sequence
 rollout_is_threshold=2.0
 rollout_is_batch_normalize=true
-rollout_rs=token
+rollout_rs=token_k1
 rollout_rs_threshold=0.6_1.6
-rollout_token_veto_threshold=1e-4
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -82,7 +81,6 @@ python3 -m verl.trainer.main_ppo \
     algorithm.rollout_correction.rollout_is_batch_normalize=${rollout_is_batch_normalize} \
     algorithm.rollout_correction.rollout_rs=${rollout_rs} \
     algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \
-    algorithm.rollout_correction.rollout_token_veto_threshold=${rollout_token_veto_threshold} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     trainer.val_before_train=True \
     trainer.save_freq=5 \
