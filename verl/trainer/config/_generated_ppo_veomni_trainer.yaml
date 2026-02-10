@@ -1,5 +1,5 @@
 # This reference configration yaml is automatically generated via 'scripts/generate_trainer_config.sh'
-# in which it invokes 'python3 scripts/print_cfg.py --cfg job --config-name=ppo_veomni_trainer.yaml' to flatten the 'verl/trainer/config/ppo_veomni_trainer.yaml' config fields into a single file.
+# in which it invokes 'python3 scripts/print_cfg.py --cfg job model_engine=veomni' to flatten the 'verl/trainer/config/ppo_trainer.yaml' config fields into a single file.
 # Do not modify this file directly.
 # The file is usually only for reference and never used.
 
@@ -93,6 +93,7 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
+      mbridge_config: {}
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -303,9 +304,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    layer_name_map:
-      qkv_layer_name: qkv
-      gate_proj_layer_name: gate_up
+    layered_summon: false
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -315,13 +314,10 @@ actor_rollout_ref:
     trust_remote_code: false
     custom_chat_template: null
     external_lib: null
-    override_config:
-      model_config: {}
-      moe_config:
-        freeze_moe_router: false
+    override_config: {}
     enable_gradient_checkpointing: true
     enable_activation_offload: false
-    use_remove_padding: false
+    use_remove_padding: true
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
@@ -389,14 +385,6 @@ data:
     path: null
     name: null
   apply_chat_template_kwargs: {}
-reward_manager:
-  _target_: verl.trainer.config.config.RewardManagerConfig
-  source: register
-  name: ${oc.select:reward_model.reward_manager,naive}
-  module:
-    _target_: verl.trainer.config.config.ModuleConfig
-    path: null
-    name: custom_reward_manager
 critic:
   optim:
     _target_: verl.workers.config.VeOmniOptimizerConfig
@@ -473,6 +461,7 @@ critic:
     - extra
     load_contents: ${.save_contents}
     async_save: false
+    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}
@@ -502,14 +491,17 @@ reward_model:
   enable: false
   use_reward_loop: true
   num_workers: 8
-  reward_manager: naive
   enable_resource_pool: false
   n_gpus_per_node: 8
   nnodes: 0
-  reward_loop_source: register
-  reward_loop_module_path: null
-  reward_loop_class_name: null
-  launch_reward_fn_async: false
+  reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    source: register
+    name: naive
+    module:
+      _target_: verl.trainer.config.config.ModuleConfig
+      path: null
+      name: custom_reward_manager
   model_path: null
   rollout:
     _target_: verl.workers.config.RolloutConfig
@@ -577,24 +569,26 @@ trainer:
   - console
   - wandb
   log_val_generations: 0
+  rollout_data_dir: null
+  validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null
-  del_local_ckpt_after_load: false
   val_before_train: true
+  val_only: false
   test_freq: -1
   critic_warmup: 0
   default_hdfs_dir: null
+  del_local_ckpt_after_load: false
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  rollout_data_dir: null
-  use_legacy_worker_impl: disable
+  use_legacy_worker_impl: auto
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
@@ -603,6 +597,7 @@ global_profiler:
   save_path: outputs/profile
   global_tool_config:
     nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
       discrete: false
       controller_nsight_options:
         trace: cuda,nvtx,cublas,ucx

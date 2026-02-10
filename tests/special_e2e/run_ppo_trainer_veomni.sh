@@ -15,8 +15,8 @@ SP_SIZE=${SP_SIZE:-2}
 EP_SIZE=${EP_SIZE:-2}
 VERL_EXP_NAME=${VERL_EXP_NAME:-qwen2.5-0.5b-function-reward-minimal-fsdp-size8}
 
-python3 -m verl.trainer.main_ppo --config-path=config\
-    --config-name="ppo_veomni_trainer.yaml" \
+python3 -m verl.trainer.main_ppo \
+    model_engine=veomni \
     algorithm.adv_estimator=grpo \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \

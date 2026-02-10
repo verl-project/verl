@@ -69,7 +69,7 @@ on:
       - "examples/data_preprocess/geo3k.py"
       - "tests/special_e2e/run_ppo_trainer_veomni.sh"
       - "verl/trainer/main_ppo.py"
-      - "verl/trainer/config/ppo_veomni_trainer.yaml"
+      - "verl/trainer/config/ppo_trainer.yaml"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
