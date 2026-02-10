@@ -11,12 +11,16 @@ export HTTP_PROXY=${HTTP_PROXY:-$WANDB_PROXY_URL}
 export HTTPS_PROXY=${HTTPS_PROXY:-$WANDB_PROXY_URL}
 export http_proxy=${http_proxy:-$WANDB_PROXY_URL}
 export https_proxy=${https_proxy:-$WANDB_PROXY_URL}
+export ALL_PROXY=${ALL_PROXY:-$WANDB_PROXY_URL}
+export all_proxy=${all_proxy:-$WANDB_PROXY_URL}
 export PYTHONPATH=/llm-align/liuchonghan/verl_lao:${PYTHONPATH:-}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
 export GLOO_IPV6=${GLOO_IPV6:-"0"}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth0}
 export RAY_TMPDIR=/dev/shm/ray
 export TMPDIR=/dev/shm/tmp
+
+mkdir -p "$WANDB_DIR" "$RAY_TMPDIR" "$TMPDIR"
 
 ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.main_ppo"}
 TRAIN_FILES=${TRAIN_FILES:-/llm-align/liuchonghan/all_data_merged_rlhf.json}
@@ -108,5 +112,7 @@ python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/c
     +ray_kwargs.ray_init.runtime_env.env_vars.HTTPS_PROXY=$HTTPS_PROXY \
     +ray_kwargs.ray_init.runtime_env.env_vars.http_proxy=$http_proxy \
     +ray_kwargs.ray_init.runtime_env.env_vars.https_proxy=$https_proxy \
+    +ray_kwargs.ray_init.runtime_env.env_vars.ALL_PROXY=$ALL_PROXY \
+    +ray_kwargs.ray_init.runtime_env.env_vars.all_proxy=$all_proxy \
     custom_reward_function.path=/llm-align/liuchonghan/verl_lao/recipes_custom/RLVR_ABCDE_dense/reward_function.py \
     custom_reward_function.name=char_count_reward_function
