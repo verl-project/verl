@@ -24,12 +24,17 @@ Retool论文参考([Retool](https://arxiv.org/pdf/2504.11536))
 -----------------------------------
 1.从自定义Conda环境进行构建
 
-在本实践中, 我们额外指定verl 的commit id 以避免引入其他问题
-
-.. code-block:: bash
-
-cd verl
-git checkout d62da4950573d7a4b7ef2362337952e7ab59e78d
+环境依赖
+| software | version|
+| --- | --- |
+| Python| >= 3.10, <3.12 |
+| CANN | == 8.3.RC1 |
+| torch | == 2.7.1 |
+| torch_npu | == 2.7.1 |
+| verl | v0.6.1 commitId=d62da4950573d7a4b7ef2362337952e7ab59e78d |
+| vllm | 	v0.11.0 |
+| vllm-ascend | v0.11.0-dev|
+| transformers | 	4.57.6|
   
 模型训练与评估
 -----------------------------------
