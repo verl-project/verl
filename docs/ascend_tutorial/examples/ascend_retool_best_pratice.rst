@@ -86,6 +86,7 @@ Retool论文参考([Retool](https://arxiv.org/pdf/2504.11536))
       --target_dir ${DATASETS}/checkpoint/multiturn-sft-qwen-2.5-7b-instruct/global_step_372/huggingface
 
 2.代码沙箱准备
+
 开源沙箱代码及部署参考
 https://github.com/bytedance/SandboxFusion
 
@@ -110,6 +111,7 @@ https://github.com/bytedance/SandboxFusion
   make run-online
 
 3.训练
+
 示例配置文件如下，在recipe/retool目录下创建一个run_qwen2.5_7b_dapo_npu.sh
 根据开发者实际路径配置情况修改模型训练脚本中的以下参数
 
