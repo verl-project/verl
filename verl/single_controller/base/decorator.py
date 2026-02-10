@@ -16,11 +16,11 @@ from functools import partial, wraps
 from types import FunctionType
 
 from tensordict import TensorDict
+from transfer_queue import KVBatchMeta
 
 from verl.protocol import DataProtoFuture, _padding_size_key
 from verl.utils.py_functional import DynamicEnum
 from verl.utils.tensordict_utils import chunk_tensordict, concat_tensordict, contiguous
-from transfer_queue import KVBatchMeta
 
 # here we add a magic number of avoid user-defined function already have this attribute
 MAGIC_ATTR = "attrs_3141562937"
@@ -432,7 +432,6 @@ def register(
     blocking=True,
     materialize_futures=True,
     put_data=True,
-    convert_type="DataProto",
 ):
     """Register a function with distributed execution configuration.
 
@@ -451,8 +450,7 @@ def register(
             Whether to materialize the data before dispatching. Defaults to True.
         put_data:
             Whether to put data into TransferQueue. Defaults to True.
-        convert_type:
-            The data type of target real data. Defaults to "DataProto".
+
 
     Returns:
         A decorator that wraps the original function with distributed execution
@@ -464,11 +462,7 @@ def register(
     _check_execute_mode(execute_mode=execute_mode)
 
     def decorator(func):
-        func = tqbridge(
-            dispatch_mode=dispatch_mode,
-            put_data=put_data,
-            convert_type=convert_type,
-        )(func)
+        func = tqbridge(dispatch_mode=dispatch_mode, put_data=put_data)(func)
 
         @wraps(func)
         def inner(*args, **kwargs):

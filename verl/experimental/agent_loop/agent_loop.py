@@ -175,7 +175,8 @@ class AgentLoopOutput(BaseModel):
             output["rm_scores"] = rm_scores
 
         return output
-        
+
+
 class _InternalAgentLoopOutput(AgentLoopOutput):
     """Internal agent loop output with padded sequences."""
 
