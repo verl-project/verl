@@ -23,7 +23,7 @@ EXPERIMENT_NAME=${EXPERIMENT_NAME:-rlvr_8b_grpo_fsdp_single}
 
 NNODES=${NNODES:-4}
 NODE_RANK=${NODE_RANK:-0}
-MASTER_ADDR=${MASTER_ADDR:-10.178.131.202}
+MASTER_ADDR=${MASTER_ADDR:-10.178.170.212}
 MASTER_PORT=${MASTER_PORT:-23457}
 N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
 
@@ -108,6 +108,5 @@ python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/c
     +ray_kwargs.ray_init.runtime_env.env_vars.HTTPS_PROXY=$HTTPS_PROXY \
     +ray_kwargs.ray_init.runtime_env.env_vars.http_proxy=$http_proxy \
     +ray_kwargs.ray_init.runtime_env.env_vars.https_proxy=$https_proxy \
-    +ray_kwargs.ray_init.runtime_env.env_vars.RAY_TMPDIR=$RAY_TMPDIR \
     custom_reward_function.path=/llm-align/liuchonghan/verl_lao/recipes_custom/RLVR_ABCDE_dense/reward_function.py \
     custom_reward_function.name=char_count_reward_function
