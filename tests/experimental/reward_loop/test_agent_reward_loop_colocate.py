@@ -30,7 +30,7 @@ from verl.utils.device import get_device_name
 from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
 
-def test_agent_loop_reward_manager():
+def test_agent_reward_loop_standalone():
     ray.init(
         runtime_env={
             "env_vars": {
@@ -64,11 +64,11 @@ def test_agent_loop_reward_manager():
     config.trainer.n_gpus_per_node = 8
     config.trainer.nnodes = 1
 
-    config.reward_model.reward_manager = "dapo"
+    config.reward_model.reward_manager.name = "dapo"
     config.reward_model.enable = True
     config.reward_model.enable_resource_pool = False
     config.reward_model.n_gpus_per_node = 8
-    config.reward_model.model.path = reward_model_path
+    config.reward_model.model_path = reward_model_path
     config.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.reward_model.rollout.gpu_memory_utilization = 0.8
     config.reward_model.rollout.tensor_model_parallel_size = 2

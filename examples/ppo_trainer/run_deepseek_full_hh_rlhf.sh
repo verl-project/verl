@@ -25,7 +25,7 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     critic.model.path=deepseek-ai/deepseek-llm-7b-chat \
     critic.ppo_micro_batch_size_per_gpu=4 \
     reward_model.enable=True \
-    reward_model.model.path=deepseek-ai/deepseek-llm-7b-chat \
+    reward_model.model_path=deepseek-ai/deepseek-llm-7b-chat \
     reward_model.use_reward_loop=True \
     reward_model.rollout.name=vllm \
     reward_model.rollout.gpu_memory_utilization=0.8 \

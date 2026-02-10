@@ -107,5 +107,4 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \
-    async_training.partial_rollout="${partial_rollout}" \
-    async_training.use_rollout_log_probs=True
+    async_training.partial_rollout="${partial_rollout}"

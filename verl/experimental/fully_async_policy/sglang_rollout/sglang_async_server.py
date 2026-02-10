@@ -67,6 +67,7 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
     ) -> None:
         sampling_params = dict(sampling_params)
 
@@ -85,13 +86,24 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         return_logprob = True
         from sglang.srt.managers.io_struct import GenerateReqInput
 
+        if video_data is not None and len(video_data) > 0:
+            logger.warning(
+                f"Request {request_id} received video_data but it is not used. "
+                "This is to keep consistency with the implementation in "
+                "verl/workers/rollout/sglang_rollout/async_sglang_server.py. "
+                "Video data will be ignored."
+            )
+
         request = GenerateReqInput(
             rid=request_id,
             input_ids=prompt_ids,
             sampling_params=sampling_params,
             return_logprob=return_logprob,
             image_data=image_data,
+            # TODO: support video input for sglang
+            # video_data=video_data,
         )
+
         generator = self.tokenizer_manager.generate_request(request, None)
         async for output in generator:
             self.req_output[request_id] = output
@@ -104,6 +116,7 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
     ) -> tuple[list[int], list[float], bool]:
         async with self.lock:
             if self.paused:
@@ -112,7 +125,7 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
             self.cancel_event[request_id] = asyncio.Event()
             cancel_handle = asyncio.create_task(self.cancel_event[request_id].wait())
             generation_handle = asyncio.create_task(
-                self._generate_step(prompt_ids, sampling_params, request_id, image_data)
+                self._generate_step(prompt_ids, sampling_params, request_id, image_data, video_data)
             )
         done, pending = await asyncio.wait(
             [generation_handle, cancel_handle],
@@ -158,11 +171,6 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         async with self.lock:
             self.paused = False
 
-    async def reset_prefix_cache(self):
-        async with self.lock:
-            print("Reset prefix cache ...")
-            await self.tokenizer_manager.flush_cache()
-
 
 class FullyAsyncSGLangReplica(SGLangReplica):
     def __init__(
@@ -183,7 +191,3 @@ class FullyAsyncSGLangReplica(SGLangReplica):
     async def resume(self):
         """Resume each rollout server."""
         await asyncio.gather(*[server.resume.remote() for server in self.servers])
-
-    async def reset_prefix_cache(self):
-        """reset kv cache in each rollout server."""
-        await asyncio.gather(*[server.reset_prefix_cache.remote() for server in self.servers])

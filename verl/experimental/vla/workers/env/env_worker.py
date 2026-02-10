@@ -20,7 +20,6 @@ from omegaconf import DictConfig
 from torch.distributed.device_mesh import init_device_mesh
 
 from verl import DataProto
-from verl.experimental.vla.envs.action_utils import prepare_actions
 from verl.experimental.vla.workers.env.env_manager import EnvManager
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
@@ -58,6 +57,7 @@ def create_env_batch_dataproto(obs, rews, terminations, truncations, infos, meta
     ret_dict = put_tensor_cpu(ret_dict)
     tensor_batch = {
         "full_image": ret_dict["obs"]["images_and_states"]["full_image"],
+        "wrist_image": ret_dict["obs"]["images_and_states"]["wrist_image"],
         "state": ret_dict["obs"]["images_and_states"]["state"],
         "rews": ret_dict["rews"],
         "terminations": ret_dict["terminations"],
@@ -146,12 +146,16 @@ class EnvWorker(Worker, DistProfilerExtension):
         """
         chunk_actions: torch.Tensor = data.non_tensor_batch["actions"]
         stage_id: int = data.meta_info["stage_id"]
-        chunk_actions = prepare_actions(
-            simulator_type=self.cfg.train.simulator_type,
-            raw_chunk_actions=chunk_actions,
-            num_action_chunks=self.cfg.actor.model.num_action_chunks,
-            action_dim=self.cfg.actor.model.action_dim,
-        )
+
+        # Pi0.5 Libero is not required
+        # TODO: prepare actions according to simulator type
+        # chunk_actions = prepare_actions(
+        #     simulator_type=self.cfg.train.simulator_type,
+        #     raw_chunk_actions=chunk_actions,
+        #     num_action_chunks=self.cfg.actor.model.num_action_chunks,
+        #     action_dim=self.cfg.actor.model.action_dim,
+        # )
+
         env_info_list = {}
 
         extracted_obs, chunk_rewards, chunk_terminations, chunk_truncations, infos = self.simulator_list[

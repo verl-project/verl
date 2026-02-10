@@ -16,15 +16,16 @@ import os
 import ray
 from hydra import compose, initialize_config_dir
 from torchdata.stateful_dataloader import StatefulDataLoader
-from transformers import AutoTokenizer
 
 from verl.experimental.agent_loop import AgentLoopManager
+from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
 from verl.trainer.main_ppo import create_rl_sampler
+from verl.utils import hf_tokenizer
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 
 
-def test_agent_loop_reward_manager():
+def test_agent_reward_loop_standalone():
     ray.init(
         runtime_env={
             "env_vars": {
@@ -58,12 +59,12 @@ def test_agent_loop_reward_manager():
     config.trainer.n_gpus_per_node = 4
     config.trainer.nnodes = 1
 
-    config.reward_model.reward_manager = "dapo"
+    config.reward_model.reward_manager.name = "dapo"
     config.reward_model.enable = True
     config.reward_model.enable_resource_pool = True
     config.reward_model.n_gpus_per_node = 4
     config.reward_model.nnodes = 1
-    config.reward_model.model.path = reward_model_path
+    config.reward_model.model_path = reward_model_path
     config.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.reward_model.rollout.gpu_memory_utilization = 0.9
     config.reward_model.rollout.tensor_model_parallel_size = 2
@@ -74,12 +75,15 @@ def test_agent_loop_reward_manager():
     config.custom_reward_function.name = "compute_score_gsm8k"
 
     # 1. init reward model manager
-    agent_loop_manager = AgentLoopManager(config)
+    reward_loop_manager = RewardLoopManager(config)
+    agent_loop_manager = AgentLoopManager(
+        config=config, reward_loop_worker_handles=reward_loop_manager.reward_loop_workers
+    )
 
     # 2. init test data
     local_folder = os.path.expanduser("~/data/gsm8k/")
     data_files = [os.path.join(local_folder, "train.parquet")]
-    tokenizer = AutoTokenizer.from_pretrained(rollout_model_path)
+    tokenizer = hf_tokenizer(rollout_model_path)
 
     dataset = RLHFDataset(
         data_files=data_files,
@@ -102,6 +106,8 @@ def test_agent_loop_reward_manager():
     # 3. generate responses
     batch_dict = next(iter(dataloader))
     batch = DataProto.from_single_dict(batch_dict)
+
+    # standalone reward model should wake up for agent_reward_loop
     gen_batch = agent_loop_manager.generate_sequences(prompts=batch)
 
     rm_scores = gen_batch.batch["rm_scores"]

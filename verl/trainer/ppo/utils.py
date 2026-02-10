@@ -77,10 +77,10 @@ def need_reference_policy(
 
 
 def need_reward_model(
-    role_worker_mapping: dict[Role, WorkerType],
+    config: DictConfig,
 ) -> bool:
-    """Given a role worker mapping, do we need reward model."""
-    return Role.RewardModel in role_worker_mapping
+    """Given the config, do we need reward model."""
+    return config.reward_model.enable
 
 
 def need_critic(config: DictConfig) -> bool:

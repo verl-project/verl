@@ -42,7 +42,6 @@ from torch.multiprocessing.reductions import reduce_tensor
 from verl import DataProto
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
 from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
-from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.utils import ensure_async_iterator
@@ -190,10 +189,14 @@ class ServerAdapter(BaseRollout):
         # send bucket weights
         offset = 0
         bucket_meta: dict[str, TensorMetadata] = {}
-        dtype = PrecisionType.to_dtype(self.config.dtype)
+        # dtype = PrecisionType.to_dtype(self.config.dtype)
         async for name, weight in ensure_async_iterator(weights):
             # model parameters are in fp32 full precision
-            weight = weight.to(dtype, non_blocking=True)
+            # (vermouth1992) we should not force cast weight here because some parameters
+            # (such as moe gate) have to keep fp32 precision. If a weight is bf16 in the rollout side,
+            # the rollout should automatically cast on demand. However, this would incur a higher weight
+            # transfer volume.
+            # weight = weight.to(dtype, non_blocking=True)
 
             # fill the tensor bucket
             if offset + weight.nbytes > bucket_size:

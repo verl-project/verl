@@ -5,8 +5,6 @@ defaults:
   - actor@actor_rollout_ref.actor: megatron_actor
   # data: trainer/config/data/legacy_data.yaml
   - data@data: legacy_data
-  # (Rule-based) Reward manager config.
-  - reward_manager@reward_manager
   # load the reference default config, then apply the fields in the current yaml
   # Reference model config.
   # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
@@ -18,7 +16,7 @@ defaults:
   # Critic model config.
   - critic@critic: megatron_critic
   # Reward model config.
-  - reward_model@reward_model: megatron_reward_loop
+  - reward_model@reward_model: reward_model
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_

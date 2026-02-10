@@ -124,12 +124,13 @@ def test_reward_model_manager():
     config.actor_rollout_ref.model.path = rollout_model_name
     config.custom_reward_function.path = "tests/experimental/reward_loop/reward_fn.py"
     config.custom_reward_function.name = "compute_score_gsm8k"
-    config.reward_model.reward_manager = "dapo"
+    config.reward_model.reward_manager.name = "dapo"
     config.reward_model.enable = True
+    config.reward_model.num_workers = 1
     config.reward_model.enable_resource_pool = True
     config.reward_model.n_gpus_per_node = 8
     config.reward_model.nnodes = 1
-    config.reward_model.model.path = reward_model_name
+    config.reward_model.model_path = reward_model_name
     config.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.reward_model.rollout.gpu_memory_utilization = 0.9
     config.reward_model.rollout.tensor_model_parallel_size = 2

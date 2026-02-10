@@ -39,7 +39,7 @@ from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
-from verl.utils.profiler.profile import DistProfiler
+from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -148,7 +148,6 @@ class vLLMHttpServer:
                 logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
                 profiler_config = None
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
-        self.server_profiler_dir = os.environ.pop("VLLM_TORCH_PROFILER_DIR", None)
 
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
@@ -239,11 +238,17 @@ class vLLMHttpServer:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
             if quantization == "fp8":
+                # Ignore MoE router layers for FP8 quantization
+                all_mlp_gate_layers = []
+                for layer in range(self.model_config.hf_config.num_hidden_layers):
+                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
+                    "ignored_layers": all_mlp_gate_layers,
                 }
                 fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Apply vllm fp8 patches
@@ -282,7 +287,7 @@ class vLLMHttpServer:
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
-            "seed": self.config.get("seed", 0),
+            "seed": self.replica_rank + self.config.get("seed", 0),
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
             "hf_overrides": hf_overrides,
@@ -290,6 +295,14 @@ class vLLMHttpServer:
             "compilation_config": compilation_config,
             **engine_kwargs,
         }
+
+        # update profiler args
+        profiler_args = build_vllm_profiler_args(
+            self.profiler_controller.config, self.profiler_controller.tool_config, self.replica_rank
+        )
+        if _VLLM_VERSION >= version.parse("0.13.0"):
+            # vLLM >= 0.13.0 supports profiler config via CLI args; env vars still work but will be deprecated
+            args.update(profiler_args)
 
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
@@ -344,19 +357,21 @@ class vLLMHttpServer:
 
         # update lora-related args
         lora_rank = self.model_config.lora.get("rank", 0)
-        megatron_lora = True
+        if lora_rank <= 0:
+            lora_rank = (
+                self.model_config.lora_rank
+            )  # FIXME: fallback to lora_rank for now, we should unify lora settings.
+
         if self.model_config.lora.get("merge", False):
             lora_rank = 0
-        if lora_rank <= 0:
-            megatron_lora = False
-            lora_rank = self.model_config.lora_rank
+
         if lora_rank > 0:
             lora_args = {
                 "enable_lora": True,
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
-            if megatron_lora:
+            if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
 
@@ -412,11 +427,21 @@ class vLLMHttpServer:
             method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
         )
 
-        app = build_app(args)
-        if _VLLM_VERSION > version.parse("0.11.0"):
-            await init_app_state(engine_client, app.state, args)
+        build_app_sig = inspect.signature(build_app)
+        supported_tasks: tuple[Any, ...] = ()
+        if "supported_tasks" in build_app_sig.parameters:
+            supported_tasks = await engine_client.get_supported_tasks()
+            app = build_app(args, supported_tasks)
         else:
+            app = build_app(args)
+
+        init_app_sig = inspect.signature(init_app_state)
+        if "vllm_config" in init_app_sig.parameters:
             await init_app_state(engine_client, vllm_config, app.state, args)
+        elif "supported_tasks" in init_app_sig.parameters:
+            await init_app_state(engine_client, app.state, args, supported_tasks)
+        else:
+            await init_app_state(engine_client, app.state, args)
         if self.replica_rank == 0 and self.node_rank == 0:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
@@ -494,9 +519,9 @@ class vLLMHttpServer:
 
         # Add lora request
         lora_request = None
-        if self.model_config.lora_rank > 0 or (
-            self.model_config.lora.get("rank", 0) > 0 and not self.model_config.lora.get("merge", False)
-        ):
+        if (
+            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
+        ) and not self.model_config.lora.get("merge", False):
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
@@ -570,19 +595,19 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here
             await self.engine.collective_rpc("sleep", kwargs={"level": 2})
+
+            # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
+            # await self.engine.reset_encoder_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             await self.engine.sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
     async def start_profile(self, **kwargs):
-        # TODO: Persist global_step to engine server-created file/path
-        kwargs.pop("global_step")
         if (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
-            and self.server_profiler_dir
         ):
             await self.engine.start_profile(**kwargs)
 
@@ -591,7 +616,6 @@ class vLLMHttpServer:
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
-            and self.server_profiler_dir
         ):
             await self.engine.stop_profile()
 

@@ -27,7 +27,6 @@ from verl.experimental.one_step_off_policy.ray_trainer import OneStepOffRayTrain
 from verl.experimental.one_step_off_policy.utils import need_critic
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
@@ -113,16 +112,6 @@ def create_role_worker_mapping(config):
         Role.Critic: ray.remote(CriticWorker),
     }
 
-    if config.reward_model.enable:
-        if config.reward_model.strategy in ["fsdp", "fsdp2"]:
-            from verl.workers.fsdp_workers import RewardModelWorker
-        elif config.reward_model.strategy == "megatron":
-            from verl.workers.megatron_workers import RewardModelWorker
-        else:
-            raise NotImplementedError(f"Unsupported reward model strategy: {config.reward_model.strategy}")
-
-        role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
-
     # Add reference policy (if KL loss or reward is required)
     if need_reference_policy(config):
         role_worker_mapping[Role.RefPolicy] = ray.remote(DetachActorWorker)
@@ -169,14 +158,6 @@ class OneStepTaskRunner:
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
-
         resource_pool_manager = create_resource_pool_manager(config, role_worker_mapping.keys())
 
         from verl.utils.dataset.rl_dataset import collate_fn
@@ -202,8 +183,6 @@ class OneStepTaskRunner:
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             collate_fn=collate_fn,

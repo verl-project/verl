@@ -24,8 +24,8 @@ from verl.utils.reward_score import default_compute_score
 class NaiveRewardManager(RewardManagerBase):
     """The reward manager."""
 
-    def __init__(self, config, tokenizer, compute_score=None, reward_router_address=None, reward_model_tokenizer=None):
-        super().__init__(config, tokenizer)
+    def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
+        super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         self.reward_router_address = reward_router_address

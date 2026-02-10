@@ -6,70 +6,57 @@
 # If False, the following parameters are not effective
 enable: False
 
+# Whether to use reward loop for reward computation
+# will be removed once legacy reward manager and reward model are fully deprecated
+use_reward_loop: True
+
+# In reward loop, we will launch num_workers reward manager workers to parallelize the reward computation
+num_workers: 8
+
 # Whether to deploy the model to a separate resource pool.
 # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
 enable_resource_pool: False
-n_gpus_per_node: 0
+n_gpus_per_node: 8
 nnodes: 0
 
-# FSDP strategy: "fsdp" or "fsdp2"
-strategy: ???
+# reward manager, see `verl/trainer/config/reward_manager.yaml` for details.
+reward_manager:
+  _target_: verl.workers.config.reward_model.RewardManagerConfig
+  source: register
+  name: naive
+  module:
+    _target_: verl.trainer.config.config.ModuleConfig
+    path: null
+    name: custom_reward_manager
 
-# model config for reward scoring
-model:
+# Inference config for reward models,
+# applicable to both discriminative and generative models
 
-  # Input tokenizer. If the reward model's chat template is inconsistent with the policy,
-  # we need to first decode to plaintext, then apply the rm's chat_template.
-  # Then score with RM. If chat_templates are consistent, it can be set to null.
-  # set this to null if the chat template is identical
-  input_tokenizer: ${actor_rollout_ref.model.path}
+model_path: null
+rollout:
+  _target_: verl.workers.config.RolloutConfig
+  name: ???
+  dtype: bfloat16
+  gpu_memory_utilization: 0.5
+  enforce_eager: true
+  cudagraph_capture_sizes: null
+  free_cache_engine: true
+  data_parallel_size: 1
+  expert_parallel_size: 1
+  tensor_model_parallel_size: 2
+  max_num_batched_tokens: 8192
+  max_model_len: null
+  max_num_seqs: 1024
+  load_format: auto
+  engine_kwargs: {}
+  limit_images: null
+  enable_chunked_prefill: true
+  enable_prefix_caching: true
+  disable_log_stats: true
+  skip_tokenizer_init: false
 
-  # RM’s HDFS path or local path. Note that RM only supports AutoModelForSequenceClassification.
-  # Other model types need to define their own RewardModelWorker and pass it from the code.
-  path: ~/models/FsfairX-LLaMA3-RM-v0.1
-
-  # External model implementation (optional)
-  external_lib: ${actor_rollout_ref.model.external_lib}
-
-  # Whether to enable loading a remote code model, default to False
-  trust_remote_code: False
-
-  # override hf config
-  override_config: {}
-
-# [Deprecated] Global micro batch size
-# will be deprecated, use micro_batch_size_per_gpu
-micro_batch_size: null
-
-# Local per-GPU micro batch size
-micro_batch_size_per_gpu: null
-
-# Maximum sequence length to process for scoring
-max_length: null
-
-# Whether to dynamically adjust batch size at runtime
-use_dynamic_bsz: ${critic.use_dynamic_bsz}
-
-# Maximum number of tokens per GPU in one forward pass
-forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-
-# Deprecated. Use `reward_manager.name` instead. See `verl/trainer/config/reward_manager.yaml` for details.
-# Kept for backward compatibility.
-reward_manager: naive
-
-# Reward Loop Loading Configuration (for experimental reward system)
-# Source for loading reward loop manager: "register" (default) or "importlib"
-reward_loop_source: register
-
-# Module path when using importlib (e.g., "hytuner/reward/reward_loop/xxx_reward_loop.py")
-reward_loop_module_path: null
-
-# Class name when using importlib (e.g., "XXXRewardManager")
-reward_loop_class_name: null
-
-# Whether to launch custom reward function asynchronously during log_prob
-# custom reward function executed async on CPU, during log_prob
-launch_reward_fn_async: False
+  prompt_length: 2048
+  response_length: 2048
 
 # Cloud/local sandbox fusion configuration for custom reward logic
 sandbox_fusion:
@@ -82,28 +69,3 @@ sandbox_fusion:
 
   # Max memory limit for each sandbox process in MB
   memory_limit_mb: 1024
-
-# profile the reward model in `compute_reward` 
-profiler:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.utils.profiler.ProfilerConfig
-
-  # profiler tool, default same as profiler.tool in global config
-  # choices: nsys, npu, torch
-  tool: ${oc.select:global_profiler.tool,null}
-
-  # whether enable profile on ref
-  enable: False
-  
-  # Whether to profile all ranks.
-  all_ranks: False
-
-  # The ranks that will be profiled. [] or [0,1,...]
-  ranks: []
-
-  # profile results saving path
-  save_path: ${oc.select:global_profiler.save_path,null}
-
-  # specific tool config
-  tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}

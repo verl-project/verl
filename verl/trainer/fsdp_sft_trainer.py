@@ -609,6 +609,7 @@ class FSDPSFTTrainer:
             lr_scheduler=self.lr_scheduler,
             processing_class=self.tokenizer,
             checkpoint_config=checkpoint_config_dict,
+            trust_remote_code=self.config.model.trust_remote_code,
         )
 
     def load_checkpoint(self):

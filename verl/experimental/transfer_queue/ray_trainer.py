@@ -28,7 +28,6 @@ from pprint import pprint
 from typing import Any, Optional
 
 import numpy as np
-import ray
 import tensordict
 import torch
 from omegaconf import OmegaConf, open_dict
@@ -59,7 +58,6 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
     process_validation_metrics,
 )
-from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -73,13 +71,11 @@ from verl.utils.transferqueue_utils import create_transferqueue_client, get_tran
 
 
 @tqbridge(put_data=False)
-def compute_reward_decorated(data, reward_fn):
-    return compute_reward(data, reward_fn)
-
-
-@tqbridge(put_data=False)
-def compute_reward_async_decorated(data, reward_fn):
-    return compute_reward_async.remote(data, reward_fn)
+def compute_reward_decorated(data):
+    reward_tensor = data.batch["rm_scores"]
+    reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
+    reward_extra_info = {key: data.non_tensor_batch[key] for key in reward_extra_keys}
+    return reward_tensor, reward_extra_info
 
 
 @tqbridge(put_data=False)
@@ -246,11 +242,6 @@ def calculate_debug_metrics_decorated(data):
     return calculate_debug_metrics(data)
 
 
-@tqbridge(put_data=False)
-def compute_val_reward_decorated(reward_fn, data, return_dict):
-    return reward_fn(data, return_dict)
-
-
 class RayPPOTrainer:
     """Distributed PPO trainer using Ray for scalable reinforcement learning.
 
@@ -269,8 +260,6 @@ class RayPPOTrainer:
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
         processor=None,
-        reward_fn=None,
-        val_reward_fn=None,
         train_dataset: Optional[Dataset] = None,
         val_dataset: Optional[Dataset] = None,
         collate_fn=None,
@@ -288,8 +277,6 @@ class RayPPOTrainer:
             resource_pool_manager (ResourcePoolManager): Manager for Ray resource pools.
             ray_worker_group_cls (RayWorkerGroup, optional): Class for Ray worker groups. Defaults to RayWorkerGroup.
             processor: Optional data processor, used for multimodal data
-            reward_fn: Function for computing rewards during training.
-            val_reward_fn: Function for computing rewards during validation.
             train_dataset (Optional[Dataset], optional): Training dataset. Defaults to None.
             val_dataset (Optional[Dataset], optional): Validation dataset. Defaults to None.
             collate_fn: Function to collate data samples into batches.
@@ -301,8 +288,6 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self.reward_fn = reward_fn
-        self.val_reward_fn = val_reward_fn
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -313,7 +298,8 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
-        self.use_rm = need_reward_model(self.role_worker_mapping)
+        self.use_rm = need_reward_model(self.config)
+        self.use_reward_loop = self.config.reward_model.use_reward_loop
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
@@ -651,32 +637,16 @@ class RayPPOTrainer:
             ground_truths = [item.get("ground_truth", None) for item in data.get("reward_model", {})]
             sample_gts.extend(ground_truths)
 
-            # evaluate using reward_function
-            if self.val_reward_fn is None:
-                raise ValueError("val_reward_fn must be provided for validation.")
+            reward_tensor, reward_extra_info = compute_reward_decorated(batch_meta)
 
-            compute_reward_fields = [
-                "responses",
-                "prompts",
-                "attention_mask",
-                "reward_model",
-                "data_source",
-            ]
-            if "rm_scores" in batch_meta.field_names:
-                compute_reward_fields = ["rm_scores", *set(batch_meta.extra_info["reward_extra_keys"])]
-
-            val_reward_meta = batch_meta.select_fields(compute_reward_fields)
-            result = compute_val_reward_decorated(self.val_reward_fn, val_reward_meta, return_dict=True)
-            reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
             reward_extra_infos_dict["reward"].extend(scores)
             print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
-                    print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+            for key, lst in reward_extra_info.items():
+                reward_extra_infos_dict[key].extend(lst)
+                print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
 
             # collect num_turns of each prompt
             if "__num_turns__" in batch_meta.field_names:
@@ -778,13 +748,6 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
-        # create a reward model if reward_fn is None
-        if self.use_rm:
-            # we create a RM here
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
-            self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
-
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -825,11 +788,6 @@ class RayPPOTrainer:
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
 
-        self.rm_wg = None
-        if self.use_rm:
-            self.rm_wg = all_wg["rm"]
-            self.rm_wg.init_model()
-
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
@@ -838,21 +796,36 @@ class RayPPOTrainer:
         for _, wg in all_wg.items():
             wg.create_transferqueue_client(self.config)
 
+        # create reward loop manager
+        if self.use_reward_loop:
+            from verl.experimental.reward_loop import RewardLoopManager
+
+            # initalize reward loop manager
+            # reward model (colocate or standalone): get resource_pool
+            # no reward model: resource_pool = None
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+            self.reward_loop_manager = RewardLoopManager(
+                config=self.config,
+                rm_resource_pool=resource_pool,
+            )
+
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
         if self.config.actor_rollout_ref.rollout.mode == "async":
             from .agent_loop import AgentLoopManager
 
             self.async_rollout_mode = True
-            if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-                rm_resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            else:
-                rm_resource_pool = None
 
+            enable_agent_reward_loop = self.use_reward_loop and (
+                not self.use_rm or self.config.reward_model.enable_resource_pool
+            )
+            reward_loop_worker_handles = (
+                self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+            )
             self.async_rollout_manager = AgentLoopManager(
                 config=self.config,
                 worker_group=self.actor_rollout_wg,
-                rm_resource_pool=rm_resource_pool,
+                reward_loop_worker_handles=reward_loop_worker_handles,
             )
 
             self.checkpoint_manager = CheckpointEngineManager(
@@ -990,8 +963,6 @@ class RayPPOTrainer:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
             if self.use_critic:
                 self.critic_wg.start_profile(profile_step=self.global_steps)
-            if self.use_rm:
-                self.rm_wg.start_profile(profile_step=self.global_steps)
 
     def _stop_profiling(self, do_profile: bool) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
@@ -1001,8 +972,6 @@ class RayPPOTrainer:
                 self.ref_policy_wg.stop_profile()
             if self.use_critic:
                 self.critic_wg.stop_profile()
-            if self.use_rm:
-                self.rm_wg.stop_profile()
 
     def _balance_batch(
         self, batch: BatchMeta, tq_client, metrics, logging_prefix="global_seqlen", keep_minibatch=False
@@ -1144,7 +1113,7 @@ class RayPPOTrainer:
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -1282,17 +1251,9 @@ class RayPPOTrainer:
                                 ["rm_scores", *set(batch_meta.extra_info["reward_extra_keys"])]
                             )
 
-                        compute_reward_meta = batch_meta.select_fields(compute_reward_fields)
+                        reward_tensor, reward_extra_infos_dict = compute_reward_decorated(batch_meta)
 
-                        if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async_decorated(
-                                data=compute_reward_meta,
-                                reward_fn=self.reward_fn,
-                            )
-                        else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward_decorated(
-                                compute_reward_meta, self.reward_fn
-                            )
+                        compute_reward_meta = batch_meta.select_fields(compute_reward_fields)
                         batch_meta = batch_meta.union(compute_reward_meta)
 
                     # recompute old_log_probs
@@ -1379,8 +1340,6 @@ class RayPPOTrainer:
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         reward_td = TensorDict({"token_level_scores": reward_tensor}, batch_size=reward_tensor.size(0))
                         batch_meta = self.tq_client.put(data=reward_td, metadata=batch_meta)
 
@@ -1533,10 +1492,8 @@ class RayPPOTrainer:
                         self._log_rollout_data(log_rollout_meta, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # TODO: validate
-                if (
-                    self.val_reward_fn is not None
-                    and self.config.trainer.test_freq > 0
-                    and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                if self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()

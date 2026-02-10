@@ -23,12 +23,10 @@ from transformers.utils import get_json_schema
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.agent_loop.agent_loop import get_trajectory_info
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
-from verl.trainer.ppo.reward import compute_reward, load_reward_manager
 from verl.utils import hf_tokenizer
 
 
@@ -44,7 +42,7 @@ def init_config() -> DictConfig:
                 # test sleep/wake_up with fsdp offload
                 "actor_rollout_ref.actor.fsdp_config.param_offload=True",
                 "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
-                "reward_model.reward_manager=dapo",
+                "reward_model.reward_manager.name=dapo",
                 "+reward_model.reward_kwargs.overlong_buffer_cfg.enable=False",
                 "+reward_model.reward_kwargs.overlong_buffer_cfg.len=3072",
                 "+reward_model.reward_kwargs.max_resp_len=4096",
@@ -77,11 +75,7 @@ def test_single_turn(init_config):
         }
     )
 
-    agent_loop_manager = AgentLoopManager(init_config)
-    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    reward_fn = load_reward_manager(
-        init_config, tokenizer, num_examine=0, **init_config.reward_model.get("reward_kwargs", {})
-    )
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
     raw_prompts = [
         [
@@ -116,7 +110,9 @@ def test_single_turn(init_config):
 
     # check compute score
     assert result.batch["rm_scores"].shape == result.batch["responses"].shape
-    reward_tensor, reward_extra_info = compute_reward(result, reward_fn)
+    reward_tensor = result.batch["rm_scores"]
+    reward_extra_keys = result.meta_info.get("reward_extra_keys", [])
+    reward_extra_info = {key: result.non_tensor_batch[key] for key in reward_extra_keys}
     assert reward_tensor.shape == result.batch["responses"].shape
     assert "acc" in reward_extra_info, f"reward_extra_info {reward_extra_info} should contain 'acc'"
     assert reward_extra_info["acc"].shape == (len(result),), f"invalid acc: {reward_extra_info['acc']}"
@@ -226,7 +222,7 @@ def test_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
     init_config.actor_rollout_ref.rollout.calculate_log_probs = True
-    agent_loop_manager = AgentLoopManager(init_config)
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences  ===========================
     raw_prompts = [

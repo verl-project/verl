@@ -18,13 +18,13 @@ from hydra import compose, initialize_config_dir
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
-from verl.experimental.agent_loop import AgentLoopManager
+from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.protocol import DataProto
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 
 
-def test_agent_loop_reward_manager():
+def test_agent_reward_loop_standalone():
     ray.init(
         runtime_env={
             "env_vars": {
@@ -38,7 +38,7 @@ def test_agent_loop_reward_manager():
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
         config = compose(config_name="ppo_trainer")
 
-    rollout_model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-3B-Instruct")
+    rollout_model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
 
     # actor_rollout_ref config
     config.data.return_raw_chat = True
@@ -57,13 +57,13 @@ def test_agent_loop_reward_manager():
     config.trainer.n_gpus_per_node = 8
     config.trainer.nnodes = 1
 
-    config.reward_model.reward_manager = "remote"
+    config.reward_model.reward_manager.name = "remote"
     config.reward_model.num_workers = 2
     config.custom_reward_function.path = "tests/experimental/reward_loop/reward_fn.py"
     config.custom_reward_function.name = "compute_score_math_verify"
 
     # 1. init reward model manager
-    agent_loop_manager = AgentLoopManager(config)
+    agent_loop_manager = init_agent_loop_manager(config)
 
     # 2. init test data
     local_folder = os.path.expanduser("~/data/math/")

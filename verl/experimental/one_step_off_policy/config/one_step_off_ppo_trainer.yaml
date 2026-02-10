@@ -20,6 +20,9 @@ actor_rollout_ref:
     free_cache_engine: False
     # Must be enabled! Otherwise, log_probs cannot be calculated.
     calculate_log_probs: True
+    # Set to auto mode to prevent incorrect rollout outputs when parameters are not synced.
+    # TODO: Can be removed in the future once parameter synchronization is ready.
+    load_format: "auto"
 
 # Only then will the use of log probs be correct.
 # And it can be used in conjunction with other rollout_correction algorithms.

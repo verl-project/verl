@@ -42,6 +42,8 @@ actor_rollout_ref:
       use_dist_checkpointing: false
       dist_checkpointing_path: null
       dist_checkpointing_prefix: ''
+      dist_ckpt_optim_fully_reshardable: true
+      distrib_optim_fully_reshardable_mem_efficient: false
       seed: 42
       override_ddp_config: {}
       override_transformer_config:
@@ -57,6 +59,11 @@ actor_rollout_ref:
       use_remove_padding: true
       forward_only: false
       dtype: bfloat16
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
+        record_file: null
+        replay_file: null
     _target_: verl.workers.config.McoreActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -100,6 +107,7 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
+      mbridge_config: {}
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -186,6 +194,8 @@ actor_rollout_ref:
       use_dist_checkpointing: false
       dist_checkpointing_path: null
       dist_checkpointing_prefix: ''
+      dist_ckpt_optim_fully_reshardable: true
+      distrib_optim_fully_reshardable_mem_efficient: false
       seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
       override_ddp_config: {}
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
@@ -195,6 +205,11 @@ actor_rollout_ref:
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
       forward_only: true
       dtype: bfloat16
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
+        record_file: null
+        replay_file: null
     _target_: verl.workers.config.McoreActorConfig
     load_weight: true
   rollout:
@@ -289,7 +304,17 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
-      tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
+      tool_config:
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+          level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+          analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
@@ -406,14 +431,6 @@ data:
     path: null
     name: null
   apply_chat_template_kwargs: {}
-reward_manager:
-  _target_: verl.trainer.config.config.RewardManagerConfig
-  source: register
-  name: ${oc.select:reward_model.reward_manager,naive}
-  module:
-    _target_: verl.trainer.config.config.ModuleConfig
-    path: null
-    name: custom_reward_manager
 critic:
   optim:
     _target_: verl.workers.config.McoreOptimizerConfig
@@ -452,6 +469,8 @@ critic:
     use_dist_checkpointing: false
     dist_checkpointing_path: null
     dist_checkpointing_prefix: ''
+    dist_ckpt_optim_fully_reshardable: true
+    distrib_optim_fully_reshardable_mem_efficient: false
     seed: 42
     override_ddp_config: {}
     override_transformer_config:
@@ -467,6 +486,11 @@ critic:
     use_remove_padding: true
     forward_only: false
     dtype: bfloat16
+    router_replay:
+      _target_: verl.workers.config.EngineRouterReplayConfig
+      mode: disabled
+      record_file: null
+      replay_file: null
   _target_: verl.workers.config.McoreCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: megatron
@@ -520,6 +544,7 @@ critic:
     - extra
     load_contents: ${.save_contents}
     async_save: false
+    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}
@@ -549,62 +574,20 @@ critic:
   load_weight: true
 reward_model:
   enable: false
+  use_reward_loop: true
+  num_workers: 8
   enable_resource_pool: false
   n_gpus_per_node: 8
   nnodes: 0
-  strategy: megatron
-  model:
-    input_tokenizer: ${actor_rollout_ref.model.path}
-    path: ~/models/FsfairX-LLaMA3-RM-v0.1
-    external_lib: ${actor_rollout_ref.model.external_lib}
-    trust_remote_code: false
-    override_config: {}
-  micro_batch_size: null
-  micro_batch_size_per_gpu: null
-  max_length: null
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
-  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-  reward_manager: naive
-  reward_loop_source: register
-  reward_loop_module_path: null
-  reward_loop_class_name: null
-  launch_reward_fn_async: false
-  sandbox_fusion:
-    url: null
-    max_concurrent: 64
-    memory_limit_mb: 1024
-  profiler:
-    _target_: verl.utils.profiler.ProfilerConfig
-    tool: ${oc.select:global_profiler.tool,null}
-    enable: false
-    all_ranks: false
-    ranks: []
-    save_path: ${oc.select:global_profiler.save_path,null}
-    tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
-  nccl_timeout: 600
-  megatron:
-    _target_: verl.workers.config.MegatronEngineConfig
-    param_offload: false
-    tensor_model_parallel_size: 1
-    expert_model_parallel_size: 1
-    expert_tensor_parallel_size: null
-    pipeline_model_parallel_size: 1
-    virtual_pipeline_model_parallel_size: null
-    context_parallel_size: 1
-    sequence_parallel: true
-    use_distributed_optimizer: false
-    use_dist_checkpointing: false
-    dist_checkpointing_path: null
-    dist_checkpointing_prefix: ''
-    seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
-    override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
-    use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
-    vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
-    use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
-    dtype: bfloat16
-  load_weight: true
-  use_reward_loop: true
-  num_workers: 1
+  reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    source: register
+    name: naive
+    module:
+      _target_: verl.trainer.config.config.ModuleConfig
+      path: null
+      name: custom_reward_manager
+  model_path: null
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -628,6 +611,10 @@ reward_model:
     skip_tokenizer_init: false
     prompt_length: 2048
     response_length: 2048
+  sandbox_fusion:
+    url: null
+    max_concurrent: 64
+    memory_limit_mb: 1024
 algorithm:
   rollout_correction:
     rollout_is: null

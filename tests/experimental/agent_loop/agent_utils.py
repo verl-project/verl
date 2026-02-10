@@ -15,11 +15,13 @@
 import ray
 from omegaconf import DictConfig
 
+from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
+from verl.experimental.reward_loop import RewardLoopManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
-from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, RewardModelWorker
+from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
 
 def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerGroup:
@@ -30,8 +32,6 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(actor_rollout_cls),
     }
-    if config.reward_model.enable:
-        role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
 
     global_pool_id = "global_pool"
     resource_pool_spec = {
@@ -60,12 +60,6 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     )
     resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
 
-    if config.reward_model.enable:
-        # we create a RM here
-        resource_pool = resource_pool_manager.get_resource_pool(Role.RewardModel)
-        rm_cls = RayClassWithInitArgs(role_worker_mapping[Role.RewardModel], config=config.reward_model)
-        resource_pool_to_cls[resource_pool]["rm"] = rm_cls
-
     all_wg = {}
     for resource_pool, class_dict in resource_pool_to_cls.items():
         worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
@@ -78,15 +72,23 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     if config.actor_rollout_ref.rollout.mode == "sync":
         raise ValueError("Agent loop tests require async rollout mode. Please set rollout.mode=async.")
 
-    if config.reward_model.enable_resource_pool and config.reward_model.enable:
-        rm_resource_pool = resource_pool_manager.get_resource_pool(Role.RewardModel)
-    else:
-        rm_resource_pool = None
     # =========================== 2. Create AgentLoopManager ===========================
+    rm_resource_pool = resource_pool_manager.get_resource_pool(Role.RewardModel) if config.reward_model.enable else None
+    reward_loop_manager = RewardLoopManager(
+        config=config,
+        rm_resource_pool=rm_resource_pool,
+    )
     agent_loop_manager = AgentLoopManager(
         config=config,
         worker_group=actor_rollout_wg,
-        rm_resource_pool=rm_resource_pool,
+        reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )
+    checkpoint_manager = CheckpointEngineManager(
+        backend=config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        trainer=actor_rollout_wg,
+        replicas=agent_loop_manager.rollout_replicas,
+    )
+    checkpoint_manager.sleep_replicas()
+    checkpoint_manager.update_weights()
 
     return agent_loop_manager

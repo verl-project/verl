@@ -141,7 +141,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
-    reward_model.reward_manager=dapo \
+    reward_model.reward_manager.name=dapo \
     +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
@@ -165,8 +165,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \
     async_training.partial_rollout="${partial_rollout}" \
-    async_training.use_rollout_log_probs=True \
-    async_training.compute_prox_log_prob=True \
+    algorithm.rollout_correction.bypass_mode=False \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
     algorithm.rollout_correction.rollout_rs=${rollout_rs} \

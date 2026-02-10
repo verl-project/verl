@@ -148,6 +148,16 @@ PROFILE_RANKS_ALL=${PROFILE_RANKS_ALL:-True}
 PROFILE_RANKS=${PROFILE_RANKS:-[0,1,2,3]}
 DISCRETE=${DISCRETE:-True}  # or True
 
+USE_LEGACY_WORKER_IMPL=${USE_LEGACY_WORKER_IMPL:-"enable"}
+USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-False}
+ROUTING_REPLAY_MODE=${ROUTING_REPLAY_MODE:-"disabled"}
+
+if [ "$ROUTING_REPLAY_MODE" = "R3" ]; then
+    ENABLE_ROLLOUT_ROUTING_REPLAY=True
+else
+    ENABLE_ROLLOUT_ROUTING_REPLAY=False
+fi
+
 python3 -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_megatron_trainer.yaml'\
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
@@ -161,11 +171,14 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     data.truncation='error' \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.use_fused_kernels=${USE_FUSED_KERNELS} \
+    actor_rollout_ref.model.use_remove_padding=${USE_REMOVE_PADDING} \
     actor_rollout_ref.model.lora.rank=${LORA_RANK} \
     actor_rollout_ref.model.lora.alpha=${LORA_ALPHA} \
     actor_rollout_ref.model.lora.target_modules=${LORA_TARGET_MODULES} \
     actor_rollout_ref.model.lora.merge=${LORA_MERGE} \
+    +actor_rollout_ref.model.lora.fully_sharded_loras=True \
     actor_rollout_ref.actor.optim.lr_warmup_steps=$LR_WARMUP_STEPS \
+    actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE} \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=$OPTIM_MEMORY_EFFICIENT \
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=$OPTIM_MEMORY_EFFICIENT \
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=$OPTIM_MEMORY_EFFICIENT \
@@ -200,6 +213,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     ++actor_rollout_ref.rollout.quantization=${ROLLOUT_QUANTIZATION} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     actor_rollout_ref.ref.megatron.use_mbridge=${USE_MBRIDGE} \
     actor_rollout_ref.ref.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
@@ -241,7 +255,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     critic.profiler.ranks=$PROFILE_RANKS \
     critic.profiler.all_ranks=$PROFILE_RANKS_ALL \
     reward_model.enable=True \
-    reward_model.model.path="${RM_MODEL_PATH}" \
+    reward_model.model_path="${RM_MODEL_PATH}" \
     reward_model.use_reward_loop=True \
     reward_model.rollout.name=${ENGINE} \
     reward_model.rollout.gpu_memory_utilization=0.6 \
@@ -264,6 +278,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.total_epochs=2 \
     trainer.total_training_steps="${TOTAL_TRAIN_STEPS}" \
+    trainer.use_legacy_worker_impl=${USE_LEGACY_WORKER_IMPL} \
     global_profiler.profile_continuous_steps=True \
     global_profiler.tool=nsys \
     global_profiler.steps=$PROFILE_STEPS \

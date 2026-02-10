@@ -100,6 +100,7 @@ verl is fast with:
    perf/dpsk.md
    perf/best_practices
    perf/perf_tuning
+   perf/perf_tuning_on_ascend.rst
    README_vllm0.8.md
    perf/device_tuning
    perf/verl_profiler_system.md
@@ -144,6 +145,7 @@ verl is fast with:
 
    amd_tutorial/amd_build_dockerfile_page.rst
    amd_tutorial/amd_vllm_page.rst
+   ascend_tutorial/ascend_ci_guide_zh.rst
    ascend_tutorial/ascend_quick_start.rst
    ascend_tutorial/ascend_consistency.rst
    ascend_tutorial/ascend_profiling_zh.rst

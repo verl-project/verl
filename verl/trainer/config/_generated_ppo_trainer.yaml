@@ -87,6 +87,7 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
+      mbridge_config: {}
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -280,7 +281,17 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
-      tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
+      tool_config:
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+          level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+          analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
@@ -371,14 +382,6 @@ data:
     path: null
     name: null
   apply_chat_template_kwargs: {}
-reward_manager:
-  _target_: verl.trainer.config.config.RewardManagerConfig
-  source: register
-  name: ${oc.select:reward_model.reward_manager,naive}
-  module:
-    _target_: verl.trainer.config.config.ModuleConfig
-    path: null
-    name: custom_reward_manager
 critic:
   optim:
     _target_: verl.workers.config.FSDPOptimizerConfig
@@ -459,6 +462,7 @@ critic:
     - extra
     load_contents: ${.save_contents}
     async_save: false
+    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}
@@ -490,52 +494,20 @@ critic:
   grad_clip: 1.0
 reward_model:
   enable: false
+  use_reward_loop: true
+  num_workers: 8
   enable_resource_pool: false
   n_gpus_per_node: 8
   nnodes: 0
-  strategy: fsdp
-  model:
-    input_tokenizer: ${actor_rollout_ref.model.path}
-    path: ~/models/FsfairX-LLaMA3-RM-v0.1
-    external_lib: ${actor_rollout_ref.model.external_lib}
-    trust_remote_code: false
-    override_config: {}
-    use_shm: false
-    use_remove_padding: false
-    use_fused_kernels: ${actor_rollout_ref.model.use_fused_kernels}
-    fsdp_config:
-      _target_: verl.workers.config.FSDPEngineConfig
-      wrap_policy:
-        min_num_params: 0
-      param_offload: false
-      reshard_after_forward: true
-      fsdp_size: -1
-      forward_prefetch: false
-  micro_batch_size: null
-  micro_batch_size_per_gpu: null
-  max_length: null
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
-  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-  reward_manager: naive
-  reward_loop_source: register
-  reward_loop_module_path: null
-  reward_loop_class_name: null
-  launch_reward_fn_async: false
-  sandbox_fusion:
-    url: null
-    max_concurrent: 64
-    memory_limit_mb: 1024
-  profiler:
-    _target_: verl.utils.profiler.ProfilerConfig
-    tool: ${oc.select:global_profiler.tool,null}
-    enable: false
-    all_ranks: false
-    ranks: []
-    save_path: ${oc.select:global_profiler.save_path,null}
-    tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
-  ulysses_sequence_parallel_size: 1
-  use_reward_loop: true
-  num_workers: 1
+  reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    source: register
+    name: naive
+    module:
+      _target_: verl.trainer.config.config.ModuleConfig
+      path: null
+      name: custom_reward_manager
+  model_path: null
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -559,6 +531,10 @@ reward_model:
     skip_tokenizer_init: false
     prompt_length: 2048
     response_length: 2048
+  sandbox_fusion:
+    url: null
+    max_concurrent: 64
+    memory_limit_mb: 1024
 algorithm:
   rollout_correction:
     rollout_is: null

@@ -31,10 +31,9 @@ from verl.experimental.fully_async_policy.detach_utils import (
     prepare_single_generation_data,
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
-from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
+from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
@@ -42,7 +41,7 @@ from verl.utils.tracking import ValidationGenerationsLogger
 
 
 @ray.remote(num_cpus=10, max_concurrency=100)
-class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
+class FullyAsyncRollouter(SeparateRayPPOTrainer):
     """
     Asynchronous sample generator, responsible for continuously generating training samples
     and putting them into MessageQueue
@@ -57,20 +56,12 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
         processor=None,
-        reward_fn=None,
-        val_reward_fn=None,
         device_name=None,
     ):
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self.reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        self.val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
 
         assert not self.hybrid_engine
@@ -83,6 +74,12 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
+        self.use_reference_policy = False
+
+        self.use_rm = False
+        self.use_reward_loop = self.config.reward_model.use_reward_loop
+
+        self.use_critic = False
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -92,9 +89,11 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
         self.ref_in_actor = False
         self.kl_ctrl_in_reward = False
-        self.use_critic = False
-        self.use_reference_policy = False
-        self.use_rm = False
+
+        self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
+        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+
+        # ==================== fully async config ====================
 
         print("[FullyAsyncRollouter] Creating datasets...")
         from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
@@ -119,8 +118,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         print(f"[FullyAsyncRollouter] Rollouter _create_dataloader...\n{train_dataset}\n{val_dataset}")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
-
-        # ==================== fully async config ====================
 
         self.total_rollout_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
         if self.config.rollout.total_rollout_steps is not None:
@@ -256,15 +253,14 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             )
             need_validate = (
                 (
-                    self.val_reward_fn is not None
-                    and self.config.rollout.test_freq > 0
+                    self.config.rollout.test_freq > 0
                     and self.current_param_version % self.config.rollout.test_freq == 0
                     and self.current_param_version > 0
                 )  # don't test here in the initial parameter sync
-                or (validate and self.val_reward_fn is not None)
+                or validate
             )
             print(
-                f"[FullyAsyncRollouter] need_validate: {need_validate},"
+                f"[FullyAsyncRollouter] need_validate: {need_validate}, "
                 f"parallel_validate_and_rollout: {self.parallel_validate_and_rollout}"
             )
             if not need_validate:
@@ -411,6 +407,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self._create_worker_classes()
         self._init_worker_groups()
         self._init_models()
+        self._init_reward_loop()
         await self._init_async_rollout_manager()
 
     def _create_actor_rollout_classes(self):
@@ -439,14 +436,23 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 yield epoch, batch_dict
 
     async def _init_async_rollout_manager(self):
+        # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
+        # agent_reward_loop: streaming reward computation with actor rollout
+        # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
+        enable_agent_reward_loop = self.use_reward_loop and (
+            not self.use_rm or self.config.reward_model.enable_resource_pool
+        )
+        # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
+        # to stream reward computation with actor rollout
+        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
         from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
 
         self.async_rollout_mode = True
         self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
-            config=self.config,
-            worker_group=self.rollout_wg,
+            config=self.config, worker_group=self.rollout_wg, reward_loop_worker_handles=reward_loop_worker_handles
         )
 
     # Add samples to the pending_queue
@@ -478,7 +484,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             if self.global_steps >= self.total_rollout_steps:
                 print(
                     f"[FullyAsyncRollouter][Feed] "
-                    f"Maximum count has been reached, stop adding new samples"
+                    f"Maximum count has been reached, stop adding new samples: "
                     f"{self.global_steps} >= {self.total_rollout_steps}"
                 )
                 break
@@ -751,10 +757,12 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 await asyncio.gather(*self.active_tasks, return_exceptions=True)
                 self.active_tasks.clear()
                 print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
-            print("[FullyAsyncRollouter][Public][Pause] Prefix cache reset")
-            # Always clear KV cache to release GPU memory during weight synchronization,
-            # regardless of partial_rollout setting.
-            await self.async_rollout_manager.clear_kv_cache()
+
+            # TODO use checkpoint engine for rollout clear_kv_cache
+            # print("[FullyAsyncRollouter][Public][Pause] clear kv cache")
+            # # Always clear KV cache to release GPU memory during weight synchronization,
+            # # regardless of partial_rollout setting.
+            # await self.async_rollout_manager.clear_kv_cache()
             self.monitor_loop_trigger = False
 
     async def resume(self, dependency_ref: ObjectRef = None):

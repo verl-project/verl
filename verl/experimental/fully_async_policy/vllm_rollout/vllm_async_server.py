@@ -44,8 +44,19 @@ class vLLMHttpServerForPartial(vLLMHttpServer):
         node_rank: int,
         gpus_per_node: int,
         nnodes: int,
+        cuda_visible_devices: str,
     ):
-        super().__init__(config, model_config, rollout_mode, workers, replica_rank, node_rank, gpus_per_node, nnodes)
+        super().__init__(
+            config,
+            model_config,
+            rollout_mode,
+            workers,
+            replica_rank,
+            node_rank,
+            gpus_per_node,
+            nnodes,
+            cuda_visible_devices,
+        )
 
         # for cancel LLMServer
         self.paused = False
@@ -59,15 +70,19 @@ class vLLMHttpServerForPartial(vLLMHttpServer):
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
     ):
         max_tokens = self.config.max_model_len - len(prompt_ids)
         sampling_params["logprobs"] = 1
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
-        prompt = TokensPrompt(
-            prompt_token_ids=prompt_ids, multi_modal_data={"image": image_data} if image_data else None
-        )
+        multi_modal_data = {}
+        if image_data is not None:
+            multi_modal_data["image"] = image_data
+        if video_data is not None:
+            multi_modal_data["video"] = video_data
+        prompt = TokensPrompt(prompt_token_ids=prompt_ids, multi_modal_data=multi_modal_data)
         generator = self.engine.generate(prompt=prompt, sampling_params=sampling_params, request_id=request_id)
 
         # Get final response
@@ -81,6 +96,7 @@ class vLLMHttpServerForPartial(vLLMHttpServer):
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
     ) -> tuple[list[Any], list[Any], bool] | tuple[Sequence[int], list[float], Any]:
         async with self.lock:
             if self.paused:
@@ -90,7 +106,7 @@ class vLLMHttpServerForPartial(vLLMHttpServer):
             self.cancel_event[request_id] = asyncio.Event()
             cancel_handle = asyncio.create_task(self.cancel_event[request_id].wait())
             generation_handle = asyncio.create_task(
-                self._generate_step(prompt_ids, sampling_params, request_id, image_data)
+                self._generate_step(prompt_ids, sampling_params, request_id, image_data, video_data)
             )
 
         done, pend = await asyncio.wait([generation_handle, cancel_handle], return_when=asyncio.FIRST_COMPLETED)

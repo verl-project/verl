@@ -129,7 +129,6 @@ def validate_config(
             ValueError: If both parameters are set or neither is set.
         """
         settings = {
-            "reward_model": "micro_batch_size",
             "actor_rollout_ref.ref": "log_prob_micro_batch_size",
             "actor_rollout_ref.rollout": "log_prob_micro_batch_size",
         }
@@ -167,16 +166,6 @@ def validate_config(
             "actor_rollout_ref.rollout",
         )
 
-    # Check for reward model micro-batch size conflicts
-    if (
-        config.reward_model.enable
-        and not config.reward_model.use_dynamic_bsz
-        and not config.reward_model.use_reward_loop
-    ):
-        check_mutually_exclusive(
-            config.reward_model.micro_batch_size, config.reward_model.micro_batch_size_per_gpu, "reward_model"
-        )
-
     if config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:
         print("NOTICE: You have both enabled in-reward kl and kl loss.")
 
@@ -201,10 +190,10 @@ def validate_config(
     # check LoRA rank in vLLM
     lora_config = config.actor_rollout_ref.model.get("lora", {})
     lora_rank = lora_config.get("rank", 0)
-    if lora_config.get("merge", False):
-        lora_rank = 0
     if lora_rank <= 0:
         lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+    if lora_config.get("merge", False):
+        lora_rank = 0
     if lora_rank > 0 and config.actor_rollout_ref.rollout.name == "vllm":
         from verl.workers.rollout.vllm_rollout.utils import get_vllm_max_lora_rank
 

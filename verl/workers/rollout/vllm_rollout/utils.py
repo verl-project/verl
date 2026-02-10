@@ -21,7 +21,7 @@ import signal
 import threading
 from multiprocessing import shared_memory
 from types import MethodType
-from typing import Any, Callable, TypedDict, get_args
+from typing import Any, Callable, Literal, TypedDict, get_args
 
 import torch
 import zmq
@@ -57,9 +57,12 @@ def get_device_uuid(device_id: int) -> str:
 
     # Convert torch.npu.current_device to its corresponding ASCEND_RT_VISIBLE_DEVICES.
     if is_npu_available:
-        npu_visible_devices = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-        assert device_id < len(npu_visible_devices), f"device_id {device_id} must less than {npu_visible_devices}"
-        return "NPU-" + npu_visible_devices[device_id]
+        if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None:
+            npu_visible_devices = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
+            assert device_id < len(npu_visible_devices), f"device_id {device_id} must less than {npu_visible_devices}"
+            return "NPU-" + npu_visible_devices[device_id]
+        else:
+            return f"NPU-{device_id}"
     else:
         return current_platform.get_device_uuid(device_id)
 
@@ -71,7 +74,11 @@ def get_vllm_max_lora_rank(lora_rank: int):
     """
     assert lora_rank > 0, f"lora_rank must be greater than 0, get {lora_rank}"
 
-    from vllm.config.lora import MaxLoRARanks
+    try:
+        from vllm.config.lora import MaxLoRARanks
+    except Exception:
+        # FIXME: migrate vllm version https://github.com/vllm-project/vllm/blob/main/vllm/config/lora.py#L25
+        MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 
     vllm_max_lora_ranks = sorted(get_args(MaxLoRARanks))
     if lora_rank > vllm_max_lora_ranks[-1]:
@@ -203,10 +210,18 @@ class vLLMColocateWorkerExtension:
             buffer, shm = rebuild_shared_memory(shm_name, shm_size, dtype=torch.uint8)
         socket.send(b"")
 
+        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
+            self.model_runner.vllm_config
+        )
+
+        # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
+        if use_standard_weight_load:
+            patch_vllm_moe_model_weight_loader(self.model_runner.model)
+
         # receive bucket and update weights
         while True:
             metadata = socket.recv_pyobj()
-            weights = []
+            weights, tensor = [], None
             for name, meta in metadata["bucket_meta"].items():
                 shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
                 size = dtype.itemsize * shape.numel()
@@ -222,7 +237,7 @@ class vLLMColocateWorkerExtension:
             get_torch_device().synchronize()
             socket.send(b"")
             self._update_weights(weights, peft_config=peft_config, base_sync_done=base_sync_done)
-            del weights
+            del weights, tensor
             if metadata["is_last"]:
                 break
 
@@ -232,6 +247,7 @@ class vLLMColocateWorkerExtension:
         if shm is not None:
             shm.close()
             del shm
+        get_torch_device().synchronize()
         gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()

@@ -25,34 +25,34 @@ from tensordict import TensorDict
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
-from verl.trainer.ppo.reward import get_custom_reward_fn
+from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 
-from .reward_manager import get_reward_manager_cls
 from .reward_model import RewardModelManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-@ray.remote
 class RewardLoopWorker:
+    """
+    RewardLoopWork can tackle reward computation:
+    (1) rule-based reward computation
+    (2) reward model-based reward computation (both disrm and genrm)
+    (3) high-flexible user-customized reward function (can access rm by posting requests to reward_model_router)
+
+    Reward Computation Logic:
+    - if user-customized reward function is provided:
+        -> directly use user-customized reward function
+    - if user-customized reward function is not provided:
+        -> rm is not enabled: use default rule-based reward function
+        -> rm is disrm: compute reward score using disrm
+        -> rm is genrm: raise error (user-costomized reward func must be provided)
+    """
+
     def __init__(self, config: DictConfig, reward_router_address: str = None):
         """
-        RewardLoopWork can tackle reward computation:
-        (1) rule-based reward computation
-        (2) reward model-based reward computation (both disrm and genrm)
-        (3) high-flexible user-customized reward function (can access rm by posting requests to reward_model_router)
-
-        Reward Computation Logic:
-        - if user-customized reward function is provided:
-            -> directly use user-customized reward function
-        - if user-customized reward function is not provided:
-            -> rm is not enabled: use default rule-based reward function
-            -> rm is disrm: compute reward score using disrm
-            -> rm is genrm: raise error (user-costomized reward func must be provided)
-
         Args:
             config: DictConfig, the config for reward loop worker.
             reward_router_address: str, the address of reward router.
@@ -66,39 +66,14 @@ class RewardLoopWorker:
         self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
         self.reward_model_tokenizer = None
         if self.config.reward_model.enable:
-            reward_model_tokenizer_local_path = copy_to_local(self.config.reward_model.model.path)
+            reward_model_tokenizer_local_path = copy_to_local(self.config.reward_model.model_path)
             self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
-        self.reward_fn = get_custom_reward_fn(self.config)
 
-        # Load reward loop manager class
-        # Support both registry and importlib loading methods
-        reward_loop_source = self.config.reward_model.get("reward_loop_source", "register")
-
-        if reward_loop_source == "register":
-            # Load from registry (default behavior)
-            reward_manager_cls = get_reward_manager_cls(self.config.reward_model.reward_manager)
-        elif reward_loop_source == "importlib":
-            # Load from external module using importlib
-            from verl.utils.import_utils import load_extern_object
-
-            reward_loop_module_path = self.config.reward_model.get("reward_loop_module_path", None)
-            reward_loop_class_name = self.config.reward_model.get("reward_loop_class_name", None)
-
-            assert reward_loop_module_path is not None, (
-                "reward_loop_module_path must be set when reward_loop_source='importlib'"
-            )
-            assert reward_loop_class_name is not None, (
-                "reward_loop_class_name must be set when reward_loop_source='importlib'"
-            )
-
-            reward_manager_cls = load_extern_object(
-                module_path=reward_loop_module_path, object_name=reward_loop_class_name
-            )
-        else:
-            raise ValueError(f"Unknown reward_loop_source: {reward_loop_source}. Must be 'register' or 'importlib'")
-
-        self.reward_loop = reward_manager_cls(
-            self.config, self.input_tokenizer, self.reward_fn, self.reward_router_address, self.reward_model_tokenizer
+        self.reward_manager = load_reward_manager(
+            self.config,
+            self.input_tokenizer,
+            reward_router_address=self.reward_router_address,
+            reward_model_tokenizer=self.reward_model_tokenizer,
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
@@ -112,14 +87,14 @@ class RewardLoopWorker:
         assert len(data) == 1, "RewardLoopWorker only support single data item"
         if self.config.custom_reward_function.path is not None:
             # directly use user-customized reward function
-            return await self.reward_loop.run_single(data)
+            return await self.reward_manager.run_single(data)
         else:
             if self.config.reward_model.enable:
                 # we assume the rm is disrm
                 # genrm must set custom_reward_function
                 return await self.compute_score_disrm(data)
             else:
-                return await self.reward_loop.run_single(data)
+                return await self.reward_manager.run_single(data)
 
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 16):
         url = f"http://{self.reward_router_address}/{endpoint}"
@@ -200,7 +175,7 @@ class RewardLoopWorker:
     async def compute_score_disrm(self, data: DataProto) -> dict:
         disrm_prompt = await self._preprocess_reward_inputs(data)
         engine_name = self.config.reward_model.rollout.name
-        model_name = self.config.reward_model.model.path
+        model_name = self.config.reward_model.model_path
         if engine_name == "vllm":
             # TODO (dyy): the "activation" has been changed to "use_activation" in vllm 0.11.2
             payloads = {
@@ -245,7 +220,6 @@ class RewardLoopManager:
     """
     RewardLoopManager run in single controller.
     This class will create reward loop workers and manage them.
-    RewardLoopManager will deprecate fsdp/megatron RewardModelWorker in the future.
     """
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
@@ -257,6 +231,7 @@ class RewardLoopManager:
             self.reward_model_manager = None
             self.reward_router_address = None
 
+        self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self._init_reward_loop_workers()
 
     def _init_reward_loop_workers(self):
@@ -268,7 +243,7 @@ class RewardLoopManager:
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
             self.reward_loop_workers.append(
-                RewardLoopWorker.options(
+                self.reward_loop_workers_class.options(
                     name=f"reward_loop_worker_{i}",
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id,
@@ -277,7 +252,6 @@ class RewardLoopManager:
                 ).remote(self.config, self.reward_router_address)
             )
 
-    # this func is used to replace the legacy fsdp/megatron RewardModelWorker.compute_rm_score
     def compute_rm_score(self, data: DataProto) -> DataProto:
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()

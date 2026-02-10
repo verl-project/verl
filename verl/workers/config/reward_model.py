@@ -18,14 +18,49 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from verl.base_config import BaseConfig
+from verl.trainer.config.config import ModuleConfig
 
-from .model import HFModelConfig
 from .rollout import RolloutConfig
 
 __all__ = ["SandboxFusionConfig", "RewardModelConfig"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+@dataclass
+class RewardManagerConfig(BaseConfig):
+    """Configuration for reward manager.
+
+        A reward manager defines the mechanism of computing rule-based reward and handling different reward sources.
+
+    Args:
+        source (str): Source of the reward manager. Options: ``"register"``, ``"importlib"``. Default: ``"register"``.
+        name (str, optional):
+            - When ``source`` is ``"register"``, the name is used in `get_reward_manager_cls(name)``.
+                See ``verl/experimental/reward/reward_manager.py`` for options. Default: ``"naive"``.
+            - When ``source`` is ``"importlib"``, the name is used in ``getattr(module, name)``,
+                e.g., ``"DAPORewardManager"``.
+        module (ModuleConfig, optional): Optional configuration for the external module defining the reward manager,
+    """
+
+    source: str = "register"
+    name: str = "naive"
+    module: Optional[ModuleConfig] = field(default_factory=ModuleConfig)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.source == "register":
+            from verl.experimental.reward_loop.reward_manager.registry import REWARD_MANAGER
+
+            assert self.name in REWARD_MANAGER, (
+                f"Reward manager is not registered: {self.name=} ,{REWARD_MANAGER.keys()=}"
+            )
+        elif self.source == "importlib":
+            # NOTE: The existence is not checked since it depends on which machine the config is initialized on.
+            assert self.module is not None and self.module.path is not None, (
+                "When source is importlib, module.path should be set."
+            )
 
 
 @dataclass
@@ -47,23 +82,20 @@ class SandboxFusionConfig(BaseConfig):
 class RewardModelConfig(BaseConfig):
     _mutable_fields = BaseConfig._mutable_fields
 
-    reward_manager: Optional[str] = None
+    use_reward_loop: bool = True
 
     enable: bool = False
     enable_resource_pool: bool = False
     n_gpus_per_node: int = 0
     nnodes: int = 0
 
-    # reward model args
-    rollout: RolloutConfig = field(default_factory=RolloutConfig)
-    model: HFModelConfig = field(default_factory=HFModelConfig)
-    sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)
+    # reward manager args
+    num_workers: int = 8
+    reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
 
-    def __post_init__(self):
-        super().__post_init__()
-        if self.reward_manager is not None:
-            logger.warning(
-                f"`reward_model.reward_manager` is deprecated, but got value {self.reward_manager}. "
-                "Please use `reward_manager.name instead. "
-                "See `verl/trainer/config/config.py:RewardManagerConfig` for more details."
-            )
+    # reward model args
+    model_path: Optional[str] = None
+    inference: RolloutConfig = field(default_factory=RolloutConfig)
+
+    # sandbox fusion args
+    sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)

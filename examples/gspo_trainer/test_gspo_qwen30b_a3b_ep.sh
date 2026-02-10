@@ -149,7 +149,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True \
-    reward_model.reward_manager=dapo \
+    reward_model.reward_manager.name=dapo \
     +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \

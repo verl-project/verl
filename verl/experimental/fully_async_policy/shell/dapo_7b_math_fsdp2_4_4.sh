@@ -137,7 +137,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
-    reward_model.reward_manager=dapo \
+    reward_model.reward_manager.name=dapo \
     +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
@@ -160,5 +160,4 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \
-    async_training.partial_rollout="${partial_rollout}" \
-    async_training.use_rollout_log_probs=True
+    async_training.partial_rollout="${partial_rollout}"

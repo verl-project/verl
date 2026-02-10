@@ -50,6 +50,7 @@ class TestConfigComparison(unittest.TestCase):
         "worker_nsight_options",
         "controller_nsight_options",
     ]
+    ignored_paths = ["reward_model"]
 
     def _compare_configs_recursively(
         self, current_config, legacy_config, path="", legacy_allow_missing=True, current_allow_missing=False
@@ -60,6 +61,9 @@ class TestConfigComparison(unittest.TestCase):
             legacy_allow_missing (bool): sometimes the legacy megatron config contains fewer keys and
               we allow that to happen
         """
+        if path in self.ignored_paths:
+            return
+
         if isinstance(current_config, dict) and isinstance(legacy_config, dict):
             current_keys = set(current_config.keys())
             legacy_keys = set(legacy_config.keys())
