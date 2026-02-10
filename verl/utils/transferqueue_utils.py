@@ -40,8 +40,6 @@ from verl.utils import tensordict_utils as tu
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-# TODO: this environment variable need to be set even if we use config..
-is_transferqueue_enabled = os.environ.get("TRANSFER_QUEUE_ENABLE", False)
 
 tq.init()
 
@@ -326,18 +324,9 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True, con
                     return updated_meta
                 return _postprocess_common(output, put_data, need_collect)
 
-        @wraps(func)
-        def dummy_inner(*args, **kwargs):
-            output = func(*args, **kwargs)
-            return output
 
-        @wraps(func)
-        async def dummy_async_inner(*args, **kwargs):
-            output = await func(*args, **kwargs)
-            return output
-
-        wrapper_inner = inner if is_transferqueue_enabled else dummy_inner
-        wrapper_async_inner = async_inner if is_transferqueue_enabled else dummy_async_inner
+        wrapper_inner = inner
+        wrapper_async_inner = async_inner
 
         wrapper = wrapper_async_inner if inspect.iscoroutinefunction(func) else wrapper_inner
         return wrapper
