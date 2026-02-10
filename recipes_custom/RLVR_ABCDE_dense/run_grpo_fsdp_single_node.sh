@@ -107,6 +107,7 @@ python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/c
     +ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME \
     +ray_kwargs.ray_init.runtime_env.env_vars.GLOO_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME \
     +ray_kwargs.ray_init.runtime_env.env_vars.WANDB_MODE=$WANDB_MODE \
+    +ray_kwargs.ray_init.runtime_env.env_vars.TMPDIR=$TMPDIR \
     +ray_kwargs.ray_init.runtime_env.env_vars.WANDB_PROXY_URL=$WANDB_PROXY_URL \
     +ray_kwargs.ray_init.runtime_env.env_vars.HTTP_PROXY=$HTTP_PROXY \
     +ray_kwargs.ray_init.runtime_env.env_vars.HTTPS_PROXY=$HTTPS_PROXY \
