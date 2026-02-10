@@ -43,7 +43,7 @@ RETURN_RAW_CHAT=${RETURN_RAW_CHAT:-True}
 RAY_ADDRESS=${RAY_ADDRESS:-10.178.131.202:6379}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 MIN_LR=${MIN_LR:-1e-7}
-LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-cosine} # constant|cosine
+LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-cosine}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.35}
 
 # FSDP optimizer uses `min_lr_ratio` (not `min_lr`) and `lr_scheduler_type` (not `lr_decay_style`).
@@ -77,8 +77,8 @@ python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/c
     actor_rollout_ref.actor.fsdp_config.param_offload=$ACTOR_OFFLOAD \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=$ACTOR_OFFLOAD \
     actor_rollout_ref.actor.optim.lr=$ACTOR_LR \
-    +actor_rollout_ref.actor.optim.min_lr_ratio=$MIN_LR_RATIO \
-    +actor_rollout_ref.actor.optim.lr_scheduler_type=$LR_SCHEDULER_TYPE \
+    actor_rollout_ref.actor.optim.min_lr_ratio=$MIN_LR_RATIO \
+    actor_rollout_ref.actor.optim.lr_scheduler_type=$LR_SCHEDULER_TYPE \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
