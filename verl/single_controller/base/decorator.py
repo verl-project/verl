@@ -399,7 +399,6 @@ def register(
     execute_mode=Execute.ALL,
     blocking=True,
     materialize_futures=True,
-    put_data=True,
 ):
     """Register a function with distributed execution configuration.
 
@@ -416,8 +415,6 @@ def register(
             Whether the execution should be blocking. Defaults to True.
         materialize_futures:
             Whether to materialize the data before dispatching. Defaults to True.
-        put_data:
-            Whether to put data into TransferQueue. Defaults to True.
 
 
     Returns:

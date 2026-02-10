@@ -116,7 +116,9 @@ class ReplayBuffer:
                     partition[key] = {}
                 partition[key].update(tags)
 
-    def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> KVBatchMeta:
+    def sample(
+        self, partition_id: str, global_steps: int = None, batch_size: int = None, extra_info: dict = None
+    ) -> KVBatchMeta:
         """Sample a batch of data from the replay buffer.
 
         Args:
@@ -124,6 +126,7 @@ class ReplayBuffer:
             global_steps (int, optional): Global training steps. If not None, wait until all prompts of
                 this global steps have finished.
             batch_size (int, optional): Batch size. Defaults to None.
+            extra_info (dict, optional): Batch-level configs. Defaults to None
 
         Returns:
             KVBatchMeta: A batch of data.
@@ -150,7 +153,7 @@ class ReplayBuffer:
                             logger.warning(f"Unknown status {tag['status']} for key {key}")
                 logger.info("partitions", self.partitions)
                 if not should_wait:
-                    return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
+                    return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags, extra_info=extra_info)
 
 
 @ray.remote
@@ -268,6 +271,11 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             keys.append(f"{uid}_{session_id}_{i}")
             field = output.as_dict()
             field.update(kwargs)
+            # TODO: engine_workers.py use padded "response_mask" as "loss_mask", which is written
+            #       by left_right_2_no_padding. Here simply write no padding "response_mask" as "loss_mask"
+            field["loss_mask"] = field["response_mask"]
+            field["input_ids"] = input_ids
+            field["position_ids"] = position_ids
             fields.append(field)
             prompt_len, response_len = field["prompt_ids"].size(0), field["response_ids"].size(0)
             tags.append(
@@ -689,7 +697,8 @@ class PPOTrainer:
             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
             return
 
-        batch.extra_info = {"calculate_entropy": True, "compute_loss": False}
+        # TODO: check if some other extra_info is missing
+        batch.extra_info.update({"calculate_entropy": True, "compute_loss": False})
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         len(output)
 
@@ -738,33 +747,44 @@ class PPOTrainer:
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         self.agent_loop_manager.generate_sequences(batch)
 
-        # 2. get batch from replay buffer
-        with marked_timer("gen", timing_raw, color="red"):
-            batch = self.replay_buffer.sample(partition_id="train", global_steps=self.global_steps)
+        # 2. prepare batch-level extra_info for dynamic control signals
+        extra_info = {}
+        validate = batch["validate"] if "validate" in batch else False
+        extra_info["temperature"] = (
+            self.config.actor_rollout_ref.rollout.temperature
+            if not validate
+            else self.config.actor_rollout_ref.rollout.val_kwargs.temperature
+        )
 
-        # 3. [OPTIONAL] compute reward score with colocated reward model
+        # 3. get batch from replay buffer
+        with marked_timer("gen", timing_raw, color="red"):
+            batch = self.replay_buffer.sample(
+                partition_id="train", global_steps=self.global_steps, extra_info=extra_info
+            )
+
+        # 4. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
                 self._compute_reward_colocate(batch)
 
-        # 4. balance batch across data parallel groups
+        # 5. balance batch across data parallel groups
         self._balance_batch(batch, metrics=metrics)
 
-        # 5. compute old_log_prob
+        # 6. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
             self._compute_old_log_prob(batch, metrics=metrics)
 
-        # 6. [OPTIONAL] compute ref_log_prob
+        # 7. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):
                 self._compute_ref_log_prob(batch)
 
-        # 7. [OPTIONAL] compute critic values
+        # 8. [OPTIONAL] compute critic values
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
                 self._compute_values(batch)
 
-        # 8. compute advantage and return
+        # 9. compute advantage and return
         with marked_timer("adv", timing_raw, color="brown"):
             self._compute_advantage(batch)
 
