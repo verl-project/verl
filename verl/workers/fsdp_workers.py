@@ -157,16 +157,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
-        
+
         # Apply NPU patches for FSDP backend
-        from verl.utils.device import is_npu_available
-        if is_npu_available:
-            try:
-                import verl.models.transformers.npu_patch  # noqa
-                if torch.distributed.get_rank() == 0:
-                    logger.info("Applied NPU patches for FSDP backend")
-            except Exception as e:
-                logger.warning(f"Failed to apply NPU patches: {e}")
+        from verl.workers.engine.fsdp.utils import apply_npu_fsdp_patches
+
+        apply_npu_fsdp_patches()
 
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()

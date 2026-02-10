@@ -108,17 +108,12 @@ class FSDPEngine(BaseEngine):
         self.mode = None
 
         self.rank = torch.distributed.get_rank()
-        
+
         # Apply NPU patches for FSDP backend
-        from verl.utils.device import is_npu_available
-        if is_npu_available:
-            try:
-                import verl.models.transformers.npu_patch  # noqa
-                if self.rank == 0:
-                    logger.info("Applied NPU patches for FSDP backend")
-            except Exception as e:
-                logger.warning(f"Failed to apply NPU patches: {e}")
-        
+        from .utils import apply_npu_fsdp_patches
+
+        apply_npu_fsdp_patches()
+
         # build device mesh for Ulysses Sequence Parallel
 
         self.use_remove_padding = self.model_config.use_remove_padding
