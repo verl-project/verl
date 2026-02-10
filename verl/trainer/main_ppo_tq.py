@@ -64,6 +64,7 @@ from verl.utils.tracking import Tracking
 from verl.workers.config import CriticConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.utils.losses import value_loss
+from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -221,10 +222,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 )
                 tasks.append(task)
             await asyncio.gather(*tasks)
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tags={"status": "finished"})
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
         except Exception as e:
             logger.exception(f"Error in _run_prompt: {e}")
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tags={"status": "failure"})
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
     async def _agent_loop_postprocess(self, output: AgentLoopOutput | list[AgentLoopOutput], **kwargs) -> None:
         """Put agent loop outputs into TransferQueue."""
@@ -261,6 +262,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - uid: raw prompt uid from dataset
         # - session_id: session id for rollout.n sampling
         # - index: index of agent loop output
+
+
         keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):
             keys.append(f"{uid}_{session_id}_{i}")
@@ -278,9 +281,15 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 }
             )
 
+        # import pickle
+        # with open("agent_loop_postprocess_output.pkl", "wb") as f:
+        #     pickle.dump(fields, f)
+
+        fields_tensordict = list_of_dict_to_tensordict(fields)
+
         await tq.async_kv_batch_put(
             keys=keys,
-            fields=fields,
+            fields=fields_tensordict,
             tags=tags,
             partition_id="train" if not kwargs.get("validate", False) else "val",
         )

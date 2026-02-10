@@ -16,9 +16,10 @@ from typing import Any, Iterable
 
 import numpy as np
 import torch
+import tensordict
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
-
+from packaging.version import parse as parse_version
 
 def assign_non_tensor_data(tensor_dict: TensorDict, key, val):
     """Assign a single non-tensor value to a TensorDict.
@@ -850,3 +851,42 @@ def maybe_fix_3d_position_ids(data: TensorDict):
     # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
     if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
         data["position_ids"]._ragged_idx = 2
+
+
+def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
+    """
+    Create a TensorDict from a list of dict of tensors and non_tensors.
+    Note that this requires tensordict version at least 0.10
+    """
+    assert parse_version(tensordict.__version__) >= parse_version("0.10"), (
+        "Storing non-tensor data in TensorDict at least requires tensordict version 0.10"
+    )
+
+    assert len(list_of_dicts) > 0
+
+
+    keys = list_of_dicts[0].keys()
+    dict_of_lists = {key: [d[key] for d in list_of_dicts] for key in keys}
+    batch_size = len(list_of_dicts)
+
+    final_data = {
+        key: (
+            torch.stack(val_list)
+            if val_list
+            and all(isinstance(item, torch.Tensor) for item in val_list)
+            and all(item.shape == val_list[0].shape for item in val_list)
+            else (
+                torch.nested.as_nested_tensor(val_list, layout=torch.jagged)
+                if val_list and all(isinstance(item, torch.Tensor) for item in val_list)
+                else NonTensorStack(*val_list)
+            )
+        )
+        for key, val_list in dict_of_lists.items()
+    }
+
+    td = TensorDict(final_data, batch_size=[batch_size])
+
+    return td
+
+
+
