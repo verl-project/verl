@@ -112,7 +112,7 @@ class AsyncLLMServerManager:
         """
         server = self._choose_server(request_id)
         output = await server.generate.remote(
-            request_id=uuid4().hex,  # use new request_id for each turn
+            request_id=request_id,  # use the same request_id for better tracking
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
             image_data=image_data,
