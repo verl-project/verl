@@ -431,7 +431,6 @@ def register(
     execute_mode=Execute.ALL,
     blocking=True,
     materialize_futures=True,
-    put_data=True,
 ):
     """Register a function with distributed execution configuration.
 
@@ -448,8 +447,6 @@ def register(
             Whether the execution should be blocking. Defaults to True.
         materialize_futures:
             Whether to materialize the data before dispatching. Defaults to True.
-        put_data:
-            Whether to put data into TransferQueue. Defaults to True.
 
 
     Returns:
@@ -462,7 +459,7 @@ def register(
     _check_execute_mode(execute_mode=execute_mode)
 
     def decorator(func):
-        func = tqbridge(dispatch_mode=dispatch_mode, put_data=put_data)(func)
+        func = tqbridge(dispatch_mode=dispatch_mode)(func)
 
         @wraps(func)
         def inner(*args, **kwargs):

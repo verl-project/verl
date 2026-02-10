@@ -222,7 +222,7 @@ def _postprocess_common(output, put_data, need_collect):
         return output
 
 
-def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
+def tqbridge(dispatch_mode: "dict | Dispatch" = None):
     """Creates a decorator for bridging KVBatchMeta and TensorDict.
 
     This decorator automatically handles conversions between `KVBatchMeta`
@@ -235,11 +235,6 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
         dispatch_mode: Controls data collection behavior for the current worker. Passed to
                       _compute_need_collect to determine if current worker should collect data.
                       If None, _compute_need_collect will return True to fallback default logics.
-        put_data: Whether put the TensorDict into Storage after func return.
-                  If True, after function execution, the output result will be put into TQ and
-                  updated `KVBatchMeta` will be returned;
-                  If False, the function output result will be returned directly.
-                  Defaults to True.
 
 
     Returns:
@@ -260,6 +255,12 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
                 args = [_meta_to_realdata(arg) if isinstance(arg, KVBatchMeta) else arg for arg in args]
                 kwargs = {k: _meta_to_realdata(v) if isinstance(v, KVBatchMeta) else v for k, v in kwargs.items()}
                 output = func(*args, **kwargs)
+
+                put_data = False
+                if isinstance(output, TensorDict):
+                    if output.batch_size is not None:
+                        put_data = output.batch_size[0] == meta.size
+
                 need_collect = _compute_need_collect(dispatch_mode, args)
                 if put_data and need_collect:
                     updated_meta = _update_meta_with_output(output, meta, func.__name__)
@@ -278,6 +279,12 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
                     k: await _async_meta_to_realdata(v) if isinstance(v, KVBatchMeta) else v for k, v in kwargs.items()
                 }
                 output = await func(*args, **kwargs)
+
+                put_data = False
+                if isinstance(output, TensorDict):
+                    if output.batch_size is not None:
+                        put_data = output.batch_size[0] == meta.size
+
                 need_collect = _compute_need_collect(dispatch_mode, args)
                 if put_data and need_collect:
                     updated_meta = await _async_update_meta_with_output(output, meta, func.__name__)
