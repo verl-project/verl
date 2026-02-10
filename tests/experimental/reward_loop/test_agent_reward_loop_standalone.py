@@ -59,7 +59,7 @@ def test_agent_reward_loop_standalone():
     config.trainer.n_gpus_per_node = 4
     config.trainer.nnodes = 1
 
-    config.reward_manager.name = "dapo"
+    config.reward.reward_manager.name = "dapo"
     config.reward.reward_model.enable = True
     config.reward.reward_model.enable_resource_pool = True
     config.reward.reward_model.n_gpus_per_node = 4
