@@ -876,6 +876,11 @@ class vLLMReplica(RolloutReplica):
         """Resume generation on all servers after abort_all_requests."""
         await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
 
+    # TODO(petersh6): refact the checkpoint engine's update_weights and rename this method
+    async def resume_all_requests(self):
+        """Resume all requests on all servers."""
+        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         """Abort a specific request. Tries all servers since we don't know which one has it.
 
