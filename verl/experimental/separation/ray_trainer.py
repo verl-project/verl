@@ -123,7 +123,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self._init_async_rollout_manager()
 
         self.checkpoint_manager = CheckpointEngineManager(
-            backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+            config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
             trainer=self.actor_rollout_wg,
             replicas=self.async_rollout_manager.rollout_replicas,
         )
