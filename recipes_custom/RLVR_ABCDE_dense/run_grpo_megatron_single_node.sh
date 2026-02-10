@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+unset RAYLET_SOCKET_NAME
+unset PLASMA_STORE_SOCKET_NAME
+unset RAY_SESSION_DIR
+
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 export VERL_USE_GPT_OSS=0
