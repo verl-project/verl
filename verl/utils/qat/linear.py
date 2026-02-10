@@ -355,7 +355,7 @@ class QATLinear(nn.Linear):
         if self.input_global_scale.item() == self._UNINITIALIZED_SCALE:
             raise RuntimeError("W4A4 input_global_scale uninitialized. Load PTQ model first.")
 
-        global_amax = self.input_global_scale.to(x.device) * 6.0 * 448.0
+        global_amax = (6.0 * 448.0) / self.input_global_scale.to(x.device)
         result = STEFP4QuantTriton.apply(x_2d, global_amax, self.group_size)
         return result.view(original_shape)
 

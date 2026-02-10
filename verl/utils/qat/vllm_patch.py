@@ -15,22 +15,15 @@
 """
 vLLM NVFP4 Patches for Dynamic Weight Updates.
 
-This module enables dynamic weight reloading for quantized models in vLLM,
-supporting QAT (Quantization-Aware Training) weight synchronization.
-
-Key features:
-- ParamMetaDict for parameter metadata caching and rebuild
-- Tensor Swap for parameters with shape changes (CUDA Graph address stability)
-- Support for multi-bucket weight loading
+Enables dynamic weight reloading for NVFP4 quantized models in vLLM.
 
 Supported schemes:
 - Dense: W4A16-FP4, W4A4-FP4
-- MoE: W4A16-FP4-MoE (MARLIN backend), W4A4-FP4-MoE (FlashInfer/CUTLASS backend)
+- MoE: NVFP4-MoE
 """
 
 import logging
 import os
-from collections.abc import Callable
 from typing import Optional
 from unittest.mock import patch
 
@@ -281,16 +274,6 @@ def _check_first_call(layer: torch.nn.Module) -> bool:
 
 
 # Dense W4A16 Patches
-def patched_w4a16_create_weights(
-    self, layer, output_partition_sizes, input_size_per_partition, params_dtype, weight_loader, **kwargs
-):
-    """Wrapper: calls original create_weights + saves params_dtype for process_weights_after_loading."""
-    _originals["w4a16_create_weights"](
-        self, layer, output_partition_sizes, input_size_per_partition, params_dtype, weight_loader, **kwargs
-    )
-    layer.params_dtype = params_dtype
-
-
 def patched_w4a16_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
     """Patched process_weights_after_loading for W4A16 Dense layer."""
     import vllm._custom_ops as ops
@@ -381,130 +364,89 @@ def patched_w4a16_process_weights_after_loading(self, layer: torch.nn.Module) ->
         delattr(layer, "weight_global_scale")
 
 
-def patched_w4a4_create_weights(
-    self,
-    layer: torch.nn.Module,
-    output_partition_sizes: list[int],
-    input_size_per_partition: int,
-    params_dtype: torch.dtype,
-    weight_loader: Callable,
-    **kwargs,
-):
-    """Patched create_weights for W4A4 Dense layer."""
-    from vllm.model_executor.parameter import (
-        GroupQuantScaleParameter,
-        ModelWeightParameter,
-        PerTensorScaleParameter,
-    )
-
-    output_size_per_partition = sum(output_partition_sizes)
-    layer.logical_widths = output_partition_sizes
-    layer.input_size_per_partition = input_size_per_partition
-    layer.output_size_per_partition = output_size_per_partition
-    layer.params_dtype = params_dtype
-
-    weight = ModelWeightParameter(
-        data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition // 2,
-            dtype=torch.uint8,
-        ),
-        input_dim=1,
-        output_dim=0,
-        weight_loader=weight_loader,
-    )
-    layer.register_parameter("weight_packed_hf", weight)
-
-    weight_global_scale = PerTensorScaleParameter(
-        data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-        weight_loader=weight_loader,
-    )
-    layer.register_parameter("weight_global_scale_hf", weight_global_scale)
-
-    weight_scale = GroupQuantScaleParameter(
-        data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition // self.group_size,
-            dtype=torch.float8_e4m3fn,
-        ),
-        input_dim=1,
-        output_dim=0,
-        weight_loader=weight_loader,
-    )
-    layer.register_parameter("weight_scale_hf", weight_scale)
-
-    input_global_scale = PerTensorScaleParameter(
-        data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-        weight_loader=weight_loader,
-    )
-    layer.register_parameter("input_global_scale_hf", input_global_scale)
-
-
 def patched_w4a4_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-    """Patched process_weights_after_loading for W4A4 Dense layer."""
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        swizzle_blockscale,
-    )
+    """Patched process_weights_after_loading for W4A4 Dense (all backends)."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import swizzle_blockscale
 
     is_first_call = _check_first_call(layer)
 
-    # Save metadata (first call only)
+    _W4A4_HF_PARAMS = ["weight_packed", "weight_scale", "weight_global_scale", "input_global_scale"]
+
     if is_first_call:
-        save_param_meta(layer, "weight_packed_hf")
-        save_param_meta(layer, "weight_scale_hf")
-        save_param_meta(layer, "weight_global_scale_hf")
-        save_param_meta(layer, "input_global_scale_hf")
+        for pname in _W4A4_HF_PARAMS:
+            save_param_meta(layer, pname)
+        if not hasattr(layer, "_weight_loaders"):
+            layer._weight_loaders = {}
+        for pname in _W4A4_HF_PARAMS:
+            param = getattr(layer, pname, None)
+            if param is not None and hasattr(param, "weight_loader"):
+                layer._weight_loaders[pname] = param.weight_loader
 
-    # Get HF format data
-    weight_packed_hf = layer.weight_packed_hf.data
-    weight_scale_hf = layer.weight_scale_hf.data
-    weight_global_scale_hf = layer.weight_global_scale_hf.data
-    input_global_scale_hf = layer.input_global_scale_hf.data
+    weight_packed_data = layer.weight_packed.data
+    weight_scale_data = layer.weight_scale.data
+    input_global_scale_data = layer.input_global_scale.data
+    weight_global_scale_data = layer.weight_global_scale.data
 
-    # Compute transformed values
-    global_input_scale = input_global_scale_hf.max().to(torch.float32)
-    global_weight_scale = weight_global_scale_hf.max().to(torch.float32)
+    global_input_scale = input_global_scale_data.max().to(torch.float32)
+    global_weight_scale = weight_global_scale_data.max().to(torch.float32)
 
     if self.backend == "flashinfer-trtllm":
         from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
 
         epilogue_tile_m = 128
-        weight_shuffled = shuffle_matrix_a(weight_packed_hf.view(torch.uint8), epilogue_tile_m)
-        weight_scale_shuffled = (
-            shuffle_matrix_sf_a(weight_scale_hf.view(torch.uint8), epilogue_tile_m)
-            .reshape(weight_scale_hf.shape)
+        processed_weight = shuffle_matrix_a(weight_packed_data.view(torch.uint8), epilogue_tile_m)
+        processed_weight_scale = (
+            shuffle_matrix_sf_a(weight_scale_data.view(torch.uint8), epilogue_tile_m)
+            .reshape(weight_scale_data.shape)
             .view(torch.float8_e4m3fn)
         )
-        processed_weight = weight_shuffled
-        processed_weight_scale = weight_scale_shuffled
+    elif self.backend == "fbgemm":
+        processed_weight_scale = swizzle_blockscale(weight_scale_data).view(-1).view(torch.uint8)
+        processed_weight = weight_packed_data
     else:
-        # cutlass or flashinfer-cutlass
-        processed_weight_scale = swizzle_blockscale(weight_scale_hf)
-        if self.backend == "fbgemm":
-            processed_weight_scale = processed_weight_scale.view(-1).view(torch.uint8)
-        processed_weight = weight_packed_hf
+        # cutlass / flashinfer-cutlass
+        processed_weight_scale = swizzle_blockscale(weight_scale_data)
+        processed_weight = weight_packed_data
 
     alpha = 1.0 / (global_input_scale * global_weight_scale)
 
-    # Update compute parameters
     if is_first_call:
         layer.weight_packed = Parameter(processed_weight, requires_grad=False)
         layer.weight_scale = Parameter(processed_weight_scale, requires_grad=False)
         layer.input_global_scale = Parameter(global_input_scale, requires_grad=False)
         layer.weight_global_scale = Parameter(global_weight_scale, requires_grad=False)
         layer.alpha = Parameter(alpha, requires_grad=False)
-    else:
-        layer.weight_packed.data.copy_(processed_weight)
-        layer.weight_scale.data.copy_(processed_weight_scale)
-        layer.input_global_scale.data.copy_(global_input_scale)
-        layer.weight_global_scale.data.copy_(global_weight_scale)
-        layer.alpha.data.copy_(alpha)
 
-    # Delete HF parameters
-    delattr(layer, "weight_packed_hf")
-    delattr(layer, "weight_scale_hf")
-    delattr(layer, "weight_global_scale_hf")
-    delattr(layer, "input_global_scale_hf")
+        if not hasattr(layer, "_marlin_tensor_refs"):
+            layer._marlin_tensor_refs = {}
+        layer._marlin_tensor_refs["weight_packed"] = layer.weight_packed.data
+        layer._marlin_tensor_refs["weight_scale"] = layer.weight_scale.data
+        layer._marlin_tensor_refs["input_global_scale"] = layer.input_global_scale.data
+        layer._marlin_tensor_refs["weight_global_scale"] = layer.weight_global_scale.data
+        layer._marlin_tensor_refs["alpha"] = layer.alpha.data
+    else:
+        refs = layer._marlin_tensor_refs
+        for ref_name, new_data in [
+            ("weight_packed", processed_weight),
+            ("weight_scale", processed_weight_scale),
+            ("input_global_scale", global_input_scale),
+            ("weight_global_scale", global_weight_scale),
+            ("alpha", alpha),
+        ]:
+            ref = refs.get(ref_name)
+            if ref is not None:
+                ref.copy_(new_data)
+                setattr(layer, ref_name, Parameter(ref, requires_grad=False))
+            else:
+                logger.warning(f"W4A4: _marlin_tensor_refs['{ref_name}'] not found, creating new Parameter")
+                setattr(
+                    layer,
+                    ref_name,
+                    Parameter(
+                        new_data.clone() if isinstance(new_data, torch.Tensor) else torch.tensor(new_data),
+                        requires_grad=False,
+                    ),
+                )
 
 
 def _marlin_repack_experts(packed, perm, size_k, size_n, num_experts):
@@ -734,17 +676,6 @@ def _process_nvfp4_moe_flashinfer_cutlass(self, layer: torch.nn.Module, is_first
 
 
 # MoE NVFP4 Patches (entry points)
-def patched_nvfp4_moe_create_weights(
-    self, layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype, **extra_weight_attrs
-):
-    """Wrapper: calls original create_weights + saves hidden_size/intermediate_size_per_partition."""
-    _originals["moe_create_weights"](
-        self, layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype, **extra_weight_attrs
-    )
-    layer.hidden_size = hidden_size
-    layer.intermediate_size_per_partition = intermediate_size_per_partition
-
-
 def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
     """Patched process_weights_after_loading for NVFP4 MoE layer."""
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
@@ -781,20 +712,10 @@ _PATCH_TARGETS = [
     # Dense W4A16
     (
         "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.create_weights",
-        patched_w4a16_create_weights,
-    ),
-    (
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
         "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.process_weights_after_loading",
         patched_w4a16_process_weights_after_loading,
     ),
     # Dense W4A4
-    (
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a4_nvfp4.CompressedTensorsW4A4Fp4.create_weights",
-        patched_w4a4_create_weights,
-    ),
     (
         "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
         "compressed_tensors_w4a4_nvfp4.CompressedTensorsW4A4Fp4.process_weights_after_loading",
@@ -803,31 +724,12 @@ _PATCH_TARGETS = [
     # MoE NVFP4
     (
         "vllm.model_executor.layers.quantization.compressed_tensors."
-        "compressed_tensors_moe.CompressedTensorsW4A4Nvfp4MoEMethod.create_weights",
-        patched_nvfp4_moe_create_weights,
-    ),
-    (
-        "vllm.model_executor.layers.quantization.compressed_tensors."
         "compressed_tensors_moe.CompressedTensorsW4A4Nvfp4MoEMethod.process_weights_after_loading",
         patched_nvfp4_moe_process_weights_after_loading,
     ),
 ]
 
 _applied_patches = []
-_originals: dict[str, object] = {}
-
-
-def _save_originals():
-    """Save original vLLM methods before patching (used by wrapper-style patches)."""
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
-        CompressedTensorsW4A4Nvfp4MoEMethod,
-    )
-    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a16_nvfp4 import (
-        CompressedTensorsW4A16Fp4,
-    )
-
-    _originals["w4a16_create_weights"] = CompressedTensorsW4A16Fp4.create_weights
-    _originals["moe_create_weights"] = CompressedTensorsW4A4Nvfp4MoEMethod.create_weights
 
 
 def apply_qat_patches():
@@ -837,8 +739,6 @@ def apply_qat_patches():
     if _applied_patches:
         logger.warning("QAT patches already applied, skipping")
         return _applied_patches
-
-    _save_originals()
 
     logger.info("Applying NVFP4 patches for dynamic weight loading...")
 
@@ -865,17 +765,24 @@ def prepare_qat_for_load_weights(model, device=None):
 
     param_meta = ParamMetaDict(inner_model, device=device)
 
-    # Tensor swap: replace Marlin-format tensors with HF-shape tensors for reload
     param_meta.prepare_for_reload()
     logger.info(f"[prepare_qat] Tensor swap prepared for {len(param_meta._tensor_swap_layers)} layers")
 
-    # Rebuild all missing parameters (deleted by process_weights_after_loading) in HF shape
+    # Rebuild deleted (W4A16) or overwritten (W4A4) params back to HF format
     rebuilt_count = 0
     for layer_name, cache_entry in param_meta._layer_meta_cache.items():
         module = cache_entry["module"]
         for param_name, pm in cache_entry["meta"].items():
-            if hasattr(module, param_name) and getattr(module, param_name) is not None:
-                continue
+            existing = getattr(module, param_name, None)
+            if existing is not None:
+                hf_shape = tuple(pm["shape"])
+                hf_dtype = pm["dtype"]
+                if (
+                    tuple(existing.shape) == hf_shape
+                    and existing.dtype == hf_dtype
+                    and hasattr(existing, "weight_loader")
+                ):
+                    continue
             new_param = _create_param_from_meta(module, param_name, pm, device)
             module.register_parameter(param_name, new_param)
             rebuilt_count += 1
