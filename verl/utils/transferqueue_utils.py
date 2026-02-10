@@ -22,8 +22,6 @@ import threading
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable
 
-import numpy as np
-import torch
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from verl.protocol import DataProto
@@ -51,7 +49,7 @@ def _run_async_in_temp_loop(async_func: Callable[..., Any], *args, **kwargs) -> 
     tmp_event_loop = asyncio.new_event_loop()
     thread = threading.Thread(
         target=tmp_event_loop.run_forever,
-        name="batchmeta dataproto/tensordict converter",
+        name="batchmeta tensordict converter",
         daemon=True,
     )
 
@@ -82,65 +80,36 @@ def _find_meta(*args, **kwargs):
     return None
 
 
-async def _async_meta_to_realdata(
-    meta: KVBatchMeta,
-    convert_type: str = "DataProto",
-) -> DataProto | TensorDict:
+async def _async_meta_to_realdata(meta: KVBatchMeta) -> TensorDict:
     meta_info = copy.deepcopy(meta.extra_info)
     if len(meta.keys) == 0:
-        if convert_type == "DataProto":
-            return DataProto(
-                batch=TensorDict({}, batch_size=(0,)),
-                non_tensor_batch={},
-                meta_info=meta_info,
-            )
-        else:
-            empty_td = TensorDict({}, batch_size=(0,))
-            tu.assign_non_tensor(empty_td, **meta_info)
-            return empty_td
+        empty_td = TensorDict({}, batch_size=(0,))
+        tu.assign_non_tensor(empty_td, **meta_info)
+        return empty_td
 
     tensordict = await tq.async_kv_batch_get(keys=meta.keys, partition_id=meta.partition_id, fields=meta.fields)
 
-    if convert_type == "DataProto":
-        if all(not isinstance(val, torch.Tensor) for val in tensordict.values()):
-            non_tensor_batch = {}
-            for key, val in tensordict.items():
-                if isinstance(val, NonTensorStack):
-                    non_tensor_batch[key] = np.array([elem.data for elem in val], dtype=object)
-                elif isinstance(val, NonTensorData) and key not in meta_info.keys():
-                    meta_info[key] = val.data
-            dataproto = DataProto(batch=None, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
+    for key, val in meta_info.items():
+        if isinstance(val, (NonTensorData | NonTensorStack)):
+            tensordict[key] = val
         else:
-            dataproto = DataProto.from_tensordict(tensordict, meta_info=meta_info)
-        return dataproto
-    else:
-        for key, val in meta_info.items():
-            if isinstance(val, (NonTensorData | NonTensorStack)):
-                tensordict[key] = val
-            else:
-                tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
-        return tensordict
+            tu.assign_non_tensor_data(tensor_dict=tensordict, key=key, val=val)
+    return tensordict
 
 
-def _meta_to_realdata(meta: KVBatchMeta, convert_type: str) -> DataProto | TensorDict:
-    return _run_async_in_temp_loop(_async_meta_to_realdata, meta, convert_type)
+def _meta_to_realdata(meta: KVBatchMeta) -> TensorDict:
+    return _run_async_in_temp_loop(_async_meta_to_realdata, meta)
 
 
-async def _async_update_meta_with_output(
-    output: DataProto | TensorDict, meta: KVBatchMeta, func_name=None
-) -> KVBatchMeta:
+async def _async_update_meta_with_output(output: TensorDict, meta: KVBatchMeta, func_name=None) -> KVBatchMeta:
     if isinstance(output, TensorDict):
         is_empty = output.batch_size[0] == 0
         meta_data = {}
         for key, val in output.items():
             if isinstance(val, NonTensorData):
                 meta_data[key] = val.data
-    elif isinstance(output, DataProto):
-        is_empty = len(output) == 0
-        meta_data = output.meta_info
-        output = output.to_tensordict()
     else:
-        raise TypeError(f"Only support DataProto|TensorDict format of output, but got {type(output)}")
+        raise TypeError(f"Only support TensorDict format of output, but got {type(output)}")
 
     meta.extra_info.update(meta_data)
 
@@ -158,7 +127,7 @@ async def _async_update_meta_with_output(
         return meta
 
 
-def _update_meta_with_output(output: TensorDict | DataProto, meta: KVBatchMeta, func_name=None) -> KVBatchMeta:
+def _update_meta_with_output(output: TensorDict, meta: KVBatchMeta, func_name=None) -> KVBatchMeta:
     updated_meta = _run_async_in_temp_loop(_async_update_meta_with_output, output, meta, func_name)
     return updated_meta
 
@@ -253,26 +222,24 @@ def _postprocess_common(output, put_data, need_collect):
         return output
 
 
-def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True, convert_type: str = "DataProto"):
-    """Creates a decorator for bridging KVBatchMeta and DataProto.
+def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True):
+    """Creates a decorator for bridging KVBatchMeta and TensorDict.
 
     This decorator automatically handles conversions between `KVBatchMeta`
-    and `DataProto`/`TensorDict` in function parameters, and decides whether to sync function
+    and `TensorDict` in function parameters, and decides whether to sync function
     output back to `KVBatchMeta` based on configuration(`put_data`). It supports
     both synchronous and asynchronous functions (async def). When TQ is not enabled, it
-    simply calls the original function as-is).
+    simply calls the original function as-is.
 
     Args:
         dispatch_mode: Controls data collection behavior for the current worker. Passed to
                       _compute_need_collect to determine if current worker should collect data.
                       If None, _compute_need_collect will return True to fallback default logics.
-        put_data: Whether put the DataProto into Storage after func return.
+        put_data: Whether put the TensorDict into Storage after func return.
                   If True, after function execution, the output result will be put into TQ and
                   updated `KVBatchMeta` will be returned;
                   If False, the function output result will be returned directly.
                   Defaults to True.
-        convert_type: Target data type of the decorated funcitons. Support "DataProto" and "TensorDict".
-                  Defaults to "DataProto"
 
 
     Returns:
@@ -290,11 +257,8 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True, con
                 return func(*args, **kwargs)
             else:
                 logger.info(f"Task {func.__name__} (pid={pid}) is getting len_samples={meta.size}")
-                args = [_meta_to_realdata(arg, convert_type) if isinstance(arg, KVBatchMeta) else arg for arg in args]
-                kwargs = {
-                    k: _meta_to_realdata(v, convert_type) if isinstance(v, KVBatchMeta) else v
-                    for k, v in kwargs.items()
-                }
+                args = [_meta_to_realdata(arg) if isinstance(arg, KVBatchMeta) else arg for arg in args]
+                kwargs = {k: _meta_to_realdata(v) if isinstance(v, KVBatchMeta) else v for k, v in kwargs.items()}
                 output = func(*args, **kwargs)
                 need_collect = _compute_need_collect(dispatch_mode, args)
                 if put_data and need_collect:
@@ -309,13 +273,9 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True, con
                 return await func(*args, **kwargs)
             else:
                 logger.info(f"Task {func.__name__} (pid={pid}) is getting len_samples={meta.size}")
-                args = [
-                    await _async_meta_to_realdata(arg, convert_type) if isinstance(arg, KVBatchMeta) else arg
-                    for arg in args
-                ]
+                args = [await _async_meta_to_realdata(arg) if isinstance(arg, KVBatchMeta) else arg for arg in args]
                 kwargs = {
-                    k: await _async_meta_to_realdata(v, convert_type) if isinstance(v, KVBatchMeta) else v
-                    for k, v in kwargs.items()
+                    k: await _async_meta_to_realdata(v) if isinstance(v, KVBatchMeta) else v for k, v in kwargs.items()
                 }
                 output = await func(*args, **kwargs)
                 need_collect = _compute_need_collect(dispatch_mode, args)
@@ -323,7 +283,6 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None, put_data: bool = True, con
                     updated_meta = await _async_update_meta_with_output(output, meta, func.__name__)
                     return updated_meta
                 return _postprocess_common(output, put_data, need_collect)
-
 
         wrapper_inner = inner
         wrapper_async_inner = async_inner

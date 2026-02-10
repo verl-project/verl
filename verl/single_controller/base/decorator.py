@@ -400,7 +400,6 @@ def register(
     blocking=True,
     materialize_futures=True,
     put_data=True,
-    convert_type="DataProto",
 ):
     """Register a function with distributed execution configuration.
 
@@ -419,8 +418,7 @@ def register(
             Whether to materialize the data before dispatching. Defaults to True.
         put_data:
             Whether to put data into TransferQueue. Defaults to True.
-        convert_type:
-            The data type of target real data. Defaults to "DataProto".
+
 
     Returns:
         A decorator that wraps the original function with distributed execution

@@ -60,11 +60,11 @@ from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from verl.utils.tracking import Tracking
 from verl.workers.config import CriticConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.utils.losses import value_loss
-from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -262,7 +262,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - uid: raw prompt uid from dataset
         # - session_id: session id for rollout.n sampling
         # - index: index of agent loop output
-
 
         keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):

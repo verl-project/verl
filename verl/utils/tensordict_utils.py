@@ -15,11 +15,12 @@ import logging
 from typing import Any, Iterable
 
 import numpy as np
-import torch
 import tensordict
+import torch
+from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
-from packaging.version import parse as parse_version
+
 
 def assign_non_tensor_data(tensor_dict: TensorDict, key, val):
     """Assign a single non-tensor value to a TensorDict.
@@ -864,7 +865,6 @@ def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDic
 
     assert len(list_of_dicts) > 0
 
-
     keys = list_of_dicts[0].keys()
     dict_of_lists = {key: [d[key] for d in list_of_dicts] for key in keys}
     batch_size = len(list_of_dicts)
@@ -887,6 +887,3 @@ def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDic
     td = TensorDict(final_data, batch_size=[batch_size])
 
     return td
-
-
-

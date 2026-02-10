@@ -222,7 +222,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"),
         blocking=False,
         put_data=False,
-        convert_type="TensorDict",
     )
     def train_mini_batch(self, data: TensorDict) -> TensorDict:
         """Split a batch into N mini-batches run for multiple epochs
@@ -310,8 +309,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
     @register(
         dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"),
         blocking=False,
-        put_data=False,
-        convert_type="TensorDict",
     )
     def train_batch(self, data: TensorDict) -> TensorDict:
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
@@ -371,7 +368,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"),
         blocking=False,
         put_data=True,
-        convert_type="TensorDict",
     )
     def infer_batch(self, data: TensorDict) -> TensorDict:
         # add mfu calculator
@@ -609,7 +605,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output.cpu() if output is not None else None
 
     @register(
-        dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"), put_data=True, convert_type="TensorDict"
+        dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"),
+        put_data=True,
     )
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
@@ -621,7 +618,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(
         dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"),
         put_data=False,
-        convert_type="TensorDict",
     )
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
