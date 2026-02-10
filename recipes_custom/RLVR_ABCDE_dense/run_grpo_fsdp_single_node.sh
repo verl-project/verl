@@ -46,6 +46,7 @@ ACTOR_LR=${ACTOR_LR:-1e-6}
 MIN_LR=${MIN_LR:-1e-7}
 LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-cosine}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.35}
+UPDATE_WEIGHTS_BUCKET_MB=${UPDATE_WEIGHTS_BUCKET_MB:-4096}
 
 # FSDP optimizer uses `min_lr_ratio` (not `min_lr`) and `lr_scheduler_type` (not `lr_decay_style`).
 # Default to MIN_LR / ACTOR_LR when MIN_LR_RATIO is not explicitly provided.
@@ -94,6 +95,7 @@ python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/c
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.max_num_batched_tokens=10384 \
     actor_rollout_ref.rollout.max_model_len=2048 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=$UPDATE_WEIGHTS_BUCKET_MB \
     actor_rollout_ref.ref.fsdp_config.fsdp_size=$FSDP_SIZE \
     actor_rollout_ref.ref.fsdp_config.param_offload=$REF_OFFLOAD \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
