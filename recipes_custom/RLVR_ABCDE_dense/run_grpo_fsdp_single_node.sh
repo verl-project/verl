@@ -13,7 +13,7 @@ export https_proxy=${https_proxy:-$WANDB_PROXY_URL}
 export PYTHONPATH=/llm-align/liuchonghan/verl_lao:${PYTHONPATH:-}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth0}
-export RAY_TMPDIR=/hbox2dir/ray_tmp
+export RAY_TMPDIR=/hbox2dir/r
 
 ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.main_ppo"}
 TRAIN_FILES=${TRAIN_FILES:-/llm-align/liuchonghan/all_data_merged_rlhf.json}
@@ -38,7 +38,7 @@ rollout_mode=${ROLLOUT_MODE:-async}
 USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-True}
 RETURN_RAW_CHAT=${RETURN_RAW_CHAT:-True}
 RAY_ADDRESS=${RAY_ADDRESS:-10.178.131.202:6379}
-RAY_WORKING_DIR=${RAY_WORKING_DIR:-/llm-align/liuchonghan/verl_lao}
+RAY_WORKING_DIR=${RAY_WORKING_DIR:-/hbox2dir/w}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 MIN_LR=${MIN_LR:-1e-7}
 LR_DECAY_STYLE=${LR_DECAY_STYLE:-cosine}
