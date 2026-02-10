@@ -69,6 +69,7 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 | Python| >= 3.10, <3.12 |
 | CANN | == 8.3.RC1 |
 | torch | == 2.7.1 |
+| torch_npu | == 2.7.1 |
 | verl | main分支 commitId=252d76908b903ad8fb6969eb3a5e5f873c95ea2b |
 | vllm | 	v0.11.0 |
 | vllm-ascend | v0.11.0-dev|
