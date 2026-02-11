@@ -21,7 +21,8 @@ Includes scale computation utilities for weight quantization.
 
 import logging
 import os
-from typing import Optional
+import re
+from typing import Generator, Iterable, Optional
 
 import torch
 from compressed_tensors.compressors.quantized_compressors.fp4_quantized import NVFP4PackedCompressor
@@ -36,6 +37,8 @@ from compressed_tensors.quantization.utils.helpers import generate_gparam
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+_LAYER_IDX_RE = re.compile(r"layers\.(\d+)\.")
 
 
 def compute_blockwise_scale(
@@ -143,8 +146,6 @@ class QATQuantizer:
 
     def _should_quantize(self, name: str, tensor: torch.Tensor) -> bool:
         """Check if parameter should be quantized."""
-        import re
-
         if not name.endswith(".weight"):
             return False
         if tensor.dim() != 2:
@@ -165,128 +166,139 @@ class QATQuantizer:
                     return False
         return True
 
-    def _group_params_by_decoder_layer(
-        self, params: dict[str, torch.Tensor]
-    ) -> dict[Optional[int], dict[str, torch.Tensor]]:
-        """Group parameters by decoder layer index. Returns {layer_idx: {name: tensor}}."""
-        import re
+    @staticmethod
+    def _extract_layer_idx(name: str) -> Optional[int]:
+        """Extract decoder layer index from parameter name."""
+        match = _LAYER_IDX_RE.search(name)
+        return int(match.group(1)) if match else None
 
-        grouped: dict[Optional[int], dict[str, torch.Tensor]] = {}
-        for name, tensor in params.items():
-            match = re.search(r"layers\.(\d+)\.", name)
-            layer_idx = int(match.group(1)) if match else None
-            grouped.setdefault(layer_idx, {})[name] = tensor
-        return grouped
+    def _process_layer_group(
+        self,
+        layer_idx: Optional[int],
+        layer_params: dict[str, torch.Tensor],
+        input_global_scales: dict[str, torch.Tensor],
+        output_device: torch.device,
+    ) -> list[tuple[str, torch.Tensor]]:
+        """Quantize one decoder layer's buffered params. Returns list of (name, tensor)."""
+        layer_weights = {}
+        layer_passthrough = {}
+
+        for name, tensor in layer_params.items():
+            if "input_global_scale" in name or "input_amax" in name:
+                continue
+
+            if self._should_quantize(name, tensor):
+                layer_name = name.rsplit(".weight", 1)[0]
+                layer_weights[layer_name] = (name, tensor)
+            else:
+                layer_passthrough[name] = tensor
+
+        if layer_idx is None and layer_weights:
+            raise RuntimeError(
+                f"[QAT Quantizer] Unexpected quantizable weights outside decoder layers: "
+                f"{list(layer_weights.keys())}. These should be in ignore_patterns."
+            )
+
+        if not layer_weights:
+            return [(name, tensor.to(output_device)) for name, tensor in layer_passthrough.items()]
+
+        # Move weights to GPU, compute global scales
+        weights_on_gpu = {}
+        layer_global_scales = {}
+
+        for layer_name, (_, tensor) in layer_weights.items():
+            weight_gpu = tensor.to(device=self.device, dtype=self.param_dtype)
+            weights_on_gpu[layer_name] = weight_gpu
+            amax = torch.amax(torch.abs(weight_gpu)).to(torch.float32)
+            layer_global_scales[layer_name] = generate_gparam(
+                -amax.unsqueeze(0),
+                amax.unsqueeze(0),
+                scale_data=FP8_E4M3_DATA,
+                quant_data=FP4_E2M1_DATA,
+                dtype=torch.float32,
+            )
+
+        fused_global_scales = fuse_global_scales(layer_global_scales, strategy="min")
+
+        results = []
+
+        for layer_name, weight_gpu in weights_on_gpu.items():
+            fused_global_scale = fused_global_scales[layer_name]
+            weight_scale = compute_blockwise_scale(weight_gpu, fused_global_scale, self.group_size)
+            weight_packed = self._compressor.compress_weight(
+                weight=weight_gpu,
+                scale=weight_scale.float(),
+                global_scale=fused_global_scale,
+                quantization_args=self._quant_args,
+            )["weight_packed"]
+
+            results.append((f"{layer_name}.weight_packed", weight_packed.to(output_device)))
+            results.append((f"{layer_name}.weight_scale", weight_scale.to(output_device)))
+            results.append((f"{layer_name}.weight_global_scale", fused_global_scale.to(output_device)))
+
+            if self._is_w4a4:
+                if layer_name in input_global_scales:
+                    results.append(
+                        (
+                            f"{layer_name}.input_global_scale",
+                            input_global_scales[layer_name].float().to(output_device),
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        f"W4A4 mode requires input_global_scale for layer '{layer_name}', "
+                        f"but it's not found or uninitialized (-1.0)."
+                    )
+
+        del weights_on_gpu, layer_global_scales, fused_global_scales
+
+        for name, tensor in layer_passthrough.items():
+            results.append((name, tensor.to(output_device)))
+
+        return results
 
     def quantize_with_fusion(
         self,
-        params: dict[str, torch.Tensor],
+        params: dict[str, torch.Tensor] | Iterable[tuple[str, torch.Tensor]],
         target_device: Optional[torch.device] = None,
-    ) -> dict[str, torch.Tensor]:
-        """Quantize all parameters with scale fusion for QKV/GateUp layers."""
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Streaming quantize: consume input layer by layer, yield (name, tensor) pairs."""
+        if isinstance(params, dict):
+            params = params.items()
+
         output_device = target_device or torch.device("cpu")
-        quantization_device = self.device
-        include_input_scale = self._is_w4a4
 
-        output_params = {}
-        input_global_scales = {}
-        grouped_params = self._group_params_by_decoder_layer(params)
-        layer_indices = sorted(grouped_params.keys(), key=lambda x: (x is not None, x or 0))
+        _sentinel = object()
+        current_layer_idx = _sentinel
+        layer_buffer: dict[str, torch.Tensor] = {}
+        input_global_scales: dict[str, torch.Tensor] = {}
+        for name, tensor in params:
+            tensor_cpu = tensor.to("cpu") if tensor.is_cuda else tensor
+            layer_idx = self._extract_layer_idx(name)
 
-        # Pre-scan for input_global_scales (W4A4 mode)
-        if include_input_scale:
-            for name, tensor in params.items():
-                if "input_global_scale" in name:
-                    layer_name = name.replace(".input_global_scale", "")
-                    if tensor.numel() == 1 and tensor.item() == -1.0:
-                        logger.warning(f"W4A4: {layer_name} input_global_scale is uninitialized")
-                    else:
-                        input_global_scales[layer_name] = tensor
-            logger.info(f"W4A4 mode: found {len(input_global_scales)} input_global_scales")
-
-        total_quantized = 0
-        total_passthrough = 0
-
-        for layer_idx in layer_indices:
-            layer_params = grouped_params[layer_idx]
-            layer_weights = {}
-            layer_passthrough = {}
-
-            for name, tensor in layer_params.items():
-                if "input_global_scale" in name or "input_amax" in name:
-                    continue
-
-                if self._should_quantize(name, tensor):
-                    layer_name = name.rsplit(".weight", 1)[0]
-                    layer_weights[layer_name] = (name, tensor)
+            # Collect input_global_scales for W4A4 as we go
+            if self._is_w4a4 and "input_global_scale" in name:
+                scale_layer_name = name.replace(".input_global_scale", "")
+                if tensor_cpu.numel() == 1 and tensor_cpu.item() == -1.0:
+                    logger.warning(f"W4A4: {scale_layer_name} input_global_scale is uninitialized")
                 else:
-                    layer_passthrough[name] = tensor
+                    input_global_scales[scale_layer_name] = tensor_cpu
 
-            if layer_idx is None and layer_weights:
-                raise RuntimeError(
-                    f"[QAT Quantizer] Unexpected quantizable weights outside decoder layers: "
-                    f"{list(layer_weights.keys())}. These should be in ignore_patterns."
+            # Layer boundary: flush previous layer
+            if layer_idx != current_layer_idx and current_layer_idx is not _sentinel and layer_buffer:
+                yield from self._process_layer_group(
+                    current_layer_idx, layer_buffer, input_global_scales, output_device
                 )
+                layer_buffer = {}
 
-            if not layer_weights:
-                for name, tensor in layer_passthrough.items():
-                    output_params[name] = tensor.to(output_device)
-                    total_passthrough += 1
-                continue
+            current_layer_idx = layer_idx
+            layer_buffer[name] = tensor_cpu
 
-            weights_on_gpu = {}
-            layer_global_scales = {}
-
-            for layer_name, (_, tensor) in layer_weights.items():
-                weight_gpu = tensor.to(device=quantization_device, dtype=self.param_dtype)
-                weights_on_gpu[layer_name] = weight_gpu
-                amax = torch.amax(torch.abs(weight_gpu)).to(torch.float32)
-                layer_global_scales[layer_name] = generate_gparam(
-                    -amax.unsqueeze(0),
-                    amax.unsqueeze(0),
-                    scale_data=FP8_E4M3_DATA,
-                    quant_data=FP4_E2M1_DATA,
-                    dtype=torch.float32,
-                )
-
-            fused_global_scales = fuse_global_scales(layer_global_scales, strategy="min")
-
-            for layer_name, weight_gpu in weights_on_gpu.items():
-                fused_global_scale = fused_global_scales[layer_name]
-                weight_scale = compute_blockwise_scale(weight_gpu, fused_global_scale, self.group_size)
-                weight_packed = self._compressor.compress_weight(
-                    weight=weight_gpu,
-                    scale=weight_scale.float(),
-                    global_scale=fused_global_scale,
-                    quantization_args=self._quant_args,
-                )["weight_packed"]
-
-                output_params[f"{layer_name}.weight_packed"] = weight_packed.to(output_device)
-                output_params[f"{layer_name}.weight_scale"] = weight_scale.to(output_device)
-                output_params[f"{layer_name}.weight_global_scale"] = fused_global_scale.to(output_device)
-
-                if include_input_scale:
-                    if layer_name in input_global_scales:
-                        output_params[f"{layer_name}.input_global_scale"] = (
-                            input_global_scales[layer_name].float().to(output_device)
-                        )
-                    else:
-                        raise ValueError(
-                            f"W4A4 mode requires input_global_scale for layer '{layer_name}', "
-                            f"but it's not found or uninitialized (-1.0)."
-                        )
-
-                total_quantized += 1
-
-            del weights_on_gpu, layer_global_scales, fused_global_scales
-
-            for name, tensor in layer_passthrough.items():
-                output_params[name] = tensor.to(output_device)
-                total_passthrough += 1
+        # Flush last buffered layer
+        if layer_buffer:
+            yield from self._process_layer_group(current_layer_idx, layer_buffer, input_global_scales, output_device)
 
         torch.cuda.empty_cache()
-        logger.info(f"Quantized {total_quantized} layers, passed through {total_passthrough} params")
-        return output_params
 
 
 __all__ = [

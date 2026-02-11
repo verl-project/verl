@@ -798,7 +798,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer
 
-            params_dict = dict(per_tensor_param)
             quantizer = QATQuantizer(
                 mode=self.qat_config.mode,
                 group_size=self.qat_config.group_size,
@@ -807,10 +806,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 param_dtype=self._param_dtype,
             )
             per_tensor_param = quantizer.quantize_with_fusion(
-                params_dict,
+                per_tensor_param,
                 target_device=torch.device("cpu"),
-            ).items()
-            del params_dict
+            )
             aggressive_empty_cache(force_sync=True)
 
         if self.config.rollout.free_cache_engine:
