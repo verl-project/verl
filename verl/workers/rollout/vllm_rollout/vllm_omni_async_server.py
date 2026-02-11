@@ -86,9 +86,7 @@ class vLLMOmniHttpServer:
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
-        self.model_config: DiffusersModelConfig = omega_conf_to_dataclass(
-            model_config, dataclass_type=DiffusersModelConfig
-        )
+        self.model_config: DiffusersModelConfig = omega_conf_to_dataclass(model_config)
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -332,10 +330,14 @@ class vLLMOmniHttpServer:
     async def run_server(self, args: argparse.Namespace):
         engine_args = AsyncOmniEngineArgs.from_cli_args(args)
 
+        # TODO (mike): drop assertion
+        assert engine_args.enforce_eager
+
         kwargs = {
             "model": engine_args.model,
             "enable_sleep_mode": engine_args.enable_sleep_mode,
             "worker_extension_cls": engine_args.worker_extension_cls,
+            "enforce_eager": engine_args.enforce_eager,
         }
 
         # TODO (mike): read custom_pipeline from CLI

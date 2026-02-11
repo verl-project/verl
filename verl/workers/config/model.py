@@ -249,7 +249,7 @@ class DiffusersModelConfig(BaseConfig):
     lora_rank: int = 32
     lora_alpha: int = 64
     lora_init_weights: str = "gaussian"
-    target_modules: Optional[str] = "auto"
+    target_modules: Optional[str | list[str]] = "auto"
     exclude_modules: Optional[str] = None
 
     # megatron lora config

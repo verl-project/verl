@@ -86,7 +86,6 @@ class QwenDataset(Dataset):
                 logger.warning("Failed to initialize tools from %s: %s", self.tool_config_path, e)
                 self.tool_schemas = None
 
-        self.seed = config.get("seed")
         self.data_source = config.get("data_source", "ocr")
         self.serialize_dataset = False
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))

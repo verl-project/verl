@@ -1331,7 +1331,6 @@ class RayFlowGRPOTrainer:
         current_epoch = self.global_steps // len(self.train_dataloader)
 
         # perform validation before training
-        # we only support validation using the reward_function and reward loop.
         if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -1558,10 +1557,8 @@ class RayFlowGRPOTrainer:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
-                if (
-                    self.val_reward_fn is not None
-                    and self.config.trainer.test_freq > 0
-                    and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                if self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()

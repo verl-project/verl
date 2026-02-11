@@ -839,6 +839,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 module=self.module,
                 layered_summon=layered_summon,
                 base_sync_done=base_sync_done,
+                is_diffusers=True,
             )
             if not base_sync_done:
                 params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
@@ -853,14 +854,20 @@ class DiffusersFSDPEngine(BaseEngine):
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
         if peft_config is not None and base_sync_done:
-            per_tensor_param = params
+            per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
             per_tensor_param = (
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
                 for name, param in params.items()
             )
-        return per_tensor_param, peft_config
+
+        # diffusers: transformer backbone only
+        # vllm-omni: whole pipeline
+        # thus we need to add the prefix
+        per_tensor_param = ((f"transformer.{name}", tensor) for name, tensor in per_tensor_param)
+        peft_config_dict = peft_config.to_dict() if peft_config is not None else None
+        return per_tensor_param, peft_config_dict
 
     @contextmanager
     def disable_adapter(self):
