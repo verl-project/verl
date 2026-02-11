@@ -35,6 +35,7 @@ from tqdm import tqdm
 
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.experimental.agent_loop.prometheus_utils import PrometheusClient
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
@@ -286,6 +287,12 @@ class RayPPOTrainer:
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+
+        # Initialize Prometheus client if enabled
+        self.prometheus_client = None
+        prometheus_config = self.config.actor_rollout_ref.rollout.prometheus
+        if prometheus_config.enable and prometheus_config.metrics_to_track:
+            self.prometheus_client = PrometheusClient(prometheus_config)
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
@@ -1575,6 +1582,11 @@ class RayPPOTrainer:
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
                 # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
+
+                # Query Prometheus metrics if enabled
+                if self.prometheus_client is not None:
+                    prometheus_metrics = self.prometheus_client.query_all_metrics()
+                    metrics.update(prometheus_metrics)
 
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
