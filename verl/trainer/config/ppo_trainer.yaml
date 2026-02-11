@@ -29,6 +29,9 @@ defaults:
   # Critic model config.
   - critic@critic: ${model_engine}_critic
 
+  # legacy reward impl config, for backward compatibility
+  - legacy_reward_impl
+
   # Reward config.
   - reward@reward: reward
 

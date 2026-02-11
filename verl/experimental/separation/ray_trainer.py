@@ -142,6 +142,28 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_critic:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cfg = omega_conf_to_dataclass(self.config.critic)
+
+            if self.use_legacy_worker_impl == "disable":
+                # convert critic_cfg into TrainingWorkerConfig
+                from verl.workers.config import FSDPEngineConfig
+                from verl.workers.engine_workers import TrainingWorkerConfig
+
+                self.orig_critic_cfg = critic_cfg
+                if self.orig_critic_cfg.strategy == "fsdp":
+                    engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
+                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+                else:
+                    raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
+
+                critic_cfg = TrainingWorkerConfig(
+                    model_type="value_model",
+                    model_config=self.orig_critic_cfg.model_config,
+                    engine_config=engine_config,
+                    optimizer_config=self.orig_critic_cfg.optim,
+                    checkpoint_config=self.orig_critic_cfg.checkpoint,
+                )
+
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
@@ -204,7 +226,17 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
     def _init_models(self):
         if self.use_critic:
             self.critic_wg = self.all_wg[str(Role.Critic)]
-            self.critic_wg.init_model()
+            if self.use_legacy_worker_impl == "disable":
+                self.critic_wg.reset()
+                # assign critic loss
+                from functools import partial
+
+                from verl.workers.utils.losses import value_loss
+
+                value_loss_ = partial(value_loss, config=self.orig_critic_cfg)
+                self.critic_wg.set_loss_fn(value_loss_)
+            else:
+                self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]

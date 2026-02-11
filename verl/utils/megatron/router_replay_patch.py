@@ -367,7 +367,10 @@ def apply_router_replay_patch():
                 getattr(self.config, "enable_routing_replay", False)
                 and not self.drop_and_pad
                 and self.config.moe_expert_capacity_factor is None
-                and not self.config.moe_router_padding_for_quantization
+                and not (
+                    getattr(self.config, "moe_router_padding_for_quantization", None)
+                    or getattr(self.config, "moe_router_padding_for_fp8", None)
+                )
             ):
                 # With router replay, duplicate indices can reduce the actual routed
                 # token count, so derive it from the routing map instead.
