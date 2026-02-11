@@ -182,22 +182,17 @@ class PrometheusClient:
         Raises:
             RuntimeError: If head node cannot be determined
         """
-        try:
-            nodes = ray.nodes()
-            for node in nodes:
-                if node.get("Alive") and "node:__internal_head__" in node.get("Resources", {}):
-                    return node["NodeManagerAddress"]
+        nodes = ray.nodes()
+        for node in nodes:
+            if node.get("Alive") and "node:__internal_head__" in node.get("Resources", {}):
+                return node["NodeManagerAddress"]
 
-            for node in nodes:
-                if node.get("Alive") and node.get("Resources", {}).get("CPU", 0) > 0:
-                    logger.warning(f"Using non-head node for Prometheus: {node['NodeManagerAddress']}")
-                    return node["NodeManagerAddress"]
+        for node in nodes:
+            if node.get("Alive") and node.get("Resources", {}).get("CPU", 0) > 0:
+                logger.warning(f"Using non-head node for Prometheus: {node['NodeManagerAddress']}")
+                return node["NodeManagerAddress"]
 
-            raise RuntimeError("No alive Ray nodes found")
-
-        except Exception as e:
-            logger.error(f"Failed to discover Ray head node: {e}")
-            return "localhost"
+        raise RuntimeError("No alive Ray nodes found")
 
     def _query_metric(self, metric_name: str) -> float | None:
         """Query a single metric from Prometheus with retry logic.
@@ -278,8 +273,8 @@ class PrometheusClient:
                 if value is not None:
                     safe_name = metric_name.replace(":", "_")
                     metrics[f"{prefix}{safe_name}"] = value
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Unexpected error while querying metric '{metric_name}': {e}", exc_info=True)
 
         return metrics
 
@@ -287,3 +282,11 @@ class PrometheusClient:
         """Clear the metrics cache. Useful for testing or forced refresh."""
         self._cache.clear()
         self._cache_timestamps.clear()
+
+
+def get_prometheus_client(prometheus_config: PrometheusConfig) -> PrometheusClient | None:
+    try:
+        return PrometheusClient(prometheus_config)
+    except Exception as e:
+        logger.warning(f"Failed to initialize PrometheusClient: {e}")
+        return None

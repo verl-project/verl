@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop.prometheus_utils import PrometheusClient
+from verl.experimental.agent_loop.prometheus_utils import get_prometheus_client
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
@@ -292,7 +292,7 @@ class RayPPOTrainer:
         self.prometheus_client = None
         prometheus_config = self.config.actor_rollout_ref.rollout.prometheus
         if prometheus_config.enable and prometheus_config.metrics_to_log:
-            self.prometheus_client = PrometheusClient(prometheus_config)
+            self.prometheus_client = get_prometheus_client(prometheus_config)
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
