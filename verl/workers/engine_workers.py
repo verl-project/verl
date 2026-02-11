@@ -42,7 +42,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import ActorConfig, CheckpointEngineConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -137,6 +137,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.flops_counter = FlopsCounter(self.model_config.hf_config)
 
         self.loss_fn = None
+
+        self.checkpoint_config = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
@@ -570,15 +572,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
 
-        # 4. build checkpoint engine
-        if "actor" in self.role:
-            checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
-            backend = checkpoint_engine_config.backend
-            bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
-            engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
-            self.checkpoint_engine = CheckpointEngineRegistry.new(
-                backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
-            )
+        self.checkpoint_engine = None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
@@ -674,6 +668,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.base_sync_done = True
         set_expandable_segments(True)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def init_checkpoint_engine(self, checkpoint_engine_config: CheckpointEngineConfig):
+        if self.checkpoint_engine:
+            return
+        backend = checkpoint_engine_config.backend
+        bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
+        engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
+        if torch.distributed.get_rank() == 0:
+            engine_kwargs["is_master"] = True
+        self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):

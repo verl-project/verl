@@ -135,6 +135,7 @@ common_params=(
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
     # GPU specific configurations
     actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )
 
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
