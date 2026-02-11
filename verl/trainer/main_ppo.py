@@ -52,7 +52,7 @@ def migrate_legacy_reward_impl(config):
 
     # 3. custom reward function migration
     # config.custom_reward_function -> reward.custom_reward_function
-    if config.custom_reward_function is not None:
+    if not all(v is None for v in config.custom_reward_function.values()):
         config.reward.custom_reward_function = config.custom_reward_function
 
     # 4. reward model migration
@@ -67,6 +67,11 @@ def migrate_legacy_reward_impl(config):
     legacy_rollout = config.reward_model.rollout
     if not all(v is None for v in legacy_rollout.values()):
         config.reward.reward_model.rollout = legacy_rollout
+
+    # 5. sandbox_fusion migration
+    # config.sandbox_fusion -> reward.sandbox_fusion
+    if not all(v is None for v in config.sandbox_fusion.values()):
+        config.reward.sandbox_fusion = config.sandbox_fusion
 
     return config
 
