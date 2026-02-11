@@ -54,11 +54,13 @@ sum_pi_squared_checkpointing: False
 #   - QAT is automatically applied to actor model during training
 #   - Fused scales (QKV/GateUp) are automatically enabled for training-inference consistency
 #   - Fast quantization is used when syncing weights to vLLM rollout
-# Supported modes: "w4a16" (NVFP4 weight-only), "w4a4" (NVFP4 weight + activation)
+# Supported modes: "w4a16" (NVFP4 weight-only)
+# Note: "w4a4" mode is included in the code but currently has KL divergence issues and is NOT recommended for use.
+# For usage examples, see: https://github.com/verl-project/verl-recipe/blob/main/qat/README.md
 qat:
   # Whether to enable QAT
   enable: false
-  # Quantization mode: "w4a16" (weight-only) or "w4a4" (weight + activation)
+  # Quantization mode: "w4a16" (weight-only). "w4a4" is experimental and not recommended.
   mode: "w4a16"
   # Quantization group size (NVFP4 requires 16)
   group_size: 16

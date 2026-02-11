@@ -164,7 +164,10 @@ class vLLMColocateWorkerExtension:
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1":
             apply_vllm_fp8_patches()
         # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
-        if os.environ.get("VERL_QAT_ENABLED", "0") == "1":
+        vllm_config = kwargs.get("vllm_config")
+        quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
+        _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
+        if _is_qat_model:
             from verl.utils.qat import apply_qat_patches
 
             apply_qat_patches()
@@ -178,7 +181,9 @@ class vLLMColocateWorkerExtension:
                 if k not in os.environ:
                     os.environ[k] = VLLM_ASCEND_REQUIRED_ENV_VARS[k]
 
-        return super().__new__(cls)
+        instance = super().__new__(cls)
+        instance._is_qat_model = _is_qat_model
+        return instance
 
     def monkey_patch_model(self, vocab_size: int):
         # patch compute_logits to avoid sampling OOV token
@@ -215,9 +220,6 @@ class vLLMColocateWorkerExtension:
             shm_size = comm_metadata["size"]
             buffer, shm = rebuild_shared_memory(shm_name, shm_size, dtype=torch.uint8)
         socket.send(b"")
-
-        # Check if QAT is enabled (set by vllm_async_server based on config.qat.enable)
-        self._is_qat_model = os.environ.get("VERL_QAT_ENABLED", "0") == "1"
 
         use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
             self.model_runner.vllm_config

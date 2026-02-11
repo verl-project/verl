@@ -240,11 +240,6 @@ class vLLMHttpServer:
             from verl.utils.qat import QATConfig, apply_qat_patches, load_quantization_config
 
             apply_qat_patches()
-            logger.info("Applied QAT patches for vLLM async server")
-
-            # Set environment variable for subprocess patching (similar to FP8)
-            # This ensures EngineCore subprocess also applies QAT patches
-            os.environ["VERL_QAT_ENABLED"] = "1"
 
             # Load quantization config from JSON file
             qat_config = QATConfig(**qat_config_dict)
@@ -282,8 +277,6 @@ class vLLMHttpServer:
         if quantization is not None and self.config.quantization_config_file is not None:
             hf_overrides["quantization_config_file"] = self.config.quantization_config_file
 
-        if quantization == "fp8":
-            hf_overrides["quantization_config"] = fp8_block_quant_kwargs
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
             compilation_config = json.loads(compilation_config)

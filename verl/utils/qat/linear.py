@@ -35,6 +35,8 @@ _TORCH_TO_TL_DTYPE = {
     torch.float16: tl.float16,
     torch.bfloat16: tl.bfloat16,
 }
+FP4_E2M1_MAX: float = 6.0
+FP8_E4M3_MAX: float = 448.0
 
 
 @triton.jit
@@ -53,6 +55,8 @@ def _fp4_fake_quant_kernel(
     TILE_N: tl.constexpr,
     NUM_FP4_BLOCKS: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
+    FP4_MAX: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
@@ -84,8 +88,8 @@ def _fp4_fake_quant_kernel(
     x_abs = tl.abs(tile_reshaped)
 
     block_max = tl.max(x_abs, axis=2, keep_dims=True)
-    block_max_scaled = block_max / (6.0 * global_scale_safe)
-    block_max_scaled = tl.minimum(block_max_scaled, 448.0)
+    block_max_scaled = block_max / (FP4_MAX * global_scale_safe)
+    block_max_scaled = tl.minimum(block_max_scaled, FP8_MAX)
     block_max_quant = block_max_scaled.to(tl.float8e4nv).to(tl.float32) * global_scale
     block_max_quant = tl.where(block_max_quant >= 1e-5, block_max_quant, 1.0)
 
@@ -107,7 +111,7 @@ def _fp4_fake_quant_kernel(
                     tl.where(
                         abs_scaled <= 2.5,
                         2.0,
-                        tl.where(abs_scaled < 3.5, 3.0, tl.where(abs_scaled <= 5.0, 4.0, 6.0)),
+                        tl.where(abs_scaled < 3.5, 3.0, tl.where(abs_scaled <= 5.0, 4.0, FP4_MAX)),
                     ),
                 ),
             ),
@@ -144,7 +148,7 @@ def fp4_fake_quant_weight(
 
     if global_amax is None:
         global_amax = weight.abs().max().to(torch.float32)
-    global_scale = global_amax.float() / (6.0 * 448.0)
+    global_scale = global_amax.float() / (FP4_E2M1_MAX * FP8_E4M3_MAX)
 
     grid = (triton.cdiv(M, tile_rows), triton.cdiv(N, tile_cols_aligned))
 
@@ -163,6 +167,8 @@ def fp4_fake_quant_weight(
         TILE_N=tile_cols_aligned,
         NUM_FP4_BLOCKS=num_fp4_blocks,
         OUT_DTYPE=_TORCH_TO_TL_DTYPE[x_dtype],
+        FP4_MAX=FP4_E2M1_MAX,
+        FP8_MAX=FP8_E4M3_MAX,
     )
     return y.view(*x_shape)
 
@@ -263,8 +269,6 @@ class QATLinear(nn.Linear):
 
     def _update_input_global_scale(self, x: torch.Tensor):
         """Update static input_global_scale based on observer strategy."""
-        from compressed_tensors.quantization.quant_args import FP4_E2M1_DATA, FP8_E4M3_DATA
-
         assert self.mode == QATMode.W4A4, "_update_input_global_scale should only be called in W4A4 mode"
 
         current_amax = torch.amax(torch.abs(x)).detach().to(torch.float32)
@@ -272,7 +276,7 @@ class QATLinear(nn.Linear):
         if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
             torch.distributed.all_reduce(current_amax, op=torch.distributed.ReduceOp.MAX)
 
-        scale_factor = FP8_E4M3_DATA.max * FP4_E2M1_DATA.max
+        scale_factor = FP8_E4M3_MAX * FP4_E2M1_MAX
 
         if self.activation_observer == "memoryless_minmax":
             new_scale = (scale_factor / (current_amax + 1e-12)).view(1)
@@ -334,7 +338,7 @@ class QATLinear(nn.Linear):
                     self._cached_weight_amax = global_amax
 
             if self._weight_global_scale is None:
-                self._weight_global_scale = global_amax.float() / (6.0 * 448.0)
+                self._weight_global_scale = global_amax.float() / (FP4_E2M1_MAX * FP8_E4M3_MAX)
 
         result = STEFP4QuantTriton.apply(weight, global_amax, self.group_size)
 
@@ -355,7 +359,7 @@ class QATLinear(nn.Linear):
         if self.input_global_scale.item() == self._UNINITIALIZED_SCALE:
             raise RuntimeError("W4A4 input_global_scale uninitialized. Load PTQ model first.")
 
-        global_amax = (6.0 * 448.0) / self.input_global_scale.to(x.device)
+        global_amax = (FP4_E2M1_MAX * FP8_E4M3_MAX) / self.input_global_scale.to(x.device)
         result = STEFP4QuantTriton.apply(x_2d, global_amax, self.group_size)
         return result.view(original_shape)
 
