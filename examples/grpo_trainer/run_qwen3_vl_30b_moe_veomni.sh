@@ -2,11 +2,12 @@ set -xeuo pipefail
 
 NUM_GPUS=8
 NNODES=1
+HOME=$pwd
 
 MODEL_ID=Qwen3_VL-30B-MOE
-MODEL_PATH=/path/Qwen3-VL-30B-A3B-Instruct
-TRAIN_FILES=/path/geo3k/train.parquet
-VAL_FILES=/path/geo3k/test.parquet
+MODEL_PATH=${HOME}/Qwen3-VL-30B-A3B-Instruct
+TRAIN_FILES=${HOME}/geo3k/train.parquet
+VAL_FILES=${HOME}/geo3k/test.parquet
 
 PROJECT_NAME=${MODEL_ID}-veomni
 EXPERIMENT_NAME=grpo-${NUM_GPUS}gpu
