@@ -2,7 +2,7 @@
 
 **Author:** `https://github.com/meituan-search`
 
-Last updated: 12/05/2025.
+Last updated: 11/02/2026.
 
 Monitor the rollout computation process using Prometheus and Grafana when using verl to enhance system observability and facilitate further performance optimization.
 
@@ -183,6 +183,22 @@ After task execution, log in to Grafana to view and customize monitoring dashboa
 - [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/performance_statistics.json)
 - [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/query_statistics.json)
 - [SGLang Grafana Dashboard](https://github.com/sgl-project/sglang/blob/main/examples/monitoring/grafana/dashboards/json/sglang-dashboard.json)
+
+## Logging Prometheus Metrics to Experiment Tracking
+
+You can automatically log Prometheus metrics to your experiment tracking backends (WandB, TensorBoard, MLflow, etc.) during training:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    prometheus:
+      enable: True
+      metrics_to_log:
+        - "vllm:gpu_cache_usage_perc"
+        - "vllm:avg_generation_throughput_toks_per_s"
+```
+
+Metrics are queried every training step and logged with the `rollout/` prefix (e.g., `rollout/vllm_gpu_cache_usage_perc`).
 
 ## Additional Resources
 
