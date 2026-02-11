@@ -194,11 +194,10 @@ actor_rollout_ref:
     prometheus:
       enable: True
       metrics_to_log:
-        - "vllm:gpu_cache_usage_perc"
-        - "vllm:avg_generation_throughput_toks_per_s"
+        - "vllm:generation_tokens_total"
 ```
 
-Metrics are queried every training step and logged with the `rollout/` prefix (e.g., `rollout/vllm_gpu_cache_usage_perc`).
+Metrics are queried every training step and logged with the `rollout/` prefix (e.g., `rollout/generation_tokens_total`).
 
 ## Additional Resources
 
