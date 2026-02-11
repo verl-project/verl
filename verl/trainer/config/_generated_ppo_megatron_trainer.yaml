@@ -572,11 +572,13 @@ critic:
         stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
   nccl_timeout: 600
   load_weight: true
-reward:
+reward_model:
+  enable: false
+  use_reward_loop: true
   num_workers: 8
-  custom_reward_function:
-    path: null
-    name: compute_score
+  enable_resource_pool: false
+  n_gpus_per_node: 8
+  nnodes: 0
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
     source: register
@@ -585,35 +587,30 @@ reward:
       _target_: verl.trainer.config.config.ModuleConfig
       path: null
       name: custom_reward_manager
-  reward_model:
-    enable: false
-    enable_resource_pool: false
-    n_gpus_per_node: 8
-    nnodes: 0
-    model_path: null
-    rollout:
-      _target_: verl.workers.config.RolloutConfig
-      name: ???
-      dtype: bfloat16
-      gpu_memory_utilization: 0.5
-      enforce_eager: true
-      cudagraph_capture_sizes: null
-      free_cache_engine: true
-      data_parallel_size: 1
-      expert_parallel_size: 1
-      tensor_model_parallel_size: 2
-      max_num_batched_tokens: 8192
-      max_model_len: null
-      max_num_seqs: 1024
-      load_format: auto
-      engine_kwargs: {}
-      limit_images: null
-      enable_chunked_prefill: true
-      enable_prefix_caching: true
-      disable_log_stats: true
-      skip_tokenizer_init: false
-      prompt_length: 2048
-      response_length: 2048
+  model_path: null
+  rollout:
+    _target_: verl.workers.config.RolloutConfig
+    name: ???
+    dtype: bfloat16
+    gpu_memory_utilization: 0.5
+    enforce_eager: true
+    cudagraph_capture_sizes: null
+    free_cache_engine: true
+    data_parallel_size: 1
+    expert_parallel_size: 1
+    tensor_model_parallel_size: 2
+    max_num_batched_tokens: 8192
+    max_model_len: null
+    max_num_seqs: 1024
+    load_format: auto
+    engine_kwargs: {}
+    limit_images: null
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
+    disable_log_stats: true
+    skip_tokenizer_init: false
+    prompt_length: 2048
+    response_length: 2048
   sandbox_fusion:
     url: null
     max_concurrent: 64
@@ -644,6 +641,9 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
+custom_reward_function:
+  path: null
+  name: compute_score
 trainer:
   balance_batch: true
   total_epochs: 30

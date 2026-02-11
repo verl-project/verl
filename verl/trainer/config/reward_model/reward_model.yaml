@@ -1,0 +1,71 @@
+# configs for the reward model
+
+# Whether to enable reward model. If False, we compute the reward only with the user-defined reward functions.
+# In GSM8K and Math examples, we disable reward model.
+# For RLHF alignment example using full_hh_rlhf, we utilize reward model to assess the responses.
+# If False, the following parameters are not effective
+enable: False
+
+# Whether to use reward loop for reward computation
+# will be removed once legacy reward manager and reward model are fully deprecated
+use_reward_loop: True
+
+# In reward loop, we will launch num_workers reward manager workers to parallelize the reward computation
+num_workers: 8
+
+# Whether to deploy the model to a separate resource pool.
+# If true, n_gpus_per_node & nnodes will be used to determine the resource node.
+enable_resource_pool: False
+n_gpus_per_node: 8
+nnodes: 0
+
+# reward manager, see `verl/trainer/config/reward_manager.yaml` for details.
+reward_manager:
+  _target_: verl.workers.config.reward_model.RewardManagerConfig
+  source: register
+  name: naive
+  module:
+    _target_: verl.trainer.config.config.ModuleConfig
+    path: null
+    name: custom_reward_manager
+
+# Inference config for reward models,
+# applicable to both discriminative and generative models
+
+model_path: null
+rollout:
+  _target_: verl.workers.config.RolloutConfig
+  name: ???
+  dtype: bfloat16
+  gpu_memory_utilization: 0.5
+  enforce_eager: true
+  cudagraph_capture_sizes: null
+  free_cache_engine: true
+  data_parallel_size: 1
+  expert_parallel_size: 1
+  tensor_model_parallel_size: 2
+  max_num_batched_tokens: 8192
+  max_model_len: null
+  max_num_seqs: 1024
+  load_format: auto
+  engine_kwargs: {}
+  limit_images: null
+  enable_chunked_prefill: true
+  enable_prefix_caching: true
+  disable_log_stats: true
+  skip_tokenizer_init: false
+
+  prompt_length: 2048
+  response_length: 2048
+
+# Cloud/local sandbox fusion configuration for custom reward logic
+sandbox_fusion:
+
+  # Cloud /local function URL for sandbox execution
+  url: null
+
+  # Max concurrent requests allowed to sandbox
+  max_concurrent: 64
+
+  # Max memory limit for each sandbox process in MB
+  memory_limit_mb: 1024

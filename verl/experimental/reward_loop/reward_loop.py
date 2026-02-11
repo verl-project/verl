@@ -65,8 +65,8 @@ class RewardLoopWorker:
         input_tokenizer_local_path = copy_to_local(self.config.actor_rollout_ref.model.path)
         self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
         self.reward_model_tokenizer = None
-        if self.config.reward.reward_model.enable:
-            reward_model_tokenizer_local_path = copy_to_local(self.config.reward.reward_model.model_path)
+        if self.config.reward_model.enable:
+            reward_model_tokenizer_local_path = copy_to_local(self.config.reward_model.model_path)
             self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
 
         self.reward_manager = load_reward_manager(
@@ -85,11 +85,11 @@ class RewardLoopWorker:
 
     async def compute_score(self, data: DataProto) -> dict:
         assert len(data) == 1, "RewardLoopWorker only support single data item"
-        if self.config.reward.custom_reward_function.path is not None:
+        if self.config.custom_reward_function.path is not None:
             # directly use user-customized reward function
             return await self.reward_manager.run_single(data)
         else:
-            if self.config.reward.reward_model.enable:
+            if self.config.reward_model.enable:
                 # we assume the rm is disrm
                 # genrm must set custom_reward_function
                 return await self.compute_score_disrm(data)
@@ -174,8 +174,8 @@ class RewardLoopWorker:
 
     async def compute_score_disrm(self, data: DataProto) -> dict:
         disrm_prompt = await self._preprocess_reward_inputs(data)
-        engine_name = self.config.reward.reward_model.rollout.name
-        model_name = self.config.reward.reward_model.model_path
+        engine_name = self.config.reward_model.rollout.name
+        model_name = self.config.reward_model.model_path
         if engine_name == "vllm":
             # TODO (dyy): the "activation" has been changed to "use_activation" in vllm 0.11.2
             payloads = {
@@ -224,8 +224,8 @@ class RewardLoopManager:
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
         self.config = config
-        if self.config.reward.reward_model.enable:
-            self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
+        if self.config.reward_model.enable:
+            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
         else:
             self.reward_model_manager = None
@@ -236,7 +236,7 @@ class RewardLoopManager:
 
     def _init_reward_loop_workers(self):
         self.reward_loop_workers = []
-        num_workers = self.config.reward.num_workers
+        num_workers = self.config.reward_model.num_workers
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
         for i in range(num_workers):

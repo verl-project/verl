@@ -29,8 +29,8 @@ defaults:
   # Critic model config.
   - critic@critic: ${model_engine}_critic
 
-  # Reward config.
-  - reward@reward: reward
+  # Reward model config.
+  - reward_model@reward_model: reward_model
 
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
@@ -53,6 +53,16 @@ actor_rollout_ref:
 
     # for huge model, layered summon can save memory (prevent OOM) but make it slower
     layered_summon: False
+
+# custom reward function definition
+custom_reward_function:
+
+  # The path to the file containing your customized reward function.
+  # If not specified, pre-implemented reward functions will be used.
+  path: null
+
+  # The name of the reward function within the specified file. Default is 'compute_score'.
+  name: compute_score
 
 # config for the algorithm
 algorithm:
