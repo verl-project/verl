@@ -121,7 +121,7 @@ def test_reward_model_manager():
     reward_model_name = os.path.expanduser("~/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B")
 
     config.actor_rollout_ref.model.path = rollout_model_name
-    config.reward_model.reward_manager = "dapo"
+    config.reward_model.reward_manager.name = "dapo"
     config.reward_model.enable = True
     config.reward_model.num_workers = 1
     config.reward_model.enable_resource_pool = True

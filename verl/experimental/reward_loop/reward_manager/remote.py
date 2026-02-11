@@ -47,8 +47,8 @@ class RemoteRewardManager(RewardManagerBase):
     Moreover, process may be more suitable for cpu-intensive requests.
     """
 
-    def __init__(self, config, tokenizer, compute_score=None, reward_router_address=None, reward_model_tokenizer=None):
-        super().__init__(config, tokenizer)
+    def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
+        super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         assert not self.is_async_reward_score, "Async reward score is not supported in remote reward manager. "

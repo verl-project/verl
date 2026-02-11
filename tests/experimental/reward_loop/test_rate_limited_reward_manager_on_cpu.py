@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import logging
 import os.path
 import time
 
@@ -470,32 +469,6 @@ class TestRateLimitedRewardManager:
 
         # Should be the same object
         assert first_semaphore is second_semaphore
-
-    def test_warn_when_rate_limits_are_ignored_due_to_prior_init(self, tokenizer, caplog):
-        """Warn when a new config attempts to change global RPM/TPM after the class has been initialized."""
-        caplog.set_level(logging.WARNING)
-
-        # First instantiation without a config (legacy signature) initializes global limiters with defaults.
-        _ = RateLimitedRewardManager(
-            tokenizer=tokenizer,
-            compute_score=mock_async_reward_function,
-            num_examine=0,
-            reward_fn_key="data_source",
-        )
-
-        # Second instantiation attempts to set RPM limits, but will be ignored due to global initialization.
-        config = DictConfig({"reward_model": {"max_concurrent": 10, "max_rpm": 60, "timeout": 10.0}})
-        _ = RateLimitedRewardManager(
-            config=config,
-            tokenizer=tokenizer,
-            compute_score=mock_async_reward_function,
-        )
-
-        assert any(
-            "RateLimitedRewardManager has already been initialized" in record.getMessage()
-            and "ignored" in record.getMessage()
-            for record in caplog.records
-        ), "Expected a warning when attempting to change global rate limits after initialization."
 
     @pytest.mark.asyncio
     async def test_extra_info_handling(self, tokenizer):

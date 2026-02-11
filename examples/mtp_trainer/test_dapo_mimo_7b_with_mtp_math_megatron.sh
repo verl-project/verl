@@ -117,7 +117,7 @@ python -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
     actor_rollout_ref.ref.megatron.context_parallel_size=${train_cp} \
     actor_rollout_ref.ref.megatron.param_offload=${offload} \
-    reward_model.reward_manager=dapo \
+    reward_model.reward_manager.name=dapo \
     +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
     +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \

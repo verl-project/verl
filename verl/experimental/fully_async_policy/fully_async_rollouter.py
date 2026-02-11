@@ -34,7 +34,6 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
@@ -57,20 +56,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
         processor=None,
-        reward_fn=None,
-        val_reward_fn=None,
         device_name=None,
     ):
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self.reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        self.val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
 
         assert not self.hybrid_engine
@@ -262,12 +253,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             )
             need_validate = (
                 (
-                    self.val_reward_fn is not None
-                    and self.config.rollout.test_freq > 0
+                    self.config.rollout.test_freq > 0
                     and self.current_param_version % self.config.rollout.test_freq == 0
                     and self.current_param_version > 0
                 )  # don't test here in the initial parameter sync
-                or (validate and self.val_reward_fn is not None)
+                or validate
             )
             print(
                 f"[FullyAsyncRollouter] need_validate: {need_validate}, "

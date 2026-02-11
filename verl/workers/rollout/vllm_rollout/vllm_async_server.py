@@ -629,37 +629,58 @@ class vLLMHttpServer:
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
+        On vLLM >= 0.12.0, uses AsyncLLM.pause_generation() to abort in-flight
+        requests, drain, and clear caches. The engine remains paused after this
+        call — use resume_generation() to accept new requests (e.g. before
+        validation).
+
+        On vLLM < 0.12.0, manually aborts each request and resets prefix cache.
+
         Returns:
             dict[str, Any]: Dictionary containing:
                 - aborted_count: Number of requests aborted
                 - request_ids: List of aborted request IDs
         """
         try:
-            # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
-            request_states_snapshot = list(self.engine.output_processor.request_states.items())
-            request_ids = [req_id for req_id, _ in request_states_snapshot]
+            if _VLLM_VERSION >= version.parse("0.12.0"):
+                # Snapshot request IDs before pausing for reporting
+                request_ids = list(self.engine.output_processor.request_states.keys())
 
-            if not request_ids:
-                return {"aborted_count": 0, "request_ids": []}
-
-            # For each request, create an abort output and put it to its queue
-            # This allows the generator to receive the aborted result
-            from vllm.v1.engine import FinishReason
-
-            for _, req_state in request_states_snapshot:
-                request_output = req_state.make_request_output(
-                    [], pooling_output=None, finish_reason=FinishReason.ABORT, stop_reason=None
+                # pause_generation with wait_for_inflight_requests=False will:
+                # 1. Set engine to paused state (blocks new generate calls)
+                # 2. Abort all in-flight requests
+                # 3. Wait for requests to drain
+                # 4. Clear prefix and mm caches if clear_cache=True
+                await self.engine.pause_generation(
+                    wait_for_inflight_requests=False,
+                    clear_cache=reset_prefix_cache,
                 )
-                req_state.queue.put(request_output)
+            else:
+                # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
+                request_states_snapshot = list(self.engine.output_processor.request_states.items())
+                request_ids = [req_id for req_id, _ in request_states_snapshot]
 
-            # Abort requests in the output processor and engine core
-            self.engine.output_processor.abort_requests(request_ids)
-            await self.engine.engine_core.abort_requests_async(request_ids)
+                if not request_ids:
+                    return {"aborted_count": 0, "request_ids": []}
 
-            # Try to reset prefix cache to ensure clean state
-            if reset_prefix_cache:
-                await self.clear_kv_cache()
-                logger.info("Prefix cache reset after abort")
+                # For each request, create an abort output and put it to its queue
+                # This allows the generator to receive the aborted result
+                from vllm.v1.engine import FinishReason
+
+                for _, req_state in request_states_snapshot:
+                    request_output = req_state.make_request_output(
+                        [], pooling_output=None, finish_reason=FinishReason.ABORT, stop_reason=None
+                    )
+                    req_state.queue.put(request_output)
+
+                # Abort requests in the output processor and engine core
+                self.engine.output_processor.abort_requests(request_ids)
+                await self.engine.engine_core.abort_requests_async(request_ids)
+
+                # Try to reset prefix cache to ensure clean state
+                if reset_prefix_cache:
+                    await self.clear_kv_cache()
+                    logger.info("Prefix cache reset after abort")
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -667,6 +688,17 @@ class vLLMHttpServer:
         except Exception as e:
             logger.error(f"Error aborting requests: {e}")
             return {"aborted_count": 0, "request_ids": [], "error": str(e)}
+
+    async def resume_generation(self):
+        """Resume generation after abort_all_requests (pause_generation).
+
+        Only effective on vLLM >= 0.12.0 where pause_generation is used.
+        No-op on older versions.
+        """
+        if self.node_rank != 0:
+            return
+        if _VLLM_VERSION >= version.parse("0.12.0"):
+            await self.engine.resume_generation()
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
@@ -839,6 +871,15 @@ class vLLMReplica(RolloutReplica):
             "request_ids": all_request_ids,
             "server_results": results,
         }
+
+    async def resume_generation(self):
+        """Resume generation on all servers after abort_all_requests."""
+        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+
+    # TODO(petersh6): refact the checkpoint engine's update_weights and rename this method
+    async def resume_all_requests(self):
+        """Resume all requests on all servers."""
+        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         """Abort a specific request. Tries all servers since we don't know which one has it.
