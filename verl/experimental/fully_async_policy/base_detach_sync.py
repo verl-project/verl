@@ -24,8 +24,8 @@ from ray.util.collective import collective
 
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_torch_device
+from verl.workers.config import CheckpointEngineConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -43,17 +43,9 @@ class BaseDetachNcclSync:
             target=self._start_background_loop, args=(self._bg_loop,), name="rollout_actor_async_worker", daemon=True
         )
         self._bg_thread.start()
+        self._role = role
+        self.checkpoint_engine = None
         logger.info(f"[DetachNcclSync] Background thread for SGLang sync started. PID: {os.getpid()}")
-        if role == "actor":
-            checkpoint_engine_config = omega_conf_to_dataclass(config.rollout.checkpoint_engine)
-            backend = checkpoint_engine_config.backend
-            bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
-            engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
-            if torch.distributed.get_rank() == 0:
-                engine_kwargs["is_master"] = True
-            self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
-        else:
-            self.checkpoint_engine = None
 
     @classmethod
     def get_bucket_size_mb(cls):
@@ -130,6 +122,17 @@ class BaseDetachNcclSync:
             self._bg_loop.call_soon_threadsafe(self._bg_loop.stop)
         if hasattr(self, "_bg_thread") and self._bg_thread.is_alive():
             self._bg_thread.join(timeout=1.0)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def init_checkpoint_engine(self, checkpoint_engine_config: CheckpointEngineConfig):
+        if self.checkpoint_engine or self._role != "actor":
+            return
+        backend = checkpoint_engine_config.backend
+        bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
+        engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
+        if torch.distributed.get_rank() == 0:
+            engine_kwargs["is_master"] = True
+        self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):

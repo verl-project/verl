@@ -730,9 +730,6 @@ class vLLMReplica(RolloutReplica):
             cls=_rollout_worker_actor_cls,
             rollout_config=self.config,
             model_config=self.model_config,
-            replica_rank=self.replica_rank,
-            world_size=self.world_size,
-            gpus_per_node=self.gpus_per_node,
         )
         return worker_dict_cls
 

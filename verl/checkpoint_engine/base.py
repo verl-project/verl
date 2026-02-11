@@ -286,11 +286,11 @@ class CheckpointEngineWorker(Worker):
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
         if self.server_adapter is None:
             self.server_adapter = get_rollout_class(self.rollout_config.name, self.rollout_config.mode)(
+                *self.extra_rollout_args,
                 config=self.rollout_config,
                 model_config=self.model_config,
                 device_mesh=None,
-                extra_args=self.extra_rollout_args,
-                extra_kwargs=self.extra_rollout_kwargs,
+                **self.extra_rollout_kwargs,
             )
         backend = self.rollout_config.checkpoint_engine.backend
         bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
@@ -335,7 +335,7 @@ class CheckpointEngineManager:
     ```
 
     Args:
-        backend: The checkpoint engine backend.
+        config: The checkpoint engine config.
         trainer: The trainer worker group.
         replicas: The list of rollout replicas.
     """
@@ -407,6 +407,7 @@ class CheckpointEngineManager:
     @auto_await
     async def update_weights(self):
         """Update weights from trainer to rollout replicas."""
+        ray.get(self.trainer.init_checkpoint_engine(self.config))
 
         # 0. update weights for sync training with colocated trainer and rollout
         if self.backend == "naive":
