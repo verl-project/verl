@@ -32,6 +32,10 @@ from verl.utils.import_utils import load_extern_object
 
 
 def migrate_legacy_reward_impl(config):
+    """
+    Migrate the legacy reward model implementation to the new one.
+    This is a temporary fix. A more robust one will be added.
+    """
     # 1. reward workers migration
     # config.reward_model.num_workers -> reward.num_workers
     if config.reward_model.num_workers is not None:
