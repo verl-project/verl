@@ -17,8 +17,8 @@ actor_rollout_ref:
       weight_decay: 0.01
       lr_warmup_steps: -1
       betas:
-      - 0.9
-      - 0.999
+        - 0.9
+        - 0.999
       clip_grad: 1.0
       lr_scheduler_type: cosine
       override_optimizer_config: {}
@@ -83,9 +83,9 @@ actor_rollout_ref:
     checkpoint:
       _target_: verl.trainer.config.CheckpointConfig
       save_contents:
-      - model
-      - optimizer
-      - extra
+        - model
+        - optimizer
+        - extra
       load_contents: ${.save_contents}
       async_save: false
       mbridge_config: {}
@@ -215,7 +215,7 @@ actor_rollout_ref:
     log_prob_max_token_len_per_gpu: ${oc.select:actor_rollout_ref.actor.ppo_max_token_len_per_gpu,16384}
     disable_log_stats: true
     do_sample: true
-    'n': 1
+    "n": 1
     over_sample_rate: 0
     multi_stage_wake_up: false
     engine_kwargs:
@@ -227,7 +227,7 @@ actor_rollout_ref:
       top_k: -1
       top_p: 1.0
       temperature: 0
-      'n': 1
+      "n": 1
       do_sample: false
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
@@ -349,7 +349,8 @@ data:
   max_response_length: 512
   train_batch_size: 1024
   val_batch_size: null
-  tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
+  tool_config_path:
+    ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
     null}
   return_raw_input_ids: false
   return_raw_chat: true
@@ -389,8 +390,8 @@ critic:
     weight_decay: 0.01
     lr_warmup_steps: -1
     betas:
-    - 0.9
-    - 0.999
+      - 0.9
+      - 0.999
     clip_grad: 1.0
     lr_scheduler_type: cosine
     override_optimizer_config: {}
@@ -442,9 +443,9 @@ critic:
   checkpoint:
     _target_: verl.trainer.config.CheckpointConfig
     save_contents:
-    - model
-    - optimizer
-    - extra
+      - model
+      - optimizer
+      - extra
     load_contents: ${.save_contents}
     async_save: false
     mbridge_config: {}
@@ -595,8 +596,8 @@ trainer:
   project_name: verl_examples
   experiment_name: gsm8k
   logger:
-  - console
-  - wandb
+    - console
+    - wandb
   log_val_generations: 0
   rollout_data_dir: null
   validation_data_dir: null
@@ -630,11 +631,11 @@ global_profiler:
       discrete: false
       controller_nsight_options:
         trace: cuda,nvtx,cublas,ucx
-        cuda-memory-usage: 'true'
+        cuda-memory-usage: "true"
         cuda-graph-trace: graph
       worker_nsight_options:
         trace: cuda,nvtx,cublas,ucx
-        cuda-memory-usage: 'true'
+        cuda-memory-usage: "true"
         cuda-graph-trace: graph
         capture-range: cudaProfilerApi
         capture-range-end: null
@@ -646,7 +647,7 @@ global_profiler:
       stacks: all
       kw_args: {}
 transfer_queue:
-  enable: true
+  enable: false
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:

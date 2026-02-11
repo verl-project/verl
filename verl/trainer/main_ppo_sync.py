@@ -430,33 +430,13 @@ class PPOTrainer:
         except Exception as e:
             logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def init_workers(self, rollout_only: bool = False):
+    def init_workers(self):
         """Initialize distributed training workers using Ray backend.
 
         Creates:
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
-
-        Args:
-            rollout_only (bool, optional): Whether to initialize only rollout workers to debug. Defaults to False.
         """
-        if rollout_only:
-            resource_pool = (
-                self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-                if self.config.reward_model.enable
-                else None
-            )
-            self.reward_loop_manager = RewardLoopManager(config=self.config, rm_resource_pool=resource_pool)
-            logger.info("reward loop manager initialized")
-
-            self.agent_loop_manager = AgentLoopManagerTQ(
-                config=self.config,
-                reward_loop_worker_handles=self.reward_loop_manager.reward_loop_worker_handles,
-                replay_buffer=self.replay_buffer,
-            )
-            logger.info("agent loop manager initialized")
-            return
-
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
@@ -473,6 +453,8 @@ class PPOTrainer:
         # 2. define critic class
         if self.use_critic:
             critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
+            critic_cfg.engine.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+            critic_cfg.engine.max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
             worker_cfg = TrainingWorkerConfig(
                 model_type="value_model",
                 model_config=critic_cfg.model_config,
@@ -535,7 +517,9 @@ class PPOTrainer:
 
         # 7. initialize reward loop manager
         resource_pool = (
-            self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.config.reward_model.enable else None
+            self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+            if self.config.reward.reward_model.enable
+            else None
         )
         self.reward_loop_manager = RewardLoopManager(
             config=self.config,
@@ -553,7 +537,7 @@ class PPOTrainer:
             config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
-            reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+            reward_loop_worker_handles=self.reward_loop_manager.reward_loop_worker_handles,
             replay_buffer=self.replay_buffer,
         )
         logger.info("agent loop manager initialized")
@@ -658,6 +642,11 @@ class PPOTrainer:
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
+    def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """Compute the reward with colocate reward model."""
+        # TODO: add reward model
+        raise NotImplementedError
+
     def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
         """Reorder the data on single controller such that each dp rank gets similar total tokens."""
         global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
@@ -757,6 +746,20 @@ class PPOTrainer:
 
         return batch
 
+    def _compute_values(self, batch: KVBatchMeta) -> KVBatchMeta:
+        """Compute the values of the batch."""
+        # 1. compute value
+        output = self.critic_wg.infer_batch(batch)
+        # TODO: DataProtoFuture support KVBatchMeta
+        ray.get(output.futures)
+
+        # 2. write value back to TransferQueue
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["values", "response_mask"])
+        data["value"] = extract_response_from_unpad_output(data.pop("values"), data["response_mask"])
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("value"))
+
+        return batch
+
     def fit(self):
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -806,6 +809,7 @@ class PPOTrainer:
         with marked_timer("gen", timing_raw, color="red"):
             batch = self.replay_buffer.sample(partition_id="train", global_steps=self.global_steps)
         batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+        self.checkpoint_manager.sleep_replicas()
 
         # 3. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
@@ -869,12 +873,18 @@ class TaskRunner:
         }
 
         # Add separate resource pool for reward model if enabled
-        if config.reward_model.enable and config.reward_model.enable_resource_pool:
-            assert config.reward_model.n_gpus_per_node > 0 and config.reward_model.nnodes > 0
-            reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
+        if config.reward.reward_model.enable_resource_pool:
+            if config.reward.reward_model.n_gpus_per_node <= 0:
+                raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
+            if config.reward.reward_model.nnodes <= 0:
+                raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
+
+            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
             self.mapping[Role.RewardModel] = "reward_pool"
         else:
+            config.reward.reward_model.nnodes = config.trainer.nnodes
+            config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
             self.mapping[Role.RewardModel] = "global_pool"
 
         self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
@@ -895,7 +905,7 @@ class TaskRunner:
             role_worker_mapping=self.role_worker_mapping,
             resource_pool_manager=self.resource_pool_manager,
         )
-        trainer.init_workers(rollout_only=False)
+        trainer.init_workers()
         trainer.fit()
 
 
@@ -910,7 +920,6 @@ def main(config):
     auto_set_device(config)
 
     config.transfer_queue.enable = True
-    config.reward_model.use_reward_loop = True
 
     # validate config
     validate_config(

@@ -678,7 +678,7 @@ global_profiler:
       stacks: all
       kw_args: {}
 transfer_queue:
-  enable: true
+  enable: false
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:

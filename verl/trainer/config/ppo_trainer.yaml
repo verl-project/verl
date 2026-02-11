@@ -297,7 +297,7 @@ global_profiler:
 transfer_queue:
 
   # Whether to enable TransferQueue
-  enable: True
+  enable: False
 
   # Pluggable storage/transport backend of TransferQueue
   backend:

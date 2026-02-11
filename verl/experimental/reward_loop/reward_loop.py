@@ -295,7 +295,7 @@ class RewardLoopManager:
         (1) rule-based reward without reward model
         (2) reward model with extra resource pool
         """
-        if not self.config.reward_model.enable or self.config.reward_model.enable_resource_pool:
+        if not self.config.reward.reward_model.enable or self.config.reward.reward_model.enable_resource_pool:
             return self.reward_loop_workers
         return None
 
