@@ -128,7 +128,7 @@ class PrometheusClient:
     Attributes:
         host: Prometheus host (Ray head node IP)
         port: Prometheus port (default 9090)
-        metrics_to_track: List of Prometheus metric names or queries
+        metrics_to_log: List of Prometheus metric names or queries
         timeout: HTTP request timeout in seconds
         max_attempts: Maximum retry attempts per metric
         retry_delay: Base delay between retries
@@ -158,7 +158,7 @@ class PrometheusClient:
             cache_duration: Cache results for this many seconds
         """
         self.port = prometheus_config.port
-        self.metrics_to_track = prometheus_config.metrics_to_track or []
+        self.metrics_to_log = prometheus_config.metrics_to_log or []
         self.timeout = timeout
         self.max_attempts = max_attempts
         self.retry_delay = retry_delay
@@ -170,8 +170,8 @@ class PrometheusClient:
         self._cache = {}
         self._cache_timestamps = {}
 
-        if self.metrics_to_track:
-            logger.info(f"PrometheusClient initialized: {len(self.metrics_to_track)} metrics from {self.base_url}")
+        if self.metrics_to_log:
+            logger.info(f"PrometheusClient initialized: {len(self.metrics_to_log)} metrics from {self.base_url}")
 
     def _get_ray_head_node(self) -> str:
         """Get the IP address of the Ray head node where Prometheus runs.
@@ -254,30 +254,30 @@ class PrometheusClient:
 
         return None
 
-    def query_all_metrics(self) -> dict[str, float]:
+    def query_all_metrics(self, prefix: str = "rollout/") -> dict[str, float]:
         """Query all configured metrics from Prometheus.
 
         Returns:
             Dictionary mapping metric names to values. Failed queries are omitted.
-            Keys use 'prometheus/' prefix for namespacing in experiment tracking.
+            Keys use a prefix for namespacing in experiment tracking.
             Always returns a dict (empty if all queries fail).
 
         Example:
             {
-                "prometheus/vllm_gpu_cache_usage_perc": 85.3,
-                "prometheus/vllm_avg_generation_throughput_toks_per_s": 1247.5
+                "rollout/vllm_gpu_cache_usage_perc": 85.3,
+                "rollout/vllm_avg_generation_throughput_toks_per_s": 1247.5
             }
         """
-        if not self.metrics_to_track:
+        if not self.metrics_to_log:
             return {}
 
         metrics = {}
-        for metric_name in self.metrics_to_track:
+        for metric_name in self.metrics_to_log:
             try:
                 value = self._query_metric(metric_name)
                 if value is not None:
                     safe_name = metric_name.replace(":", "_")
-                    metrics[f"prometheus/{safe_name}"] = value
+                    metrics[f"{prefix}{safe_name}"] = value
             except Exception:
                 pass
 

@@ -378,6 +378,9 @@ prometheus:
   # Specify served_model_name to avoid displaying overly long model paths in Grafana
   served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
 
+  # List of Prometheus metrics to query and log to experiment tracking
+  metrics_to_log: null
+
 # type of quantization in vllm, currently support fp8 and torchao
 quantization: null
 
