@@ -53,7 +53,10 @@ from verl.single_controller.ray import (
     create_colocated_worker_cls,
 )
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
+from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
+from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -357,6 +360,8 @@ class PPOTrainer:
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
         self.replay_buffer = ReplayBuffer()
+        if self.config.algorithm.use_kl_in_reward:
+            self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self._init_tokenizer()
         self._init_dataloader()
@@ -695,14 +700,20 @@ class PPOTrainer:
         fields = ["entropy", "log_probs", "response_mask"]
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             fields.extend(["responses", "old_log_probs", "rollout_log_probs"])
+        t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+        t_end = time.time()
+        print(f"[DEBUG] _compute_old_log_prob time to get data: {t_end - t_start:.2f}", flush=True)
 
         # 2. write old_log_probs and entropy back to TransferQueue
         data["old_log_probs"] = extract_response_from_unpad_output(data.pop("log_probs"), data["response_mask"])
         data["entropy"] = extract_response_from_unpad_output(data.pop("entropy"), data["response_mask"])
+        t_start = time.time()
         tq.kv_batch_put(
             keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
         )
+        t_end = time.time()
+        print(f"[DEBUG] _compute_old_log_prob time to put data: {t_end - t_start:.2f}", flush=True)
 
         data = DataProto(batch=data.to_padded_tensor())
 
@@ -726,7 +737,7 @@ class PPOTrainer:
 
         return batch
 
-    def _compute_ref_log_prob(self, batch: KVBatchMeta) -> KVBatchMeta:
+    def _compute_ref_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the reference log prob of the batch."""
         # 1. compute log probs
         metadata = {"calculate_entropy": False, "compute_loss": False}
@@ -740,13 +751,19 @@ class PPOTrainer:
         assert len(output) == len(batch)
 
         # 2. write ref_log_prob and entropy back to TransferQueue
+        t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["log_probs", "response_mask"])
+        t_end = time.time()
+        print(f"[DEBUG] _compute_ref_log_prob time to get data: {t_end - t_start:.2f}", flush=True)
         data["ref_log_prob"] = extract_response_from_unpad_output(data.pop("log_probs"), data["response_mask"])
+        t_start = time.time()
         tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("ref_log_prob"))
+        t_end = time.time()
+        print(f"[DEBUG] _compute_ref_log_prob time to put data: {t_end - t_start:.2f}", flush=True)
 
         return batch
 
-    def _compute_values(self, batch: KVBatchMeta) -> KVBatchMeta:
+    def _compute_values(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the values of the batch."""
         # 1. compute value
         output = self.critic_wg.infer_batch(batch)
@@ -754,9 +771,71 @@ class PPOTrainer:
         ray.get(output.futures)
 
         # 2. write value back to TransferQueue
+        t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["values", "response_mask"])
-        data["value"] = extract_response_from_unpad_output(data.pop("values"), data["response_mask"])
-        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("value"))
+        t_end = time.time()
+        print(f"[DEBUG] _compute_values time to get data: {t_end - t_start:.2f}", flush=True)
+        data["values"] = extract_response_from_unpad_output(data.pop("values"), data["response_mask"])
+        t_start = time.time()
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("values"))
+        t_end = time.time()
+        print(f"[DEBUG] _compute_values time to put data: {t_end - t_start:.2f}", flush=True)
+
+        return batch
+
+    def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """Compute the advantage of the batch."""
+        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        t_start = time.time()
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+        t_end = time.time()
+        print(f"[DEBUG] _compute_advantage time to get data: {t_end - t_start:.2f}", flush=True)
+        data = DataProto(batch=data.to_padded_tensor())
+        data.batch["token_level_scores"] = data.batch["rm_scores"]
+        breakpoint()
+
+        # 1. apply kl penalty to rewards
+        if self.config.algorithm.use_kl_in_reward:
+            data, kl_metrics = apply_kl_penalty(
+                data, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+            )
+            metrics.update(kl_metrics)
+        else:
+            data.batch["token_level_rewards"] = data.batch["token_level_scores"]
+
+        # 2. Compute rollout correction: IS weights, rejection sampling, and metrics
+        # Only runs in decoupled mode (computes once per batch using stable π_old)
+        # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
+        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        rollout_correction = (
+            rollout_corr_config is not None and "rollout_log_probs" in data.batch and not bypass_recomputing_logprobs
+        )
+        if rollout_correction:
+            data, is_metrics = compute_rollout_correction_and_add_to_batch(data, rollout_corr_config)
+            metrics.update(is_metrics)
+
+        # 3. compute advantages
+        data = compute_advantage(
+            data,
+            adv_estimator=self.config.algorithm.adv_estimator,
+            gamma=self.config.algorithm.gamma,
+            lam=self.config.algorithm.lam,
+            num_repeat=self.config.actor_rollout_ref.rollout.n,
+            norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
+            config=self.config.algorithm,
+        )
+
+        # 4. write advantages and returns back to TransferQueue
+        fields = ["advantages", "returns"]
+        if rollout_correction:
+            fields.append("response_mask")
+            if "rollout_is_weights" in data.batch:
+                fields.append("rollout_is_weights")
+        t_start = time.time()
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select(*fields))
+        t_end = time.time()
+        print(f"[DEBUG] _compute_advantage time to put data: {t_end - t_start:.2f}", flush=True)
 
         return batch
 
@@ -826,16 +905,16 @@ class PPOTrainer:
         # 6. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):
-                batch = self._compute_ref_log_prob(batch)
+                batch = self._compute_ref_log_prob(batch, metrics=metrics)
 
         # 7. [OPTIONAL] compute critic values
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
-                batch = self._compute_values(batch)
+                batch = self._compute_values(batch, metrics=metrics)
 
         # 8. compute advantage and return
         with marked_timer("adv", timing_raw, color="brown"):
-            batch = self._compute_advantage(batch)
+            batch = self._compute_advantage(batch, metrics=metrics)
 
 
 @ray.remote
