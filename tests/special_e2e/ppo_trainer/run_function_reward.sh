@@ -133,8 +133,8 @@ python3 -m verl.trainer.main_ppo \
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.optimizer_offload=False \
-    custom_reward_function.path="${reward_fn_file_path}"\
-    custom_reward_function.name="${reward_fn_name}"\
+    reward.custom_reward_function.path="${reward_fn_file_path}"\
+    reward.custom_reward_function.name="${reward_fn_name}"\
     algorithm.use_kl_in_reward="${USE_KL}" \
     algorithm.kl_penalty=kl \
     algorithm.kl_ctrl.kl_coef=0.001 \

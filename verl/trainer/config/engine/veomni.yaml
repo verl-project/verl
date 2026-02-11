@@ -7,9 +7,6 @@ param_offload: False
 # Whether to offload optimizer state to CPU
 optimizer_offload: False
 
-# fsdp or fsdp2
-data_parallel_mode: fsdp2
-
 data_parallel_size: 1
 
 data_parallel_replicate_size: 1

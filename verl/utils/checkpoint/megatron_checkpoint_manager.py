@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import json
 import logging
 import os
@@ -578,9 +579,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 log_with_rank(f"Saving HF model checkpoint to {local_path} with bridge", rank=self.rank, logger=logger)
                 hf_ckpt_path = get_hf_model_checkpoint_path(local_path)
                 if self.vanilla_bridge:
-                    self.bridge.save_weights(
-                        self.model, hf_ckpt_path, distributed_filesystem=True, memory_efficient=True
-                    )
+                    extended_args = {}
+                    mbridge_config = getattr(self.checkpoint_config, "mbridge_config", None) or {}
+                    for sig in inspect.signature(self.bridge.save_weights).parameters:
+                        if sig == "weights_path" or sig == "models":
+                            continue
+                        if sig in mbridge_config:
+                            extended_args[sig] = mbridge_config[sig]
+                    self.bridge.save_weights(self.model, hf_ckpt_path, **extended_args)
                 else:
                     self.bridge.save_hf_weights(self.model, hf_ckpt_path)
 
@@ -651,9 +657,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             if self.bridge is not None:
                 hf_model_ckpt_path = get_hf_model_checkpoint_path(local_path)
                 if self.vanilla_bridge:
-                    self.bridge.save_weights(
-                        self.model, hf_model_ckpt_path, distributed_filesystem=True, memory_efficient=True
-                    )
+                    extended_args = {}
+                    mbridge_config = getattr(self.checkpoint_config, "mbridge_config", None) or {}
+                    for sig in inspect.signature(self.bridge.save_weights).parameters:
+                        if sig == "weights_path" or sig == "models":
+                            continue
+                        if sig in mbridge_config:
+                            extended_args[sig] = mbridge_config[sig]
+                    self.bridge.save_weights(self.model, hf_model_ckpt_path, **extended_args)
                 else:
                     self.bridge.save_hf_weights(self.model, hf_model_ckpt_path)
             else:

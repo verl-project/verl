@@ -25,7 +25,6 @@ from omegaconf import OmegaConf
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
@@ -162,6 +161,9 @@ class TaskRunner:
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
+        elif config.actor_rollout_ref.actor.strategy == "veomni":
+            raise NotImplementedError("VeOmni does not support legacy worker implementation")
+
         else:
             raise NotImplementedError
 
@@ -188,6 +190,15 @@ class TaskRunner:
             # TODO: switch this to TrainingWorker as well
             from verl.workers.megatron_workers import CriticWorker
 
+        elif config.critic.strategy == "veomni":
+            if use_legacy_worker_impl == "disable":
+                from verl.workers.engine_workers import TrainingWorker
+
+                CriticWorker = TrainingWorker
+                print("Using new worker implementation")
+            else:
+                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
+
         else:
             raise NotImplementedError
 
@@ -203,18 +214,18 @@ class TaskRunner:
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
-        # TODO Here you can use the new registration method to support dynamic registration of roles
-        if config.reward_model.enable_resource_pool:
-            if config.reward_model.n_gpus_per_node <= 0:
-                raise ValueError("config.reward_model.n_gpus_per_node must be greater than 0")
-            if config.reward_model.nnodes <= 0:
-                raise ValueError("config.reward_model.nnodes must be greater than 0")
 
-            reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
+        if config.reward.reward_model.enable_resource_pool:
+            if config.reward.reward_model.n_gpus_per_node <= 0:
+                raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
+            if config.reward.reward_model.nnodes <= 0:
+                raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
+
+            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
         else:
-            config.reward_model.nnodes = config.trainer.nnodes
-            config.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
+            config.reward.reward_model.nnodes = config.trainer.nnodes
+            config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
@@ -225,10 +236,10 @@ class TaskRunner:
         """Add reward model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if config.reward_model.enable:
+        if config.reward.reward_model.enable:
             # we do not use reward model workers, so we only register reward model in resource pool
             # without continue to register reward model worker in role mapping
-            if config.reward_model.enable_resource_pool:
+            if config.reward.reward_model.enable_resource_pool:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
                 self.mapping[Role.RewardModel] = "global_pool"
@@ -297,25 +308,6 @@ class TaskRunner:
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        use_reward_loop = config.reward_model.use_reward_loop
-        if not use_reward_loop:
-            print(
-                "WARNING: Init reward manager in single controller will be deprecated. "
-                "Please set config.reward_model.use_reward_loop to use distributed reward manager."
-            )
-            # Load the reward manager for training and validation.
-            reward_fn = load_reward_manager(
-                config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-            )
-            val_reward_fn = load_reward_manager(
-                config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-            )
-        else:
-            # reward_loop will use init a reward loop manager in ray_trainer
-            # and use it to compute reward score
-            reward_fn = None
-            val_reward_fn = None
-
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
         from verl.utils.dataset.rl_dataset import collate_fn
@@ -347,8 +339,6 @@ class TaskRunner:
             role_worker_mapping=self.role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             collate_fn=collate_fn,

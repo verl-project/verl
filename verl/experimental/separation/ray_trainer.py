@@ -25,7 +25,6 @@ from pprint import pprint
 from typing import Any, Optional
 
 import numpy as np
-import ray
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import Dataset, Sampler
@@ -44,7 +43,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_variance_proxy_metrics,
 )
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage, compute_response_mask
-from verl.trainer.ppo.reward import compute_reward_async
+from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -83,8 +82,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             resource_pool_manager,
             ray_worker_group_cls,
             processor,
-            reward_fn,
-            val_reward_fn,
             train_dataset,
             val_dataset,
             collate_fn,
@@ -104,7 +101,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.metrics = {}
         self.timing_raw = {}
         # reward message
-        self.future_reward = None
         self.reward_tensor = None
         self.reward_extra_infos_dict = {}
 
@@ -146,6 +142,28 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_critic:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cfg = omega_conf_to_dataclass(self.config.critic)
+
+            if self.use_legacy_worker_impl == "disable":
+                # convert critic_cfg into TrainingWorkerConfig
+                from verl.workers.config import FSDPEngineConfig
+                from verl.workers.engine_workers import TrainingWorkerConfig
+
+                self.orig_critic_cfg = critic_cfg
+                if self.orig_critic_cfg.strategy == "fsdp":
+                    engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
+                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+                else:
+                    raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
+
+                critic_cfg = TrainingWorkerConfig(
+                    model_type="value_model",
+                    model_config=self.orig_critic_cfg.model_config,
+                    engine_config=engine_config,
+                    optimizer_config=self.orig_critic_cfg.optim,
+                    checkpoint_config=self.orig_critic_cfg.checkpoint,
+                )
+
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
@@ -166,7 +184,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_rm:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
+            rm_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.RewardModel], config=self.config.reward.reward_model
+            )
             self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
 
     def _init_worker_groups(self):
@@ -206,7 +226,17 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
     def _init_models(self):
         if self.use_critic:
             self.critic_wg = self.all_wg[str(Role.Critic)]
-            self.critic_wg.init_model()
+            if self.use_legacy_worker_impl == "disable":
+                self.critic_wg.reset()
+                # assign critic loss
+                from functools import partial
+
+                from verl.workers.utils.losses import value_loss
+
+                value_loss_ = partial(value_loss, config=self.orig_critic_cfg)
+                self.critic_wg.set_loss_fn(value_loss_)
+            else:
+                self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
@@ -221,19 +251,16 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.actor_rollout_wg.init_model()
 
     def _init_reward_loop(self):
-        if self.use_reward_loop:
-            # create reward loop manager
-            if self.use_reward_loop:
-                from verl.experimental.reward_loop import RewardLoopManager
+        from verl.experimental.reward_loop import RewardLoopManager
 
-                # initalize reward loop manager
-                # reward model (colocate or standalone): get resource_pool
-                # no reward model: resource_pool = None
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-                self.reward_loop_manager = RewardLoopManager(
-                    config=self.config,
-                    rm_resource_pool=resource_pool,
-                )
+        # initalize reward loop manager
+        # reward model (colocate or standalone): get resource_pool
+        # no reward model: resource_pool = None
+        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        self.reward_loop_manager = RewardLoopManager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+        )
 
     def _init_async_rollout_manager(self):
         pass
@@ -320,7 +347,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.metrics = {"training/global_step": self.global_steps, "training/epoch": self.epoch}
         self.timing_raw = {}
         # reward message
-        self.future_reward = None
         self.reward_tensor = None
         self.reward_extra_infos_dict = {}
 
@@ -412,12 +438,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                     batch = batch.union(batch_reward)
 
                 # Compute or extract reward for REMAX baseline
-                if not self.use_reward_loop:
-                    reward_baseline_tensor = self._compute_reward_legacy(
-                        batch, reward_fn=self.reward_fn, sum_reward=True
-                    )
-                else:
-                    reward_baseline_tensor = batch.batch["rm_scores"].sum(dim=-1)
+                reward_baseline_tensor = batch.batch["rm_scores"].sum(dim=-1)
 
                 keys_to_pop = set(gen_baseline_output.batch.keys())
                 if rm_scores is not None:
@@ -460,19 +481,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 batch = batch.union(batch_reward)
 
             # Compute or extract reward_tensor and reward_extra_infos_dict for training
-            if not self.use_reward_loop:
-                if self.config.reward_model.launch_reward_fn_async:
-                    self.future_reward = compute_reward_async.remote(
-                        data=batch, config=self.config, tokenizer=self.tokenizer
-                    )
-                else:
-                    self.reward_tensor, self.reward_extra_infos_dict = self._compute_reward_legacy(
-                        batch, reward_fn=self.reward_fn, reward_for_val=False
-                    )
-            else:
-                self.reward_tensor = batch.batch["rm_scores"]
-                reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
-                self.reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+            reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+            self.reward_tensor = reward_tensor
+            self.reward_extra_infos_dict = reward_extra_infos_dict
         return batch
 
     def _fit_compute_log_prob(self, batch: DataProto) -> DataProto:
@@ -545,15 +556,12 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
     def _fit_compute_advantage(self, batch) -> DataProto:
         metrics = self.metrics
         timing_raw = self.timing_raw
-        future_reward = self.future_reward
         reward_tensor = self.reward_tensor
         reward_extra_infos_dict = self.reward_extra_infos_dict
 
         with marked_timer("adv", timing_raw, color="brown"):
             # we combine with rule-based rm
             reward_extra_infos_dict: dict[str, list]
-            if self.config.reward_model.launch_reward_fn_async:
-                reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
             batch.batch["token_level_scores"] = reward_tensor
 
             if reward_extra_infos_dict:

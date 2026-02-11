@@ -32,7 +32,6 @@ from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.debug import marked_timer
@@ -59,8 +58,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
         processor=None,
-        reward_fn=None,
-        val_reward_fn=None,
         device_name=None,
     ):
         # ==================== RayPPOTrainer config ====================
@@ -69,12 +66,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self.reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        self.val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert not self.hybrid_engine
@@ -84,7 +75,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.use_reference_policy = need_reference_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
-        self.use_reward_loop = self.config.reward_model.use_reward_loop
 
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -307,9 +297,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
             # agent_reward_loop: streaming reward computation with actor rollout
             # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-            enable_agent_reward_loop = self.use_reward_loop and (
-                not self.use_rm or self.config.reward_model.enable_resource_pool
-            )
+            enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+
             # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
             # to stream reward computation with actor rollout
             reward_loop_worker_handles = (
@@ -685,7 +674,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             and self.current_param_version > 0
         )
         print(f"do_validate_param: {do_validate_param}")
-        if do_validate_param and self.reward_fn is not None and self.config.async_training.use_trainer_do_validate:
+        if do_validate_param and self.config.async_training.use_trainer_do_validate:
             print(f"[FullyAsyncTrainer] validate param version: {self.current_param_version}")
             await self._validate_process()
         else:

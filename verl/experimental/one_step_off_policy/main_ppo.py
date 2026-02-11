@@ -27,7 +27,6 @@ from verl.experimental.one_step_off_policy.ray_trainer import OneStepOffRayTrain
 from verl.experimental.one_step_off_policy.utils import need_critic
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
@@ -83,29 +82,42 @@ def create_role_worker_mapping(config):
         dict: Mapping from roles to worker classes
     """
     # Select worker class based on strategy
-    if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-        assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from verl.experimental.one_step_off_policy.fsdp_workers import (
-            CriticWorker,
+    use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+    if use_legacy_worker_impl == "disable":
+        from verl.experimental.separation.engine_workers import (
             DetachActorWorker,
             DetachAsyncRolloutWorker,
+            TrainingWorker,
         )
         from verl.single_controller.ray import RayWorkerGroup
 
         ray_worker_group_cls = RayWorkerGroup
 
-    elif config.actor_rollout_ref.actor.strategy == "megatron":
-        assert config.critic.strategy == "megatron"
-        from verl.experimental.one_step_off_policy.megatron_workers import (
-            CriticWorker,
-            DetachActorWorker,
-            DetachAsyncRolloutWorker,
-        )
-        from verl.single_controller.ray import RayWorkerGroup
-
-        ray_worker_group_cls = RayWorkerGroup
+        CriticWorker = TrainingWorker
     else:
-        raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
+        if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
+            from verl.experimental.one_step_off_policy.fsdp_workers import (
+                CriticWorker,
+                DetachActorWorker,
+                DetachAsyncRolloutWorker,
+            )
+            from verl.single_controller.ray import RayWorkerGroup
+
+            ray_worker_group_cls = RayWorkerGroup
+
+        elif config.actor_rollout_ref.actor.strategy == "megatron":
+            assert config.critic.strategy == "megatron"
+            from verl.experimental.one_step_off_policy.megatron_workers import (
+                CriticWorker,
+                DetachActorWorker,
+                DetachAsyncRolloutWorker,
+            )
+            from verl.single_controller.ray import RayWorkerGroup
+
+            ray_worker_group_cls = RayWorkerGroup
+        else:
+            raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
 
     role_worker_mapping = {
         Role.Actor: ray.remote(DetachActorWorker),
@@ -159,26 +171,6 @@ class OneStepTaskRunner:
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        # Load the reward manager for training and validation.
-        use_reward_loop = config.reward_model.use_reward_loop
-        if not use_reward_loop:
-            print(
-                "WARNING: Init reward manager in single controller will be deprecated. "
-                "Please set config.reward_model.use_reward_loop to use distributed reward manager."
-            )
-            # Load the reward manager for training and validation.
-            reward_fn = load_reward_manager(
-                config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-            )
-            val_reward_fn = load_reward_manager(
-                config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-            )
-        else:
-            # reward_loop will use init a reward loop manager in ray_trainer
-            # and use it to compute reward score
-            reward_fn = None
-            val_reward_fn = None
-
         resource_pool_manager = create_resource_pool_manager(config, role_worker_mapping.keys())
 
         from verl.utils.dataset.rl_dataset import collate_fn
@@ -204,8 +196,6 @@ class OneStepTaskRunner:
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             collate_fn=collate_fn,

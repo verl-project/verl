@@ -158,6 +158,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
 
+        # Apply NPU patches for FSDP backend
+        from verl.workers.engine.fsdp.utils import apply_npu_fsdp_patches
+
+        apply_npu_fsdp_patches()
+
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
         # TODO(sgm): support FSDP hybrid shard for larger model

@@ -241,6 +241,14 @@ class vLLMColocateWorkerExtension:
             if metadata["is_last"]:
                 break
 
+        if use_standard_weight_load:
+            # Some post-load transforms are non-idempotent; run once after all buckets.
+            from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+            model = self.model_runner.model
+            model_config = self.model_runner.vllm_config.model_config
+            process_weights_after_loading(model, model_config, self.device)
+
         # clean up
         socket.close()
         del buffer

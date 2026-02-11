@@ -44,7 +44,7 @@ exp_name="$(basename "${MODEL_ID,,}")-dapo-minimal"
 python3 -m recipe.dapo.main_dapo \
     data.train_files="${HOME}/data/gsm8k/train.parquet" \
     data.val_files="${HOME}/data/gsm8k/test.parquet" \
-    reward_model.reward_manager=dapo \
+    reward.reward_manager.name=dapo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
@@ -54,9 +54,9 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
-    reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
-    reward_model.overlong_buffer.len=${overlong_buffer_len} \
-    reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
+    reward.overlong_buffer.enable=${enable_overlong_buffer} \
+    reward.overlong_buffer.len=${overlong_buffer_len} \
+    reward.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     data.train_batch_size=${train_prompt_bsz} \
     data.gen_batch_size=${gen_prompt_bsz} \

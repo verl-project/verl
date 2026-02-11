@@ -57,10 +57,10 @@ def test_agent_reward_loop_standalone():
     config.trainer.n_gpus_per_node = 8
     config.trainer.nnodes = 1
 
-    config.reward_model.reward_manager = "remote"
-    config.reward_model.num_workers = 2
-    config.custom_reward_function.path = "tests/experimental/reward_loop/reward_fn.py"
-    config.custom_reward_function.name = "compute_score_math_verify"
+    config.reward.reward_manager.name = "remote"
+    config.reward.num_workers = 2
+    config.reward.custom_reward_function.path = "tests/experimental/reward_loop/reward_fn.py"
+    config.reward.custom_reward_function.name = "compute_score_math_verify"
 
     # 1. init reward model manager
     agent_loop_manager = init_agent_loop_manager(config)
