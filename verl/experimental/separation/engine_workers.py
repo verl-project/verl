@@ -259,6 +259,11 @@ class DetachNcclSync(BaseDetachNcclSync, ActorRolloutRefWorker):
                 f" offload model to cpu cost {offload_duration} seconds"
             )
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def update_weights(self):
+        params_generator, _ = self.actor.engine.get_per_tensor_param()
+        await self.checkpoint_engine.send_weights(params_generator)
+
 
 class DetachActorWorker(DetachNcclSync):
     def __init__(self, config: DictConfig, role: str):
@@ -343,7 +348,7 @@ class DetachActorWorker(DetachNcclSync):
                 ret.append((key, tensor.size(), tensor.dtype))
 
         elif self.config.actor_rollout_ref.actor.strategy == "megatron":
-            if self.engine._is_offload_param:
+            if self.actor.engine._is_offload_param:
                 self.load_model_to_gpu()
 
             params_generator = self._get_actor_params_generator()
