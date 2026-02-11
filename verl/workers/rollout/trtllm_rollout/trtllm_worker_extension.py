@@ -23,7 +23,7 @@ from tensorrt_llm._torch.utils import get_device_uuid
 from tensorrt_llm.logger import logger
 import tensorrt_llm.llmapi.rlhf_utils.WorkerExtension as trtllm_worker_extension
 
-class WorkerExtension(trtllm_worker_extension.WorkerExtension):
+class WorkerExtension(trtllm_worker_extension):
     def __init__(self):
         pass
 
