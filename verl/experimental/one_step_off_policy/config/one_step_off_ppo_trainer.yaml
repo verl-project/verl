@@ -6,6 +6,9 @@ defaults:
   - ppo_trainer
   - _self_
 
+trainer:
+  use_legacy_worker_impl: disable
+
 # config for the rollout (only for resource isolation)
 rollout:
   # Number of nodes used in the rollout

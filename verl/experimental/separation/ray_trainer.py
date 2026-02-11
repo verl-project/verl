@@ -103,6 +103,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         # reward message
         self.reward_tensor = None
         self.reward_extra_infos_dict = {}
+        self.checkpoint_manager = None
 
     def init_workers(self):
         """Initialize distributed training workers using Ray backend.
