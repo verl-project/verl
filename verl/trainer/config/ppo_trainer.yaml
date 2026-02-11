@@ -29,14 +29,14 @@ defaults:
   # Critic model config.
   - critic@critic: ${model_engine}_critic
 
+  # legacy reward impl config, for backward compatibility
+  - legacy_reward_impl
+
   # Reward config.
   - reward@reward: reward
 
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
-
-  # legacy reward impl config.
-  - legacy_reward_impl
 
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
