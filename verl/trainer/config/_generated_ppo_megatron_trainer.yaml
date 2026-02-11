@@ -582,6 +582,9 @@ reward_model:
   enable_resource_pool: null
   n_gpus_per_node: null
   nnodes: null
+  reward_loop_source: null
+  reward_loop_module_path: null
+  reward_loop_class_name: null
   rollout:
     name: null
     dtype: null

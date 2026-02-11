@@ -66,6 +66,7 @@ def migrate_legacy_reward_impl(config):
 
     return config
 
+
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     """Main entry point for PPO training with Hydra configuration management.
