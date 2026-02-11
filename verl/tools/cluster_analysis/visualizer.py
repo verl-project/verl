@@ -1,14 +1,13 @@
 import os
-from ast import Dict
-from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from schema import FigureConfig
 
 ClusterVisualizerFn = Callable[
-    [pd.DataFrame, str, Dict],
+    [pd.DataFrame, str, dict],
     None,
 ]
 
@@ -45,16 +44,14 @@ def get_cluster_visualizer_fn(fn_name):
 
 
 @register_cluster_visualizer("html")
-def cluster_visualizer_html(data: pd.DataFrame, output_path: str, config: Dict) -> None:
+def cluster_visualizer_html(data: pd.DataFrame, output_path: str, config: dict) -> None:
     generate_rl_timeline(data, output_path)
     print("in html")
-    pass
 
 
 @register_cluster_visualizer("chart")
-def cluster_visualizer_chart(data: pd.DataFrame, output_path: str, config: Dict) -> None:
+def cluster_visualizer_chart(data: pd.DataFrame, output_path: str, config: dict) -> None:
     print("in chart")
-    pass
 
 
 def generate_rl_timeline(
@@ -128,6 +125,9 @@ def load_and_preprocess(input_data: pd.DataFrame) -> tuple[pd.DataFrame, float]:
     df = df.dropna(subset=["Start", "Finish", "Rank ID"])
     df = df[df["Finish"] > df["Start"]].copy()
     df["Duration"] = df["Finish"] - df["Start"]
+
+    if df.empty:
+        return df, 0.0
 
     t0 = df["Start"].min()
     df["Start"] -= t0
@@ -235,23 +235,6 @@ def build_traces(df: pd.DataFrame, y_mapping: dict):
         traces.append(trace)
     return traces
 
-
-@dataclass
-class FigureConfig:
-    title_prefix: str
-    t0: float
-    y_mappings: dict
-    y_axis_spacing: int = 60
-    chart_height_min: int = 800
-    chart_height_max: int = 3000
-    xaxis_max_pad_ratio: float = 0.02
-    nticks: int = 15
-    margin_left: int = 180
-    margin_right: int = 50
-    margin_top: int = 80
-    margin_bottom: int = 50
-
-
 def assemble_figure(traces: list[go.Bar], df: pd.DataFrame, cfg: FigureConfig) -> go.Figure:
     max_time = df["Finish"].max()
     unique_y_labels = sorted(df["Y_Label"].unique())
@@ -347,7 +330,6 @@ def assemble_figure(traces: list[go.Bar], df: pd.DataFrame, cfg: FigureConfig) -
         ],
     )
     return fig
-
 
 def save_html(fig: go.Figure, output_dir: str, output_filename: str):
     os.makedirs(output_dir, exist_ok=True)
