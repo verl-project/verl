@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import gc
 import logging
 import os
 import pickle
@@ -31,6 +32,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.multiprocessing.reductions import reduce_tensor
 
+from verl.utils.device import get_torch_device
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -326,6 +328,10 @@ class ServerAdapter(BaseRollout):
         self._adapter = AsyncTRTLLMHttpAdapter(
             host=host,
             port=server_port,
+            timeout=self.config.server.timeout,
+            max_attempts=self.config.server.max_attempts,
+            retry_delay=self.config.server.retry_delay,
+            max_connections=self.config.server.max_connections,
         )
 
     async def resume(self, tags: list[str]):
@@ -334,6 +340,10 @@ class ServerAdapter(BaseRollout):
         Args:
             tag: weights or kv_cache.
         """
+        # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
+        # have completed actor offloading to CPU, preventing OOM issue.
+        if "kv_cache" in tags and self.config.free_cache_engine:
+            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
@@ -424,3 +434,9 @@ class ServerAdapter(BaseRollout):
             # Finalize update weights
             await self._adapter.update_weights(None)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+
+        gc.collect()
+        get_torch_device().empty_cache()
+
+    def _get_attribute(self, name: str):
+        return getattr(self, name)

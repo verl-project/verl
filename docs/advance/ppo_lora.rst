@@ -1,7 +1,7 @@
 RL(HF) algorithms with LoRA Support
 ===========================================
 
-Last updated: 12/17/2025.
+Last updated: 02/03/2026.
 
 We support LoRA (Low-Rank Adaptation) for reinforcement learning algorithms such as PPO, GRPO, and others.
 
@@ -42,6 +42,8 @@ FSDP Backend Usage Guide
 - `actor_rollout_ref.model.lora_adapter_path`: string, path to a pretrained LoRA adapter directory. 
    If provided, loads existing adapter instead of creating new one. Enables multi-stage training from previously saved adapters.
    Directory need contain `adapter_model.safetensors` and `adapter_config.json`.
+- `actor_rollout_ref.model.lora.merge`: bool, whether to merge LoRA adapters into the base model weights before transferring to vLLM. 
+   If True, it will merge LoRA adapters into the base model weights before transferring to vLLM. If False, it will transfer only adapters to vLLM. This option is currently supported **only for engine-based rollout workers** (i.e. vLLM engine workers using the new worker implementation with ``trainer.use_legacy_worker_impl`` disabled) and is not available when using the legacy worker implementation.
 
 5. Recommend options:
 
@@ -136,6 +138,10 @@ Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `th
 
         # Path to pre-trained LoRA adapter weights (null to train from scratch)
         adapter_path: null
+
+        # Whether to fully shard LoRA adapters. Defaults to False
+        # https://docs.vllm.ai/en/latest/api/vllm/config/lora/#vllm.config.lora.LoRAConfig.fully_sharded_loras
+        fully_sharded_loras: bool
 
         # VLMLoRA additionally allows the user to specify whether the language or vision models should be frozen.
         # For example, a common finetuning workload for multimodal models is to apply adapters to language model and fully

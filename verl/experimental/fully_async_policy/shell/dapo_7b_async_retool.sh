@@ -83,8 +83,8 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     data.truncation='error' \
     data.custom_cls.path=$retool_path \
     data.custom_cls.name=CustomRLHFDataset \
-    custom_reward_function.path=$retool_path \
-    custom_reward_function.name=compute_score \
+    reward.custom_reward_function.path=$retool_path \
+    reward.custom_reward_function.name=compute_score \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -137,5 +137,4 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     async_training.staleness_threshold=$staleness_threshold \
     async_training.trigger_parameter_sync_step=$trigger_parameter_sync_step \
     async_training.require_batches=$require_batches \
-    async_training.partial_rollout=$partial_rollout \
-    async_training.use_rollout_log_probs=True
+    async_training.partial_rollout=$partial_rollout

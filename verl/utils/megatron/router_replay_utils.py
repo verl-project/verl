@@ -34,7 +34,11 @@ from megatron.core.tensor_parallel import gather_from_sequence_parallel_region, 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
-from verl.models.mcore.util import postprocess_packed_seqs, preprocess_packed_seqs
+from verl.models.mcore.util import (
+    postprocess_packed_seqs,
+    preprocess_packed_seqs,
+    preprocess_thd_no_padding,
+)
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 
@@ -230,7 +234,10 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         None: The function updates internal RouterReplay instances in-place.
     """
     with torch.no_grad():
-        layers_topk_idx_rmpad, _ = preprocess_packed_seqs(layers_topk_idx, attention_mask, pre_process=True)
+        if layers_topk_idx.is_nested:
+            layers_topk_idx_rmpad, _ = preprocess_thd_no_padding(layers_topk_idx, pre_process=True)
+        else:
+            layers_topk_idx_rmpad, _ = preprocess_packed_seqs(layers_topk_idx, attention_mask, pre_process=True)
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 
         # 1, dynamic_bs_split, layer_num, topk

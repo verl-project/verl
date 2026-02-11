@@ -80,29 +80,42 @@ def create_role_worker_mapping(config):
         dict: Mapping from roles to worker classes
     """
     # Select worker class based on strategy
-    if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-        assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from verl.experimental.fully_async_policy.fsdp_workers import (
-            CriticWorker,
+    use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+    if use_legacy_worker_impl == "disable":
+        from verl.experimental.separation.engine_workers import (
             DetachActorWorker,
             DetachAsyncRolloutWorker,
+            TrainingWorker,
         )
         from verl.single_controller.ray import RayWorkerGroup
 
         ray_worker_group_cls = RayWorkerGroup
 
-    elif config.actor_rollout_ref.actor.strategy == "megatron":
-        assert config.critic.strategy == "megatron"
-        from verl.experimental.fully_async_policy.megatron_worker import (
-            CriticWorker,
-            DetachActorWorker,
-            DetachAsyncRolloutWorker,
-        )
-        from verl.single_controller.ray import RayWorkerGroup
-
-        ray_worker_group_cls = RayWorkerGroup
+        CriticWorker = TrainingWorker
     else:
-        raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
+        if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
+            from verl.experimental.fully_async_policy.fsdp_workers import (
+                CriticWorker,
+                DetachActorWorker,
+                DetachAsyncRolloutWorker,
+            )
+            from verl.single_controller.ray import RayWorkerGroup
+
+            ray_worker_group_cls = RayWorkerGroup
+
+        elif config.actor_rollout_ref.actor.strategy == "megatron":
+            assert config.critic.strategy == "megatron"
+            from verl.experimental.fully_async_policy.megatron_worker import (
+                CriticWorker,
+                DetachActorWorker,
+                DetachAsyncRolloutWorker,
+            )
+            from verl.single_controller.ray import RayWorkerGroup
+
+            ray_worker_group_cls = RayWorkerGroup
+        else:
+            raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
 
     train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
     role_worker_mapping = {
@@ -110,16 +123,6 @@ def create_role_worker_mapping(config):
         Role.Rollout: ray.remote(DetachAsyncRolloutWorker),
         Role.Critic: ray.remote(CriticWorker),
     }
-
-    if config.reward_model.enable:
-        if config.reward_model.strategy in ["fsdp", "fsdp2"]:
-            from verl.workers.fsdp_workers import RewardModelWorker
-        elif config.reward_model.strategy == "megatron":
-            from verl.workers.megatron_workers import RewardModelWorker
-        else:
-            raise NotImplementedError
-
-        role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
 
     # Add reference policy (if KL loss or reward is required)
     if need_reference_policy(config):
@@ -170,11 +173,17 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
-        self._create_rollouter(config)
+        from concurrent.futures import ThreadPoolExecutor
 
-        print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
-        self._create_trainer(config)
+        print("[ASYNC MAIN] Creating FullyAsyncRollouter and FullyAsyncTrainer in parallel...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            rollouter_future = executor.submit(self._create_rollouter, config)
+            rollouter_future.result()
+
+            # TODO: keep _create_rollouter and _create_trainer parallel
+            trainer_future = executor.submit(self._create_trainer, config)
+            # Wait for both to complete
+            trainer_future.result()
 
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())

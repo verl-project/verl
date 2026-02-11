@@ -29,12 +29,12 @@ from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
 
-from verl.models.mcore.util import preprocess_packed_seqs
+from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_no_padding
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
-from .util import postprocess_packed_seqs_for_dict_output
+from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_no_padding
 
 
 def _get_patching_model(model: torch.nn.Module):
@@ -135,6 +135,79 @@ def fused_forward_model_gen(vision_model: bool = False):
         return output
 
     return fused_forward_model
+
+
+def fused_forward_no_padding_gen(vision_model: bool = False):
+    def fused_forward_no_padding(
+        model,
+        input_ids: Tensor,
+        labels: Tensor,
+        multi_modal_inputs: dict,
+        temperature: float,
+        calculate_entropy: bool,
+        pad_token_id: int,
+    ):
+        pre_process = unwrap_model(model).pre_process
+        post_process = unwrap_model(model).post_process
+
+        input_ids_rmpad, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=pre_process)
+        input_ids_rmpad = input_ids_rmpad.contiguous()
+
+        model_kwargs = {}
+        if "pixel_values" in multi_modal_inputs:
+            model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
+        if "image_grid_thw" in multi_modal_inputs:
+            model_kwargs["image_grid_thw"] = multi_modal_inputs["image_grid_thw"].to(input_ids.device)
+        if "pixel_values_videos" in multi_modal_inputs:
+            model_kwargs["pixel_values_videos"] = multi_modal_inputs["pixel_values_videos"].to(input_ids.device)
+        if "video_grid_thw" in multi_modal_inputs:
+            model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
+
+        attention_mask = None
+        if vision_model:
+            input_ids_rmpad = input_ids.to_padded_tensor(pad_token_id)
+            seqlens_in_batch = input_ids.offsets().diff().to(input_ids.device)
+            max_seq_len = input_ids_rmpad.shape[1]
+            attention_mask = torch.arange(max_seq_len, device=input_ids.device).unsqueeze(
+                0
+            ) < seqlens_in_batch.unsqueeze(1)
+
+        labels_rmpad, _ = preprocess_thd_no_padding(labels, pre_process=True, need_roll=True)
+        labels_rmpad = labels_rmpad.contiguous()
+        output_orig: CausalLMOutputForPPO = model(
+            input_ids=input_ids_rmpad,
+            attention_mask=attention_mask,
+            position_ids=None,
+            packed_seq_params=packed_seq_params,
+            labels=labels_rmpad,
+            temperature=temperature,
+            **model_kwargs,
+        )
+
+        if not post_process:
+            return output_orig
+
+        log_probs = output_orig.log_probs
+        if log_probs.dim() == 1:
+            log_probs = log_probs.unsqueeze(0)
+        log_probs = postprocess_thd_no_padding(
+            log_probs, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
+        )
+
+        output = {"log_probs": log_probs}
+
+        if calculate_entropy:
+            entropy = output_orig.entropy
+            if entropy.dim() == 1:
+                entropy = entropy.unsqueeze(0)
+            entropy = postprocess_thd_no_padding(
+                entropy, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
+            )
+            output["entropy"] = entropy
+
+        return output
+
+    return fused_forward_no_padding
 
 
 def _fused_GPTModel_forward(

@@ -7,6 +7,7 @@ CONFIG_SPECS=(
     "ppo_trainer:_generated_ppo_trainer.yaml:"
     "ppo_megatron_trainer:_generated_ppo_megatron_trainer.yaml:--config-name=ppo_megatron_trainer.yaml"
     "ppo_diffusion_trainer:_generated_ppo_diffusion_trainer.yaml:--config-name=ppo_diffusion_trainer.yaml"
+    "ppo_trainer:_generated_ppo_veomni_trainer.yaml:model_engine=veomni"
 )
 
 generate_config() {

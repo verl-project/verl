@@ -39,7 +39,7 @@ from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
-from verl.utils.profiler.profile import DistProfiler
+from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -148,7 +148,6 @@ class vLLMHttpServer:
                 logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
                 profiler_config = None
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
-        self.server_profiler_dir = os.environ.pop("VLLM_TORCH_PROFILER_DIR", None)
 
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
@@ -239,11 +238,17 @@ class vLLMHttpServer:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
             if quantization == "fp8":
+                # Ignore MoE router layers for FP8 quantization
+                all_mlp_gate_layers = []
+                for layer in range(self.model_config.hf_config.num_hidden_layers):
+                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
+                    "ignored_layers": all_mlp_gate_layers,
                 }
                 fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Apply vllm fp8 patches
@@ -258,12 +263,22 @@ class vLLMHttpServer:
 
         if quantization == "fp8":
             hf_overrides["quantization_config"] = fp8_block_quant_kwargs
-        compilation_config = engine_kwargs.get("compilation_config", None)
-        if compilation_config is None:
-            compilation_config = json.dumps({"cudagraph_mode": "FULL_AND_PIECEWISE"})
-        else:
-            cudagraph_mode = compilation_config.get("cudagraph_mode", "FULL_AND_PIECEWISE")
-            compilation_config = json.dumps({"cudagraph_mode": cudagraph_mode})
+        compilation_config = engine_kwargs.pop("compilation_config", None) or {}
+        if isinstance(compilation_config, str):
+            compilation_config = json.loads(compilation_config)
+        compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
+
+        # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
+        dcp_size = engine_kwargs.get("decode_context_parallel_size", 1) or 1
+        if dcp_size > 1 and compilation_config["cudagraph_mode"] == "FULL_AND_PIECEWISE":
+            logger.warning(
+                "FULL cuda graph is not supported with DCP (decode_context_parallel_size=%d), "
+                "downgrading cudagraph_mode to PIECEWISE.",
+                dcp_size,
+            )
+            compilation_config["cudagraph_mode"] = "PIECEWISE"
+
+        compilation_config = json.dumps(compilation_config)
         args = {
             "dtype": self.config.dtype,
             "load_format": self.config.load_format,
@@ -282,7 +297,7 @@ class vLLMHttpServer:
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
-            "seed": self.config.get("seed", 0),
+            "seed": self.replica_rank + self.config.get("seed", 0),
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
             "hf_overrides": hf_overrides,
@@ -290,6 +305,14 @@ class vLLMHttpServer:
             "compilation_config": compilation_config,
             **engine_kwargs,
         }
+
+        # update profiler args
+        profiler_args = build_vllm_profiler_args(
+            self.profiler_controller.config, self.profiler_controller.tool_config, self.replica_rank
+        )
+        if _VLLM_VERSION >= version.parse("0.13.0"):
+            # vLLM >= 0.13.0 supports profiler config via CLI args; env vars still work but will be deprecated
+            args.update(profiler_args)
 
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
@@ -344,19 +367,21 @@ class vLLMHttpServer:
 
         # update lora-related args
         lora_rank = self.model_config.lora.get("rank", 0)
-        megatron_lora = True
+        if lora_rank <= 0:
+            lora_rank = (
+                self.model_config.lora_rank
+            )  # FIXME: fallback to lora_rank for now, we should unify lora settings.
+
         if self.model_config.lora.get("merge", False):
             lora_rank = 0
-        if lora_rank <= 0:
-            megatron_lora = False
-            lora_rank = self.model_config.lora_rank
+
         if lora_rank > 0:
             lora_args = {
                 "enable_lora": True,
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
-            if megatron_lora:
+            if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
 
@@ -412,11 +437,21 @@ class vLLMHttpServer:
             method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
         )
 
-        app = build_app(args)
-        if _VLLM_VERSION > version.parse("0.11.0"):
-            await init_app_state(engine_client, app.state, args)
+        build_app_sig = inspect.signature(build_app)
+        supported_tasks: tuple[Any, ...] = ()
+        if "supported_tasks" in build_app_sig.parameters:
+            supported_tasks = await engine_client.get_supported_tasks()
+            app = build_app(args, supported_tasks)
         else:
+            app = build_app(args)
+
+        init_app_sig = inspect.signature(init_app_state)
+        if "vllm_config" in init_app_sig.parameters:
             await init_app_state(engine_client, vllm_config, app.state, args)
+        elif "supported_tasks" in init_app_sig.parameters:
+            await init_app_state(engine_client, app.state, args, supported_tasks)
+        else:
+            await init_app_state(engine_client, app.state, args)
         if self.replica_rank == 0 and self.node_rank == 0:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
@@ -494,9 +529,9 @@ class vLLMHttpServer:
 
         # Add lora request
         lora_request = None
-        if self.model_config.lora_rank > 0 or (
-            self.model_config.lora.get("rank", 0) > 0 and not self.model_config.lora.get("merge", False)
-        ):
+        if (
+            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
+        ) and not self.model_config.lora.get("merge", False):
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
@@ -570,19 +605,19 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here
             await self.engine.collective_rpc("sleep", kwargs={"level": 2})
+
+            # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
+            # await self.engine.reset_encoder_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             await self.engine.sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
     async def start_profile(self, **kwargs):
-        # TODO: Persist global_step to engine server-created file/path
-        kwargs.pop("global_step")
         if (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
-            and self.server_profiler_dir
         ):
             await self.engine.start_profile(**kwargs)
 
@@ -591,7 +626,6 @@ class vLLMHttpServer:
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
-            and self.server_profiler_dir
         ):
             await self.engine.stop_profile()
 
@@ -605,37 +639,58 @@ class vLLMHttpServer:
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
+        On vLLM >= 0.12.0, uses AsyncLLM.pause_generation() to abort in-flight
+        requests, drain, and clear caches. The engine remains paused after this
+        call — use resume_generation() to accept new requests (e.g. before
+        validation).
+
+        On vLLM < 0.12.0, manually aborts each request and resets prefix cache.
+
         Returns:
             dict[str, Any]: Dictionary containing:
                 - aborted_count: Number of requests aborted
                 - request_ids: List of aborted request IDs
         """
         try:
-            # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
-            request_states_snapshot = list(self.engine.output_processor.request_states.items())
-            request_ids = [req_id for req_id, _ in request_states_snapshot]
+            if _VLLM_VERSION >= version.parse("0.12.0"):
+                # Snapshot request IDs before pausing for reporting
+                request_ids = list(self.engine.output_processor.request_states.keys())
 
-            if not request_ids:
-                return {"aborted_count": 0, "request_ids": []}
-
-            # For each request, create an abort output and put it to its queue
-            # This allows the generator to receive the aborted result
-            from vllm.v1.engine import FinishReason
-
-            for _, req_state in request_states_snapshot:
-                request_output = req_state.make_request_output(
-                    [], pooling_output=None, finish_reason=FinishReason.ABORT, stop_reason=None
+                # pause_generation with wait_for_inflight_requests=False will:
+                # 1. Set engine to paused state (blocks new generate calls)
+                # 2. Abort all in-flight requests
+                # 3. Wait for requests to drain
+                # 4. Clear prefix and mm caches if clear_cache=True
+                await self.engine.pause_generation(
+                    wait_for_inflight_requests=False,
+                    clear_cache=reset_prefix_cache,
                 )
-                req_state.queue.put(request_output)
+            else:
+                # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
+                request_states_snapshot = list(self.engine.output_processor.request_states.items())
+                request_ids = [req_id for req_id, _ in request_states_snapshot]
 
-            # Abort requests in the output processor and engine core
-            self.engine.output_processor.abort_requests(request_ids)
-            await self.engine.engine_core.abort_requests_async(request_ids)
+                if not request_ids:
+                    return {"aborted_count": 0, "request_ids": []}
 
-            # Try to reset prefix cache to ensure clean state
-            if reset_prefix_cache:
-                await self.clear_kv_cache()
-                logger.info("Prefix cache reset after abort")
+                # For each request, create an abort output and put it to its queue
+                # This allows the generator to receive the aborted result
+                from vllm.v1.engine import FinishReason
+
+                for _, req_state in request_states_snapshot:
+                    request_output = req_state.make_request_output(
+                        [], pooling_output=None, finish_reason=FinishReason.ABORT, stop_reason=None
+                    )
+                    req_state.queue.put(request_output)
+
+                # Abort requests in the output processor and engine core
+                self.engine.output_processor.abort_requests(request_ids)
+                await self.engine.engine_core.abort_requests_async(request_ids)
+
+                # Try to reset prefix cache to ensure clean state
+                if reset_prefix_cache:
+                    await self.clear_kv_cache()
+                    logger.info("Prefix cache reset after abort")
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -643,6 +698,17 @@ class vLLMHttpServer:
         except Exception as e:
             logger.error(f"Error aborting requests: {e}")
             return {"aborted_count": 0, "request_ids": [], "error": str(e)}
+
+    async def resume_generation(self):
+        """Resume generation after abort_all_requests (pause_generation).
+
+        Only effective on vLLM >= 0.12.0 where pause_generation is used.
+        No-op on older versions.
+        """
+        if self.node_rank != 0:
+            return
+        if _VLLM_VERSION >= version.parse("0.12.0"):
+            await self.engine.resume_generation()
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
@@ -815,6 +881,15 @@ class vLLMReplica(RolloutReplica):
             "request_ids": all_request_ids,
             "server_results": results,
         }
+
+    async def resume_generation(self):
+        """Resume generation on all servers after abort_all_requests."""
+        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+
+    # TODO(petersh6): refact the checkpoint engine's update_weights and rename this method
+    async def resume_all_requests(self):
+        """Resume all requests on all servers."""
+        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         """Abort a specific request. Tries all servers since we don't know which one has it.

@@ -18,7 +18,7 @@ from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 
 __all__ = ["register", "get_reward_manager_cls"]
 
-REWARD_LOOP_MANAGER_REGISTRY: dict[str, type[RewardManagerBase]] = {}
+REWARD_MANAGER: dict[str, type[RewardManagerBase]] = {}
 
 
 def register(name: str) -> Callable[[type[RewardManagerBase]], type[RewardManagerBase]]:
@@ -30,11 +30,9 @@ def register(name: str) -> Callable[[type[RewardManagerBase]], type[RewardManage
     """
 
     def decorator(cls: type[RewardManagerBase]) -> type[RewardManagerBase]:
-        if name in REWARD_LOOP_MANAGER_REGISTRY and REWARD_LOOP_MANAGER_REGISTRY[name] != cls:
-            raise ValueError(
-                f"reward manager {name} has already been registered: {REWARD_LOOP_MANAGER_REGISTRY[name]} vs {cls}"
-            )
-        REWARD_LOOP_MANAGER_REGISTRY[name] = cls
+        if name in REWARD_MANAGER and REWARD_MANAGER[name] != cls:
+            raise ValueError(f"reward manager {name} has already been registered: {REWARD_MANAGER[name]} vs {cls}")
+        REWARD_MANAGER[name] = cls
         return cls
 
     return decorator
@@ -50,6 +48,6 @@ def get_reward_manager_cls(name: str) -> type[RewardManagerBase]:
     Returns:
         `(type)`: The reward manager class.
     """
-    if name not in REWARD_LOOP_MANAGER_REGISTRY:
+    if name not in REWARD_MANAGER:
         raise ValueError(f"Unknown reward manager: {name}")
-    return REWARD_LOOP_MANAGER_REGISTRY[name]
+    return REWARD_MANAGER[name]
