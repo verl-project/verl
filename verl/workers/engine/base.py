@@ -292,6 +292,7 @@ class EngineRegistry:
         """
 
         def decorator(engine_class):
+            engine_class._model_type = model_type
             assert issubclass(engine_class, BaseEngine)
             if model_type not in cls._engines:
                 cls._engines[model_type] = {}

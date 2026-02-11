@@ -618,14 +618,14 @@ def patch_valuehead_model(model) -> None:
     model._no_split_modules = getattr(model.pretrained_model, "_no_split_modules", [])
 
 
-def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
+def load_valuehead_model(pretrained_model_name_or_path, torch_dtype, config, trust_remote_code):
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 
     try:
         model = AutoModelForTokenClassification.from_pretrained(
-            pretrained_model_name_or_path=local_path,
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
             torch_dtype=torch_dtype,
-            config=model_config,
+            config=config,
             attn_implementation="flash_attention_2",
             trust_remote_code=trust_remote_code,
         )
@@ -633,21 +633,21 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
     except BaseException as e:
         if not is_trl_available():
             raise RuntimeError(
-                f"model({local_path}) is not a value head model, please install trl to make it valid"
+                f"model({pretrained_model_name_or_path}) is not a value head model, please install trl to make it valid"
             ) from e
 
     assert is_trl_available()
 
     from trl import AutoModelForCausalLMWithValueHead
 
-    if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
+    if type(config) in AutoModelForVision2Seq._model_mapping.keys():
         module_class = AutoModelForVision2Seq
     else:
         module_class = AutoModelForCausalLM
     ori_model = module_class.from_pretrained(
-        pretrained_model_name_or_path=local_path,
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch_dtype,
-        config=model_config,
+        config=config,
         attn_implementation="flash_attention_2",
         trust_remote_code=trust_remote_code,
     )

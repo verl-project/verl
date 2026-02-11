@@ -792,7 +792,6 @@ class PPOTrainer:
         print(f"[DEBUG] _compute_advantage time to get data: {t_end - t_start:.2f}", flush=True)
         data = DataProto(batch=data.to_padded_tensor())
         data.batch["token_level_scores"] = data.batch["rm_scores"]
-        breakpoint()
 
         # 1. apply kl penalty to rewards
         if self.config.algorithm.use_kl_in_reward:
@@ -833,7 +832,7 @@ class PPOTrainer:
             if "rollout_is_weights" in data.batch:
                 fields.append("rollout_is_weights")
         t_start = time.time()
-        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select(*fields))
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.batch.select(*fields))
         t_end = time.time()
         print(f"[DEBUG] _compute_advantage time to put data: {t_end - t_start:.2f}", flush=True)
 
@@ -915,6 +914,11 @@ class PPOTrainer:
         # 8. compute advantage and return
         with marked_timer("adv", timing_raw, color="brown"):
             batch = self._compute_advantage(batch, metrics=metrics)
+
+        # 9. [OPTIONAL] update critic
+        if self.use_critic:
+            with marked_timer("update_critic", timing_raw, color="pink"):
+                self._update_critic(batch)
 
 
 @ray.remote
