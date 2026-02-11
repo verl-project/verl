@@ -291,7 +291,7 @@ class RayPPOTrainer:
         # Initialize Prometheus client if enabled
         self.prometheus_client = None
         prometheus_config = self.config.actor_rollout_ref.rollout.prometheus
-        if prometheus_config.enable and prometheus_config.metrics_to_track:
+        if prometheus_config.enable and prometheus_config.metrics_to_log:
             self.prometheus_client = PrometheusClient(prometheus_config)
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
@@ -1585,7 +1585,7 @@ class RayPPOTrainer:
 
                 # Query Prometheus metrics if enabled
                 if self.prometheus_client is not None:
-                    prometheus_metrics = self.prometheus_client.query_all_metrics()
+                    prometheus_metrics = self.prometheus_client.query_all_metrics(prefix="rollout/")
                     metrics.update(prometheus_metrics)
 
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
