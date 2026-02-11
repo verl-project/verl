@@ -84,7 +84,7 @@ After pulling the desired Docker image and installing desired inference and trai
 .. code:: bash
 
     # install the nightly version (recommended)
-    git clone https://github.com/volcengine/verl && cd verl
+    git clone https://github.com/verl-project/verl && cd verl
     pip3 install --no-deps -e .
 
 [Optional] If you hope to switch between different frameworks, you can install verl with the following command:
@@ -92,7 +92,7 @@ After pulling the desired Docker image and installing desired inference and trai
 .. code:: bash
 
     # install the nightly version (recommended)
-    git clone https://github.com/volcengine/verl && cd verl
+    git clone https://github.com/verl-project/verl && cd verl
     pip3 install -e .[vllm]
     pip3 install -e .[sglang]
 
