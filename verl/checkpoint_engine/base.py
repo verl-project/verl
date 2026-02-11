@@ -407,17 +407,19 @@ class CheckpointEngineManager:
     @auto_await
     async def update_weights(self):
         """Update weights from trainer to rollout replicas."""
-        ray.get(self.trainer.init_checkpoint_engine(self.config))
 
         # 0. update weights for sync training with colocated trainer and rollout
         if self.backend == "naive":
             ray.get(self.trainer.update_weights())
             return
 
-        # 1. abort and save all unfinished requests for partial rollout
+        # 1. init checkpoint engine for non-colocated trainer
+        ray.get(self.trainer.init_checkpoint_engine(self.config))
+
+        # 2. abort and save all unfinished requests for partial rollout
         await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
 
-        # 2. create a temporay worker group for all replicas
+        # 3. create a temporay worker group for all replicas
         workers = []
         for replica in self.replicas:
             workers.extend(replica.workers)
@@ -433,18 +435,18 @@ class CheckpointEngineManager:
             )
         )
 
-        # 3. build process group
+        # 4. build process group
         self.build_process_group(rollout)
 
-        # 4. update weights of all workers
+        # 5. update weights of all workers
 
         ray.get(trainer.update_weights() + rollout.update_weights())
 
-        # 5. finalize all workers
+        # 6. finalize all workers
         ray.get(
             trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
             + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
         )
 
-        # 6. resume all unfinished requests for partial rollout
+        # 7. resume all unfinished requests for partial rollout
         await asyncio.gather(*[r.resume_all_requests() for r in self.replicas])
