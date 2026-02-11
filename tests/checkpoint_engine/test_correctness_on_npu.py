@@ -23,12 +23,14 @@ from verl.single_controller.ray.base import (
     split_resource_pool,
 )
 from verl.utils.device import get_device_name
+from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@auto_await
 async def test_hccl_checkpoint_engine(
     rebuild_group,
     num_trainer,

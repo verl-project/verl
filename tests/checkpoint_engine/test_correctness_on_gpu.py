@@ -22,12 +22,14 @@ from verl.single_controller.ray.base import (
     RayResourcePool,
     split_resource_pool,
 )
+from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False, True])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@auto_await
 async def test_nccl_checkpoint_engine(
     rebuild_group,
     num_trainer,
@@ -76,6 +78,7 @@ async def test_nccl_checkpoint_engine(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@auto_await
 async def test_nixl_checkpoint_engine(
     num_trainer,
     num_rollout,
