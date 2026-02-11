@@ -19,6 +19,54 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.attention_utils import pad_input, unpad_input
 
 
+def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
+    """
+    Convert TensorDict from prompt embeds with padding to no-padding format.
+
+    Args:
+        data: TensorDict with "prompt_embeds", "prompt_embeds_mask",
+              "negative_prompt_embeds", "negative_prompt_embeds_mask"
+
+    Returns:
+        data: TensorDict with
+        - Tensor includes NestedTensors "prompt_embeds", "prompt_embeds_mask",
+          "negative_prompt_embeds", "negative_prompt_embeds_mask"
+    """
+
+    prompt_embeds = data["prompt_embeds"]  # (bs, seq_len, dim)
+    prompt_embeds_mask = data["prompt_embeds_mask"]  # (bs, seq_len)
+    prompt_embeds_list = []
+    prompt_embeds_mask_list = []
+    for i in range(prompt_embeds_mask.shape[0]):
+        curr_mask = prompt_embeds_mask[i].bool()
+        curr_prompt_embeds = prompt_embeds[i, curr_mask, :]
+        prompt_embeds_list.append(curr_prompt_embeds)
+        prompt_embeds_mask_list.append(curr_mask)
+    prompt_embeds_nested = torch.nested.as_nested_tensor(prompt_embeds_list, layout=torch.jagged)
+    prompt_embeds_mask_nested = torch.nested.as_nested_tensor(prompt_embeds_mask_list, layout=torch.jagged)
+    data["prompt_embeds"] = prompt_embeds_nested
+    data["prompt_embeds_mask"] = prompt_embeds_mask_nested
+
+    if "negative_prompt_embeds" in data and "negative_prompt_embeds_mask" in data:
+        negative_prompt_embeds = data["negative_prompt_embeds"]  # (bs, seq_len, dim)
+        negative_prompt_embeds_mask = data["negative_prompt_embeds_mask"]  # (bs, seq_len)
+        negative_prompt_embeds_list = []
+        negative_prompt_embeds_mask_list = []
+        for i in range(negative_prompt_embeds_mask.shape[0]):
+            curr_mask = negative_prompt_embeds_mask[i].bool()
+            curr_negative_prompt_embeds = negative_prompt_embeds[i, curr_mask, :]
+            negative_prompt_embeds_list.append(curr_negative_prompt_embeds)
+            negative_prompt_embeds_mask_list.append(curr_mask)
+        negative_prompt_embeds_nested = torch.nested.as_nested_tensor(negative_prompt_embeds_list, layout=torch.jagged)
+        negative_prompt_embeds_mask_nested = torch.nested.as_nested_tensor(
+            negative_prompt_embeds_mask_list, layout=torch.jagged
+        )
+        data["negative_prompt_embeds"] = negative_prompt_embeds_nested
+        data["negative_prompt_embeds_mask"] = negative_prompt_embeds_mask_nested
+
+    return data
+
+
 def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     """
     Convert TensorDict from left-right padding to no-padding format.

@@ -28,6 +28,7 @@ from verl.workers.engine_workers import TrainingWorker
 from verl.workers.utils.diffusers_patch.schedulers import FlowMatchSDEDiscreteScheduler
 from verl.workers.utils.diffusers_patch.utils import set_timesteps
 from verl.workers.utils.losses import ppo_loss
+from verl.workers.utils.padding import embeds_padding_2_no_padding
 
 
 def create_training_config(model_type, strategy, device_count, model):
@@ -173,6 +174,7 @@ def test_diffusers_fsdp_engine(strategy):
 
     # forward only without loss function
     data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
+    data_td = embeds_padding_2_no_padding(data_td)
     tu.assign_non_tensor(
         data_td,
         compute_loss=False,
@@ -194,6 +196,7 @@ def test_diffusers_fsdp_engine(strategy):
 
     # train batch
     data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
+    data_td = embeds_padding_2_no_padding(data_td)
     ppo_mini_batch_size = 4
     ppo_epochs = actor_config.ppo_epochs
     seed = 42

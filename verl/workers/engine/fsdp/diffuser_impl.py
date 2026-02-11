@@ -569,6 +569,29 @@ class DiffusersFSDPEngine(BaseEngine):
         negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
         negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
 
+        if prompt_embeds.is_nested:
+            batch_size = prompt_embeds.size(0)
+            seq_len_effective = prompt_embeds.offsets().diff()
+            max_seq_len = max(seq_len_effective)
+            embed_dim = prompt_embeds.size(-1)
+            prompt_embeds = torch.nested.to_padded_tensor(
+                prompt_embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim)
+            )
+            prompt_embeds_mask = torch.nested.to_padded_tensor(
+                prompt_embeds_mask, padding=0, output_size=(batch_size, max_seq_len)
+            )
+        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
+            batch_size = negative_prompt_embeds.size(0)
+            seq_len_effective = negative_prompt_embeds.offsets().diff()
+            max_seq_len = max(seq_len_effective)
+            embed_dim = negative_prompt_embeds.size(-1)
+            negative_prompt_embeds = torch.nested.to_padded_tensor(
+                negative_prompt_embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim)
+            )
+            negative_prompt_embeds_mask = torch.nested.to_padded_tensor(
+                negative_prompt_embeds_mask, padding=0, output_size=(batch_size, max_seq_len)
+            )
+
         height = tu.get_non_tensor_data(data=micro_batch, key="height", default=None)
         width = tu.get_non_tensor_data(data=micro_batch, key="width", default=None)
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)

@@ -65,6 +65,7 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
+from verl.workers.utils.padding import embeds_padding_2_no_padding
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -1165,6 +1166,7 @@ class RayFlowGRPOTrainer:
     def _compute_values(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
+            batch_td = embeds_padding_2_no_padding(batch_td)
             batch_td["loss_mask"] = batch_td["response_mask"]
             # step 3: add meta info
             tu.assign_non_tensor(batch_td, compute_loss=False)
@@ -1181,6 +1183,8 @@ class RayFlowGRPOTrainer:
         if self.use_legacy_worker_impl == "disable":
             # step 1: convert dataproto to tensordict.
             batch_td = batch.to_tensordict()
+            # step 2: convert padding to no padding
+            batch_td = embeds_padding_2_no_padding(batch_td)
             batch_td["loss_mask"] = batch_td["response_mask"]
             # step 3: add meta info
             metadata = {
@@ -1211,6 +1215,8 @@ class RayFlowGRPOTrainer:
             # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
             # step 1: convert dataproto to tensordict.
             batch_td = batch.to_tensordict()
+            # step 2: convert padding to no padding
+            batch_td = embeds_padding_2_no_padding(batch_td)
             batch_td["loss_mask"] = batch_td["response_mask"]
             # step 3: add meta info
             tu.assign_non_tensor(
@@ -1236,6 +1242,8 @@ class RayFlowGRPOTrainer:
         # update actor
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
+            # convert padding to no padding
+            batch_td = embeds_padding_2_no_padding(batch_td)
             batch_td["loss_mask"] = batch_td["response_mask"]
             ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
             ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
@@ -1266,6 +1274,7 @@ class RayFlowGRPOTrainer:
     def _update_critic(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
+            batch_td = embeds_padding_2_no_padding(batch_td)
             batch_td["loss_mask"] = batch_td["response_mask"]
             ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
             ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
