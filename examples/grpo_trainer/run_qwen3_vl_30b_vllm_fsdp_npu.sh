@@ -73,7 +73,6 @@ python3 -m verl.trainer.main_ppo \
     algorithm.rollout_correction.rollout_rs=${rollout_rs} \
     algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
-    trainer.device=npu \
     trainer.critic_warmup=0 \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name="${project_name}" \
