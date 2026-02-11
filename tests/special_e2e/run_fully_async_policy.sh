@@ -133,6 +133,8 @@ common_params=(
     async_training.staleness_threshold=${staleness_threshold}
     async_training.partial_rollout="${partial_rollout}"
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
+    # GPU specific configurations
+    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
 )
 
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
