@@ -49,28 +49,28 @@ class DetachNcclSync(BaseDetachNcclSync, ActorRolloutRefWorker):
         pass
 
     def load_model_to_gpu(self):
-        if self.config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+        if self.config.actor.strategy in ["fsdp", "fsdp2"]:
             from verl.utils.fsdp_utils import load_fsdp_model_to_gpu
 
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        elif self.config.actor_rollout_ref.actor.strategy == "megatron":
+        elif self.config.actor.strategy == "megatron":
             from verl.utils.megatron_utils import load_megatron_model_to_gpu
 
             load_megatron_model_to_gpu(self.actor_module, False)
         else:
-            raise NotImplementedError(f"Unsupported strategy: {self.config.actor_rollout_ref.actor.strategy}")
+            raise NotImplementedError(f"Unsupported strategy: {self.config.actor.strategy}")
 
     def offload_model_to_cpu(self):
-        if self.config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+        if self.config.actor.strategy in ["fsdp", "fsdp2"]:
             from verl.utils.fsdp_utils import offload_fsdp_model_to_cpu
 
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        elif self.config.actor_rollout_ref.actor.strategy == "megatron":
+        elif self.config.actor.strategy == "megatron":
             from verl.utils.megatron_utils import offload_megatron_model_to_cpu
 
             offload_megatron_model_to_cpu(self.actor_module)
         else:
-            raise NotImplementedError(f"Unsupported strategy: {self.config.actor_rollout_ref.actor.strategy}")
+            raise NotImplementedError(f"Unsupported strategy: {self.config.actor.strategy}")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights(self, sync_group_name="actor_rollout"):
@@ -81,15 +81,15 @@ class DetachNcclSync(BaseDetachNcclSync, ActorRolloutRefWorker):
         if self._is_actor and self.engine._is_offload_param:
             self.load_model_to_gpu()
 
-        if self.config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+        if self.config.actor.strategy in ["fsdp", "fsdp2"]:
             params = self._get_actor_params() if self._is_actor else None
 
-        elif self.config.actor_rollout_ref.actor.strategy == "megatron":
+        elif self.config.actor.strategy == "megatron":
             params_generator = self._get_actor_params_generator() if self._is_actor else None
             params = {key: tensor for key, tensor in params_generator} if params_generator is not None else None
 
         else:
-            raise NotImplementedError(f"Unsupported strategy: {self.config.actor_rollout_ref.actor.strategy}")
+            raise NotImplementedError(f"Unsupported strategy: {self.config.actor.strategy}")
 
         rollout_name = self.config.rollout.name
 
@@ -140,7 +140,7 @@ class DetachNcclSync(BaseDetachNcclSync, ActorRolloutRefWorker):
         local_rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
         if self._is_actor:
-            if self.config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+            if self.config.actor.strategy in ["fsdp", "fsdp2"]:
                 params = self._get_actor_params()
                 for tensor_idx, (key, _, _) in enumerate(self._weights_info):
                     origin_data = params[key]
@@ -150,14 +150,14 @@ class DetachNcclSync(BaseDetachNcclSync, ActorRolloutRefWorker):
                     if tensor_idx % world_size == local_rank:
                         self.cpu_named_params[key] = origin_data.to("cpu", non_blocking=True)
 
-            elif self.config.actor_rollout_ref.actor.strategy == "megatron":
+            elif self.config.actor.strategy == "megatron":
                 params_generator = self._get_actor_params_generator()
                 print(f"cache_actor_weights_to_cpu, local_rank:{local_rank}, world_size:{world_size}")
                 for tensor_idx, (key, tensor) in enumerate(params_generator):
                     if tensor_idx % world_size == local_rank:
                         self.cpu_named_params[key] = tensor.to("cpu", non_blocking=True)
             else:
-                raise NotImplementedError(f"Unsupported strategy: {self.config.actor_rollout_ref.actor.strategy}")
+                raise NotImplementedError(f"Unsupported strategy: {self.config.actor.strategy}")
 
             get_torch_device().synchronize()
 
@@ -199,10 +199,9 @@ class DetachNcclSync(BaseDetachNcclSync, ActorRolloutRefWorker):
 
                 patch_vllm_moe_model_weight_loader(inference_model)
             elif rollout_name == "sglang":
-                if self.config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+                if self.config.actor.strategy in ["fsdp", "fsdp2"]:
                     raise NotImplementedError(
-                        "Fully async sglang backend does not support "
-                        f"actor strategy: {self.config.actor_rollout_ref.actor.strategy}"
+                        f"Fully async sglang backend does not support actor strategy: {self.config.actor.strategy}"
                     )
 
                 inference_model = self.rollout._engine
@@ -238,7 +237,7 @@ class DetachNcclSync(BaseDetachNcclSync, ActorRolloutRefWorker):
         update_end_time = time.time()
         update_duration = update_end_time - update_start_time
 
-        if self.config.actor_rollout_ref.actor.strategy == "megatron":
+        if self.config.actor.strategy == "megatron":
             collective.barrier(group_name=sync_group_name)
 
         offload_start_time = time.time()
@@ -303,7 +302,7 @@ class DetachActorWorker(DetachNcclSync):
         if self._strategy_handlers is not None:
             return self._strategy_handlers
 
-        strategy = self.config.actor_rollout_ref.actor.strategy
+        strategy = self.config.actor.strategy
 
         if strategy in ["fsdp", "fsdp2"]:
             from verl.experimental.fully_async_policy.fsdp2_utils import (
@@ -333,7 +332,7 @@ class DetachActorWorker(DetachNcclSync):
 
         ret = []
 
-        if self.config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+        if self.config.actor.strategy in ["fsdp", "fsdp2"]:
             if fsdp_version(self.actor_module_fsdp) == 1:
                 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 
@@ -347,7 +346,7 @@ class DetachActorWorker(DetachNcclSync):
             for key, tensor in params.items():
                 ret.append((key, tensor.size(), tensor.dtype))
 
-        elif self.config.actor_rollout_ref.actor.strategy == "megatron":
+        elif self.config.actor.strategy == "megatron":
             if self.actor.engine._is_offload_param:
                 self.load_model_to_gpu()
 
@@ -357,7 +356,7 @@ class DetachActorWorker(DetachNcclSync):
                 ret.append((key, tensor.size(), tensor.dtype))
 
         else:
-            raise NotImplementedError(f"Unsupported strategy: {self.config.actor_rollout_ref.actor.strategy}")
+            raise NotImplementedError(f"Unsupported strategy: {self.config.actor.strategy}")
 
         self._weights_info = ret
 
@@ -373,7 +372,7 @@ class DetachActorWorker(DetachNcclSync):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def restore_model_from_cpu(self, n):
         if n in self.cpu_saved_models:
-            strategy = self.config.actor_rollout_ref.actor.strategy
+            strategy = self.config.actor.strategy
 
             if strategy in ["fsdp", "fsdp2"]:
                 cpu_sharded_state, global_spec = self.cpu_saved_models[n]
