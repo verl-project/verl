@@ -20,7 +20,7 @@ import socket
 
 import hydra
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
@@ -31,6 +31,41 @@ from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
 
 
+def migrate_legacy_reward_impl(config):
+    # 1. reward workers migration
+    # config.reward_model.num_workers -> reward.num_workers
+    if config.reward_model.num_workers is not None:
+        config.reward.num_workers = config.reward_model.num_workers
+
+    # 2.reward manager migration
+    # config.reward_model.reward_manager -> reward.reward_manager
+    if config.reward_model.reward_manager is not None:
+        config.reward.reward_manager.name = config.reward_model.reward_manager
+    if config.reward_model.get("reward_loop_source") is not None:
+        config.reward.reward_manager.source = config.reward_model.reward_loop_source
+        config.reward.reward_manager.module.path = config.reward_model.reward_loop_module_path
+        config.reward.reward_manager.module.name = config.reward_model.reward_loop_class_name
+
+    # 3. custom reward function migration
+    # config.custom_reward_function -> reward.custom_reward_function
+    if config.custom_reward_function is not None:
+        config.reward.custom_reward_function = config.custom_reward_function
+
+    # 4. reward model migration
+    # config.reward_model -> config.reward.reward_model
+    for key in ["enable", "enable_resource_pool", "n_gpus_per_node", "nnodes"]:
+        if config.reward_model.get(key) is not None:
+            config.reward.reward_model[key] = config.reward_model[key]
+    # for dapo reward kwargs
+    if config.reward_model.get("reward_kwargs") is not None:
+        with open_dict(config.reward.reward_model):
+            config.reward.reward_model["reward_kwargs"] = config.reward_model["reward_kwargs"]
+    legacy_rollout = config.reward_model.rollout
+    if not all(v is None for v in legacy_rollout.values()):
+        config.reward.reward_model.rollout = legacy_rollout
+
+    return config
+
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     """Main entry point for PPO training with Hydra configuration management.
@@ -40,7 +75,7 @@ def main(config):
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
-
+    config = migrate_legacy_reward_impl(config)
     run_ppo(config)
 
 
