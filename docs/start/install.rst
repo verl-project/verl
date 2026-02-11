@@ -54,15 +54,15 @@ Upon base image, the following packages are added:
 
 Latest docker file:
 
-- `Dockerfile.stable.vllm <https://github.com/volcengine/verl/blob/main/docker/Dockerfile.stable.vllm>`_
-- `Dockerfile.stable.sglang <https://github.com/volcengine/verl/blob/main/docker/Dockerfile.stable.sglang>`_
+- `Dockerfile.stable.vllm <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.vllm>`_
+- `Dockerfile.stable.sglang <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.sglang>`_
 
 All pre-built images are available in dockerhub: `verlai/verl <https://hub.docker.com/r/verlai/verl>`_. For example, ``verlai/verl:sgl055.latest``, ``verlai/verl:vllm011.latest``.
 
 You can find the latest images used for development and ci in our github workflows:
 
-- `.github/workflows/vllm.yml <https://github.com/volcengine/verl/blob/main/.github/workflows/vllm.yml>`_
-- `.github/workflows/sgl.yml <https://github.com/volcengine/verl/blob/main/.github/workflows/sgl.yml>`_
+- `.github/workflows/vllm.yml <https://github.com/verl-project/verl/blob/main/.github/workflows/vllm.yml>`_
+- `.github/workflows/sgl.yml <https://github.com/verl-project/verl/blob/main/.github/workflows/sgl.yml>`_
 
 
 Installation from Docker
@@ -104,7 +104,7 @@ We recommend to use docker images for convenience. However, if your environment 
 
 .. note::
 
-    - Dockerfile provides more details than this installation instructions. You can find examples in each Dockerfile, for example `verl0.6-cu128-torch2.8.0-fa2.7.4 Dockerfile.base <https://github.com/volcengine/verl/blob/v0.6.0/docker/verl0.6-cu128-torch2.8.0-fa2.7.4/Dockerfile.base>`_ .
+    - Dockerfile provides more details than this installation instructions. You can find examples in each Dockerfile, for example `verl0.6-cu128-torch2.8.0-fa2.7.4 Dockerfile.base <https://github.com/verl-project/verl/blob/v0.6.0/docker/verl0.6-cu128-torch2.8.0-fa2.7.4/Dockerfile.base>`_ .
 
 
 Pre-requisites
@@ -208,7 +208,7 @@ own post-training jobs.
 
 .. code:: bash
 
-   git clone https://github.com/volcengine/verl.git
+   git clone https://github.com/verl-project/verl.git
    cd verl
    pip install --no-deps -e .
 
@@ -236,7 +236,7 @@ Install with AMD GPUs - ROCM kernel support
 When you run on AMD GPUs (MI300) with ROCM platform, you cannot use the previous quickstart to run verl. You should follow the following steps to build a docker and run it.
 If you encounter any issues in using AMD GPUs running verl, feel free to contact me - `Yusheng Su <https://yushengsu-thu.github.io/>`_.
 
-Find the docker for AMD ROCm: `docker/Dockerfile.rocm <https://github.com/volcengine/verl/blob/main/docker/Dockerfile.rocm>`_
+Find the docker for AMD ROCm: `docker/Dockerfile.rocm <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.rocm>`_
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 .. code-block:: bash
