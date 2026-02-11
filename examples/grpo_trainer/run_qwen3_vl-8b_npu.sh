@@ -71,7 +71,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.device=npu \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=4 \
     trainer.default_local_dir=${CKPTS_DIR} \
