@@ -15,7 +15,7 @@
 Synchronous PPO trainer with colocated actor and rollout.
 
 Differs from original PPO trainer in main_ppo.py:
-1. Use TransferQueue to transfer data between components.
+1. Use TransferQueue to zero-padding and zero-copy data transfer.
 2. Use ReplayBuffer to sample data from TransferQueue.
 3. Support different `n` sampling for each prompt.
 4. Support multiple outputs for each agent loop.
@@ -285,7 +285,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             field["position_ids"] = position_ids
             field["multi_modal_inputs"] = multi_modal_inputs
             fields.append(field)
-            prompt_len, response_len = field["prompt_ids"].size(0), field["response_ids"].size(0)
+            prompt_len, response_len = field["prompts"].size(0), field["responses"].size(0)
             tags.append(
                 {
                     "global_steps": kwargs["global_steps"],
@@ -698,6 +698,7 @@ class PPOTrainer:
             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
             return
 
+        # 1. compute log probs
         batch.extra_info.update({"calculate_entropy": True, "compute_loss": False})
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
@@ -706,8 +707,8 @@ class PPOTrainer:
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             fields.extend(["responses", "old_log_probs", "rollout_log_probs"])
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
-        breakpoint()
-        # write old_log_probs and entropy back to TransferQueue
+
+        # 2. write old_log_probs and entropy back to TransferQueue
         data["old_log_probs"] = extract_response_from_unpad_output(data.pop("log_probs"), data["response_mask"])
         data["entropy"] = extract_response_from_unpad_output(data.pop("entropy"), data["response_mask"])
         tq.kv_batch_put(
@@ -716,7 +717,7 @@ class PPOTrainer:
 
         data = DataProto(batch=data.to_padded_tensor())
 
-        # calculate actor entroy metrics
+        # 3. calculate actor entroy metrics
         actor_config = self.config.actor_rollout_ref.actor
         entropy_agg = agg_loss(
             loss_mat=data.batch["entropy"],
@@ -730,9 +731,29 @@ class PPOTrainer:
         }
         metrics.update(old_log_prob_metrics)
 
-        # calculate rollout vs actor logprobs diff
+        # 4. calculate rollout vs actor logprobs diff
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             metrics.update(calculate_debug_metrics(data))
+
+        return batch
+
+    def _compute_ref_log_prob(self, batch: KVBatchMeta) -> KVBatchMeta:
+        """Compute the reference log prob of the batch."""
+        # 1. compute log probs
+        metadata = {"calculate_entropy": False, "compute_loss": False}
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        batch.extra_info.update(metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.compute_log_prob(batch)
+        else:
+            output = self.ref_policy_wg.compute_ref_log_prob(batch)
+        assert len(output) == len(batch)
+
+        # 2. write ref_log_prob and entropy back to TransferQueue
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["log_probs", "response_mask"])
+        data["ref_log_prob"] = extract_response_from_unpad_output(data.pop("log_probs"), data["response_mask"])
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("ref_log_prob"))
 
         return batch
 
@@ -789,28 +810,28 @@ class PPOTrainer:
         # 3. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
-                self._compute_reward_colocate(batch)
+                batch = self._compute_reward_colocate(batch)
 
         # 4. balance batch across data parallel groups
         self._balance_batch(batch, metrics=metrics)
 
         # 5. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
-            self._compute_old_log_prob(batch, metrics=metrics)
+            batch = self._compute_old_log_prob(batch, metrics=metrics)
 
         # 6. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):
-                self._compute_ref_log_prob(batch)
+                batch = self._compute_ref_log_prob(batch)
 
         # 7. [OPTIONAL] compute critic values
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
-                self._compute_values(batch)
+                batch = self._compute_values(batch)
 
         # 8. compute advantage and return
         with marked_timer("adv", timing_raw, color="brown"):
-            self._compute_advantage(batch)
+            batch = self._compute_advantage(batch)
 
 
 @ray.remote
