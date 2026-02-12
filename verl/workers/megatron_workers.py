@@ -219,18 +219,19 @@ class MegatronWorker(Worker):
                 provider.moe_token_dispatcher_type = "alltoall"
                 provider.moe_router_load_balancing_type = "none"
 
-                def quantization_layer_spec(config):
-                    from megatron.core.post_training.modelopt.gpt.model_specs import get_gpt_modelopt_spec
-                    return get_gpt_modelopt_spec(
-                        config=config,
-                        local_core_attention=False,
-                        remap_te_layernorm=True,
-                        real_quant_cfg="None",
-                        use_arbitrary_attention_mask=False,
-                    )
+                enable_qat = self.config.actor.megatron.get("enable_qat", False)
+                if enable_qat:
+                    from megatron.bridge.models.gpt_provider import quantization_layer_spec
+                    provider.transformer_layer_spec = quantization_layer_spec
 
-                # from megatron.bridge.models.gpt_provider import quantization_layer_spec
-                provider.transformer_layer_spec = quantization_layer_spec
+                    # Patch megatron-core MLP to support singleton_local_shards
+                    # in SwiGLU sharded state dict (required for QAT checkpointing)
+                    from verl.models.mcore.qat_patch import apply_qat_patch
+                    apply_qat_patch()
+
+                    from megatron.bridge.models.conversion.param_mapping import AutoMapping
+                    AutoMapping.register_module_type('QuantColumnParallelLinear', 'column')
+                    AutoMapping.register_module_type('QuantRowParallelLinear', 'row')
 
                 # Apply transformer config overrides
                 for key, value in override_transformer_config.items():
@@ -459,12 +460,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             quantization = self.config.actor.megatron.get("quantization", None)
             enable_qat = self.config.actor.megatron.get("enable_qat", False)
             if quantization is not None and enable_qat:
-                print(f"[lark]: Applying QAT with quantization: {quantization}")
-                print("[lark]: length of actor_module:", len(actor_module))
                 for i in range(len(actor_module)):
                     actor_module[i] = apply_qat(actor_module[i], quantization)
-                print("[lark]: QAT applied to all actor model chunks")
-            print(f"larkz module: {actor_module[0]}")
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model
@@ -741,7 +738,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.layer_name_mapping,
             )
         if self.config.actor.megatron.get("enable_qat", False):
-            print("[lark]: rollout mode: quantizing weights with QAT")
             from verl.utils.modelopt_qat_utils import QATWeightPostProcessor
 
             qat_weight_post_processor = QATWeightPostProcessor(

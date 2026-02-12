@@ -21,6 +21,7 @@ from pprint import pprint
 from typing import Any, Callable, Optional
 
 import numpy as np
+from numpy.random import f
 import ray
 import vllm.entrypoints.cli.serve
 from packaging import version
@@ -60,9 +61,10 @@ if _VLLM_VERSION > version.parse("0.11.0"):
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     if _VLLM_VERSION == version.parse("0.12.0"):
-        from vllm.entrypoints.harmony_utils import get_encoding
+        pass
+        # from vllm.entrypoints.harmony_utils import get_encoding
 
-        get_encoding()
+        # get_encoding()
     elif _VLLM_VERSION >= version.parse("0.13.0"):
         from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 
@@ -243,9 +245,18 @@ class vLLMHttpServer:
                 # for subprocesses patching
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
             elif quantization == "nvfp4":
-                print("[lark]: vllm quantization is nvfp4")
-                from verl.utils.modelopt_vllm_utils import apply_vllm_modelopt_patches, NVFP4_BLOCK_QUANT_KWARGS
-                fp4_block_quant_kwargs = dict(NVFP4_BLOCK_QUANT_KWARGS)
+                from verl.utils.modelopt_vllm_utils import apply_vllm_modelopt_patches, get_nvfp4_block_quant_kwargs
+                
+                num_layers = getattr(self.model_config.hf_config, "num_hidden_layers")
+                
+                is_moe = (
+                    hasattr(self.model_config.hf_config, "num_experts") or
+                    hasattr(self.model_config.hf_config, "num_local_experts") or
+                    hasattr(self.model_config.hf_config, "moe_intermediate_size")
+                )
+
+                fp4_block_quant_kwargs = get_nvfp4_block_quant_kwargs(num_layers, is_moe)
+                
                 apply_vllm_modelopt_patches()
                 os.environ["VERL_VLLM_NVFP4_QUANT_ENABLED"] = "1"
 

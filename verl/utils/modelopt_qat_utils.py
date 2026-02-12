@@ -158,8 +158,6 @@ class QATWeightPostProcessor:
         self._build_quantization_metadata()
 
         global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        # print(f"[QAT PostProcessor][Rank {global_rank}] After _build_quantization_metadata: "
-        #       f"metadata_count={len(self.quant_metadata)}, ep_size={self.ep_size}, pp_size={self.pp_size}")
 
         # Synchronize metadata across EP ranks if EP is enabled
         if self.ep_size > 1:
@@ -740,7 +738,6 @@ class QATWeightPostProcessor:
         qformat = metadata.qformat
 
         if qformat == QUANTIZATION_NVFP4:
-            # print("[lark]: quantize_weight name:", name, "weight:", weight.shape, "metadata:", metadata)
             yield from self._quantize_nvfp4(name, weight, metadata)
         else:
             # Unknown format, pass through with warning

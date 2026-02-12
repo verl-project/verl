@@ -23,84 +23,69 @@ logger = logging.getLogger(__name__)
 from torch.nn import Parameter
 
 
-NVFP4_BLOCK_QUANT_KWARGS = {
-    "config_groups": {
-        "group_0": {
-            "input_activations": {
-                "dynamic": "false",
-                "num_bits": 4,
-                "type": "float",
-                "group_size": 16
-            },
-            "weights": {
-                "dynamic": "false",
-                "num_bits": 4,
-                "type": "float",
-                "group_size": 16
-            },
-            "targets": [
-                "Linear"
-            ]
-        }
-    },
-    "ignore": [
-        # "model.layers.0.mlp.gate",
-        # "model.layers.1.mlp.gate",
-        # "model.layers.10.mlp.gate",
-        # "model.layers.11.mlp.gate",
-        # "model.layers.12.mlp.gate",
-        # "model.layers.13.mlp.gate",
-        # "model.layers.14.mlp.gate",
-        # "model.layers.15.mlp.gate",
-        # "model.layers.16.mlp.gate",
-        # "model.layers.17.mlp.gate",
-        # "model.layers.18.mlp.gate",
-        # "model.layers.19.mlp.gate",
-        # "model.layers.2.mlp.gate",
-        # "model.layers.20.mlp.gate",
-        # "model.layers.21.mlp.gate",
-        # "model.layers.22.mlp.gate",
-        # "model.layers.23.mlp.gate",
-        # "model.layers.24.mlp.gate",
-        # "model.layers.25.mlp.gate",
-        # "model.layers.26.mlp.gate",
-        # "model.layers.27.mlp.gate",
-        # "model.layers.28.mlp.gate",
-        # "model.layers.29.mlp.gate",
-        # "model.layers.3.mlp.gate",
-        # "model.layers.30.mlp.gate",
-        # "model.layers.31.mlp.gate",
-        # "model.layers.32.mlp.gate",
-        # "model.layers.33.mlp.gate",
-        # "model.layers.34.mlp.gate",
-        # "model.layers.35.mlp.gate",
-        # "model.layers.36.mlp.gate",
-        # "model.layers.37.mlp.gate",
-        # "model.layers.38.mlp.gate",
-        # "model.layers.39.mlp.gate",
-        # "model.layers.4.mlp.gate",
-        # "model.layers.40.mlp.gate",
-        # "model.layers.41.mlp.gate",
-        # "model.layers.42.mlp.gate",
-        # "model.layers.43.mlp.gate",
-        # "model.layers.44.mlp.gate",
-        # "model.layers.45.mlp.gate",
-        # "model.layers.46.mlp.gate",
-        # "model.layers.47.mlp.gate",
-        # "model.layers.5.mlp.gate",
-        # "model.layers.6.mlp.gate",
-        # "model.layers.7.mlp.gate",
-        # "model.layers.8.mlp.gate",
-        # "model.layers.9.mlp.gate",
-        "lm_head"
-    ],
-    "quant_algo": "NVFP4",
-    "producer": {
-        "name": "modelopt",
-        "version": "0.40.0.dev89+g0ec5e200f.d20251127"
-    },
-    "quant_method": "modelopt"
-}
+def generate_nvfp4_ignore_list(num_layers: int, is_moe: bool) -> list[str]:
+    """
+    Generate the ignore list for NVFP4 quantization based on model configuration.
+    
+    Args:
+        num_layers: Number of hidden layers in the model (from hf_config.num_hidden_layers)
+        is_moe: Whether the model is a Mixture of Experts model
+        
+    Returns:
+        List of layer names to ignore during quantization
+    """
+    ignore_list = []
+    
+    # For MoE models, ignore the gate layers (routing layers)
+    if is_moe:
+        for layer_idx in range(num_layers):
+            ignore_list.append(f"model.layers.{layer_idx}.mlp.gate")
+    
+    # Always ignore lm_head for stability
+    ignore_list.append("lm_head")
+    
+    return ignore_list
+
+
+def get_nvfp4_block_quant_kwargs(num_layers: int, is_moe: bool) -> dict:
+    """
+    Generate complete NVFP4 quantization configuration based on model properties.
+    Args:
+        num_layers: Number of hidden layers in the model (from hf_config.num_hidden_layers)
+        is_moe: Whether the model is a Mixture of Experts model
+        
+    Returns:
+        Complete quantization configuration dictionary compatible with ModelOpt
+    """
+    ignore_list = generate_nvfp4_ignore_list(num_layers, is_moe)
+    
+    return {
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "dynamic": "false",
+                    "num_bits": 4,
+                    "type": "float",
+                    "group_size": 16
+                },
+                "weights": {
+                    "dynamic": "false",
+                    "num_bits": 4,
+                    "type": "float",
+                    "group_size": 16
+                },
+                "targets": [
+                    "Linear"
+                ]
+            }
+        },
+        "ignore": ignore_list,
+        "quant_algo": "NVFP4",
+        "producer": {
+            "name": "modelopt",
+        },
+        "quant_method": "modelopt"
+    }
 
 
 
@@ -121,12 +106,6 @@ def _create_param_from_subclass_attributes(custom_data: torch.Tensor, custom_wei
 
 
 def process_weights_after_loading_modelopt(self, layer: torch.nn.Module) -> None:
-    if getattr(layer, "prefix", None) == "model.layers.27.mlp.gate_up_proj" or getattr(layer, "prefix", "").startswith(
-        "model.layers.27.self_attn"
-    ):
-        print(
-            f"##VLLM##: {getattr(layer, 'prefix', None)}: {layer.params_dtype} bias: {getattr(layer, 'bias', None)} {layer.weight.data[0, :4]}, scale: {layer.weight_scale.data[0, :4]}, scale_2: {layer.weight_scale_2.data[0]}"
-        )
     import vllm._custom_ops as ops
     from torch.nn import Parameter
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -248,13 +227,6 @@ def process_weights_after_loading_modelopt(self, layer: torch.nn.Module) -> None
         layer.weight_scale = _create_param_from_subclass_attributes(weight_scale, layer.weight_scale)
         prepare_fp4_layer_for_marlin(layer, weight_scale_2_max)
 
-        if getattr(layer, "prefix", None) == "model.layers.27.mlp.gate_up_proj" or getattr(
-            layer, "prefix", ""
-        ).startswith("model.layers.27.self_attn"):
-            print(
-                f"##VLLM-MARLIN##: {getattr(layer, 'prefix', None)}: {layer.marlin_weight.data[0, :4]}, scale: {layer.marlin_weight_scale.data[0, :4]}, scale_2: {layer.marlin_weight_scale_2.data}"
-            )
-
         del layer.alpha
         # del layer.input_scale
     elif self.backend == "flashinfer-trtllm":
@@ -293,8 +265,6 @@ def apply_modelopt(
     from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
 
     if self.backend == "marlin":
-        # if getattr(layer, "prefix", None) == "model.layers.27.mlp.gate_up_proj" or getattr(layer, "prefix", "").startswith("model.layers.27.self_attn"):
-        # print(f"##VLLM-MARLIN##: {getattr(layer, 'prefix', None)}: {layer.marlin_weight.data[0, :4]}, scale: {layer.marlin_weight_scale.data[0, :4]}, scale_2: {layer.marlin_weight_scale_2.data}")
         return apply_fp4_marlin_linear(
             input=x,
             weight=layer.marlin_weight,
