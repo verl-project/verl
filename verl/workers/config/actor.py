@@ -362,12 +362,10 @@ class DeepSpeedActorConfig(ActorConfig):
 
         super().__post_init__()
         self.engine = self.deepspeed
-        # Align offload flags with offload shorthand.
-        offload_enabled = self.deepspeed.offload in {"cpu", "nvme", "auto"}
-        if offload_enabled:
-            object.__setattr__(self.deepspeed, "param_offload", True)
-            # Optimizer offload requires ZeRO-2 or ZeRO-3.
-            object.__setattr__(self.deepspeed, "optimizer_offload", self.deepspeed.zero_stage >= 2)
+        # Keep dataclass-level normalization aligned with worker runtime logic.
+        normalize_offload_flags = getattr(self.deepspeed, "normalize_offload_flags", None)
+        if callable(normalize_offload_flags):
+            normalize_offload_flags(allow_param_offload=True)
 
         # Keep both names in sync for callers that expect either field.
         object.__setattr__(self, "deepspeed_config", self.deepspeed)

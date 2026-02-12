@@ -244,14 +244,9 @@ class DeepSpeedCriticConfig(CriticConfig):
     def __post_init__(self):
         super().__post_init__()
         object.__setattr__(self, "engine", self.deepspeed_config)
-        offload_enabled = self.deepspeed_config.offload in {"cpu", "nvme", "auto"}
-        if offload_enabled:
-            object.__setattr__(self.deepspeed_config, "param_offload", True)
-            object.__setattr__(
-                self.deepspeed_config,
-                "optimizer_offload",
-                self.deepspeed_config.zero_stage >= 2,
-            )
+        normalize_offload_flags = getattr(self.deepspeed_config, "normalize_offload_flags", None)
+        if callable(normalize_offload_flags):
+            normalize_offload_flags(allow_param_offload=True)
 
 
 @dataclass

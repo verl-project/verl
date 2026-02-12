@@ -257,10 +257,41 @@ class DeepSpeedEngineConfig(EngineConfig):
 
     strategy: str = "deepspeed"
 
+    def normalize_offload_flags(self, *, allow_param_offload: bool = True) -> None:
+        """Normalize offload booleans under ZeRO-stage constraints.
+
+        Rules enforced by DeepSpeed workers:
+        - ZeRO-1: no parameter/optimizer offload
+        - ZeRO-2: optimizer offload only
+        - ZeRO-3: optimizer offload, parameter offload gated by ``allow_param_offload``
+
+        The ``offload`` shorthand (`cpu`/`nvme`/`auto`) turns on supported
+        booleans for the current ZeRO stage. Explicit boolean fields are still
+        accepted but clipped by stage constraints.
+        """
+        offload_requested = self.offload in {"cpu", "nvme", "auto"}
+        param_offload = bool(self.param_offload)
+        optimizer_offload = bool(self.optimizer_offload)
+
+        if offload_requested:
+            if self.zero_stage >= 3 and allow_param_offload:
+                param_offload = True
+            if self.zero_stage >= 2:
+                optimizer_offload = True
+
+        if self.zero_stage < 3 or not allow_param_offload:
+            param_offload = False
+        if self.zero_stage < 2:
+            optimizer_offload = False
+
+        object.__setattr__(self, "param_offload", param_offload)
+        object.__setattr__(self, "optimizer_offload", optimizer_offload)
+
     def __post_init__(self):
         super().__post_init__()
         assert self.zero_stage in {0, 1, 2, 3}, f"Unsupported zero_stage={self.zero_stage}"
         assert self.offload in {"none", "cpu", "nvme", "auto"}, f"Unsupported offload={self.offload}"
+        self.normalize_offload_flags(allow_param_offload=True)
 
 
 @dataclass

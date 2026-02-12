@@ -1,81 +1,33 @@
-# DeepSpeed Integration Guide
+# DeepSpeed Worker Integration (Current PR Scope)
 
-This document summarizes how to run verl with the DeepSpeed backend and how to reproduce the core benchmark/demo flows used by the current PR.
+This document summarizes the current DeepSpeed worker capabilities, feature boundaries, and reproducible launch commands.
 
-## 1. What Is Supported
+## 1. Feature Support Matrix
 
-- DeepSpeed actor/critic worker path.
-- ZeRO stage `1/2/3`.
-- CPU offload benchmark variants for ZeRO stages.
-- ZeRO2 behavior switches:
-  - `VERL_DS_ZERO2_FP32_ACCUM_PATCH` (accumulation precision patch).
-  - `VERL_DS_ZERO2_STEP_EACH_MICRO` (micro-step mode for ZeRO2).
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Data Parallel (DP) | Supported | DP layout is used for actor/ref/critic/reward workers. |
+| ZeRO-1 | Supported | Offload is disabled in this worker path. |
+| ZeRO-2 | Supported | Optimizer offload supported; parameter offload disabled. |
+| ZeRO-3 | Supported | Optimizer offload supported; parameter offload is env-gated. |
+| CPU/NVMe offload | Supported (stage-aware) | `offload=cpu/nvme/auto` is normalized by ZeRO stage. |
+| Checkpoint save/load | Supported | Native DS checkpoint manager (`DeepSpeedCheckpointManager`). |
+| Activation checkpointing | Supported | Controlled by model/deepspeed config flags. |
+| Ulysses / SP | Not supported | Forced to `ulysses_sequence_parallel_size=1`. |
 
-## 2. Prerequisites
+Key env knobs:
 
-- Multi-GPU node (examples below assume 8x A100).
-- Model/data already cached or reachable.
-- Entry point:
-  - `python3 -m verl.trainer.main_ppo -cn ppo_trainer`
+- `VERL_ENABLE_PARAM_OFFLOAD=1`: allow ZeRO-3 param offload.
+- `VERL_DS_ZERO2_FP32_ACCUM_PATCH=1`: enable ZeRO-2 accumulation patch.
+- `VERL_DS_ZERO2_STEP_EACH_MICRO=0|1`: ZeRO-2 micro-step behavior switch.
 
-## 3. Ready-to-Run Scripts
+## 2. Startup Command Examples
 
-### 3.1 Six-case ZeRO benchmark
-
-Runs six cases:
-
-- `zero1_no_offload`
-- `zero2_no_offload`
-- `zero3_no_offload`
-- `zero1_cpu_offload`
-- `zero2_cpu_offload`
-- `zero3_cpu_offload`
-
-Command:
-
-```bash
-SEED=7777 STEPS=60 RUN_TAG=zero_six_60_seed7777_fix \
-VERL_DS_ZERO2_FP32_ACCUM_PATCH=1 ZERO2_STEP_EACH_MICRO=0 \
-bash scripts/bench/run_ds_zero_six_case_bench.sh
-```
-
-Outputs:
-
-- `outputs/<RUN_TAG>_<timestamp>/summary.tsv`
-- `outputs/<RUN_TAG>_<timestamp>/<case>/train.log`
-
-### 3.2 ZeRO1/2 crossover gate benchmark
-
-Compares stage1 vs stage2 across seeds with retry and paired summaries.
-
-Command (`step_each_micro=1`):
-
-```bash
-SEEDS="7777" STEPS=60 RUN_TAG=ds_stage12_seed60_gate_stepmicro1 \
-VERL_DS_ZERO2_FP32_ACCUM_PATCH=1 VERL_DS_ZERO2_STEP_EACH_MICRO=1 \
-bash scripts/bench/run_ds_zero12_seed_gate_bench.sh
-```
-
-Command (`step_each_micro=0`):
-
-```bash
-SEEDS="7777" STEPS=60 RUN_TAG=ds_stage12_seed60_gate_stepmicro0 \
-VERL_DS_ZERO2_FP32_ACCUM_PATCH=1 VERL_DS_ZERO2_STEP_EACH_MICRO=0 \
-bash scripts/bench/run_ds_zero12_seed_gate_bench.sh
-```
-
-Outputs:
-
-- `outputs/<RUN_TAG>_<timestamp>/summary.tsv`
-- `outputs/<RUN_TAG>_<timestamp>/compare.tsv`
-- `outputs/<RUN_TAG>_<timestamp>/overall.tsv`
-
-## 4. Minimal DeepSpeed Demo (single run)
-
-Use this when you only need one stage/case quick-check instead of full sweeps:
+### 2.1 Single-run DeepSpeed PPO (2 GPUs)
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 \
+PYTHONUNBUFFERED=1 \
 VERL_DS_ZERO2_FP32_ACCUM_PATCH=1 \
 VERL_DS_ZERO2_STEP_EACH_MICRO=0 \
 python3 -m verl.trainer.main_ppo -cn ppo_trainer \
@@ -88,15 +40,60 @@ python3 -m verl.trainer.main_ppo -cn ppo_trainer \
   critic.deepspeed_config.offload=none \
   actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
   critic.model.path=Qwen/Qwen3-0.6B \
+  data.train_files=/home/ubuntu/data/gsm8k_ppo/train.parquet \
+  data.val_files=/home/ubuntu/data/gsm8k_ppo/test.parquet \
   trainer.total_training_steps=20 \
   trainer.n_gpus_per_node=2 \
   trainer.nnodes=1 \
   trainer.logger=[console]
 ```
 
-## 5. Notes for PR/Regression
+### 2.2 Six-case ZeRO benchmark
 
-- Prefer `summary.tsv` and tail-step averages (`avg_score_tail5`, `avg_throughput_tail5`) for quick comparisons.
-- For ZeRO2 parity checks, always report both:
-  - score delta (`z2 - z1`)
-  - throughput and memory deltas
+```bash
+SEED=7777 STEPS=60 RUN_TAG=zero_six_60_seed7777 \
+VERL_DS_ZERO2_FP32_ACCUM_PATCH=1 ZERO2_STEP_EACH_MICRO=0 \
+bash scripts/bench/run_ds_zero_six_case_bench.sh
+```
+
+Cases:
+
+- `zero1_no_offload`
+- `zero2_no_offload`
+- `zero3_no_offload`
+- `zero1_cpu_offload`
+- `zero2_cpu_offload`
+- `zero3_cpu_offload`
+
+Outputs:
+
+- `outputs/<RUN_TAG>_<timestamp>/summary.tsv`
+- `outputs/<RUN_TAG>_<timestamp>/<case>/train.log`
+
+### 2.3 Plot six-case curves (memory/throughput/score/loss)
+
+```bash
+python3 scripts/bench/plot_ds_zero_six_curves.py \
+  --run-root outputs/zero_six_60_seed7777_20260212_115956
+```
+
+Outputs:
+
+- `outputs/zero_six_60_seed7777_20260212_115956/zero_six_curves.png`
+- `outputs/zero_six_60_seed7777_20260212_115956/zero_six_curves_metrics.tsv`
+
+The `loss` curve uses `critic/vf_loss`.
+
+## 3. This Round Benchmark Artifacts
+
+Reference run root:
+
+- `outputs/zero_six_60_seed7777_20260212_115956`
+
+Summary files:
+
+- `outputs/zero_six_60_seed7777_20260212_115956/summary.tsv`
+- `outputs/zero_six_60_seed7777_20260212_115956/summary_complete.tsv`
+
+All six cases reached `step=60` in the merged summary.
+

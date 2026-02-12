@@ -381,6 +381,15 @@ def _normalize_offload_flags(ds_cfg: Any):
     if ds_cfg is None:
         return
 
+    allow_param_offload = os.getenv("VERL_ENABLE_PARAM_OFFLOAD", "0") == "1"
+    normalize_offload_flags = getattr(ds_cfg, "normalize_offload_flags", None)
+    if callable(normalize_offload_flags):
+        try:
+            normalize_offload_flags(allow_param_offload=allow_param_offload)
+            return
+        except Exception as exc:
+            logger.warning("Fallback to local offload normalization due to: %s", exc)
+
     zero_stage_int = _get_zero_stage(ds_cfg)
     offload_val = _cfg_get(ds_cfg, "offload", "none")
     offload_str = offload_val.lower() if isinstance(offload_val, str) else ""
@@ -388,9 +397,6 @@ def _normalize_offload_flags(ds_cfg: Any):
 
     param_offload = bool(_cfg_get(ds_cfg, "param_offload", False))
     optimizer_offload = bool(_cfg_get(ds_cfg, "optimizer_offload", False))
-
-    # Param offload is gated by env knob to keep rollout sync memory stable.
-    allow_param_offload = os.getenv("VERL_ENABLE_PARAM_OFFLOAD", "0") == "1"
 
     if offload_requested:
         if zero_stage_int >= 3 and allow_param_offload:

@@ -27,7 +27,7 @@ from dataclasses import FrozenInstanceError, dataclass
 from typing import Any
 
 import torch.distributed as dist
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 
 
 @dataclass
@@ -46,7 +46,7 @@ class ParallelLayout:
         return True
 
 
-def _get_attr(cfg: Any, name: str, default: int | None = None) -> int | None:
+def _get_attr(cfg: Any, name: str, default: Any = None) -> Any:
     """Read one field from dataclass-like, DictConfig, or dict configs."""
     if hasattr(cfg, name):
         return getattr(cfg, name)
@@ -70,8 +70,12 @@ def _set_attr(cfg: Any, name: str, value: Any) -> None:
     if cfg is None:
         return
     if isinstance(cfg, DictConfig):
-        if name in cfg:
-            cfg[name] = value
+        try:
+            with open_dict(cfg):
+                cfg[name] = value
+        except Exception:
+            if name in cfg:
+                cfg[name] = value
         return
     if isinstance(cfg, dict):
         cfg[name] = value
@@ -96,7 +100,10 @@ def resolve_and_sync_sp_size(role_cfg: Any) -> int:
     # Keep both config views aligned with the enforced value.
     if _get_attr(role_cfg, "ulysses_sequence_parallel_size", None) != sp_size:
         _set_attr(role_cfg, "ulysses_sequence_parallel_size", sp_size)
-    if _get_attr(ds_cfg, "ulysses_sequence_parallel_size", None) != sp_size:
+    # DeepSpeedEngineConfig does not define ulysses_sequence_parallel_size.
+    # Only write to DS sub-config when the field already exists.
+    ds_sp = _get_attr(ds_cfg, "ulysses_sequence_parallel_size", None)
+    if ds_sp is not None and ds_sp != sp_size:
         _set_attr(ds_cfg, "ulysses_sequence_parallel_size", sp_size)
 
     return int(sp_size)
