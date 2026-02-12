@@ -84,6 +84,7 @@ class AgentData:
         self.tool_rewards: list[float] = []
         self.user_turns = 0
         self.assistant_turns = 0
+        self.routed_experts: Optional[Any] = None
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
@@ -201,6 +202,11 @@ class ToolAgentLoop(AgentLoopBase):
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
             else None,
+            routed_experts=(
+                agent_data.routed_experts[: len(prompt_ids) + self.response_length]
+                if agent_data.routed_experts is not None
+                else None
+            ),
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             extra_fields={},
