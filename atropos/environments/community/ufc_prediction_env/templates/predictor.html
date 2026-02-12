@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fight Predictor</title>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .fighters-container {
+            display: flex;
+            justify-content: space-around;
+            margin: 20px 0;
+            position: relative;
+        }
+
+        .fighter {
+            width: 300px;
+            text-align: center;
+            transition: all 0.5s ease;
+        }
+
+        .fighter img {
+            width: 100%;
+            height: auto;
+            border: 3px solid;
+            border-radius: 10px;
+            transition: all 0.5s ease;
+        }
+
+        .red-corner img {
+            border-color: #ff0000;
+        }
+
+        .blue-corner img {
+            border-color: #0000ff;
+        }
+
+        .winner {
+            transform: scale(1.2);
+            z-index: 2;
+            position: relative;
+        }
+
+        .winner::after {
+            content: "WINNER!";
+            position: absolute;
+            top: -30px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #ffd700;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+
+        .loser {
+            animation: explode 1s forwards;
+        }
+
+        @keyframes explode {
+            0% {
+                transform: scale(1);
+                opacity: 1;
+            }
+            50% {
+                transform: scale(1.5);
+                opacity: 0.5;
+            }
+            100% {
+                transform: scale(0);
+                opacity: 0;
+            }
+        }
+
+        .commentary {
+            background-color: #2a2a2a;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            min-height: 200px;
+            white-space: pre-wrap;
+            display: none;
+        }
+
+        .typing {
+            overflow: hidden;
+            border-right: 2px solid #fff;
+            white-space: nowrap;
+            animation: typing 1s steps(40, end),
+                       blink-caret 0.75s step-end infinite;
+        }
+
+        @keyframes typing {
+            from { width: 0 }
+            to { width: 100% }
+        }
+
+        @keyframes blink-caret {
+            from, to { border-color: transparent }
+            50% { border-color: #fff }
+        }
+
+        .upload-form {
+            display: flex;
+            justify-content: space-around;
+            margin: 20px 0;
+        }
+
+        .upload-section {
+            text-align: center;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .upload-btn {
+            background-color: #333;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .upload-btn:hover {
+            background-color: #444;
+        }
+
+        .predict-btn {
+            background-color: #ff0000;
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 18px;
+            margin: 20px auto;
+            display: block;
+            transition: background-color 0.3s;
+        }
+
+        .predict-btn:hover {
+            background-color: #cc0000;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+            font-size: 24px;
+        }
+
+        .loading::before {
+            content: "⚡";
+            display: inline-block;
+            animation: loading 0.5s infinite;
+            margin-right: 10px;
+        }
+
+        .loading::after {
+            content: "Analyzing Fight...";
+            display: inline-block;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes loading {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.5; }
+            50% { opacity: 1; }
+            100% { opacity: 0.5; }
+        }
+
+        .new-fight-btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 18px;
+            margin: 20px auto;
+            display: none;
+            transition: background-color 0.3s;
+        }
+
+        .new-fight-btn:hover {
+            background-color: #45a049;
+        }
+
+        .buttons-container {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤼‍♂️ Fight Predictor 🤼‍♂️</h1>
+
+        <!-- Hidden iframe for airhorn -->
+        <iframe id="airhorn" width="110" height="200" src="https://www.myinstants.com/instant/dj-airhorn/embed/" frameborder="0" scrolling="no" style="display: none;"></iframe>
+
+        <form id="predictForm" class="upload-form">
+            <div class="upload-section">
+                <label class="upload-btn">
+                    Upload Red Corner Fighter
+                    <input type="file" name="red_fighter" accept="image/*" required>
+                </label>
+                <div class="fighter red-corner">
+                    <img id="redPreview" src="" alt="Red Corner Fighter" style="display: none;">
+                </div>
+            </div>
+
+            <div class="upload-section">
+                <label class="upload-btn">
+                    Upload Blue Corner Fighter
+                    <input type="file" name="blue_fighter" accept="image/*" required>
+                </label>
+                <div class="fighter blue-corner">
+                    <img id="bluePreview" src="" alt="Blue Corner Fighter" style="display: none;">
+                </div>
+            </div>
+        </form>
+
+        <div class="buttons-container">
+            <button class="predict-btn" onclick="predictFight()">Predict Fight!</button>
+            <button class="new-fight-btn" onclick="resetFight()">New Fight</button>
+        </div>
+
+        <div class="loading" id="loading"></div>
+        <div class="commentary" id="commentary"></div>
+    </div>
+
+    <script>
+        function previewImage(input, previewId) {
+            const preview = document.getElementById(previewId);
+            if (input.files && input.files[0]) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.src = e.target.result;
+                    preview.style.display = 'block';
+                }
+                reader.readAsDataURL(input.files[0]);
+            }
+        }
+
+        document.querySelector('input[name="red_fighter"]').addEventListener('change', function() {
+            previewImage(this, 'redPreview');
+        });
+
+        document.querySelector('input[name="blue_fighter"]').addEventListener('change', function() {
+            previewImage(this, 'bluePreview');
+        });
+
+        function playAirhorn() {
+            const iframe = document.getElementById('airhorn');
+            iframe.contentWindow.postMessage('play', '*');
+        }
+
+        function triggerConfetti() {
+            const duration = 3 * 1000;
+            const animationEnd = Date.now() + duration;
+            const defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 0 };
+
+            function randomInRange(min, max) {
+                return Math.random() * (max - min) + min;
+            }
+
+            const interval = setInterval(function() {
+                const timeLeft = animationEnd - Date.now();
+
+                if (timeLeft <= 0) {
+                    return clearInterval(interval);
+                }
+
+                const particleCount = 50 * (timeLeft / duration);
+
+                // since particles fall down, start a bit higher than random
+                confetti({
+                    ...defaults,
+                    particleCount,
+                    origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 }
+                });
+                confetti({
+                    ...defaults,
+                    particleCount,
+                    origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 }
+                });
+            }, 250);
+        }
+
+        function typeText(element, text, speed = 30) {
+            let i = 0;
+            element.innerHTML = '';
+            element.style.display = 'block';
+
+            function type() {
+                if (i < text.length) {
+                    element.innerHTML += text.charAt(i);
+                    i++;
+                    setTimeout(type, speed);
+                } else {
+                    // After typing is complete, check for winner
+                    const winnerMatch = text.match(/\\boxed{(Red|Blue)}/);
+                    if (winnerMatch) {
+                        const winner = winnerMatch[1];
+                        const redFighter = document.querySelector('.red-corner');
+                        const blueFighter = document.querySelector('.blue-corner');
+
+                        if (winner === 'Red') {
+                            redFighter.classList.add('winner');
+                            blueFighter.classList.add('loser');
+                            // Trigger effects from red corner
+                            triggerConfetti();
+                            playAirhorn();
+                        } else {
+                            blueFighter.classList.add('winner');
+                            redFighter.classList.add('loser');
+                            // Trigger effects from blue corner
+                            triggerConfetti();
+                            playAirhorn();
+                        }
+                        // Show new fight button after prediction is complete
+                        document.querySelector('.new-fight-btn').style.display = 'block';
+                    }
+                }
+            }
+
+            type();
+        }
+
+        function resetFight() {
+            // Reset images
+            document.getElementById('redPreview').style.display = 'none';
+            document.getElementById('redPreview').src = '';
+            document.getElementById('bluePreview').style.display = 'none';
+            document.getElementById('bluePreview').src = '';
+
+            // Reset form
+            document.getElementById('predictForm').reset();
+
+            // Reset classes
+            document.querySelector('.red-corner').classList.remove('winner', 'loser');
+            document.querySelector('.blue-corner').classList.remove('winner', 'loser');
+
+            // Clear and hide commentary
+            const commentary = document.getElementById('commentary');
+            commentary.innerHTML = '';
+            commentary.style.display = 'none';
+
+            // Hide new fight button
+            document.querySelector('.new-fight-btn').style.display = 'none';
+        }
+
+        async function predictFight() {
+            const form = document.getElementById('predictForm');
+            const formData = new FormData(form);
+
+            const loading = document.getElementById('loading');
+            const commentary = document.getElementById('commentary');
+            const predictBtn = document.querySelector('.predict-btn');
+
+            loading.style.display = 'block';
+            commentary.style.display = 'none';
+            predictBtn.disabled = true;
+
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    typeText(commentary, data.prediction);
+                } else {
+                    commentary.style.display = 'block';
+                    commentary.innerHTML = `Error: ${data.error}`;
+                }
+            } catch (error) {
+                commentary.style.display = 'block';
+                commentary.innerHTML = `Error: ${error.message}`;
+            } finally {
+                loading.style.display = 'none';
+                predictBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
