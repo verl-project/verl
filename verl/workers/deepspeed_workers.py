@@ -46,7 +46,6 @@ from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
-from verl.third_party.vllm import vllm_version
 from verl.utils import hf_processor, hf_tokenizer
 from verl.workers.deepspeed_parallel import (
     ParallelLayout,
@@ -88,7 +87,6 @@ from verl.utils.py_functional import append_to_dict, convert_to_regular_types
 from verl.utils.seqlen_balancing import prepare_dynamic_batch
 from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.torch_functional import masked_mean
-from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.workers.config import DeepSpeedCriticConfig, DeepSpeedEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.actor import DataParallelPPOActor
@@ -133,6 +131,20 @@ def _safe_zero_grad(engine: Optional[DeepSpeedEngine]):
         logger.warning("Skip zero_grad to avoid DeepSpeed zero_grad recursion (missing module)")
     except AttributeError:
         logger.warning("Skip zero_grad because DeepSpeed engine has no module")
+
+
+def _set_device_from_local_rank():
+    """Best-effort: bind CUDA device to LOCAL_RANK to avoid NCCL group issues."""
+    try:
+        if torch.cuda.is_available():
+            local_rank_env = os.environ.get("LOCAL_RANK")
+            if local_rank_env is None:
+                return
+            lr = int(local_rank_env)
+            if torch.cuda.current_device() != lr:
+                torch.cuda.set_device(lr)
+    except Exception:
+        pass
 
 
 def _ensure_engine_has_module(engine: Optional[DeepSpeedEngine], module: Optional[torch.nn.Module]):
@@ -285,97 +297,6 @@ def _gather_zero3_state_dict(module: torch.nn.Module, engine: DeepSpeedEngine):
     return params
 
 
-def _normalize_ds_config(cfg_section: DictConfig | dict | Any) -> Any:
-    """Normalize DeepSpeed config aliases and offload flags."""
-    if cfg_section is None:
-        return None
-
-    # Prefer canonical key first.
-    ds_cfg = getattr(cfg_section, "deepspeed_config", None)
-    if isinstance(cfg_section, DictConfig) and ds_cfg is None:
-        ds_cfg = cfg_section.get("deepspeed_config", None)
-
-    # Fallback to legacy alias `deepspeed`.
-    if ds_cfg is None:
-        if hasattr(cfg_section, "deepspeed"):
-            ds_cfg = getattr(cfg_section, "deepspeed")
-        elif isinstance(cfg_section, DictConfig):
-            ds_cfg = cfg_section.get("deepspeed", None)
-        elif isinstance(cfg_section, dict):
-            ds_cfg = cfg_section.get("deepspeed", None)
-
-        if ds_cfg is not None:
-            try:
-                if isinstance(cfg_section, DictConfig):
-                    with open_dict(cfg_section):
-                        cfg_section["deepspeed_config"] = ds_cfg
-                else:
-                    setattr(cfg_section, "deepspeed_config", ds_cfg)
-            except Exception:
-                pass
-
-    # Normalize offload knobs to a coherent state for the active ZeRO stage.
-    try:
-        if isinstance(ds_cfg, DictConfig):
-            zero_stage = ds_cfg.get("zero_stage", 0)
-            offload_val = ds_cfg.get("offload", "none")
-            param_offload = bool(ds_cfg.get("param_offload", False))
-            optimizer_offload = bool(ds_cfg.get("optimizer_offload", False))
-        elif isinstance(ds_cfg, dict):
-            zero_stage = ds_cfg.get("zero_stage", 0)
-            offload_val = ds_cfg.get("offload", "none")
-            param_offload = bool(ds_cfg.get("param_offload", False))
-            optimizer_offload = bool(ds_cfg.get("optimizer_offload", False))
-        else:
-            zero_stage = getattr(ds_cfg, "zero_stage", 0)
-            offload_val = getattr(ds_cfg, "offload", "none")
-            param_offload = bool(getattr(ds_cfg, "param_offload", False))
-            optimizer_offload = bool(getattr(ds_cfg, "optimizer_offload", False))
-
-        try:
-            zero_stage_int = int(zero_stage or 0)
-        except Exception:
-            zero_stage_int = 0
-        offload_str = offload_val.lower() if isinstance(offload_val, str) else ""
-        offload_requested = offload_str in {"cpu", "nvme", "auto"}
-
-        allow_param_offload = os.getenv("VERL_ENABLE_PARAM_OFFLOAD", "0") == "1"
-        if offload_requested:
-            if zero_stage_int >= 3 and allow_param_offload:
-                param_offload = True
-            if zero_stage_int >= 2:
-                optimizer_offload = True
-
-        if zero_stage_int >= 3 and not allow_param_offload:
-            param_offload = False
-        if zero_stage_int < 3:
-            param_offload = False
-        if zero_stage_int < 2:
-            optimizer_offload = False
-
-        if isinstance(ds_cfg, DictConfig):
-            with open_dict(ds_cfg):
-                ds_cfg["param_offload"] = param_offload
-                ds_cfg["optimizer_offload"] = optimizer_offload
-        elif isinstance(ds_cfg, dict):
-            ds_cfg["param_offload"] = param_offload
-            ds_cfg["optimizer_offload"] = optimizer_offload
-        else:
-            try:
-                setattr(ds_cfg, "param_offload", param_offload)
-                setattr(ds_cfg, "optimizer_offload", optimizer_offload)
-            except Exception:
-                try:
-                    object.__setattr__(ds_cfg, "param_offload", param_offload)
-                    object.__setattr__(ds_cfg, "optimizer_offload", optimizer_offload)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    return ds_cfg
-
-
 def _cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
     if cfg is None:
         return default
@@ -386,11 +307,132 @@ def _cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
     return getattr(cfg, key, default)
 
 
+def _cfg_set(cfg: Any, key: str, value: Any) -> bool:
+    """Best-effort config assignment across DictConfig/dict/object containers."""
+    if cfg is None:
+        return False
+    if isinstance(cfg, DictConfig):
+        try:
+            with open_dict(cfg):
+                cfg[key] = value
+            return True
+        except Exception:
+            return False
+    if isinstance(cfg, dict):
+        cfg[key] = value
+        return True
+    try:
+        setattr(cfg, key, value)
+        return True
+    except Exception:
+        try:
+            object.__setattr__(cfg, key, value)
+            return True
+        except Exception:
+            return False
+
+
 def _get_zero_stage(cfg: Any) -> int:
     try:
         return int(_cfg_get(cfg, "zero_stage", 0) or 0)
     except Exception:
         return 0
+
+
+def _get_ds_config_section(cfg_section: DictConfig | dict | Any) -> Any:
+    """Resolve DeepSpeed config and keep legacy alias in sync."""
+    if cfg_section is None:
+        return None
+
+    ds_cfg = _cfg_get(cfg_section, "deepspeed_config", None)
+    if ds_cfg is not None:
+        return ds_cfg
+
+    # Backward compatibility: older configs may still use `deepspeed`.
+    ds_cfg = _cfg_get(cfg_section, "deepspeed", None)
+    if ds_cfg is not None:
+        _cfg_set(cfg_section, "deepspeed_config", ds_cfg)
+    return ds_cfg
+
+
+def _enforce_deepspeed_sp_disabled(cfg_section: DictConfig | dict | Any, ds_cfg: Any):
+    """DeepSpeed worker path currently does not support ulysses/SP."""
+    sp_val = _cfg_get(cfg_section, "ulysses_sequence_parallel_size", None)
+    if sp_val is None and ds_cfg is not None:
+        sp_val = _cfg_get(ds_cfg, "ulysses_sequence_parallel_size", None)
+
+    if sp_val is None:
+        return
+
+    try:
+        sp_int = int(sp_val)
+    except Exception:
+        sp_int = 1
+
+    if sp_int != 1:
+        logger.warning("DeepSpeed workers do not support ulysses/sp. Forcing ulysses_sequence_parallel_size=1")
+
+    _cfg_set(cfg_section, "ulysses_sequence_parallel_size", 1)
+    _cfg_set(ds_cfg, "ulysses_sequence_parallel_size", 1)
+
+
+def _normalize_offload_flags(ds_cfg: Any):
+    """Normalize offload flags to match supported ZeRO-stage combinations."""
+    if ds_cfg is None:
+        return
+
+    zero_stage_int = _get_zero_stage(ds_cfg)
+    offload_val = _cfg_get(ds_cfg, "offload", "none")
+    offload_str = offload_val.lower() if isinstance(offload_val, str) else ""
+    offload_requested = offload_str in {"cpu", "nvme", "auto"}
+
+    param_offload = bool(_cfg_get(ds_cfg, "param_offload", False))
+    optimizer_offload = bool(_cfg_get(ds_cfg, "optimizer_offload", False))
+
+    # Param offload is gated by env knob to keep rollout sync memory stable.
+    allow_param_offload = os.getenv("VERL_ENABLE_PARAM_OFFLOAD", "0") == "1"
+
+    if offload_requested:
+        if zero_stage_int >= 3 and allow_param_offload:
+            param_offload = True
+        if zero_stage_int >= 2:
+            optimizer_offload = True
+
+    # Stage constraints:
+    # - ZeRO-3 may use param offload (behind env gate)
+    # - ZeRO-2 may use optimizer offload
+    # - ZeRO-1 keeps offload disabled in this DS worker path
+    if zero_stage_int >= 3 and not allow_param_offload:
+        param_offload = False
+    if zero_stage_int < 3:
+        param_offload = False
+    if zero_stage_int < 2:
+        optimizer_offload = False
+
+    _cfg_set(ds_cfg, "param_offload", param_offload)
+    _cfg_set(ds_cfg, "optimizer_offload", optimizer_offload)
+
+
+def _normalize_ds_config(cfg_section: DictConfig | dict | Any) -> Any:
+    """Normalize DS config aliases + feature boundaries for DS worker runtime.
+
+    Supported in DS workers:
+    - data parallel (dp)
+    - ZeRO stages 1/2/3
+    - checkpointing hooks
+    - offload control (stage-aware)
+
+    Not supported:
+    - ulysses/sp (forced to 1 for both role cfg and DS cfg views)
+    """
+    if cfg_section is None:
+        return None
+
+    ds_cfg = _get_ds_config_section(cfg_section)
+    _enforce_deepspeed_sp_disabled(cfg_section, ds_cfg)
+    _normalize_offload_flags(ds_cfg)
+
+    return ds_cfg
 
 
 def _ensure_background_loop() -> asyncio.AbstractEventLoop:
@@ -501,21 +543,13 @@ class ActorRolloutRefWorker(Worker):
         self.actor_layout: ParallelLayout | None = None
         self.ref_layout: ParallelLayout | None = None
 
-        rollout_cfg = self.config.get("rollout", {}) if isinstance(self.config, DictConfig) else {}
+        rollout_cfg = self.config.get("rollout", {}) if isinstance(self.config, DictConfig) else getattr(self.config, "rollout", {})
         self._skip_rollout = rollout_cfg.get("skip_rollout", False)
         load_format = rollout_cfg.get("load_format", "")
         self._dummy_rollout = isinstance(load_format, str) and load_format.startswith("dummy")
 
         # Ensure CUDA device is bound to LOCAL_RANK before init_process_group
-        try:
-            if torch.cuda.is_available():
-                local_rank_env = os.environ.get("LOCAL_RANK")
-                if local_rank_env is not None:
-                    lr = int(local_rank_env)
-                    if torch.cuda.current_device() != lr:
-                        torch.cuda.set_device(lr)
-        except Exception:
-            pass
+        _set_device_from_local_rank()
 
         # Initialize distributed environment
         if not torch.distributed.is_initialized():
@@ -539,15 +573,7 @@ class ActorRolloutRefWorker(Worker):
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
         # Ensure the CUDA device matches LOCAL_RANK to avoid NCCL hangs in new groups
-        try:
-            if torch.cuda.is_available():
-                local_rank_env = os.environ.get("LOCAL_RANK")
-                if local_rank_env is not None:
-                    lr = int(local_rank_env)
-                    if torch.cuda.current_device() != lr:
-                        torch.cuda.set_device(lr)
-        except Exception:
-            pass
+        _set_device_from_local_rank()
 
         # Setup offload flags
         self._is_offload_param = False
@@ -772,8 +798,6 @@ class ActorRolloutRefWorker(Worker):
                 config=ds_config,
                 model_parameters=actor_module.parameters(),
             )
-
-
             return ds_engine, ds_engine.module, optimizer, lr_scheduler, actor_model_config
         else:
             # No optimizer for ref or rollout
@@ -2080,6 +2104,8 @@ class CriticWorker(Worker):
         _normalize_ds_config(self.config)
         self.layout: ParallelLayout | None = None
 
+        _set_device_from_local_rank()
+
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(
                 backend=get_nccl_backend(),
@@ -2246,8 +2272,6 @@ class CriticWorker(Worker):
             config=ds_config,
             model_parameters=critic_module.parameters(),
         )
-
-
         self.critic_module = self.critic_engine.module
         self.critic_optimizer = optimizer
         self.critic_lr_scheduler = lr_scheduler
@@ -2450,6 +2474,7 @@ class RewardModelWorker(Worker):
         self.config = config
         _normalize_ds_config(self.config)
         self.layout: ParallelLayout | None = None
+        _set_device_from_local_rank()
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(
                 backend=get_nccl_backend(),
