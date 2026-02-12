@@ -15,6 +15,8 @@ import warnings
 from enum import Enum
 
 import torch
+import types
+import inspect
 
 try:
     from megatron.core.transformer.moe.moe_utils import (
@@ -236,7 +238,27 @@ def _patched_topk_routing_with_score_function(
 
     return routing_probs, routing_map
 
+def _get_aux_loss_coeff(_self, aux_loss_type: str) -> float:
+    """获取给定辅助损失类型的系数。"""
+    # 逻辑保持不变
+    if isinstance(_self.routing_type, str):
+        if _self.routing_type == aux_loss_type:
+            return _self.config.moe_aux_loss_coeff
+    if isinstance(_self.routing_type, list):
+        try:
+            idx = _self.routing_type.index(aux_loss_type)
+            return _self.config.moe_aux_loss_coeff[idx]
+        except (ValueError, IndexError):
+            return 0.0
+    return 0.0
 
+def _is_aux_loss_enabled(_self) -> bool:
+    """检查是否启用了任何辅助损失。"""
+    for aux_loss_type in ["aux_loss", "seq_aux_loss", "global_aux_loss"]:
+        # 注意这里调用的是同在模块级别的另一个辅助函数
+        if _get_aux_loss_coeff(_self, aux_loss_type) > 0:
+            return True
+    return False
 def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     """Top-k routing function
 
@@ -282,6 +304,8 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
             pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
         )
 
+    if not hasattr(self, "is_aux_loss_enabled"):
+        self.is_aux_loss_enabled = types.MethodType(_is_aux_loss_enabled, self)
     # Apply each aux loss type and attach aux loss autograd function to probs
     if self.training and torch.is_grad_enabled() and self.is_aux_loss_enabled():
         # Calculate scores and routing_map for aux loss
@@ -311,26 +335,48 @@ def apply_router_replay_patch():
     # Clear router instances to avoid state leakage between model initializations.
     RouterReplay.router_instances.clear()
     # Step 1: Patch TransformerConfig to include the feature flag
-    if not hasattr(TransformerConfig, "enable_routing_replay"):
-        # Add class attribute with default value
-        TransformerConfig.enable_routing_replay = False
+    try:
+        global_args = get_args()
+    except Exception:
+        global_args = None
 
+    try:
+        sig = inspect.signature(TransformerConfig.__init__)
+        native_params = sig.parameters
+    except Exception:
+        native_params = []
+
+    ext_attrs = ["enable_routing_replay", "moe_router_fusion"]
+
+    for attr in ext_attrs:
+        val = getattr(global_args, attr, False) if global_args else False
+
+        if not hasattr(TransformerConfig, attr):
+            setattr(TransformerConfig, attr, val)
+
+    if not hasattr(TransformerConfig, "_verl_router_patched"):
         # Store original __init__ method
         original_tf_config_init = TransformerConfig.__init__
 
         # Define new __init__ method that safely handles enable_routing_replay parameter
+        @wraps(original_tf_config_init)
         def patched_tf_config_init(self, *args, **kwargs):
             # Simple solution: remove the unknown parameter before calling original constructor
-            enable_routing_replay = kwargs.pop("enable_routing_replay", TransformerConfig.enable_routing_replay)
+            if "enable_routing_replay" not in native_params:
+                enable_routing_replay = kwargs.pop("enable_routing_replay", TransformerConfig.enable_routing_replay)
 
+            if "moe_router_fusion" not in native_params:
+                moe_router_fusion = kwargs.pop("enable_routing_replay", TransformerConfig.moe_router_fusion)
             # Call original constructor with remaining kwargs
             original_tf_config_init(self, *args, **kwargs)
 
             # Set the instance attribute
             self.enable_routing_replay = enable_routing_replay
+            self.moe_router_fusion = moe_router_fusion
 
         # Apply the patch
         TransformerConfig.__init__ = patched_tf_config_init
+        TransformerConfig._verl_router_patched = True
 
     # Step 2: Patch TopKRouter only once to ensure idempotency.
     if hasattr(TopKRouter, "_router_replay_patched"):
