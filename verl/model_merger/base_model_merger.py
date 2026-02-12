@@ -38,6 +38,7 @@ def parse_args():
     base_op_parser.add_argument(
         "--backend", type=str, required=True, choices=["fsdp", "megatron"], help="The backend of the model"
     )
+    base_op_parser.add_argument("--lora_alpha", type=int, default=None, help="Scaling factor for LoRA merging (integer type). If unset, defaults to twice the rank value")
     base_op_parser.add_argument("--local_dir", type=str, default=None, help="Path to the saved model checkpoints.")
     base_op_parser.add_argument(
         "--tie-word-embedding",
@@ -86,6 +87,7 @@ class ModelMergerConfig:
     Args:
         operation (str): Operation type - 'merge' or 'test'.
         backend (str): Backend type for the model ('fsdp' or 'megatron').
+        lora_alpha (int): Scaling factor for LoRA merging (integer type). If unset, defaults to twice the rank value.
         target_dir (Optional[str]): Directory to save the merged huggingface model. Defaults to "tmp".
         hf_upload_path (Optional[str]): Hugging Face repository ID to upload the model. Defaults to None.
         private (bool): Whether to upload the model to a private Hugging Face repository. Defaults to False.
@@ -103,6 +105,7 @@ class ModelMergerConfig:
 
     operation: str  # 'merge' or 'test'
     backend: str
+    lora_alpha: Optional[int] = None
     target_dir: Optional[str] = "tmp"
     hf_upload_path: Optional[str] = None
     private: bool = False
@@ -127,6 +130,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
     common_config_args = {
         "operation": args.operation,
         "backend": args.backend,
+        "lora_alpha": args.lora_alpha,
         "tie_word_embedding": args.tie_word_embedding,
         "trust_remote_code": args.trust_remote_code,
         "is_value_model": args.is_value_model,
@@ -275,9 +279,12 @@ class BaseModelMerger(ABC):
             lora_params[lora_key] = state_dict.pop(name)
 
         lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
+        if self.config.lora_alpha is None:
+            print(f"Warning: lora_alpha is unset and set to twice the rank value {lora_rank*2}")
+            self.config.lora_alpha = lora_rank*2
         peft_dict = {
             "r": lora_rank,
-            "lora_alpha": 0,  # lora_alpha is not set. An error should be raised to inform the user to set it manually.
+            "lora_alpha": self.config.lora_alpha, 
             "target_modules": list(target_modules),
         }
         peft_config = peft.LoraConfig(**peft_dict).to_dict()
