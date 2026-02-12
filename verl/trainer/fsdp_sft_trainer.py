@@ -18,6 +18,7 @@ TODO(zhangchi.usc1992)
 - Add validation
 """
 
+import json
 import os
 
 os.environ["NCCL_DEBUG"] = "WARN"
@@ -27,12 +28,14 @@ import logging
 import re
 import time
 from contextlib import nullcontext
+from dataclasses import asdict
 
 import hydra
 import torch
 import torch.distributed
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, TaskType, get_peft_model
+from safetensors.torch import save_file
 from tensordict import TensorDict
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -49,13 +52,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, get_
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.dataset import SFTDataset
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
-from verl.utils.device import (
-    auto_set_device,
-    get_device_id,
-    get_device_name,
-    is_cuda_available,
-    is_npu_available,
-)
+from verl.utils.device import auto_set_device, get_device_id, get_device_name, is_cuda_available, is_npu_available
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
@@ -67,6 +64,7 @@ from verl.utils.fsdp_utils import (
     get_fsdp_wrap_policy,
     get_init_weight_context_manager,
     init_fn,
+    layered_summon_lora_params,
 )
 from verl.utils.logger import log_with_rank
 from verl.utils.profiler import log_gpu_memory_usage
@@ -558,6 +556,34 @@ class FSDPSFTTrainer:
         self.checkpoint_manager.save_checkpoint(
             local_path=local_global_step_folder, global_step=step, max_ckpt_to_keep=max_ckpt_to_keep
         )
+        torch.distributed.barrier()
+
+        if self.lora and hasattr(self.fsdp_model, "peft_config"):
+            lora_save_path = os.path.join(local_global_step_folder, "lora_adapter")
+            local_mkdir_safe(lora_save_path)
+
+            peft_config = {}
+            if self.device_mesh.get_rank() == 0:
+                peft_config = asdict(self.fsdp_model.peft_config.get("default", {}))
+                peft_config["task_type"] = peft_config["task_type"].value
+                peft_config["peft_type"] = peft_config["peft_type"].value
+                peft_config["target_modules"] = list(peft_config["target_modules"])
+            try:
+                lora_params = layered_summon_lora_params(self.fsdp_model)
+                if self.device_mesh.get_rank() == 0:
+                    save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
+                    with open(os.path.join(lora_save_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+                        json.dump(peft_config, f, ensure_ascii=False, indent=4)
+                    print(f"Saved LoRA adapter to: {lora_save_path}")
+            except Exception as e:
+                log_with_rank(
+                    f"Save LoRA Adapter Error ({e})",
+                    rank=self.device_mesh.get_rank(),
+                    level=logging.WARNING,
+                    logger=logger,
+                    log_only_rank_0=True,
+                )
+            torch.distributed.barrier()
 
         # Save dataloader state
         if self.device_mesh.get_rank() == 0:
