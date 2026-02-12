@@ -20,12 +20,12 @@ generate_config() {
     local tmp_cfg=$(mktemp)
     
     echo "# This reference configration yaml is automatically generated via 'scripts/generate_trainer_config.sh'" > "$tmp_header"
-    echo "# in which it invokes 'python scripts/print_cfg.py --cfg job ${config_arg}' to flatten the 'verl/trainer/config/${config_name}.yaml' config fields into a single file." >> "$tmp_header"
+    echo "# in which it invokes 'python3 scripts/print_cfg.py --cfg job ${config_arg}' to flatten the 'verl/trainer/config/${config_name}.yaml' config fields into a single file." >> "$tmp_header"
     echo "# Do not modify this file directly." >> "$tmp_header"
     echo "# The file is usually only for reference and never used." >> "$tmp_header"
     echo "" >> "$tmp_header"
     
-    python scripts/print_cfg.py --cfg job ${config_arg} > "$tmp_cfg"
+    python3 scripts/print_cfg.py --cfg job ${config_arg} > "$tmp_cfg"
     
     cat "$tmp_header" > "$target_cfg"
     sed -n '/^actor_rollout_ref/,$p' "$tmp_cfg" >> "$target_cfg"
