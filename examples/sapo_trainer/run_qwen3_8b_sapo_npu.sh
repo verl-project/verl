@@ -91,8 +91,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.resume_mode=auto \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
     actor_rollout_ref.ref.fsdp_config.forward_prefetch=True \
-    ++actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
-    ++actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
+    actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
+    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
     trainer.val_before_train=True \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
