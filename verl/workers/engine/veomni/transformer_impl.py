@@ -83,10 +83,15 @@ class VeOmniEngine(FSDPEngine):
         world_size = dist.get_world_size()
         dp_size = world_size // self.engine_config.ulysses_parallel_size
 
-        if fsdp_size < 0 or fsdp_size >= world_size:
+        if fsdp_size < 0 or fsdp_size >= dp_size:
             data_parallel_replicate_size = 1
-            data_parallel_shard_size = world_size
+            data_parallel_shard_size = dp_size
         else:
+            if dp_size % fsdp_size != 0:
+                raise ValueError(
+                    f"Data parallel size ({dp_size}) must be divisible by fsdp_size ({fsdp_size}). "
+                    "Please adjust your parallel configuration."
+                )
             data_parallel_replicate_size = dp_size // fsdp_size
             data_parallel_shard_size = fsdp_size
 
