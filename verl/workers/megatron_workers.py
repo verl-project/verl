@@ -219,6 +219,19 @@ class MegatronWorker(Worker):
                 provider.moe_token_dispatcher_type = "alltoall"
                 provider.moe_router_load_balancing_type = "none"
 
+                def quantization_layer_spec(config):
+                    from megatron.core.post_training.modelopt.gpt.model_specs import get_gpt_modelopt_spec
+                    return get_gpt_modelopt_spec(
+                        config=config,
+                        local_core_attention=False,
+                        remap_te_layernorm=True,
+                        real_quant_cfg="None",
+                        use_arbitrary_attention_mask=False,
+                    )
+
+                # from megatron.bridge.models.gpt_provider import quantization_layer_spec
+                provider.transformer_layer_spec = quantization_layer_spec
+
                 # Apply transformer config overrides
                 for key, value in override_transformer_config.items():
                     setattr(provider, key, value)
@@ -451,7 +464,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 for i in range(len(actor_module)):
                     actor_module[i] = apply_qat(actor_module[i], quantization)
                 print("[lark]: QAT applied to all actor model chunks")
-
+            print(f"larkz module: {actor_module[0]}")
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model
