@@ -424,9 +424,13 @@ class ToolAgentLoop(AgentLoopBase):
             tool_args = json.loads(tool_call.arguments)
             tool = self.tools[tool_name]
             kwargs = tools_kwargs.get(tool_name, {})
-            instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+            # more robustness for create_kwargs, execute_kwargs, and release_kwargs
+            create_kwargs = kwargs.get("create_kwargs", {})
+            execute_kwargs = kwargs.get("execute_kwargs", {})
+            release_kwargs = kwargs.get("release_kwargs", {})
+            instance_id, _ = await tool.create(**create_kwargs)
             tool_execution_response, tool_reward, res = await tool.execute(
-                instance_id, tool_args, agent_data=agent_data
+                instance_id, tool_args, agent_data=agent_data, **execute_kwargs
             )
         except Exception as e:
             logger.warning(f"Error when executing tool: {e}")
@@ -439,7 +443,7 @@ class ToolAgentLoop(AgentLoopBase):
             )
         finally:
             if tool and instance_id:
-                await tool.release(instance_id)
+                await tool.release(instance_id, **release_kwargs)
 
         tool_response_text = tool_execution_response.text
         if tool_response_text and len(tool_response_text) > self.max_tool_response_length:
