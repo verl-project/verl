@@ -22,6 +22,7 @@ import threading
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable
 
+import torch
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from verl.protocol import DataProto
@@ -102,29 +103,20 @@ def _meta_to_realdata(meta: KVBatchMeta) -> TensorDict:
 
 
 async def _async_update_meta_with_output(output: TensorDict, meta: KVBatchMeta, func_name=None) -> KVBatchMeta:
-    if isinstance(output, TensorDict):
-        is_empty = output.batch_size[0] == 0
-        meta_data = {}
-        for key, val in output.items():
-            if isinstance(val, NonTensorData):
-                meta_data[key] = val.data
-    else:
-        raise TypeError(f"Only support TensorDict format of output, but got {type(output)}")
+    fields, meta_data = [], {}
+    for k, v in output.items():
+        if isinstance(v, torch.Tensor | NonTensorStack):
+            fields.append(k)
+        elif isinstance(v, NonTensorData):
+            meta_data[k] = v.data
+        else:
+            raise ValueError(f"Unsupported type {type(v)} for key {k} in output TensorDict.")
 
-    meta.extra_info.update(meta_data)
-
-    # process tensordict containing data to be put into TQ. meta_info should not be saved
-    if not is_empty:
-        for key in meta_data.keys():
-            output.pop(key)
-        await tq.async_kv_batch_put(keys=meta.keys, partition_id=meta.partition_id, fields=output)
-
-        meta.fields = list(output.keys())
-
-        return meta
-    else:
-        meta.fields = None
-        return meta
+    if fields:
+        await tq.async_kv_batch_put(keys=meta.keys, partition_id=meta.partition_id, fields=output.select(*fields))
+    return KVBatchMeta(
+        keys=meta.keys, partition_id=meta.partition_id, fields=fields, tags=[{}] * len(meta.keys), extra_info=meta_data
+    )
 
 
 def _update_meta_with_output(output: TensorDict, meta: KVBatchMeta, func_name=None) -> KVBatchMeta:
@@ -258,8 +250,11 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
 
                 put_data = False
                 if isinstance(output, TensorDict):
-                    if output.batch_size is not None:
-                        put_data = output.batch_size[0] == meta.size
+                    if output.batch_size:
+                        assert output.batch_size[0] == meta.size, (
+                            f"output batch size {output.batch_size} != meta size {meta.size}"
+                        )
+                        put_data = True
 
                 need_collect = _compute_need_collect(dispatch_mode, args)
                 if put_data and need_collect:
@@ -282,8 +277,11 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
 
                 put_data = False
                 if isinstance(output, TensorDict):
-                    if output.batch_size is not None:
-                        put_data = output.batch_size[0] == meta.size
+                    if output.batch_size:
+                        assert output.batch_size[0] == meta.size, (
+                            f"output batch size {output.batch_size} != meta size {meta.size}"
+                        )
+                        put_data = True
 
                 need_collect = _compute_need_collect(dispatch_mode, args)
                 if put_data and need_collect:
