@@ -1,0 +1,47 @@
+# Dockerfile for running verl on Google Cloud Vertex AI with vLLM rollout engine.
+#
+# Vertex AI's container runtime requires specific NVIDIA driver userspace libraries
+# for GPU injection. The existing nvidia/cuda-based images (e.g., Dockerfile.stable.vllm)
+# do not work on Vertex AI (nvidia-smi unavailable, torch.cuda.device_count()=0).
+#
+# This Dockerfile uses verlai/verl:app-verl0.6-* as the base (Vertex AI GPU compatible),
+# and builds vLLM from source to match the base image's PyTorch ABI (2.8.0+cu128).
+# The pre-built vLLM wheel targets torch==2.6.0 and causes undefined symbol errors.
+#
+# Tested on: Vertex AI a3-highgpu-8g (8x H100 80GB), a2-ultragpu-8g (8x A100 80GB)
+#
+# Build:
+#   docker build -f Dockerfile.vllm -t verl-vertex-vllm:latest .
+
+FROM verlai/verl:app-verl0.6-transformers4.56.1-sglang0.5.2-mcore0.13.0-te2.2
+
+ARG PIP_NO_CACHE_DIR=1
+ARG MAX_JOBS=8
+
+ENV TORCH_CUDA_ARCH_LIST="8.0;9.0"
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+ENV PYTHONUNBUFFERED=1
+ENV HYDRA_FULL_ERROR=1
+
+# Install verl (base image ships dependencies only, verl itself is uninstalled)
+RUN pip install --no-deps git+https://github.com/volcengine/verl.git@v0.6.0
+
+# Build vLLM 0.8.5 from source to match base image torch ABI
+# --no-deps: prevent replacing torch; --no-build-isolation: use system torch for compilation
+RUN pip install "setuptools>=77.0.3,<81.0.0" "packaging>=24.2" setuptools_scm
+RUN git clone --depth 1 -b v0.8.5 https://github.com/vllm-project/vllm.git /opt/vllm && \
+    cd /opt/vllm && \
+    MAX_JOBS=${MAX_JOBS} pip install . --no-build-isolation --no-deps && \
+    pip install -r requirements/common.txt && \
+    rm -rf /opt/vllm
+
+# Fix dependency version conflicts
+# 1. transformers>=5.0 removed AutoModelForVision2Seq (required by verl 0.6)
+# 2. numba 0.61.2 (vLLM dep) requires numpy<=1.26
+RUN pip install "transformers>=4.56.0,<5.0.0" "numpy<1.27" "numba==0.61.2"
+
+# Uninstall uvloop: verl's fsdp_workers.py calls asyncio.get_event_loop() which
+# raises RuntimeError under uvloop when no running loop exists in the thread
+RUN pip uninstall -y uvloop 2>/dev/null; true
+
+CMD ["bash"]
