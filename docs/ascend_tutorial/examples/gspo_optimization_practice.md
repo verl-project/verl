@@ -1,6 +1,6 @@
 ## NPU Qwen3-32B GSPO Optimization Practice
 
-Last updated: 01/27/2026.
+Last updated: 02/10/2026.
 
 本文章对应脚本地址：[qwen3_32b_gspo_npu](https://github.com/volcengine/verl/blob/main/examples/gspo_trainer/run_qwen3_32b_gspo_npu.sh)
 
@@ -29,6 +29,32 @@ actor_rollout_ref.rollout.n=16 \                  # 每个prompt生成16个响�
 ~~~
 
 一般选择入口函数为`verl.trainer.main_ppo`
+
+### 基础环境
+
+当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 4台Atlas 800T A3。关键软件版本可以参考：[Ascend Quickstart](https://github.com/volcengine/verl/blob/main/docs/ascend_tutorial/ascend_quick_start.rst)
+
+## 安装基础环境
+
+| software     | version                                                    |
+| ------------ | ---------------------------------------------------------- |
+| Python       | >= 3.10, <3.12                                             |
+| CANN         | == 8.3.RC1                                                 |
+| torch        | == 2.7.1                                                   |
+| torch_npu    | == 2.7.1                                                   |
+| verl         | main分支 commitId=252d76908b903ad8fb6969eb3a5e5f873c95ea2b |
+| vllm         | v0.11.0                                                    |
+| vllm-ascend  | v0.11.0-dev                                                |
+| transformers | 4.57.3                                                     |
+
+在本实践中, 我们通过指定 verl 的commit id 以避免引入其他问题
+
+~~~bash
+cd verl
+git checkout 252d76908b903ad8fb6969eb3a5e5f873c95ea2b
+# 指定相应的recipe版本
+git submodule update --init --recursive recipe
+~~~
 
 ### 性能调优
 
