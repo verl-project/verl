@@ -367,7 +367,7 @@ def apply_router_replay_patch():
                 enable_routing_replay = kwargs.pop("enable_routing_replay", TransformerConfig.enable_routing_replay)
 
             if "moe_router_fusion" not in native_params:
-                moe_router_fusion = kwargs.pop("enable_routing_replay", TransformerConfig.moe_router_fusion)
+                moe_router_fusion = kwargs.pop("moe_router_fusion", TransformerConfig.moe_router_fusion)
             # Call original constructor with remaining kwargs
             original_tf_config_init(self, *args, **kwargs)
 
