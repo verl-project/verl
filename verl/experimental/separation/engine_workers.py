@@ -347,7 +347,7 @@ class DetachActorWorker(DetachNcclSync):
                 ret.append((key, tensor.size(), tensor.dtype))
 
         elif self.config.actor.strategy == "megatron":
-            if self.actor.engine._is_offload_param:
+            if self.engine._is_offload_param:
                 self.load_model_to_gpu()
 
             params_generator = self._get_actor_params_generator()
