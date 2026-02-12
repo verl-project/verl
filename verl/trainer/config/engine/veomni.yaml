@@ -12,6 +12,8 @@ fsdp_size: -1
 
 ulysses_parallel_size: 1
 
+expert_parallel_size: 1
+
 mixed_precision: true
 
 # Random seed for reproducibility.

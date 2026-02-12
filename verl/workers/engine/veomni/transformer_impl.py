@@ -99,6 +99,7 @@ class VeOmniEngine(FSDPEngine):
             dp_size=dp_size,
             dp_replicate_size=data_parallel_replicate_size,
             dp_shard_size=data_parallel_shard_size,
+            ep_size=self.engine_config.expert_parallel_size,
             ulysses_size=self.engine_config.ulysses_parallel_size,
             dp_mode=self.data_parallel_mode,
         )

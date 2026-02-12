@@ -237,6 +237,7 @@ class VeOmniEngineConfig(EngineConfig):
         reshard_after_forward (bool): Whether to reshard parameters after forward pass, default True
         fsdp_size (int): FSDP group size. -1 means use all available GPUs, default -1
         ulysses_parallel_size (int): Ulysses sequence parallel size, default 1
+        expert_parallel_size (int): Expert parallel size, default 1
         init_device (str): Device to initialize model weights.
             1. `cpu`: Init parameters on CPU in rank0 only.
             2. `cuda`: Init parameters on GPU.
@@ -287,6 +288,7 @@ class VeOmniEngineConfig(EngineConfig):
     strategy: str = "veomni"
     fsdp_size: int = -1
     ulysses_parallel_size: int = 1
+    expert_parallel_size: int = 1
     seed: int = 42
     full_determinism: bool = False
     mixed_precision: bool = False
