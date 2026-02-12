@@ -38,7 +38,6 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 def migrate_legacy_reward_impl(config):
     """
     Migrate the legacy reward model implementation to the new one.
-    This is a temporary fix. A more robust one will be added.
     """
     # 1. reward workers migration
     # config.reward_model.num_workers -> config.reward.num_workers
@@ -49,7 +48,7 @@ def migrate_legacy_reward_impl(config):
     # config.reward_model.reward_manager -> config.reward.reward_manager
     if config.reward_model.reward_manager is not None:
         config.reward.reward_manager.name = config.reward_model.reward_manager
-    if config.reward_model.get("reward_loop_source") is not None:
+    if config.reward_model.reward_loop_source is not None:
         config.reward.reward_manager.source = config.reward_model.reward_loop_source
         config.reward.reward_manager.module.path = config.reward_model.reward_loop_module_path
         config.reward.reward_manager.module.name = config.reward_model.reward_loop_class_name
@@ -64,18 +63,28 @@ def migrate_legacy_reward_impl(config):
     for key in ["enable", "enable_resource_pool", "n_gpus_per_node", "nnodes"]:
         if config.reward_model.get(key) is not None:
             config.reward.reward_model[key] = config.reward_model[key]
-    # for dapo reward kwargs
+    if config.reward_model.model.path is not None:
+        config.reward.reward_model.model_path = config.reward_model.model.path
+    # config.reward_model.reward_kwargs -> config.reward.reward_kwargs (for dapo algo)
     if config.reward_model.get("reward_kwargs") is not None:
-        with open_dict(config.reward.reward_model):
-            config.reward.reward_model["reward_kwargs"] = config.reward_model["reward_kwargs"]
+        with open_dict(config.reward):
+            config.reward["reward_kwargs"] = config.reward_model["reward_kwargs"]
+    # config.reward_model.rollout -> config.reward.reward_model.rollout
     legacy_rollout = config.reward_model.rollout
-    if not all(v is None for v in legacy_rollout.values()):
-        config.reward.reward_model.rollout = legacy_rollout
+    for key in legacy_rollout.keys():
+        if legacy_rollout[key] is not None:
+            config.reward.reward_model.rollout[key] = legacy_rollout[key]
 
     # 5. sandbox_fusion migration
     # config.sandbox_fusion -> reward.sandbox_fusion
     if not all(v is None for v in config.sandbox_fusion.values()):
         config.reward.sandbox_fusion = config.sandbox_fusion
+
+    # 6. delete legacy config from configs
+    with open_dict(config):
+        del config.reward_model
+        del config.custom_reward_function
+        del config.sandbox_fusion
 
     return config
 
@@ -222,12 +231,10 @@ class RewardLoopWorker:
         engine_name = self.config.reward.reward_model.rollout.name
         model_name = self.config.reward.reward_model.model_path
         if engine_name == "vllm":
-            # TODO (dyy): the "activation" has been changed to "use_activation" in vllm 0.11.2
             payloads = {
                 "model": model_name,
                 "input": disrm_prompt,
-                "activation": False,
-                # "add_special_tokens": False,  # vllm >= 0.11.2
+                "use_activation": False,
             }
             output = await self._post_request(payloads, "classify")
             rm_score = output["data"][-1]["probs"][-1]
