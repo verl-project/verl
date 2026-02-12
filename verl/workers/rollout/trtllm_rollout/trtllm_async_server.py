@@ -203,7 +203,6 @@ class TRTLLMHttpServer:
         if self.is_vlm_model:
             org_prompt = self.llm.tokenizer.decode(prompt_ids)
             if image_data or video_data:
-                
                 input_dict = {
                     "prompt": org_prompt,
                     "multi_modal_data": {},
@@ -213,7 +212,7 @@ class TRTLLMHttpServer:
                     input_dict["multi_modal_data"]["image"] = image_data
                 if video_data:
                     input_dict["multi_modal_data"]["video"] = video_data
-                
+
                 outputs = await self.llm.generate_async(
                     inputs=input_dict,
                     sampling_params=trt_llm_sampling_params,
