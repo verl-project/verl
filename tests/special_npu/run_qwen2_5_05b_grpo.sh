@@ -3,13 +3,15 @@ set -x
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
-SAVE_PATH="outputs/profile_qwen2_5_05b_grpo"
-LEVEL="level1"
+SAVE_PATH=tests/utils/ci/profiler_data
+rm -rf "$SAVE_PATH"
+
+LEVEL="level0"
 CONTENTS="['npu','cpu']"
-ANALYSIS=True
+ANALYSIS=False
 PROFILE_STEPS="[1]"
-PROFILE_RANKS_ALL=True
-DISCRETE=False
+PROFILE_RANKS_ALL=False
+DISCRETE=True
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -67,7 +69,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.profiler.tool_config.npu.analysis=$ANALYSIS \
     global_profiler.tool=npu \
     global_profiler.steps=$PROFILE_STEPS \
-    global_profiler.save_path=$SAVE_PATH $@
+    global_profiler.save_path="$SAVE_PATH" $@
 
+python3 "tests/utils/test_check_and_profiler_output.py" --profiler-dir="$SAVE_PATH"
 
 
