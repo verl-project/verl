@@ -82,6 +82,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     metrics = {}
 
+    # select fields and convert to padded tensor
+    fields = ["response_mask", "old_log_probs", "advantages"]
+    if "rollout_is_weights" in data:
+        fields.append("rollout_is_weights")
+    if "ref_log_prob" in data:
+        fields.append("ref_log_prob")
+    data = data.select(*fields).to_padded_tensor()
+
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
     old_log_prob = data["old_log_probs"]
@@ -150,6 +158,7 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     """
     vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
 
+    # select fields and convert to padded tensor
     data = data.select("values", "returns", "response_mask").to_padded_tensor()
     values = data["values"]
     returns = data["returns"]

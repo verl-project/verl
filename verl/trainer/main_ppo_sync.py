@@ -45,7 +45,7 @@ from transfer_queue import KVBatchMeta
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
 from verl.experimental.reward_loop import RewardLoopManager
-from verl.protocol import DataProto
+from verl.protocol import DataProto, DataProtoFuture
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
     RayWorkerGroup,
@@ -55,6 +55,12 @@ from verl.single_controller.ray import (
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.metric_utils import (
+    compute_data_metrics,
+    compute_throughout_metrics,
+    compute_timing_metrics,
+    compute_variance_proxy_metrics,
+)
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy
@@ -159,7 +165,7 @@ class ReplayBuffer:
                             keys.append(key)
                             tags.append(tag)
                         else:
-                            logger.warning(f"Unknown status {tag['status']} for key {key}")
+                            logger.debug(f"Unknown status {tag['status']} for key {key}")
                 logger.info("partitions", self.partitions)
                 if not should_wait:
                     return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
@@ -612,6 +618,12 @@ class PPOTrainer:
         else:
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+    def _save_checkpoint(self):
+        raise NotImplementedError
+
+    def _validate(self) -> dict:
+        raise NotImplementedError
+
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         do_profile = (
@@ -831,6 +843,8 @@ class PPOTrainer:
 
         # 4. write nested advantages and returns back to TransferQueue
         fields = ["advantages", "returns"]
+        if self.config.algorithm.use_kl_in_reward:
+            fields.append("token_level_rewards")
         if rollout_correction:
             fields.append("response_mask")
             if "rollout_is_weights" in data.batch:
@@ -852,6 +866,7 @@ class PPOTrainer:
         ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         extra_info = {
+            "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.critic.ppo_epochs,
             "seed": self.config.critic.data_loader_seed,
@@ -859,14 +874,66 @@ class PPOTrainer:
         }
         batch.extra_info.update(extra_info)
 
-        output = self.critic_wg.train_mini_batch(batch)
-        output: TensorDict = ray.get(output.futures)[0]
+        output: DataProtoFuture = self.critic_wg.train_mini_batch(batch)
+        output: TensorDict = output.get()
         output = rename_dict(output["metrics"], "critic/")
         output["perf/mfu/critic"] = output.pop("critic/mfu")
         critic_metrics = reduce_metrics(output)
         metrics.update(critic_metrics)
 
         return batch
+
+    def _update_actor(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """Update the actor network."""
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+        extra_info = {
+            "calculate_entropy": calculate_entropy,
+            "global_batch_size": ppo_mini_batch_size,
+            "mini_batch_size": ppo_mini_batch_size,
+            "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
+            "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
+            "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+        }
+        batch.extra_info.update(extra_info)
+
+        output: TensorDict = self.actor_rollout_wg.update_actor(batch)
+        output = rename_dict(output["metrics"], "actor/")
+        output["perf/mfu/actor"] = output.pop("actor/mfu")
+        actor_metrics = reduce_metrics(output)
+        metrics.update(actor_metrics)
+
+        return batch
+
+    def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
+        # 1. collect necessary fields from TransferQueue for computing metrics
+        fields = [
+            "attention_mask",
+            "responses",
+            "response_mask",
+            "values",
+            "advantages",
+            "returns",
+            "rm_scores",
+            "token_level_rewards",
+        ]
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+        data = data.to_padded_tensor()
+        data["token_level_scores"] = data["rm_scores"]
+        if "token_level_rewards" not in data:
+            data["token_level_rewards"] = data["rm_scores"]
+        global_token_num = torch.sum(data["attention_mask"], dim=-1).tolist()
+        batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
+
+        # 2. compute metrics
+        metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
+        metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+        metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+        n_gpus = self.resource_pool_manager.get_n_gpus()
+        metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+        gradient_norm = metrics.get("actor/grad_norm", None)
+        metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
     def fit(self):
         self.logger = Tracking(
@@ -895,25 +962,59 @@ class PPOTrainer:
         )
         self.next_step_profile = False
 
+        last_val_metrics = None
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
+                is_last_step = self.global_steps >= self.total_training_steps
                 metrics, timing_raw = {}, {}
+
+                # 1. perform rollout, update critic, and update actor
                 self._start_profiling()
                 with marked_timer("step", timing_raw):
-                    metrics = self.step(batch_dict, metrics, timing_raw)
+                    batch = self.step(batch_dict, metrics, timing_raw)
                 self._stop_profiling()
+
+                # 2. save checkpoint
+                if self.config.trainer.save_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                ):
+                    with marked_timer("save_checkpoint", timing_raw, color="green"):
+                        self._save_checkpoint()
+
+                # 3. update weights from trainer to rollout
+                with marked_timer("update_weights", timing_raw, color="red"):
+                    self.checkpoint_manager.update_weights()
+
+                # 4. validate
+                if self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+                ):
+                    with marked_timer("testing", timing_raw, color="green"):
+                        val_metrics: dict = self._validate()
+                        if is_last_step:
+                            last_val_metrics = val_metrics
+                    metrics.update(val_metrics)
+
+                # 5. record metrics
+                self._compute_metrics(batch, metrics, timing_raw, global_steps=self.global_steps, epoch=epoch)
+
                 self.logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
                 self.global_steps += 1
 
-    def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> dict:
+                if is_last_step:
+                    pprint(f"Final validation metrics: {last_val_metrics}")
+                    progress_bar.close()
+                    return
+
+    def step(self, batch_dict: dict, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         # 1. put batch to agent loop manager
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         self.agent_loop_manager.generate_sequences(batch)
 
-        # 2. get batch from replay buffer
+        # 2. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
             batch = self.replay_buffer.sample(partition_id="train", global_steps=self.global_steps)
         batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
@@ -949,7 +1050,13 @@ class PPOTrainer:
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
                 batch = self._update_critic(batch, metrics=metrics)
-        breakpoint()
+
+        # 10. update actor
+        if self.config.trainer.critic_warmup <= self.global_steps:
+            with marked_timer("update_actor", timing_raw, color="red"):
+                batch = self._update_actor(batch, metrics=metrics)
+
+        return batch
 
 
 @ray.remote
