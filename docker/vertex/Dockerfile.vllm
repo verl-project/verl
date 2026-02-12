@@ -42,6 +42,6 @@ RUN pip install "transformers>=4.56.0,<5.0.0" "numpy<1.27" "numba==0.61.2"
 
 # Uninstall uvloop: verl's fsdp_workers.py calls asyncio.get_event_loop() which
 # raises RuntimeError under uvloop when no running loop exists in the thread
-RUN pip uninstall -y uvloop 2>/dev/null; true
+RUN pip uninstall -y uvloop
 
 CMD ["bash"]
