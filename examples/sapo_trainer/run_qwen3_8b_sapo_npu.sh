@@ -1,4 +1,4 @@
-set -x
+set -euxo pipefail
 
 mkdir -p logs
 ulimit -n 32768
