@@ -73,6 +73,7 @@ from verl.utils.profiler import (
     simple_timer,
 )
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
+from verl.utils.qat_utils import QATConfig, apply_qat, is_qat_enabled
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.torch_functional import use_original_torch_compile
 from verl.workers.actor.megatron_actor import MegatronPPOActor
@@ -442,6 +443,16 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self.rank == 0:
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
+            quantization = self.config.actor.megatron.get("quantization", None)
+            if quantization is not None:
+                if is_qat_enabled(quantization):
+                    print(f"[lark]: Applying QAT with method: {quantization}")
+                    qat_config = QATConfig(enabled=True, quant_method=quantization)
+                    print("[lark]: length of actor_module:", len(actor_module))
+                    for i in range(len(actor_module)):
+                        actor_module[i] = apply_qat(actor_module[i], qat_config)
+                    print("[lark]: QAT applied to all actor model chunks")
+
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model
@@ -717,6 +728,28 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.tf_config,
                 self.layer_name_mapping,
             )
+        if is_qat_enabled(self.config.actor.megatron.quantization):
+            print("[lark]: rollout mode: quantizing weights with QAT")
+            from verl.utils.qat_post_utils import QATWeightPostProcessor
+
+            qat_weight_post_processor = QATWeightPostProcessor(
+                self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True
+            )
+            per_tensor_param = qat_weight_post_processor.process_weights_iterator(per_tensor_param)
+
+            # per_tensor_param = list(per_tensor_param)
+            # rank = torch.distributed.get_rank()
+            # state_dict = {}
+            # for name, weight in per_tensor_param:
+            #     state_dict[name] = weight.data.cpu()
+            # path = f"/apps/quant_models/qwen3_8b_nvfp4/model_rank_{rank}.pt"
+            # torch.save(state_dict, path)
+            # del state_dict
+            # print(f"[lark]: saved state_dict to {path}")
+
+            # import time 
+            # time.sleep(1000)
+
 
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])

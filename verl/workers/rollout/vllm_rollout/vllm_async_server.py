@@ -225,7 +225,7 @@ class vLLMHttpServer:
         quantization = self.config.quantization
 
         if quantization is not None:
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]
+            _SUPPORTED_QUANTIZATION = ["fp8", "torchao", "nvfp4_qat"]
             if quantization not in _SUPPORTED_QUANTIZATION:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
@@ -242,6 +242,41 @@ class vLLMHttpServer:
                 apply_vllm_fp8_patches()
                 # for subprocesses patching
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+            elif quantization == "nvfp4_qat":
+                print("[lark]: vllm quantization is nvfp4_qat")
+                fp4_block_quant_kwargs = {
+                    "config_groups": {
+                        "group_0": {
+                            "input_activations": {
+                                "dynamic": "false",
+                                "num_bits": 4,
+                                "type": "float",
+                                "group_size": 16
+                            },
+                            "weights": {
+                                "dynamic": "false",
+                                "num_bits": 4,
+                                "type": "float",
+                                "group_size": 16
+                            },
+                            "targets": [
+                                "Linear"
+                            ]
+                        }
+                    },
+                    "ignore": [
+                        "lm_head"
+                    ],
+                    "quant_algo": "NVFP4",
+                    "producer": {
+                        "name": "modelopt",
+                        "version": "0.40.0.dev89+g0ec5e200f.d20251127"
+                    },
+                    "quant_method": "modelopt"
+                }
+                from verl.utils.modelopt_utils import apply_vllm_modelopt_patches
+                apply_vllm_modelopt_patches()
+                os.environ["VERL_VLLM_NVFP4_QUANT_ENABLED"] = "1"
 
         hf_overrides = {}
         if quantization is not None and self.config.quantization_config_file is not None:
@@ -249,6 +284,9 @@ class vLLMHttpServer:
 
         if quantization == "fp8":
             hf_overrides["quantization_config"] = fp8_block_quant_kwargs
+        elif quantization == "nvfp4_qat":
+            hf_overrides["quantization_config"] = fp4_block_quant_kwargs
+            quantization = "modelopt"
 
         args = {
             "dtype": self.config.dtype,

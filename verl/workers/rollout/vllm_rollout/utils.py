@@ -29,7 +29,7 @@ from verl.utils.device import get_torch_device, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
-
+from verl.utils.modelopt_utils import apply_vllm_modelopt_patches
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -138,6 +138,8 @@ class vLLMColocateWorkerExtension:
         # 2. patch online fp8 quant
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1":
             apply_vllm_fp8_patches()
+        elif os.environ.get("VERL_VLLM_NVFP4_QUANT_ENABLED", "0") == "1":
+            apply_vllm_modelopt_patches()
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -225,6 +227,12 @@ class vLLMColocateWorkerExtension:
                 logger.info("Loading standard weights (non-FP8, async)")
                 self.model_runner.model.load_weights(weights)
 
+                from vllm.model_executor.model_loader.utils import process_weights_after_loading
+                model_config = self.model_runner.vllm_config.model_config
+                device = next(self.model_runner.model.parameters()).device
+                process_weights_after_loading(self.model_runner.model, model_config, device)
+                # from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4LinearMethod
+    
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""
         if not hasattr(self, "device_uuid") or not self.device_uuid:
