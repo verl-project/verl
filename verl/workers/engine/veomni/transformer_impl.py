@@ -79,14 +79,21 @@ class VeOmniEngine(FSDPEngine):
         self.data_parallel_mode = "fsdp2"
         self.rank = dist.get_rank()
 
+        fsdp_size = self.engine_config.fsdp_size
+        world_size = dist.get_world_size()
+        dp_size = world_size // self.engine_config.ulysses_parallel_size
+
+        if fsdp_size < 0 or fsdp_size >= world_size:
+            data_parallel_replicate_size = 1
+            data_parallel_shard_size = world_size
+        else:
+            data_parallel_replicate_size = dp_size // fsdp_size
+            data_parallel_shard_size = fsdp_size
+
         parallel_state.init_parallel_state(
-            dp_size=self.engine_config.data_parallel_size,
-            dp_replicate_size=self.engine_config.data_parallel_replicate_size,
-            dp_shard_size=self.engine_config.data_parallel_shard_size,
-            tp_size=self.engine_config.tensor_parallel_size,
-            ep_size=self.engine_config.expert_parallel_size,
-            pp_size=self.engine_config.pipeline_parallel_size,
-            cp_size=self.engine_config.context_parallel_size,
+            dp_size=dp_size,
+            dp_replicate_size=data_parallel_replicate_size,
+            dp_shard_size=data_parallel_shard_size,
             ulysses_size=self.engine_config.ulysses_parallel_size,
             dp_mode=self.data_parallel_mode,
         )

@@ -235,13 +235,7 @@ class VeOmniEngineConfig(EngineConfig):
         optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
         offload_policy (bool): Whether to offload policy model parameters, default False
         reshard_after_forward (bool): Whether to reshard parameters after forward pass, default True
-        data_parallel_size (int): FSDP group size, default 1
-        data_parallel_replicate_size (int): Data parallel replicate size, default 1
-        data_parallel_shard_size (int): Data parallel shard degree, default 1
-        tensor_parallel_size (int): Tensor parallel size, default 1
-        expert_parallel_size (int): Expert parallel size, default 1
-        pipeline_parallel_size (int): Pipeline parallel size, default 1
-        context_parallel_size (int): Ring-attn context parallel size, default 1
+        fsdp_size (int): FSDP group size. -1 means use all available GPUs, default -1
         ulysses_parallel_size (int): Ulysses sequence parallel size, default 1
         init_device (str): Device to initialize model weights.
             1. `cpu`: Init parameters on CPU in rank0 only.
@@ -291,13 +285,7 @@ class VeOmniEngineConfig(EngineConfig):
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "veomni"
-    data_parallel_size: int = 1
-    data_parallel_replicate_size: int = 1
-    data_parallel_shard_size: int = 1
-    tensor_parallel_size: int = 1
-    expert_parallel_size: int = 1
-    pipeline_parallel_size: int = 1
-    context_parallel_size: int = 1
+    fsdp_size: int = -1
     ulysses_parallel_size: int = 1
     seed: int = 42
     full_determinism: bool = False
