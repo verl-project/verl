@@ -84,6 +84,34 @@ Outputs:
 
 The `loss` curve uses `critic/vf_loss`.
 
+### 2.4 GRPO smoke (DeepSpeed actor path)
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+python3 -m verl.trainer.main_ppo -cn ppo_trainer \
+  actor@actor_rollout_ref.actor=ds_actor \
+  critic=ds_critic \
+  actor_rollout_ref.actor.strategy=deepspeed \
+  actor_rollout_ref.actor.deepspeed.zero_stage=2 \
+  actor_rollout_ref.actor.deepspeed.offload=none \
+  actor_rollout_ref.actor.use_kl_loss=False \
+  algorithm.use_kl_in_reward=False \
+  critic.enable=False \
+  algorithm.adv_estimator=grpo \
+  algorithm.norm_adv_by_std_in_grpo=True \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.mode=async \
+  actor_rollout_ref.rollout.load_format=auto \
+  actor_rollout_ref.rollout.n=4 \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
+  data.train_files=/home/ubuntu/data/gsm8k_ppo/train.parquet \
+  data.val_files=/home/ubuntu/data/gsm8k_ppo/test.parquet \
+  trainer.n_gpus_per_node=2 \
+  trainer.nnodes=1 \
+  trainer.total_training_steps=3
+```
+
 ## 3. This Round Benchmark Artifacts
 
 Reference run root:
@@ -96,4 +124,3 @@ Summary files:
 - `outputs/zero_six_60_seed7777_20260212_115956/summary_complete.tsv`
 
 All six cases reached `step=60` in the merged summary.
-
