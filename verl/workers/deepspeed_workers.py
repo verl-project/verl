@@ -1597,6 +1597,10 @@ class DeepSpeedPPOActor(DataParallelPPOActor):
             return False
         if bool(self.config.use_kl_loss):
             return False
+        if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+            # This workaround changes backward call count based on local micro activity.
+            # In multi-rank ZeRO-2, per-rank activity can diverge and break NCCL collective ordering.
+            return False
         # Emergency off-switch for production troubleshooting.
         if os.getenv("VERL_DS_ZERO2_SKIP_INACTIVE_MICRO", "1").lower() in {"0", "false", "off", "no"}:
             return False
@@ -1858,11 +1862,16 @@ class DeepSpeedPPOActor(DataParallelPPOActor):
                     micro_batch_metrics.update(pg_metrics)
                     append_to_dict(metrics, micro_batch_metrics)
 
-                # Prefer DeepSpeed global grad norm when ZeRO is active; otherwise fall back to local clip.
+                # Step only once after all micro batches unless ZeRO-2 canonical micro-stepping is enabled.
+                if not zero2_step_each_micro:
+                    self.deepspeed_engine.step()
+
+                # Avoid explicit ZeRO global-grad-norm collectives here to keep NCCL ordering stable.
+                # Prefer cached DeepSpeed grad norm from the previous step when available.
                 ds_zero = self._zero_stage
-                if ds_zero and hasattr(self.deepspeed_engine, "get_global_grad_norm"):
+                if ds_zero:
                     try:
-                        grad_norm_val = float(self.deepspeed_engine.get_global_grad_norm())
+                        grad_norm_val = float(getattr(self.deepspeed_engine, "global_grad_norm", 0.0) or 0.0)
                     except Exception:
                         grad_norm_val = 0.0
                 else:
@@ -1874,10 +1883,6 @@ class DeepSpeedPPOActor(DataParallelPPOActor):
                         )
                     )
                 append_to_dict(metrics, {"actor/grad_norm": grad_norm_val})
-
-                # Step only once after all micro batches unless ZeRO-2 canonical micro-stepping is enabled.
-                if not zero2_step_each_micro:
-                    self.deepspeed_engine.step()
 
         if not self._use_manual_backward:
             _safe_zero_grad(self.deepspeed_engine)
@@ -2065,11 +2070,15 @@ class DeepSpeedPPOCritic(DataParallelPPOCritic):
                     }
                     append_to_dict(metrics, micro_batch_metrics)
 
-                # Prefer DeepSpeed global grad norm when ZeRO is active; otherwise fall back to local clip.
+                # Step only once after all micro batches unless ZeRO-2 canonical micro-stepping is enabled.
+                if not zero2_step_each_micro:
+                    self.deepspeed_engine.step()
+
+                # Avoid explicit ZeRO global-grad-norm collectives here to keep NCCL ordering stable.
                 ds_zero = self._zero_stage
-                if ds_zero and hasattr(self.deepspeed_engine, "get_global_grad_norm"):
+                if ds_zero:
                     try:
-                        grad_norm_val = float(self.deepspeed_engine.get_global_grad_norm())
+                        grad_norm_val = float(getattr(self.deepspeed_engine, "global_grad_norm", 0.0) or 0.0)
                     except Exception:
                         grad_norm_val = 0.0
                 else:
@@ -2081,10 +2090,6 @@ class DeepSpeedPPOCritic(DataParallelPPOCritic):
                         )
                     )
                 append_to_dict(metrics, {"critic/grad_norm": grad_norm_val})
-
-                # Step only once after all micro batches unless ZeRO-2 canonical micro-stepping is enabled.
-                if not zero2_step_each_micro:
-                    self.deepspeed_engine.step()
 
         if not self._use_manual_backward:
             _safe_zero_grad(self.deepspeed_engine)
