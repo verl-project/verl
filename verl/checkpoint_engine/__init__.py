@@ -51,3 +51,10 @@ try:
     __all__ += ["NIXLCheckpointEngine"]
 except ImportError:
     NIXLCheckpointEngine = None
+
+try:
+    from .mooncake_checkpoint_engine import MooncakeCheckpointEngine
+
+    __all__ += ["MoonCakeCheckpointEngine"]
+except ImportError:
+    MooncakeCheckpointEngine = None
