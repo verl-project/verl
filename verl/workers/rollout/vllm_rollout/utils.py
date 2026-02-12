@@ -29,7 +29,7 @@ from verl.utils.device import get_torch_device, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
-from verl.utils.modelopt_utils import apply_vllm_modelopt_patches
+from verl.utils.modelopt_vllm_utils import apply_vllm_modelopt_patches
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
