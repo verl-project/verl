@@ -160,6 +160,7 @@ class AgentLoopOutput(BaseModel):
         output["prompts"] = torch.tensor(output.pop("prompt_ids"), dtype=torch.int64)
         output["responses"] = torch.tensor(output.pop("response_ids"), dtype=torch.int64)
         output["response_mask"] = torch.tensor(output.pop("response_mask"), dtype=torch.int64)
+        output["attention_mask"] = torch.ones(len(self.prompt_ids) + len(self.response_ids), dtype=torch.int64)
 
         response_logprobs = output.pop("response_logprobs", None)
         if response_logprobs is not None:

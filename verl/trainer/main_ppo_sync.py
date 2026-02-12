@@ -68,13 +68,15 @@ from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.metric import reduce_metrics
+from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from verl.utils.tracking import Tracking
 from verl.workers.config import CriticConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.utils.losses import value_loss
-from verl.workers.utils.padding import extract_response_from_unpad_output
+from verl.workers.utils.padding import response_from_nested, response_to_nested
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -699,15 +701,15 @@ class PPOTrainer:
 
         fields = ["entropy", "log_probs", "response_mask"]
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
-            fields.extend(["responses", "old_log_probs", "rollout_log_probs"])
+            fields.extend(["responses", "rollout_log_probs"])
         t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
         t_end = time.time()
         print(f"[DEBUG] _compute_old_log_prob time to get data: {t_end - t_start:.2f}", flush=True)
 
         # 2. write old_log_probs and entropy back to TransferQueue
-        data["old_log_probs"] = extract_response_from_unpad_output(data.pop("log_probs"), data["response_mask"])
-        data["entropy"] = extract_response_from_unpad_output(data.pop("entropy"), data["response_mask"])
+        data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
+        data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
         t_start = time.time()
         tq.kv_batch_put(
             keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
@@ -755,7 +757,7 @@ class PPOTrainer:
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["log_probs", "response_mask"])
         t_end = time.time()
         print(f"[DEBUG] _compute_ref_log_prob time to get data: {t_end - t_start:.2f}", flush=True)
-        data["ref_log_prob"] = extract_response_from_unpad_output(data.pop("log_probs"), data["response_mask"])
+        data["ref_log_prob"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
         t_start = time.time()
         tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("ref_log_prob"))
         t_end = time.time()
@@ -775,7 +777,7 @@ class PPOTrainer:
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["values", "response_mask"])
         t_end = time.time()
         print(f"[DEBUG] _compute_values time to get data: {t_end - t_start:.2f}", flush=True)
-        data["values"] = extract_response_from_unpad_output(data.pop("values"), data["response_mask"])
+        data["values"] = response_from_nested(data.pop("values"), data["response_mask"])
         t_start = time.time()
         tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("values"))
         t_end = time.time()
@@ -788,10 +790,12 @@ class PPOTrainer:
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
         t_start = time.time()
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+        response_mask = data["response_mask"]
         t_end = time.time()
         print(f"[DEBUG] _compute_advantage time to get data: {t_end - t_start:.2f}", flush=True)
         data = DataProto(batch=data.to_padded_tensor())
         data.batch["token_level_scores"] = data.batch["rm_scores"]
+        data.non_tensor_batch["uid"] = data.batch.pop("uid").tolist()
 
         # 1. apply kl penalty to rewards
         if self.config.algorithm.use_kl_in_reward:
@@ -825,16 +829,42 @@ class PPOTrainer:
             config=self.config.algorithm,
         )
 
-        # 4. write advantages and returns back to TransferQueue
+        # 4. write nested advantages and returns back to TransferQueue
         fields = ["advantages", "returns"]
         if rollout_correction:
             fields.append("response_mask")
             if "rollout_is_weights" in data.batch:
                 fields.append("rollout_is_weights")
+
+        output = {}
+        for field in fields:
+            output[field] = response_to_nested(data.batch[field], response_mask)
+        output = TensorDict(output, batch_size=len(batch))
         t_start = time.time()
-        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.batch.select(*fields))
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
         t_end = time.time()
         print(f"[DEBUG] _compute_advantage time to put data: {t_end - t_start:.2f}", flush=True)
+
+        return batch
+
+    def _update_critic(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """Update the critic network."""
+        ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        extra_info = {
+            "mini_batch_size": ppo_mini_batch_size,
+            "epochs": self.config.critic.ppo_epochs,
+            "seed": self.config.critic.data_loader_seed,
+            "dataloader_kwargs": {"shuffle": self.config.critic.shuffle},
+        }
+        batch.extra_info.update(extra_info)
+
+        output = self.critic_wg.train_mini_batch(batch)
+        output: TensorDict = ray.get(output.futures)[0]
+        output = rename_dict(output["metrics"], "critic/")
+        output["perf/mfu/critic"] = output.pop("critic/mfu")
+        critic_metrics = reduce_metrics(output)
+        metrics.update(critic_metrics)
 
         return batch
 
@@ -918,7 +948,8 @@ class PPOTrainer:
         # 9. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
-                self._update_critic(batch)
+                batch = self._update_critic(batch, metrics=metrics)
+        breakpoint()
 
 
 @ray.remote
