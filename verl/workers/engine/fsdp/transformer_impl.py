@@ -62,9 +62,14 @@ from verl.utils.fsdp_utils import (
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
-from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.ulysses import (
+    gather_outputs_and_unpad,
+    get_ulysses_sequence_parallel_group,
+    set_ulysses_sequence_parallel_group,
+    ulysses_pad,
+    ulysses_pad_and_slice_inputs,
+)
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -190,14 +195,15 @@ class FSDPEngine(BaseEngine):
 
         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
         self.ulysses_device_mesh = None
+        self.ulysses_parallel_group = None
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_sequence_parallel_size
         dp_size = self.get_data_parallel_size()
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
                 device_name, mesh_shape=(dp_size, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
             )
+            self.ulysses_parallel_group = self.ulysses_device_mesh["sp"].get_group()
 
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
     def _build_module(self):
@@ -707,12 +713,13 @@ class EngineEvalModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, FSDPEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.eval()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, FSDPEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -732,12 +739,13 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, FSDPEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, FSDPEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
         self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
