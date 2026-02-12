@@ -17,6 +17,7 @@ from enum import Enum
 import torch
 import types
 import inspect
+from functools import wraps
 
 try:
     from megatron.core.transformer.moe.moe_utils import (
