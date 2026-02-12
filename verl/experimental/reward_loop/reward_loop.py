@@ -20,7 +20,7 @@ import aiohttp
 import numpy as np
 import ray
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
@@ -33,6 +33,51 @@ from .reward_model import RewardModelManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def migrate_legacy_reward_impl(config):
+    """
+    Migrate the legacy reward model implementation to the new one.
+    This is a temporary fix. A more robust one will be added.
+    """
+    # 1. reward workers migration
+    # config.reward_model.num_workers -> config.reward.num_workers
+    if config.reward_model.num_workers is not None:
+        config.reward.num_workers = config.reward_model.num_workers
+
+    # 2.reward manager migration
+    # config.reward_model.reward_manager -> config.reward.reward_manager
+    if config.reward_model.reward_manager is not None:
+        config.reward.reward_manager.name = config.reward_model.reward_manager
+    if config.reward_model.get("reward_loop_source") is not None:
+        config.reward.reward_manager.source = config.reward_model.reward_loop_source
+        config.reward.reward_manager.module.path = config.reward_model.reward_loop_module_path
+        config.reward.reward_manager.module.name = config.reward_model.reward_loop_class_name
+
+    # 3. custom reward function migration
+    # config.custom_reward_function -> config.reward.custom_reward_function
+    if not all(v is None for v in config.custom_reward_function.values()):
+        config.reward.custom_reward_function = config.custom_reward_function
+
+    # 4. reward model migration
+    # config.reward_model -> config.reward.reward_model
+    for key in ["enable", "enable_resource_pool", "n_gpus_per_node", "nnodes"]:
+        if config.reward_model.get(key) is not None:
+            config.reward.reward_model[key] = config.reward_model[key]
+    # for dapo reward kwargs
+    if config.reward_model.get("reward_kwargs") is not None:
+        with open_dict(config.reward.reward_model):
+            config.reward.reward_model["reward_kwargs"] = config.reward_model["reward_kwargs"]
+    legacy_rollout = config.reward_model.rollout
+    if not all(v is None for v in legacy_rollout.values()):
+        config.reward.reward_model.rollout = legacy_rollout
+
+    # 5. sandbox_fusion migration
+    # config.sandbox_fusion -> reward.sandbox_fusion
+    if not all(v is None for v in config.sandbox_fusion.values()):
+        config.reward.sandbox_fusion = config.sandbox_fusion
+
+    return config
 
 
 class RewardLoopWorker:
