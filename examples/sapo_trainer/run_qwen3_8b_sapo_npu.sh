@@ -1,6 +1,5 @@
 set -euxo pipefail
 
-mkdir -p logs
 ulimit -n 32768
 
 ## Basic Environment Settings
@@ -22,8 +21,6 @@ CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/dataset/dapo_processed/train.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/dataset/aime-24_processed/train.parquet"}
 
-
-
 # reference policy
 use_kl_in_reward=False
 kl_coef=0.001
@@ -42,7 +39,6 @@ tau_neg=1.05
 
 gae_gamma=1.0
 gae_lam=0.95
-
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
