@@ -134,6 +134,19 @@ class ReplayBuffer:
                     partition[key] = {}
                 partition[key].update(tags)
 
+    def remove(self, partition_id: str, keys: list[str]):
+        """Remove items from the replay buffer.
+
+        Args:
+            partition_id (str): Partition of transfer queue, e.g. "train" or "val".
+            keys (list[str]): Keys to remove.
+        """
+        with self.lock:
+            partition = self.partitions[partition_id]
+            for key in keys:
+                if key in partition:
+                    del partition[key]
+
     def sample(self, partition_id: str, global_steps: int = None, batch_size: int = None) -> KVBatchMeta:
         """Sample a batch of data from the replay buffer.
 
@@ -997,6 +1010,10 @@ class PPOTrainer:
 
                 # 5. record metrics
                 self._compute_metrics(batch, metrics, timing_raw, global_steps=self.global_steps, epoch=epoch)
+
+                # remove items from transfer queue and replay buffer
+                tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
+                self.replay_buffer.remove(batch.partition_id, batch.keys)
 
                 self.logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
