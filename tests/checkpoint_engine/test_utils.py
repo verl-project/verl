@@ -31,23 +31,18 @@ from verl.workers.rollout import BaseRollout, RolloutReplica
 class TrainingWorkerTest(TrainingWorker):
     def __init__(self, config: TrainingWorkerConfig, checkpoint_engine_config: CheckpointEngineConfig) -> None:
         super().__init__(config)
-        self.checkpoint_engine = None
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self):
-        per_tensor_param, _ = self.engine.get_per_tensor_param()
-        await self.checkpoint_engine.send_weights(per_tensor_param)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def init_checkpoint_engine(self, checkpoint_engine_config: CheckpointEngineConfig):
-        if self.checkpoint_engine:
-            return
         backend = checkpoint_engine_config.backend
         bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
         engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
         if torch.distributed.get_rank() == 0:
             engine_kwargs["is_master"] = True
         self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def update_weights(self):
+        per_tensor_param, _ = self.engine.get_per_tensor_param()
+        await self.checkpoint_engine.send_weights(per_tensor_param)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):

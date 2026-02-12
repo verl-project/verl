@@ -32,7 +32,7 @@ from verl.experimental.fully_async_policy.detach_utils import (
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -406,21 +406,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         2. Worker groups for each role (actor, critic, etc.)
         """
         self._init_async_objects()
-        self._init_resource_pools()
         self._create_worker_classes()
         self._init_reward_loop()
         await self._init_async_rollout_manager()
 
     def _create_actor_rollout_classes(self):
-        # only create rollout
-        for role in [Role.Rollout]:
-            resource_pool = self.resource_pool_manager.get_resource_pool(role)
-            role_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[role],
-                config=self.config.actor_rollout_ref,
-                role=str(role),
-            )
-            self.resource_pool_to_cls[resource_pool][str(role)] = role_cls
+        # Skip rollout creation and let agentloop handle it
+        pass
 
     def _init_models(self):
         self.rollout_wg = self.all_wg[str(Role.Rollout)]

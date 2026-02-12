@@ -18,12 +18,9 @@ import logging
 import os
 import threading
 
-import torch
 from omegaconf import DictConfig
-from ray.util.collective import collective
 
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.utils.device import get_torch_device
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -140,62 +137,6 @@ class BaseDetachNcclSync:
                 f"Expected LLM (with llm_engine attribute) or WorkerWrapperBase (with worker attribute)."
             )
         return inference_model
-
-    def _sync_sglang_weights(self, inference_model, params, sync_group_name):
-        bucket_size_bytes = int(self.get_bucket_size_mb() * 1024 * 1024)
-        actual_bucket_sizes = []
-        current_batch = []
-        current_batch_size = 0
-
-        def flush_batch():
-            if current_batch:
-                actual_bucket_sizes.append(current_batch_size / (1024 * 1024))
-                self._run_async_safely(self.update_weights(inference_model, iter(current_batch)))
-                get_torch_device().synchronize()
-                current_batch.clear()
-
-        for key, shape, dtype in self._weights_info:
-            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-            if self._is_actor:
-                assert key in params
-                origin_data = params[key]
-                if hasattr(origin_data, "full_tensor"):
-                    origin_data = origin_data.full_tensor()
-                if torch.distributed.get_rank() == 0:
-                    tensor.copy_(origin_data)
-            collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
-
-            tensor_size = tensor.numel() * tensor.element_size()
-            current_batch.append((key, tensor))
-            current_batch_size += tensor_size
-
-            if current_batch_size >= bucket_size_bytes:
-                flush_batch()
-                current_batch_size = 0
-
-        flush_batch()
-        cls = type(self)
-        cls._last_avg_bucket_size = (
-            sum(actual_bucket_sizes) / len(actual_bucket_sizes) if actual_bucket_sizes else self.get_bucket_size_mb()
-        )
-
-        # Resume kv_cache after weights sync to restore GPU memory released during pause
-        if self._is_rollout and self.rollout_device_mesh["infer_tp"].get_local_rank() == 0:
-            self._run_async_safely(inference_model.resume_memory_occupation(tags=["kv_cache"]))
-
-    def _sync_vllm_weights(self, inference_model, params, sync_group_name):
-        for key, shape, dtype in self._weights_info:
-            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-            if self._is_actor:
-                assert key in params
-                origin_data = params[key]
-                if hasattr(origin_data, "full_tensor"):
-                    origin_data = origin_data.full_tensor()
-                if torch.distributed.get_rank() == 0:
-                    tensor.copy_(origin_data)
-            collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
-            if self._is_rollout:
-                inference_model.load_weights([(key, tensor)])
 
     async def update_weights(self, inference_engine, params):
         from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights

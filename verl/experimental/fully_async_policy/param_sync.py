@@ -52,12 +52,11 @@ class ParameterSynchronizer:
         # Statistics
         self.current_version = 0
 
-        if self.config.async_training.checkpoint_engine.enable:
-            replicas = ray.get(rollouter.get_replicas.remote())
-            checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-            self.checkpoint_manager = CheckpointEngineManager(
-                config=checkpoint_engine_config, trainer=self.actor_wg, replicas=replicas
-            )
+        replicas = ray.get(rollouter.get_replicas.remote())
+        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        self.checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config, trainer=self.actor_wg, replicas=replicas
+        )
 
     def get_current_param_version(self) -> int:
         """Get current parameter version number"""

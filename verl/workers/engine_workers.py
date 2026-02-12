@@ -455,6 +455,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
 
+        checkpoint_engine_config: CheckpointEngineConfig = omega_conf_to_dataclass(
+            self.config.rollout.checkpoint_engine
+        )
+
+        backend = checkpoint_engine_config.backend
+        bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
+        engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
+        if os.getenv("RANK") == "0":
+            engine_kwargs["is_master"] = True
+        self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_loss_fn(self, loss_fn):
         self.actor.set_loss_fn(loss_fn=loss_fn)
@@ -572,8 +583,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
 
-        self.checkpoint_engine = None
-
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
@@ -615,9 +624,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
            - after update_weights: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
         """
-        assert self.checkpoint_engine is not None
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
+        # naive backend is not used for now, skip init it for cosistency with legacy worker impl.
         if self.config.rollout.checkpoint_engine.backend != "naive":
             per_tensor_param, _ = self.engine.get_per_tensor_param()
             await self.checkpoint_engine.send_weights(per_tensor_param)
@@ -668,17 +677,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.base_sync_done = True
         set_expandable_segments(True)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def init_checkpoint_engine(self, checkpoint_engine_config: CheckpointEngineConfig):
-        if self.checkpoint_engine:
-            return
-        backend = checkpoint_engine_config.backend
-        bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
-        engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
-        if torch.distributed.get_rank() == 0:
-            engine_kwargs["is_master"] = True
-        self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
