@@ -65,6 +65,8 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
         data["negative_prompt_embeds"] = negative_prompt_embeds_nested
         data["negative_prompt_embeds_mask"] = negative_prompt_embeds_mask_nested
 
+    data["loss_mask"] = data["response_mask"]
+
     return data
 
 

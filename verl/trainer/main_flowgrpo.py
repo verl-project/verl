@@ -24,9 +24,9 @@ import ray
 from omegaconf import OmegaConf
 
 from verl.experimental.dataset.sampler import AbstractSampler
+from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_diffusion_trainer import RayFlowGRPOTrainer
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
@@ -42,7 +42,7 @@ def main(config):
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
-
+    config = migrate_legacy_reward_impl(config)
     run_ppo(config)
 
 
@@ -163,6 +163,9 @@ class TaskRunner:
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
+        elif config.actor_rollout_ref.actor.strategy == "veomni":
+            raise NotImplementedError("VeOmni does not support legacy worker implementation")
+
         else:
             raise NotImplementedError
 
@@ -189,6 +192,15 @@ class TaskRunner:
             # TODO: switch this to TrainingWorker as well
             from verl.workers.megatron_workers import CriticWorker
 
+        elif config.critic.strategy == "veomni":
+            if use_legacy_worker_impl == "disable":
+                from verl.workers.engine_workers import TrainingWorker
+
+                CriticWorker = TrainingWorker
+                print("Using new worker implementation")
+            else:
+                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
+
         else:
             raise NotImplementedError
 
@@ -204,43 +216,32 @@ class TaskRunner:
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
-        # TODO Here you can use the new registration method to support dynamic registration of roles
-        if config.reward_model.enable_resource_pool:
-            if config.reward_model.n_gpus_per_node <= 0:
-                raise ValueError("config.reward_model.n_gpus_per_node must be greater than 0")
-            if config.reward_model.nnodes <= 0:
-                raise ValueError("config.reward_model.nnodes must be greater than 0")
 
-            reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
+        if config.reward.reward_model.enable_resource_pool:
+            if config.reward.reward_model.n_gpus_per_node <= 0:
+                raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
+            if config.reward.reward_model.nnodes <= 0:
+                raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
+
+            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
+        else:
+            config.reward.reward_model.nnodes = config.trainer.nnodes
+            config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
         return resource_pool_manager
 
-    def add_reward_model_worker(self, config):
+    def add_reward_model_resource_pool(self, config):
         """Add reward model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if config.reward_model.enable:
-            use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-            if use_legacy_worker_impl in ["auto", "enable", "disable"]:
-                if config.reward_model.strategy in {"fsdp", "fsdp2"}:
-                    from verl.workers.fsdp_workers import RewardModelWorker
-                elif config.reward_model.strategy == "megatron":
-                    from verl.workers.megatron_workers import RewardModelWorker
-                else:
-                    raise NotImplementedError
-            # elif use_legacy_worker_impl == "disable":
-            #     from verl.workers.engine_workers import RewardModelWorker
-            #
-            #     print("Using new worker implementation")
-            else:
-                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
-
-            self.role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
-            if config.reward_model.enable_resource_pool:
+        if config.reward.reward_model.enable:
+            # we do not use reward model workers, so we only register reward model in resource pool
+            # without continue to register reward model worker in role mapping
+            if config.reward.reward_model.enable_resource_pool:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
                 self.mapping[Role.RewardModel] = "global_pool"
@@ -283,13 +284,7 @@ class TaskRunner:
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
 
-        # We should adopt a multi-source reward function here:
-        # - for rule-based rm, we directly call a reward score
-        # - for model-based rm, we call a model
-        # - for code related prompt, we send to a sandbox if there are test cases
-        # finally, we combine all the rewards together
-        # The reward type depends on the tag of the data
-        self.add_reward_model_worker(config)
+        self.add_reward_model_resource_pool(config)
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
@@ -311,8 +306,7 @@ class TaskRunner:
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer_path = config.actor_rollout_ref.model.get("tokenizer_path", os.path.join(local_path, "tokenizer"))
-        tokenizer = hf_tokenizer(tokenizer_path, trust_remote_code=trust_remote_code)
+        tokenizer = hf_tokenizer(os.path.join(local_path, "tokenizer"), trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
         if os.path.exists(os.path.join(local_path, "processor")):
             processor = hf_processor(
@@ -320,17 +314,6 @@ class TaskRunner:
             )
         else:
             processor = None
-
-        # Load the reward manager for training and validation.
-        if not config.reward_model.use_reward_loop:
-            reward_fn = load_reward_manager(
-                config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-            )
-            val_reward_fn = load_reward_manager(
-                config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-            )
-        else:
-            reward_fn, val_reward_fn = None, None
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
@@ -363,8 +346,6 @@ class TaskRunner:
             role_worker_mapping=self.role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             collate_fn=collate_fn,

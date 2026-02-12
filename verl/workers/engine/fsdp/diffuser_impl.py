@@ -51,6 +51,8 @@ from verl.utils.fsdp_utils import (
     init_fn,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
+    merged_lora_context,
+    normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
     replace_lora_wrapper,
@@ -103,6 +105,12 @@ class DiffusersFSDPEngine(BaseEngine):
         self.mode = None
 
         self.rank = torch.distributed.get_rank()
+
+        # Apply NPU patches for FSDP backend
+        from .utils import apply_npu_fsdp_patches
+
+        apply_npu_fsdp_patches()
+
         # build device mesh for Ulysses Sequence Parallel
 
         self._init_device_mesh()
@@ -147,6 +155,7 @@ class DiffusersFSDPEngine(BaseEngine):
             lr_scheduler=self.lr_scheduler,
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
+            trust_remote_code=self.model_config.trust_remote_code,
         )
 
         self.to(
@@ -234,6 +243,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 "lora_alpha": self.model_config.lora_alpha,
                 "init_lora_weights": "gaussian",
                 "target_modules": convert_to_regular_types(self.model_config.target_modules),
+                "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
                 "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
                 "bias": "none",
             }
@@ -824,7 +834,7 @@ class DiffusersFSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False):
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         load_fsdp_model_to_gpu(self.module)
@@ -832,17 +842,24 @@ class DiffusersFSDPEngine(BaseEngine):
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
         peft_config = None
+        merge_lora = self.model_config.lora.get("merge", False)
+
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
-            peft_config = peft_model.peft_config.get("default", None)
-            params = collect_lora_params(
-                module=self.module,
-                layered_summon=layered_summon,
-                base_sync_done=base_sync_done,
-                is_diffusers=True,
-            )
-            if not base_sync_done:
-                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            if not merge_lora:
+                peft_config = peft_model.peft_config.get("default", None)
+                params = collect_lora_params(
+                    module=self.module,
+                    layered_summon=layered_summon,
+                    base_sync_done=base_sync_done,
+                    is_diffusers=True,
+                )
+                if not base_sync_done:
+                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            else:  # merge lora
+                with merged_lora_context(self.module, backup_adapters=True):
+                    params = self.module.state_dict()
+                    params = normalize_peft_param_name(params)
         else:
             params = self.module.state_dict()
 
@@ -857,10 +874,18 @@ class DiffusersFSDPEngine(BaseEngine):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
             per_tensor_param = (
-                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
+                (
+                    name,
+                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    if isinstance(param, DTensor)
+                    else param,
+                )
                 for name, param in params.items()
             )
+        # return per_tensor_param, peft_config
+        # Convert peft_config to dict for vLLM compatibility (PEFTHelper.from_dict expects dict)
 
         # diffusers: transformer backbone only
         # vllm-omni: whole pipeline

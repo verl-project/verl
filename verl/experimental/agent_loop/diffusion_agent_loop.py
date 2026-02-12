@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+import random
 from typing import Any, Optional
 
 import hydra
@@ -35,7 +36,6 @@ from verl.experimental.agent_loop.agent_loop import (
 )
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
-from verl.experimental.reward_loop import DiffusionRewardLoopWorker
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import hf_processor, hf_tokenizer
@@ -101,13 +101,13 @@ class DiffusionAgentLoopWorker:
         self,
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
-        reward_router_address: str = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            reward_router_address (str): reward router address.
+            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
         """
         self.config = config
 
@@ -116,7 +116,7 @@ class DiffusionAgentLoopWorker:
             self.server_manager = AsyncLLMServerManager(config, server_handles)
 
         self.dataset_cls = get_dataset_class(config.data)
-        self.reward_router_address = reward_router_address
+        self.reward_loop_worker_handles = reward_loop_worker_handles
 
         model_path = config.actor_rollout_ref.model.path
         self.model_name = "/".join(model_path.split("/")[-2:])
@@ -138,16 +138,6 @@ class DiffusionAgentLoopWorker:
             if self.processor is not None:
                 self.processor.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
             self.tokenizer.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
-
-        use_reward_loop = True if self.config.reward_model.use_reward_loop else None
-        self.use_reward_loop = use_reward_loop
-        if use_reward_loop and not hasattr(self, "reward_loop_worker"):
-            self.reward_loop_worker = DiffusionRewardLoopWorker.options(
-                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                    node_id=ray.get_runtime_context().get_node_id(),
-                    soft=False,
-                ),
-            ).remote(self.config, self.reward_router_address)
 
         trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
         RolloutTraceConfig.init(
@@ -235,7 +225,7 @@ class DiffusionAgentLoopWorker:
             )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs)
+        output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
         return output
 
@@ -353,11 +343,9 @@ class DiffusionAgentLoopWorker:
 
     async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, kwargs):
         """Compute reward score for single sample."""
-        enable_async_reward = (
-            self.reward_router_address is not None and self.config.reward_model.enable_resource_pool
-        ) or not self.config.reward_model.enable
+        enable_async_reward = self.reward_loop_worker_handles is not None
 
-        if output.reward_score is None and enable_async_reward and self.use_reward_loop:
+        if output.reward_score is None and enable_async_reward:
             batch = TensorDict(
                 {
                     "prompts": prompts,  # [1, prompt_length]
@@ -377,12 +365,17 @@ class DiffusionAgentLoopWorker:
                 batch=batch,
                 non_tensor_batch=non_tensor_batch,
             )
-            result = await self.reward_loop_worker.compute_score.remote(data)
+            selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
+            result = await selected_reward_loop_worker_handle.compute_score.remote(data)
             output.reward_score = result["reward_score"]
             output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
-    def _postprocess(self, inputs: list[_InternalDiffusionAgentLoopOutput]) -> DataProto:
-        """Process the outputs from _run_agent_loop and combine them into a batch."""
+    def _postprocess(
+        self,
+        inputs: list[_InternalDiffusionAgentLoopOutput],
+        input_non_tensor_batch: dict | None = None,
+    ) -> DataProto:
+        """Process the padded outputs from _run_agent_loop and combine them into a batch."""
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
         response_image = torch.cat([input.response_image for input in inputs], dim=0)
@@ -418,6 +411,8 @@ class DiffusionAgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
+        if self.reward_loop_worker_handles is None and input_non_tensor_batch:
+            non_tensor_batch.update(input_non_tensor_batch)
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
@@ -477,7 +472,7 @@ class DiffusionAgentLoopManager(AgentLoopManager):
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        rm_resource_pool: RayResourcePool = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
 
@@ -485,17 +480,11 @@ class DiffusionAgentLoopManager(AgentLoopManager):
             config (DictConfig): trainer config.
             worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
             rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
-            rm_resource_pool (RayResourcePool): Resource pool for reward model (Standalone mode).
+            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
         """
         self.config = config
         self.worker_group = worker_group
-        self.reward_model_manager = None
-        self.reward_router_address = None
-        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-            from verl.experimental.reward_loop import RewardModelManager
-
-            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
-            self.reward_router_address = self.reward_model_manager.get_router_address()
+        self.reward_loop_worker_handles = reward_loop_worker_handles
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):

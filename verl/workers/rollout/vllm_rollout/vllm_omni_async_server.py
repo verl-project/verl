@@ -36,7 +36,7 @@ from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
-from verl.utils.profiler.profile import DistProfiler
+from verl.utils.profiler import DistProfiler
 from verl.workers.config import DiffusersModelConfig, RolloutConfig
 from verl.workers.rollout.replica import ImageOutput, RolloutMode, RolloutReplica
 from verl.workers.rollout.utils import run_unvicorn
@@ -113,7 +113,6 @@ class vLLMOmniHttpServer:
                 logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
                 profiler_config = None
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
-        self.server_profiler_dir = os.environ.pop("VLLM_TORCH_PROFILER_DIR", None)
 
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
@@ -202,12 +201,22 @@ class vLLMOmniHttpServer:
 
         hf_overrides = {}
 
-        compilation_config = engine_kwargs.get("compilation_config", None)
-        if compilation_config is None:
-            compilation_config = json.dumps({"cudagraph_mode": "FULL_AND_PIECEWISE"})
-        else:
-            cudagraph_mode = compilation_config.get("cudagraph_mode", "FULL_AND_PIECEWISE")
-            compilation_config = json.dumps({"cudagraph_mode": cudagraph_mode})
+        compilation_config = engine_kwargs.pop("compilation_config", None) or {}
+        if isinstance(compilation_config, str):
+            compilation_config = json.loads(compilation_config)
+        compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
+
+        # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
+        dcp_size = engine_kwargs.get("decode_context_parallel_size", 1) or 1
+        if dcp_size > 1 and compilation_config["cudagraph_mode"] == "FULL_AND_PIECEWISE":
+            logger.warning(
+                "FULL cuda graph is not supported with DCP (decode_context_parallel_size=%d), "
+                "downgrading cudagraph_mode to PIECEWISE.",
+                dcp_size,
+            )
+            compilation_config["cudagraph_mode"] = "PIECEWISE"
+
+        compilation_config = json.dumps(compilation_config)
         args = {
             "dtype": self.config.dtype,
             "load_format": self.config.load_format,
@@ -226,7 +235,7 @@ class vLLMOmniHttpServer:
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
-            "seed": self.config.get("seed", 0),
+            "seed": self.replica_rank + self.config.get("seed", 0),
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
             "hf_overrides": hf_overrides,
@@ -280,19 +289,21 @@ class vLLMOmniHttpServer:
 
         # update lora-related args
         lora_rank = self.model_config.lora.get("rank", 0)
-        megatron_lora = True
+        if lora_rank <= 0:
+            lora_rank = (
+                self.model_config.lora_rank
+            )  # FIXME: fallback to lora_rank for now, we should unify lora settings.
+
         if self.model_config.lora.get("merge", False):
             lora_rank = 0
-        if lora_rank <= 0:
-            megatron_lora = False
-            lora_rank = self.model_config.lora_rank
+
         if lora_rank > 0:
             lora_args = {
                 "enable_lora": True,
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
-            if megatron_lora:
+            if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
 
@@ -376,9 +387,9 @@ class vLLMOmniHttpServer:
 
         # Add lora request
         lora_request = None
-        if self.model_config.lora_rank > 0 or (
-            self.model_config.lora.get("rank", 0) > 0 and not self.model_config.lora.get("merge", False)
-        ):
+        if (
+            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
+        ) and not self.model_config.lora.get("merge", False):
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
@@ -481,13 +492,10 @@ class vLLMOmniHttpServer:
             logger.info("skip sleep in standalone mode")
 
     async def start_profile(self, **kwargs):
-        # TODO: Persist global_step to engine server-created file/path
-        kwargs.pop("global_step")
         if (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
-            and self.server_profiler_dir
         ):
             await self.engine.start_profile(**kwargs)
 
@@ -496,7 +504,6 @@ class vLLMOmniHttpServer:
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
-            and self.server_profiler_dir
         ):
             await self.engine.stop_profile()
 
@@ -548,6 +555,14 @@ class vLLMOmniHttpServer:
         except Exception as e:
             logger.error(f"Error aborting requests: {e}")
             return {"aborted_count": 0, "request_ids": [], "error": str(e)}
+
+    async def resume_generation(self):
+        """Resume generation after abort_all_requests (pause_generation).
+
+        # TODO (mike): no usage now
+        """
+        if self.node_rank != 0:
+            return
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.

@@ -25,7 +25,7 @@ from verl.utils.reward_score import default_compute_score_image
 class DiffusionRewardManager(RewardManagerBase):
     """The reward manager for diffusion models."""
 
-    def __init__(self, config, tokenizer, compute_score=None, reward_router_address=None, reward_model_tokenizer=None):
+    def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
         """Initialize reward manager.
 
         Args:
@@ -36,7 +36,7 @@ class DiffusionRewardManager(RewardManagerBase):
             reward_model_tokenizer (AutoTokenizer): Tokenizer for tokenize reward messages.
         """
 
-        super().__init__(config, tokenizer)
+        super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score_image
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         self.reward_router_address = reward_router_address
@@ -62,7 +62,7 @@ class DiffusionRewardManager(RewardManagerBase):
             {
                 "reward_router_address": self.reward_router_address,
                 "reward_model_tokenizer": self.reward_model_tokenizer,
-                "model_name": self.config.reward_model.model.path,
+                "model_name": self.config.reward.reward_model.model_path,
             }
             if self.reward_router_address is not None
             else {}

@@ -101,8 +101,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         log_prob = model_output["log_probs"]
     else:
         log_prob = _slice_response_from_unpad_output(model_output["log_probs"], data)
+        log_prob = no_padding_2_padding(model_output["log_probs"], data)
 
-    log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)

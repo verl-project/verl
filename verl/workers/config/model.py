@@ -227,11 +227,12 @@ class DiffusersModelConfig(BaseConfig):
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
     model_type: str = "diffusion_model"
-    tokenizer: Any = None
-    processor: Any = None
 
     # whether to load tokenizer. This is useful when we only want to load model config
     load_tokenizer: bool = True
+
+    tokenizer: Any = None
+    processor: Any = None
 
     # whether to use shared memory
     use_shm: bool = False
@@ -250,7 +251,9 @@ class DiffusersModelConfig(BaseConfig):
     lora_rank: int = 32
     lora_alpha: int = 64
     lora_init_weights: str = "gaussian"
-    target_modules: Optional[str | list[str]] = "auto"
+    target_modules: Optional[str | list[str]] = "all-linear"
+    target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
+
     exclude_modules: Optional[str] = None
 
     # megatron lora config
@@ -266,10 +269,6 @@ class DiffusersModelConfig(BaseConfig):
 
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
-
-    # ema related
-    use_ema: bool = True
-    ema_decay: float = 0.95
 
     # sample related
     image_height: int = 512

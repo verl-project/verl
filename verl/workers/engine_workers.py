@@ -205,7 +205,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
-        if global_token_num is not None:
+        if global_token_num is not None and self.flops_counter is not None:
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                 global_token_num, delta_time, images_seqlens=images_seqlens
             )
@@ -512,6 +512,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+            model_type = model_config.get("model_type", "language_model")
             actor_training_config = TrainingWorkerConfig(
                 model_type=model_type,
                 model_config=actor_config.model_config,

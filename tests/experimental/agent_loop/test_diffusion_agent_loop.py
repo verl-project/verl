@@ -49,7 +49,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.engine_kwargs.vllm_omni = {"custom_pipeline": qwen_pipeline}
     config.data.custom_cls.path = "verl/utils/dataset/qwen_dataset.py"
     config.data.custom_cls.name = "QwenDataset"
-    config.reward_model.reward_manager = "diffusion"
+    config.reward.reward_manager.name = "diffusion"
     config.trainer.n_gpus_per_node = 4
 
     tokenizer_max_length = 1024
@@ -116,9 +116,6 @@ def test_single_turn(init_config):
     ]
     for key in expected_batch_keys:
         assert key in result.batch, f"Key {key} not found in result batch."
-
-    # check compute score
-    assert result.batch["rm_scores"].shape[0] == result.batch["responses"].shape[0]
 
     # check turns
     num_turns = result.non_tensor_batch["__num_turns__"]
