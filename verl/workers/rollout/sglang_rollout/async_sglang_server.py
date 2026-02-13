@@ -126,7 +126,6 @@ class SGLangHttpServer:
         # used for NCCL process group
         if self.node_rank == 0:
             self._master_address = self._server_address
-            # Seed with replica_rank + pid to avoid port conflicts across replicas and restarts
             self._master_port = get_free_port(self._server_address, random_seed=os.getpid())
             logger.info(
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
