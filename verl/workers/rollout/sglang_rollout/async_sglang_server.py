@@ -126,7 +126,7 @@ class SGLangHttpServer:
         # used for NCCL process group
         if self.node_rank == 0:
             self._master_address = self._server_address
-            self._master_port = get_free_port(self._server_address, random_seed=os.getpid())
+            self._master_port, self._master_sock = get_free_port(self._server_address, with_alive_sock=True)
             logger.info(
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
                 f"master address: {self._master_address}, port: {self._master_port}"
@@ -149,6 +149,8 @@ class SGLangHttpServer:
             assert master_address and master_port, "non-master node should provide master address and port"
             self._master_address = master_address
             self._master_port = master_port
+        else:
+            self._master_sock.close()
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)

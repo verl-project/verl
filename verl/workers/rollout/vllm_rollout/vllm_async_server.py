@@ -152,12 +152,11 @@ class vLLMHttpServer:
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
             self._master_address = self._server_address
-            random_seed = os.getpid()
             # used for torch.distributed.init_process_group
-            self._master_port = get_free_port(self._server_address, random_seed=random_seed)
+            self._master_port, self._master_sock = get_free_port(self._server_address, with_alive_sock=True)
             # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
-            self._dp_rpc_port = get_free_port(self._server_address, random_seed=random_seed + 1)
-            self._dp_master_port = get_free_port(self._server_address, random_seed=random_seed + 2)
+            self._dp_rpc_port, self._dp_rpc_sock = get_free_port(self._server_address, with_alive_sock=True)
+            self._dp_master_port, self._dp_master_sock = get_free_port(self._server_address, with_alive_sock=True)
         else:
             self._master_address = None
             self._master_port = None
@@ -424,6 +423,9 @@ class vLLMHttpServer:
 
         # 3. launch server
         if self.node_rank == 0:
+            self._master_sock.close()
+            self._dp_rpc_sock.close()
+            self._dp_master_sock.close()
             await self.run_server(server_args)
         else:
             # TODO: avoid connect before master_sock close
