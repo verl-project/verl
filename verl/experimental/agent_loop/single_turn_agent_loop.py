@@ -81,4 +81,8 @@ class SingleTurnAgentLoop(AgentLoopBase):
             num_turns=2,
             metrics=metrics,
         )
+
+        # keeping the schema consistent with tool_agent_loop
+        output.extra_fields.update({"turn_scores": [], "tool_rewards": []})
+
         return output

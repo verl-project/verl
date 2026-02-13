@@ -777,8 +777,17 @@ class AgentLoopWorker:
 
         metrics = [input.metrics.model_dump() for input in inputs]
         # Collect extra fields from all inputs and convert them to np.ndarray
+        # Keep a stable set of keys so downstream batch concat stays consistent across agent loops.
         extra_fields = {}
-        all_keys = set(key for input_item in inputs for key in input_item.extra_fields)
+        default_extra_keys = {
+            "turn_scores",
+            "tool_rewards",
+            "is_cancel",
+            "param_version_start",
+            "param_version_end",
+            "extras",
+        }
+        all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
         for key in all_keys:
             temp_arr = np.empty(len(inputs), dtype=object)
             temp_arr[:] = [input.extra_fields.get(key) for input in inputs]
