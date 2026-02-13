@@ -95,8 +95,10 @@ MEGATRON_ENGINE_CONFIG="\
 
 TORCHTITAN_ENGINE_CONFIG="\
     engine=${backend} \
-    model=torchtitan_model \
-    model.attn_type=varlen \
+    model=hf_model \
+    model.torchtitan.name=qwen3 \
+    model.torchtitan.flavor=0.6B \
+    model.torchtitan.attn_type=flex \
     model.path=${MODEL_PATH} \
     optim=${backend} \
     optim.lr=1e-5 \

@@ -114,17 +114,17 @@ class TorchTitanEngine(BaseEngine):
         train_spec_module.get_train_spec = _get_train_spec_without_dataloader
 
         # Get train_spec and directly override model_args before Trainer init
-        train_spec = train_spec_module.get_train_spec(self.model_config.torchtitan.name)
-        model_args = train_spec.model_args.get(self.model_config.torchtitan.flavor)
+        train_spec = train_spec_module.get_train_spec(self.model_config.torchtitan["name"])
+        model_args = train_spec.model_args.get(self.model_config.torchtitan["flavor"])
         if model_args is not None:
             if hasattr(model_args, "attn_type"):
-                model_args.attn_type = self.model_config.torchtitan.attn_type
+                model_args.attn_type = self.model_config.torchtitan["attn_type"]
             if hasattr(model_args, "attn_mask_type"):
-                model_args.attn_mask_type = self.model_config.torchtitan.attn_mask_type
+                model_args.attn_mask_type = self.model_config.torchtitan["attn_mask_type"]
 
         model = Model(
-            name=self.model_config.torchtitan.name,
-            flavor=self.model_config.torchtitan.flavor,
+            name=self.model_config.torchtitan["name"],
+            flavor=self.model_config.torchtitan["flavor"],
             hf_assets_path=self.model_config.path,
         )
         optimizer = Optimizer(
@@ -390,13 +390,15 @@ class TorchTitanEngine(BaseEngine):
         assert device in (device_name, "cpu")
         if device == device_name:
             if model:
-                load_fsdp_model_to_gpu(self.module)
+                for module in self.module:
+                    load_fsdp_model_to_gpu(module)
             if optimizer and self.optimizer is not None:
                 load_fsdp_optimizer(self.optimizer, device)
             gc.collect()
         elif device == "cpu":
             if model:
-                offload_fsdp_model_to_cpu(self.module)
+                for module in self.module:
+                    offload_fsdp_model_to_cpu(module)
             if optimizer and self.optimizer is not None:
                 offload_fsdp_optimizer(self.optimizer)
         else:
