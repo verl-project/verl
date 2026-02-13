@@ -152,9 +152,6 @@ class SGLangHttpServer:
             assert master_address and master_port, "non-master node should provide master address and port"
             self._master_address = master_address
             self._master_port = master_port
-        else:
-            # Release the reservation socket cuz we don't have SO_REUSEPORT
-            self._master_sock.close()
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)

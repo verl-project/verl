@@ -78,6 +78,7 @@ def get_free_port(address: str, seed: int | None = None) -> tuple[int, socket.so
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
 
     # When a seed is provided, use it to deterministically pick ports from a wide range.
     # This reduces port conflicts when multiple get_free_port running concurrently.
