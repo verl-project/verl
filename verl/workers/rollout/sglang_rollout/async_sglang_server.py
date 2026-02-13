@@ -127,7 +127,7 @@ class SGLangHttpServer:
         if self.node_rank == 0:
             self._master_address = self._server_address
             # Seed with replica_rank + pid to avoid port conflicts across replicas and restarts
-            self._master_port = get_free_port(self._server_address, random_seed=self.replica_rank + os.getpid())
+            self._master_port = get_free_port(self._server_address, random_seed=os.getpid())
             logger.info(
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
                 f"master address: {self._master_address}, port: {self._master_port}"

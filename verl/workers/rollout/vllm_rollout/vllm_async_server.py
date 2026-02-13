@@ -152,7 +152,7 @@ class vLLMHttpServer:
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
             self._master_address = self._server_address
-            random_seed = self.replica_rank + os.getpid()
+            random_seed = os.getpid()
             # used for torch.distributed.init_process_group
             self._master_port = get_free_port(self._server_address, random_seed=random_seed)
             # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
