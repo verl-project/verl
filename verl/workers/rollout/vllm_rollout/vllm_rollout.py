@@ -26,7 +26,6 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 
-import gc
 import logging
 import os
 import time
@@ -34,18 +33,16 @@ from typing import Any, Generator, Optional
 
 import ray
 import torch
-import zmq
 from packaging import version as vs
 from torch.distributed.device_mesh import DeviceMesh
-from torch.multiprocessing.reductions import reduce_tensor
 
 from verl import DataProto
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
-from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
+from verl.utils.device import get_device_id, is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
-from verl.workers.rollout.utils import ensure_async_iterator
-from verl.workers.rollout.vllm_rollout.utils import TensorMetadata, get_device_uuid
+from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
+from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -98,7 +95,6 @@ class ServerAdapter(BaseRollout):
             self.sleep_level = VLLM_SLEEP_LEVEL
 
         self.device_uuid = get_device_uuid(get_device_id())
-        self.zmq_context = zmq.Context()
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
         self.use_shm = not is_support_ipc()
@@ -165,81 +161,14 @@ class ServerAdapter(BaseRollout):
             kwargs={**kwargs, "use_shm": self.use_shm},
         )
 
-        # build communication buffer
         bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
-        bucket_size = int(bucket_size_mb) << 20
-        s = self.zmq_context.socket(zmq.REQ)
-        s.bind(self.zmq_handle)
+        sender = BucketedWeightSender(
+            zmq_handle=self.zmq_handle,
+            bucket_size_mb=bucket_size_mb,
+            use_shm=self.use_shm,
+        )
+        await sender.async_send_weights(weights)
 
-        buffer, shm = None, None
-        if not self.use_shm:
-            buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
-            handle = reduce_tensor(buffer)
-            s.send_pyobj(handle)
-        else:
-            import uuid
-            from multiprocessing import shared_memory
-
-            # Create unique name for shared memory
-            shm_name = f"verl_weights_{uuid.uuid4().hex}"
-            shm = shared_memory.SharedMemory(name=shm_name, create=True, size=bucket_size)
-            buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
-
-            comm_metadata = {"name": shm_name, "size": bucket_size}
-            s.send_pyobj(comm_metadata)
-
-        s.recv()
-
-        # send bucket weights
-        offset = 0
-        bucket_meta: dict[str, TensorMetadata] = {}
-        # dtype = PrecisionType.to_dtype(self.config.dtype)
-        async for name, weight in ensure_async_iterator(weights):
-            # model parameters are in fp32 full precision
-            # (vermouth1992) we should not force cast weight here because some parameters
-            # (such as moe gate) have to keep fp32 precision. If a weight is bf16 in the rollout side,
-            # the rollout should automatically cast on demand. However, this would incur a higher weight
-            # transfer volume.
-            # weight = weight.to(dtype, non_blocking=True)
-
-            # fill the tensor bucket
-            if offset + weight.nbytes > bucket_size:
-                get_torch_device().synchronize()
-                s.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                s.recv()
-                bucket_meta = {}
-                offset = 0
-
-            # TODO: slice embedding layer weight into chunks
-            assert offset + weight.nbytes <= bucket_size, (
-                f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-                f"Please increase rollout.update_weights_bucket_megabytes({bucket_size_mb} MB)."
-            )
-            bucket_meta[name] = {
-                "name": name,
-                "shape": weight.shape,
-                "dtype": weight.dtype,
-                "offset": offset,
-            }
-            buffer[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
-            offset += weight.nbytes
-
-        # send the last bucket
-        get_torch_device().synchronize()
-        s.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
-        s.recv()
-
-        # clean up
-        s.close()
-        del buffer
-        gc.collect()
-        if shm is not None:
-            shm.close()
-            shm.unlink()
-            del shm
-        gc.collect()
-        get_torch_device().ipc_collect()
-        get_torch_device().empty_cache()
         if future is not None:
             await future
 
