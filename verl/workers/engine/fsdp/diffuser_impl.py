@@ -17,6 +17,7 @@ The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 """
 
 import gc
+import json
 import logging
 import os
 import warnings
@@ -190,6 +191,12 @@ class DiffusersFSDPEngine(BaseEngine):
 
         from verl.utils.torch_dtypes import PrecisionType
 
+        # for checkpoint saving
+        def save_config(self, save_directory: str | os.PathLike):
+            output_config_file = os.path.join(save_directory, "config.json")
+            with open(output_config_file, "w", encoding="utf-8") as f:
+                json.dump(self, f, indent=4, sort_keys=True)
+
         torch_dtype = self.engine_config.model_dtype
 
         if torch_dtype is None:
@@ -224,6 +231,11 @@ class DiffusersFSDPEngine(BaseEngine):
 
             if self.model_config.enable_gradient_checkpointing:
                 module.enable_gradient_checkpointing()
+
+            # for checkpoint saving
+            module.can_generate = lambda: False
+            module.config.save_pretrained = save_config.__get__(module.config)
+
         return module
 
     def _build_lora_module(self, module):
