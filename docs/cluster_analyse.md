@@ -79,11 +79,10 @@ python cluster_analysis.py --input-path ./data --output-path ./output
 
 ## 五、注意事项
 
-1. 当前版本仅支持 `mstx` 类型的 profiler 数据
-2. RL 分析功能当前仅支持处理所有 Rank（`--rank-list` 参数暂不支持过滤）
-3. 需至少采集 level0 及以上数据
-4. 采用离散模式采集 `discrete=True`
-5. 数据格式要求：
+1. RL 分析功能当前仅支持处理所有 Rank（`--rank-list` 参数暂不支持过滤）
+2. 需至少采集 level0 及以上数据
+3. 采用离散模式采集 `discrete=True`
+4. MSTX 数据格式要求：
    - 输入路径下需包含 `*_ascend_pt` 目录
    - 每个 ascend_pt 目录下需包含 `profiler_info_*.json` 文件
    - trace_view.json 文件位于 `ASCEND_PROFILER_OUTPUT` 子目录中

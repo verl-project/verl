@@ -1,3 +1,4 @@
+from logging import RootLogger
 import os
 import stat
 from dataclasses import dataclass
@@ -5,12 +6,12 @@ from typing import TypedDict
 
 class DataMap(TypedDict):
     rank_id: int
-    roll: str
+    role: str
     profiler_data_path: str
 
 class EventRow(TypedDict):
     name: str
-    roll: str
+    role: str
     domain: str
     start_time_ms: float
     end_time_ms: float
@@ -34,7 +35,7 @@ class FigureConfig:
     margin_bottom: int = 50
 
 class Constant:
-    ROLL = "roll"
+    ROLE = "role"
     COMMUNICATION_GROUP_DOMAIN = "communication_group"
     # params
     INPUT_PATH = "input_path"

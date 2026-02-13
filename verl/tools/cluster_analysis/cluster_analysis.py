@@ -9,7 +9,7 @@ from visualizer import get_cluster_visualizer_fn
 def main():
     arg_parser = argparse.ArgumentParser(description="Cluster scheduling visualization")
     arg_parser.add_argument("--input-path", default="test", help="Raw path of profiling data")
-    arg_parser.add_argument("--profiler-type", default="mstx", help="Profiling data type")
+    arg_parser.add_argument("--profiler-type", default="mstx", help="Profiler type")
     arg_parser.add_argument("--data-type", default="text", help="Profiling file format")
     arg_parser.add_argument("--output-path", default="test", help="Output path")
     arg_parser.add_argument("--vis-type", default="html", help="Visualization type")
@@ -24,12 +24,12 @@ def main():
     }
     visualizer_config = {}
 
-    # Get and call parser function
+    # Get and call parser
     parser_cls = get_cluster_parser_cls(args.profiler_type)
     parser = parser_cls(parser_config)
     data = parser.parse()
 
-    # Call visualizer
+    # Get and Call visualizer
     visualizer_fn = get_cluster_visualizer_fn(args.vis_type)
     visualizer_fn(data, args.output_path, visualizer_config)
 
