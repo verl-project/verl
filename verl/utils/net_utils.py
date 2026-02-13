@@ -92,6 +92,5 @@ def get_free_port(address: str, seed: int | None = None) -> tuple[int, socket.so
             except OSError:
                 continue
 
-    # Fallback: let the OS pick a free port
     sock.bind((address, 0))
     return sock.getsockname()[1], sock
