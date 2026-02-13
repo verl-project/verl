@@ -106,7 +106,6 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.trigger_parameter_sync_step`                     | Indicates how many local updates FullyAsyncTrainer performs before a parameter synchronization |
 | `async_training.staleness_threshold`                             | Freshness control                                                                              |
 | `async_training.partial_rollout`                                 | Whether to perform partial_rollout                                                             |
-| `async_training.checkpoint_engine.device_buffer_size_M`          | When use checkpoint_engine, the user-specific bucket size (MB), default `4096`                 |
 | `async_training.use_trainer_do_validate`                         | Whether use trainer node to do validate process, default `False`                               |
 
 **Further Explanation:**

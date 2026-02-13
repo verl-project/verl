@@ -38,7 +38,6 @@ class BaseDetachNcclSync:
             target=self._start_background_loop, args=(self._bg_loop,), name="rollout_actor_async_worker", daemon=True
         )
         self._bg_thread.start()
-        self._role = role
         logger.info(f"[DetachNcclSync] Background thread for SGLang sync started. PID: {os.getpid()}")
 
     @classmethod

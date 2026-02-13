@@ -82,9 +82,6 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.trigger_parameter_sync_step`                     | 表示FullyAsyncTrainer进行多少次本地更新后,进行一次参数同步                          |
 | `async_training.staleness_threshold`                             | 新鲜度控制                                                           |
 | `async_training.partial_rollout`                                 | 是否进行partial_rollout                                             |
-| `async_training.checkpoint_engine.enable`                        | 是否开启checkpoint_engine模式的加速，默认值True                              |
-| `async_training.checkpoint_engine.overlap_broadcast_and_consume` | 启动checkpoint_engine时，是否在参数同步时在broadcast和加载之间使用流水，默认值False       |
-| `async_training.checkpoint_engine.device_buffer_size_M`          | 启动checkpoint_engine时，组装的bucket的大小(MB)，默认为4096                   |
 | `async_training.use_trainer_do_validate`                         | 是否使用Trainer的do_validate方法进行validation，默认值False                  |
 
 **进一步的解释：**

@@ -76,7 +76,7 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
                 replica_rank=replica_rank,
                 config=rollout_config,
                 model_config=model_config,
-                gpus_per_node=self.config.trainer.n_gpus_per_node,
+                gpus_per_node=self.config.rollout.n_gpus_per_node,
             )
             for replica_rank in range(num_replicas)
         ]

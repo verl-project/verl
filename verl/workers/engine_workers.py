@@ -138,8 +138,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         self.loss_fn = None
 
-        self.checkpoint_config = None
-
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
         """Manual control of load/offload"""
