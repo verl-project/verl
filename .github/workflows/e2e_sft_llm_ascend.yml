@@ -65,7 +65,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Declare permissions just read content.
-permissions:
+permissions: 
   contents: read
 
 jobs:
