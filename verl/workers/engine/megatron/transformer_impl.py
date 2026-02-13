@@ -155,7 +155,7 @@ class MegatronEngine(BaseEngine):
             # Ensure dtype settings propagate to Megatron-Bridge/TE
             provider.fp16 = self.param_dtype == torch.float16
             provider.bf16 = self.param_dtype == torch.bfloat16
-            
+
             # Pass distributed info
             provider.tensor_model_parallel_size = self.engine_config.tensor_model_parallel_size
             provider.pipeline_model_parallel_size = self.engine_config.pipeline_model_parallel_size
