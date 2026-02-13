@@ -40,7 +40,7 @@ async def run_unvicorn(app: FastAPI, server_args, server_address, max_retries=5)
 
     for i in range(max_retries):
         try:
-            server_port = get_free_port(server_address)
+            server_port, _ = get_free_port(server_address)
             app.server_args = server_args
             config = uvicorn.Config(app, host=server_address, port=server_port, log_level="warning")
             server = uvicorn.Server(config)

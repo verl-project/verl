@@ -125,7 +125,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
         self.topic = "bucket_metadata"
         if self.is_master:
             self._start_zmq_server()
-            self.dist_port = get_free_port(self.ip)
+            self.dist_port, _ = get_free_port(self.ip)
 
     def prepare(self) -> MasterMetadata:
         self.send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="npu")
@@ -165,7 +165,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
 
     def _start_zmq_server(self):
         self.ip = ray.util.get_node_ip_address().strip("[]")
-        self.zmq_port = get_free_port(self.ip)
+        self.zmq_port, _ = get_free_port(self.ip)
 
         context = zmq.Context()
         self.socket = context.socket(zmq.PUB)
