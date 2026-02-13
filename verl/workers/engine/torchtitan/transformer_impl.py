@@ -56,7 +56,7 @@ from verl.utils.fsdp_utils import (
 from verl.utils.model import extract_multi_modal_inputs
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import HFModelConfig, TorchtitanEngineConfig, TorchtitanOptimizerConfig
-from verl.workers.engine.torchtitan.utils import get_attention_masks
+from verl.workers.engine.torchtitan.utils import enable_fsdp_gradient_division, get_attention_masks
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -182,6 +182,14 @@ class TorchTitanEngine(BaseEngine):
 
         self._init_device_mesh()
 
+        # Re-enable FSDP's gradient division for verl's loss scaling.
+        # TorchTitan disables gradient division by default (for global token normalization),
+        # but verl's loss function multiplies by dp_size to compensate for gradient averaging.
+        if self.engine_config.data_parallel_shard_size > 1:
+            dp_size = self.get_data_parallel_size()
+            for model_part in self.trainer.model_parts:
+                enable_fsdp_gradient_division(model_part, dp_size)
+
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
 
@@ -279,16 +287,24 @@ class TorchTitanEngine(BaseEngine):
         return EngineEvalModeCtx(self, **kwargs)
 
     def get_data_parallel_rank(self):
-        mesh = self.parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"])
+        mesh = self._get_data_parallel_mesh()
         return 0 if mesh is None else mesh.get_local_rank()
 
     def get_data_parallel_size(self):
-        mesh = self.parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"])
-        return 1 if mesh is None else mesh.size()
+        return self.engine_config.data_parallel_shard_size * self.engine_config.data_parallel_replicate_size
 
     def get_data_parallel_group(self):
-        mesh = self.parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"])
+        mesh = self._get_data_parallel_mesh()
         return mesh.get_group() if mesh is not None else None
+
+    def _get_data_parallel_mesh(self):
+        """Get the data parallel mesh, handling hybrid/fully/replicate shard modes."""
+        mesh = self.parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"])
+        if mesh is None:
+            mesh = self.parallel_dims.get_optional_mesh("fsdp")
+        if mesh is None:
+            mesh = self.parallel_dims.get_optional_mesh("dp_replicate")
+        return mesh
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False):
         """Perform forward and optionally backward pass on a batch."""

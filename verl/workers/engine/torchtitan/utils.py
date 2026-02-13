@@ -12,13 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
+import torch.nn as nn
+from torch.distributed._composable.fsdp import FSDPModule
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
-from torchtitan.models.attention import (
-    VarlenMetadata,
-    create_attention_mask,
-    get_causal_mask_mod,
-)
+from torchtitan.models.attention import VarlenMetadata, create_attention_mask, get_causal_mask_mod
 from torchtitan.protocols.model import AttentionMasksType
+
+
+def enable_fsdp_gradient_division(model: nn.Module, dp_size: int) -> None:
+    """
+    Re-enable FSDP's automatic gradient division.
+
+    TorchTitan calls disable_fsdp_gradient_division() which sets gradient_divide_factor=1.0.
+    This re-enables it by setting the factor to the specified dp_size, so gradients are
+    averaged across FSDP ranks. This is needed for verl's loss scaling (loss * dp_size)
+    to work correctly.
+
+    Args:
+        model: The model (or model part) to enable gradient division on.
+        dp_size: The data parallel size to use as the gradient divide factor.
+    """
+
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.set_gradient_divide_factor(float(dp_size))
 
 
 def get_attention_masks(
