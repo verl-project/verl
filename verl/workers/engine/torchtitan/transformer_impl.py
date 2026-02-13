@@ -25,7 +25,16 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed
 from tensordict import TensorDict
-from torchtitan.config.job_config import Checkpoint, Compile, JobConfig, LRScheduler, Model, Optimizer, Parallelism
+from torchtitan.config.job_config import (
+    Checkpoint,
+    Compile,
+    JobConfig,
+    LRScheduler,
+    Model,
+    Optimizer,
+    Parallelism,
+    Training,
+)
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -115,7 +124,7 @@ class TorchTitanEngine(BaseEngine):
         model = Model(
             name=self.model_config.name,
             flavor=self.model_config.flavor,
-            hf_assets_path=self.model_config.hf_assets_path,
+            hf_assets_path=self.model_config.path,
         )
         optimizer = Optimizer(
             name=self.optimizer_config.name,
@@ -150,9 +159,13 @@ class TorchTitanEngine(BaseEngine):
             enable=True,
             initial_load_in_hf=True,
             initial_load_model_only=True,
-            initial_load_path=model_config.hf_assets_path,
+            initial_load_path=model_config.path,
         )
         compile = Compile(enable=self.engine_config.use_torch_compile)
+        if self.engine_config.offload_policy or self.engine_config.forward_only:
+            training = Training(enable_cpu_offload=True)
+        else:
+            training = Training()
 
         # Construct Torchtitan's JobConfig
         self.config = JobConfig(
@@ -162,6 +175,7 @@ class TorchTitanEngine(BaseEngine):
             parallelism=parallelism,
             checkpoint=checkpoint,
             compile=compile,
+            training=training,
         )
         self.trainer = Trainer(self.config)
 
@@ -292,7 +306,6 @@ class TorchTitanEngine(BaseEngine):
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )
-        print(f"jessica: {len(micro_batches)=}")
 
         output_lst = []
 
@@ -355,7 +368,7 @@ class TorchTitanEngine(BaseEngine):
 
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
+            logger.warning(f"grad_norm is not finite: {grad_norm}")
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()

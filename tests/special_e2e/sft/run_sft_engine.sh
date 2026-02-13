@@ -97,7 +97,7 @@ TORCHTITAN_ENGINE_CONFIG="\
     engine=${backend} \
     model=torchtitan_model \
     model.attn_type=varlen \
-    model.hf_assets_path=${MODEL_PATH}
+    model.path=${MODEL_PATH} \
     optim=${backend} \
     optim.lr=1e-5 \
     optim.lr_warmup_steps_ratio=0.2 \
@@ -110,7 +110,7 @@ TORCHTITAN_ENGINE_CONFIG="\
     engine.tensor_parallel_size=${TP_SIZE} \
     engine.pipeline_parallel_size=${PP_SIZE} \
     engine.context_parallel_size=${CP_SIZE} \
-    engine.data_parallel_size=${FSDP_SIZE} \
+    engine.data_parallel_shard_size=${FSDP_SIZE} \
     engine.use_torch_compile=False"
 
 

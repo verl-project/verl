@@ -323,6 +323,7 @@ class TorchtitanEngineConfig(EngineConfig):
         forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
         use_orig_params (bool): Whether to use original parameters when initialize FSDP, default False
         mixed_precision (bool): Mixed precision configuration for FSDP, default False
+        offload_policy (bool): Whether to offload policy model parameters, default False
         data_parallel_size (int): Data parallel group size, default 1
         data_parallel_replicate_size (int): Data parallel replicate size, default 1
         data_parallel_shard_size (int): Data parallel shard degree, default 1
@@ -344,6 +345,7 @@ class TorchtitanEngineConfig(EngineConfig):
     forward_prefetch: bool = False
     use_orig_params: bool = False
     mixed_precision: bool = False
+    offload_policy: bool = False
     use_torch_compile: bool = True
     entropy_from_logits_with_chunking: bool = False
     entropy_checkpointing: bool = False

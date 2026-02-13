@@ -223,44 +223,14 @@ class HFModelConfig(BaseConfig):
 
 
 @dataclass
-class TorchtitanModelConfig(BaseConfig):
-    _mutable_fields = {
-        "tokenizer",
-        "processor",
-        "hf_config",
-        "local_hf_assets_path",
-        "attn_type",
-        "attn_mask_type",
-    }
-
+class TorchtitanModelConfig(HFModelConfig):
+    # Torchtitan-specific fields
     name: str = "qwen3"
     flavor: str = "0.6B"
-    hf_assets_path: str = "./assets/hf/Qwen3-0.6B"
-    local_hf_assets_path: Optional[str] = None
-
-    hf_config: Any = None
-    tokenizer: Any = None
-    processor: Any = None
-
-    # whether to use shared memory
-    use_shm: bool = False
-    trust_remote_code: bool = False
-
-    use_remove_padding: bool = True
 
     # Model args overrides
     attn_type: str = "sdpa"  # e.g., "sdpa", "flex", "varlen"
-    attn_mask_type: str = "causal"  # e.g., "causal", "document_mask", "block_causal"
+    attn_mask_type: str = "causal"  # e.g., "causal", "block_causal"
 
     def __post_init__(self):
-        self.local_hf_assets_path = copy_to_local(self.hf_assets_path, use_shm=self.use_shm)
-
-        # Load tokenizer from hf_assets_path
-        self.tokenizer = hf_tokenizer(self.local_hf_assets_path, trust_remote_code=self.trust_remote_code)
-        self.processor = hf_processor(self.local_hf_assets_path, trust_remote_code=self.trust_remote_code)
-
-        # Load hf_config for model architecture info
-        self.hf_config = AutoConfig.from_pretrained(self.local_hf_assets_path, trust_remote_code=self.trust_remote_code)
-
-    def get_processor(self):
-        return self.processor if self.processor is not None else self.tokenizer
+        super().__post_init__()
