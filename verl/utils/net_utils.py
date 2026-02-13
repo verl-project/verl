@@ -25,6 +25,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ipaddress
+import random
 import socket
 
 
@@ -70,15 +71,26 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
-def get_free_port(address: str) -> tuple[int, socket.socket]:
+def get_free_port(address: str, seed: int | None = None) -> tuple[int, socket.socket]:
     family = socket.AF_INET
     if is_valid_ipv6_address(address):
         family = socket.AF_INET6
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind((address, 0))
 
-    port = sock.getsockname()[1]
-    return port, sock
+    # When a seed is provided, use it to deterministically pick ports from a wide range.
+    # This reduces port conflicts when multiple get_free_port running concurrently.
+    if seed is not None:
+        rng = random.Random(seed)
+        for _ in range(10):
+            port = rng.randint(20000, 60000)
+            try:
+                sock.bind((address, port))
+                return sock.getsockname()[1], sock
+            except OSError:
+                continue
+
+    # Fallback: let the OS pick a free port
+    sock.bind((address, 0))
+    return sock.getsockname()[1], sock
