@@ -34,6 +34,7 @@ Important offload behavior:
 - `VERL_ENABLE_PARAM_OFFLOAD=1`: enable ZeRO-3 parameter offload.
 - `VERL_DS_ZERO2_FP32_ACCUM_PATCH=1`: enable ZeRO-2 accumulation patch.
 - `VERL_DS_ZERO2_STEP_EACH_MICRO=0|1`: switch ZeRO-2 micro-step behavior.
+- `VERL_DS_ROLLOUT_SYNC_PROFILE=1`: log rollout weight-sync phase timings (helps diagnose ZeRO-3 slowness).
 
 ## Command Setup (Relative Paths)
 
@@ -232,3 +233,112 @@ python3 -m verl.trainer.main_ppo -cn ppo_trainer \
   trainer.val_before_train=False \
   trainer.logger=[console]
 ```
+
+## GRPO Six-Case Benchmark + Curves
+
+Run full six-case GRPO benchmark (default behavior):
+
+```bash
+STEPS=60 \
+RUN_TAG=grpo_zero_six_60 \
+./scripts/bench/run_ds_zero_six_case_grpo_bench.sh
+```
+
+Optional fast mode: reuse a completed `zero2_no_offload` baseline and run the other five cases:
+
+```bash
+STEPS=60 \
+REUSE_BASELINE=1 \
+BASELINE_CASE=zero2_no_offload \
+BASELINE_LOG=outputs/<baseline_run>/zero2_no_offload/train.log \
+RUN_TAG=grpo_zero_six_60_reuse \
+./scripts/bench/run_ds_zero_six_case_grpo_bench.sh
+```
+
+Outputs:
+
+- `outputs/<run_tag>_<timestamp>/summary.tsv`
+- `outputs/<run_tag>_<timestamp>/grpo_zero_six_curves.png`
+- `outputs/<run_tag>_<timestamp>/grpo_zero_six_curves_metrics.tsv`
+
+Plot-only command:
+
+```bash
+python3 ./scripts/bench/plot_ds_zero_six_grpo_curves.py \
+  --run-root outputs/<run_tag>_<timestamp>
+```
+
+## PPO + GRPO Twelve-Case Benchmark (60-step)
+
+Run PPO six-case + GRPO six-case end-to-end:
+
+```bash
+SEED=7777 \
+STEPS=60 \
+DS_ROLLOUT_SYNC_PROFILE=0 \
+PPO_TAG=ppo_zero_six_60_seed7777 \
+GRPO_TAG=grpo_zero_six_60_seed7777 \
+./scripts/bench/run_ds_ppo_grpo_twelve_case_bench.sh
+```
+
+Main outputs:
+
+- `outputs/<ppo_tag>_<timestamp>/summary.tsv`
+- `outputs/<ppo_tag>_<timestamp>/zero_six_curves.png`
+- `outputs/<grpo_tag>_<timestamp>/summary.tsv`
+- `outputs/<grpo_tag>_<timestamp>/grpo_zero_six_curves.png`
+- `outputs/twelve_case_manifest_<timestamp>.txt`
+
+## PR Curve Export (GRPO-30 + PPO-60)
+
+Export a PR-friendly curve bundle from existing run logs:
+
+```bash
+./scripts/bench/export_pr_curves.sh
+```
+
+Custom run roots/output directory:
+
+```bash
+PPO_RUN_ROOT=outputs/<ppo_run_dir> \
+GRPO_RUN_ROOT=outputs/<grpo_run_dir> \
+OUT_DIR=outputs/pr_curves_manual \
+./scripts/bench/export_pr_curves.sh
+```
+
+Generated artifacts:
+
+- `outputs/pr_curves_<timestamp>/grpo_zero_six_30step_curves.png`
+- `outputs/pr_curves_<timestamp>/grpo_zero_six_30step_metrics.tsv`
+- `outputs/pr_curves_<timestamp>/ppo_zero_six_60step_curves.png`
+- `outputs/pr_curves_<timestamp>/ppo_zero_six_60step_metrics.tsv`
+
+## ZeRO-3 Slowdown Profiling Workflow
+
+1) Enable runtime sync-phase logs for actor->rollout weight updates:
+
+```bash
+VERL_DS_ROLLOUT_SYNC_PROFILE=1 python3 -m verl.trainer.main_ppo ...
+```
+
+Or enable it for six-case bench runs:
+
+```bash
+DS_ROLLOUT_SYNC_PROFILE=1 \
+STEPS=60 \
+RUN_TAG=zero_six_60_sync_profile \
+./scripts/bench/run_ds_zero_six_case_bench.sh
+```
+
+2) Build timing breakdown from benchmark logs:
+
+```bash
+python3 ./scripts/bench/profile_zero_case_timing_breakdown.py \
+  --run-root outputs/zero_six_60_seed7777_fix_20260209_120716 \
+  --tail-steps 5 \
+  --baseline-case zero2_no_offload \
+  --output-tsv outputs/zero_six_60_seed7777_fix_20260209_120716/timing_breakdown_tail5.tsv
+```
+
+Typical observation in this PR branch: `zero3_no_offload` is mainly slowed by
+`timing_s/update_weights` (rollout sync) and by `old_log_prob/values` recomputation overhead.

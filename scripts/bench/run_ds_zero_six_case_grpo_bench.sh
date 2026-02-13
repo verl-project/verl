@@ -1,25 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE=/home/ubuntu/verl
+REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$REPO_ROOT"
+
 STAMP=$(date +%Y%m%d_%H%M%S)
 STEPS=${STEPS:-60}
 SEED=${SEED:-7777}
-RUN_TAG=${RUN_TAG:-zero_six_${STEPS}_seed${SEED}}
-RUN_ROOT="$BASE/outputs/${RUN_TAG}_${STAMP}"
+RUN_TAG=${RUN_TAG:-grpo_zero_six_${STEPS}_seed${SEED}}
+RUN_ROOT="$REPO_ROOT/outputs/${RUN_TAG}_${STAMP}"
 ROLLOUT_MODE=${ROLLOUT_MODE:-async}
-ZERO2_STEP_EACH_MICRO=${ZERO2_STEP_EACH_MICRO:-0}
-VERL_PATCH=${VERL_DS_ZERO2_FP32_ACCUM_PATCH:-1}
 DS_ROLLOUT_SYNC_PROFILE=${DS_ROLLOUT_SYNC_PROFILE:-0}
 MAX_RETRIES=${MAX_RETRIES:-2}
 
-mkdir -p "$RUN_ROOT" /home/ubuntu/ray_tmp /home/ubuntu/ds_offload
+# Reuse baseline optionally; default runs full six-case benchmark.
+REUSE_BASELINE=${REUSE_BASELINE:-0}
+BASELINE_CASE=${BASELINE_CASE:-zero2_no_offload}
+BASELINE_LOG=${BASELINE_LOG:-$REPO_ROOT/outputs/grpo60_fix3_0212_180313/train.log}
+
+DATA_TRAIN=${DATA_TRAIN:-$REPO_ROOT/../data/gsm8k_ppo/train.parquet}
+DATA_VAL=${DATA_VAL:-$REPO_ROOT/../data/gsm8k_ppo/test.parquet}
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-0.6B}
+
+mkdir -p "$RUN_ROOT" /tmp /home/ubuntu/ds_offload
 
 COMMON_ARGS=(
   actor@actor_rollout_ref.actor=ds_actor
   critic=ds_critic
   actor_rollout_ref.actor.strategy=deepspeed
   trainer.use_legacy_worker_impl=enable
+
+  critic.enable=False
+  algorithm.adv_estimator=grpo
+  algorithm.norm_adv_by_std_in_grpo=True
+  algorithm.use_kl_in_reward=False
+  reward.num_workers=1
+  +reward.reward_kwargs.method=flexible
+  +reward.reward_kwargs.format_score=0.1
+  +reward.reward_kwargs.score=1.0
+
+  actor_rollout_ref.rollout.n=4
   actor_rollout_ref.rollout.name=vllm
   actor_rollout_ref.rollout.mode="$ROLLOUT_MODE"
   actor_rollout_ref.rollout.load_format=auto
@@ -28,32 +48,30 @@ COMMON_ARGS=(
   actor_rollout_ref.rollout.max_num_seqs=8
   actor_rollout_ref.rollout.max_num_batched_tokens=1024
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
+  actor_rollout_ref.rollout.enforce_eager=True
   actor_rollout_ref.rollout.gpu_memory_utilization=0.2
-  actor_rollout_ref.model.path=Qwen/Qwen3-0.6B
-  critic.model.path=Qwen/Qwen3-0.6B
+
+  actor_rollout_ref.model.path="$MODEL_PATH"
   actor_rollout_ref.model.trust_remote_code=True
-  critic.model.trust_remote_code=True
-  data.trust_remote_code=True
-  +actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2
-  +critic.model.override_config.attn_implementation=flash_attention_2
   actor_rollout_ref.model.enable_gradient_checkpointing=True
   actor_rollout_ref.model.use_remove_padding=True
+  +actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2
+
   actor_rollout_ref.actor.ppo_mini_batch_size=32
-  critic.ppo_mini_batch_size=32
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2
-  critic.ppo_micro_batch_size_per_gpu=2
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu=2048
-  critic.ppo_max_token_len_per_gpu=2048
   actor_rollout_ref.actor.use_kl_loss=False
-  algorithm.use_kl_in_reward=False
-  data.train_files=/home/ubuntu/data/gsm8k_ppo/train.parquet
-  data.val_files=/home/ubuntu/data/gsm8k_ppo/test.parquet
+
+  data.train_files="$DATA_TRAIN"
+  data.val_files="$DATA_VAL"
   data.train_batch_size=64
   data.max_prompt_length=512
   data.max_response_length=512
+  data.filter_overlong_prompts=True
+  data.trust_remote_code=True
   data.seed="$SEED"
   actor_rollout_ref.actor.data_loader_seed="$SEED"
-  critic.data_loader_seed="$SEED"
+
   trainer.project_name="$RUN_TAG"
   trainer.save_freq=0
   trainer.test_freq=-1
@@ -63,20 +81,25 @@ COMMON_ARGS=(
   trainer.resume_mode=disable
   trainer.total_training_steps="$STEPS"
   trainer.logger=[console]
+
   +ray_kwargs.ray_init.address=local
   +ray_kwargs.ray_init.num_gpus=2
   +ray_kwargs.ray_init.include_dashboard=False
 )
 
-cat > "$RUN_ROOT/run_config.env" <<CFG
+cat >"$RUN_ROOT/run_config.env" <<CFG
 RUN_ROOT=$RUN_ROOT
 RUN_TAG=$RUN_TAG
 STEPS=$STEPS
 SEED=$SEED
 ROLLOUT_MODE=$ROLLOUT_MODE
-VERL_DS_ZERO2_FP32_ACCUM_PATCH=$VERL_PATCH
-VERL_DS_ZERO2_STEP_EACH_MICRO=$ZERO2_STEP_EACH_MICRO
 DS_ROLLOUT_SYNC_PROFILE=$DS_ROLLOUT_SYNC_PROFILE
+REUSE_BASELINE=$REUSE_BASELINE
+BASELINE_CASE=$BASELINE_CASE
+BASELINE_LOG=$BASELINE_LOG
+DATA_TRAIN=$DATA_TRAIN
+DATA_VAL=$DATA_VAL
+MODEL_PATH=$MODEL_PATH
 CFG
 
 run_case_once() {
@@ -91,7 +114,7 @@ run_case_once() {
   local log_file="$log_dir/train.log"
   local short_id
   short_id=$(printf '%s' "$case_name" | md5sum | cut -c1-8)
-  local ray_tmp="/tmp/ray_${short_id}"
+  local ray_tmp="/tmp/rgrpo_${short_id}"
   local offload_dir="/home/ubuntu/ds_offload/$case_name"
   mkdir -p "$log_dir" "$ray_tmp" "$offload_dir"
   if [[ "$attempt" -eq 1 ]]; then
@@ -107,14 +130,17 @@ run_case_once() {
     actor_rollout_ref.actor.deepspeed.zero_stage="$zero_stage"
     critic.deepspeed_config.zero_stage="$zero_stage"
   )
+
   if [[ "$offload" == "cpu" ]]; then
-    enable_param_offload=1
     extra+=(
       actor_rollout_ref.actor.deepspeed.offload=cpu
       critic.deepspeed_config.offload=cpu
       actor_rollout_ref.actor.deepspeed.offload_dir="$offload_dir"
       critic.deepspeed_config.offload_dir="$offload_dir"
     )
+    if [[ "$zero_stage" -eq 3 ]]; then
+      enable_param_offload=1
+    fi
   else
     extra+=(
       actor_rollout_ref.actor.deepspeed.offload=none
@@ -134,13 +160,11 @@ run_case_once() {
     XDG_CACHE_HOME=/home/ubuntu/.cache \
     TRITON_CACHE_DIR=/home/ubuntu/.cache/triton \
     TORCH_EXTENSIONS_DIR=/home/ubuntu/.cache/torch_extensions \
-    PYTHONPATH="$BASE" \
+    PYTHONPATH="$REPO_ROOT" \
     HYDRA_FULL_ERROR=1 \
     VLLM_SKIP_MEMORY_PROFILING=1 \
     DS_SKIP_CUDA_CHECK=1 \
     VERL_ENABLE_PARAM_OFFLOAD="$enable_param_offload" \
-    VERL_DS_ZERO2_FP32_ACCUM_PATCH="$VERL_PATCH" \
-    VERL_DS_ZERO2_STEP_EACH_MICRO="$ZERO2_STEP_EACH_MICRO" \
     VERL_DS_ROLLOUT_SYNC_PROFILE="$DS_ROLLOUT_SYNC_PROFILE" \
     NCCL_DEBUG=WARN \
     NCCL_ASYNC_ERROR_HANDLING=1 \
@@ -188,77 +212,97 @@ run_wave() {
   done
 }
 
-# Keep GPU pressure balanced:
-# - wave1 runs ZeRO-1/2 + offload variants together (4 x 2GPU jobs)
-# - wave2 runs ZeRO-3 variants after wave1 completes
-wave1_jobs=(
-  "zero1_no_offload:0,1:1:none"
-  "zero2_no_offload:2,3:2:none"
-  "zero1_cpu_offload:4,5:1:cpu"
-  "zero2_cpu_offload:6,7:2:cpu"
-)
-run_wave "${wave1_jobs[@]}"
-
-wave2_jobs=(
-  "zero3_no_offload:0,1:3:none"
-  "zero3_cpu_offload:2,3:3:cpu"
-)
-run_wave "${wave2_jobs[@]}"
+if [[ "$REUSE_BASELINE" == "1" && -f "$BASELINE_LOG" ]]; then
+  mkdir -p "$RUN_ROOT/$BASELINE_CASE"
+  cp "$BASELINE_LOG" "$RUN_ROOT/$BASELINE_CASE/train.log"
+  echo "[info] reused baseline case=$BASELINE_CASE from $BASELINE_LOG"
+  # Other five cases, 8 GPUs in wave1 and 2 GPUs in wave2.
+  run_wave \
+    "zero1_no_offload:0,1:1:none" \
+    "zero3_no_offload:2,3:3:none" \
+    "zero1_cpu_offload:4,5:1:cpu" \
+    "zero2_cpu_offload:6,7:2:cpu"
+  run_wave \
+    "zero3_cpu_offload:0,1:3:cpu"
+else
+  # Full six-case run when no baseline is reused.
+  run_wave \
+    "zero1_no_offload:0,1:1:none" \
+    "zero2_no_offload:2,3:2:none" \
+    "zero1_cpu_offload:4,5:1:cpu" \
+    "zero2_cpu_offload:6,7:2:cpu"
+  run_wave \
+    "zero3_no_offload:0,1:3:none" \
+    "zero3_cpu_offload:2,3:3:cpu"
+fi
 
 summary_file="$RUN_ROOT/summary.tsv"
 python3 - <<'PY' "$RUN_ROOT" "$summary_file" "$STEPS"
-import os, re, sys
+import os
+import re
+import sys
+
 run_root, out_file, target_steps = sys.argv[1], sys.argv[2], int(sys.argv[3])
 cases = [
-    'zero1_no_offload','zero2_no_offload','zero3_no_offload',
-    'zero1_cpu_offload','zero2_cpu_offload','zero3_cpu_offload',
+    "zero1_no_offload",
+    "zero2_no_offload",
+    "zero3_no_offload",
+    "zero1_cpu_offload",
+    "zero2_cpu_offload",
+    "zero3_cpu_offload",
 ]
 start_tail = max(1, target_steps - 4)
 
-with open(out_file, 'w', encoding='utf-8') as f:
+with open(out_file, "w", encoding="utf-8") as f:
     f.write(
-        'case\tstatus\tlast_step\t'
-        'step_target_score_mean\tavg_score_tail5\t'
-        'step_target_throughput\tavg_throughput_tail5\t'
-        'step_target_max_memory_allocated_gb\tavg_max_memory_allocated_tail5_gb\t'
-        'step_target_max_memory_reserved_gb\tavg_max_memory_reserved_tail5_gb\t'
-        'peak_max_memory_reserved_gb\t'
-        'skip_zero_grad_warn_count\tlast_error\n'
+        "case\tstatus\tlast_step\t"
+        "step_target_score_mean\tavg_score_tail5\t"
+        "step_target_throughput\tavg_throughput_tail5\t"
+        "step_target_pg_loss\tavg_pg_loss_tail5\t"
+        "step_target_max_memory_allocated_gb\tavg_max_memory_allocated_tail5_gb\t"
+        "step_target_max_memory_reserved_gb\tavg_max_memory_reserved_tail5_gb\t"
+        "peak_max_memory_reserved_gb\t"
+        "last_error\n"
     )
     for case in cases:
-        log = os.path.join(run_root, case, 'train.log')
-        txt = ''
+        log = os.path.join(run_root, case, "train.log")
+        txt = ""
         if os.path.exists(log):
-            txt = open(log, 'rb').read().decode('utf-8', 'ignore')
+            txt = open(log, "rb").read().decode("utf-8", "ignore")
         rows = []
         for line in txt.splitlines():
-            m = re.search(r'step:(\d+) -', line)
+            m = re.search(r"step:(\d+) -", line)
             if not m:
                 continue
             step = int(m.group(1))
-            sm = re.search(r'critic/score/mean:([-+0-9.eE]+)', line)
-            tm = re.search(r'perf/throughput:([-+0-9.eE]+)', line)
-            ma = re.search(r'perf/max_memory_allocated_gb:([-+0-9.eE]+)', line)
-            mr = re.search(r'perf/max_memory_reserved_gb:([-+0-9.eE]+)', line)
+            sm = re.search(r"critic/score/mean:([-+0-9.eE]+)", line)
+            tm = re.search(r"perf/throughput:([-+0-9.eE]+)", line)
+            lm = re.search(r"actor/pg_loss:([-+0-9.eE]+)", line)
+            ma = re.search(r"perf/max_memory_allocated_gb:([-+0-9.eE]+)", line)
+            mr = re.search(r"perf/max_memory_reserved_gb:([-+0-9.eE]+)", line)
             score = float(sm.group(1)) if sm else None
             thru = float(tm.group(1)) if tm else None
+            loss = float(lm.group(1)) if lm else None
             mem_alloc = float(ma.group(1)) if ma else None
             mem_reserved = float(mr.group(1)) if mr else None
-            rows.append((step, score, thru, mem_alloc, mem_reserved, line))
+            rows.append((step, score, thru, loss, mem_alloc, mem_reserved, line))
 
         last_step = 0
-        step_target_score = 'NA'
-        step_target_thru = 'NA'
-        step_target_mem_alloc = 'NA'
-        step_target_mem_reserved = 'NA'
+        step_target_score = "NA"
+        step_target_thru = "NA"
+        step_target_loss = "NA"
+        step_target_mem_alloc = "NA"
+        step_target_mem_reserved = "NA"
         if rows:
             last_step = max(r[0] for r in rows)
-            for step, score, thru, mem_alloc, mem_reserved, _ in rows:
+            for step, score, thru, loss, mem_alloc, mem_reserved, _ in rows:
                 if step == target_steps:
                     if score is not None:
                         step_target_score = str(score)
                     if thru is not None:
                         step_target_thru = str(thru)
+                    if loss is not None:
+                        step_target_loss = str(loss)
                     if mem_alloc is not None:
                         step_target_mem_alloc = str(mem_alloc)
                     if mem_reserved is not None:
@@ -267,34 +311,43 @@ with open(out_file, 'w', encoding='utf-8') as f:
         tail = [r for r in rows if start_tail <= r[0] <= target_steps]
         scores = [r[1] for r in tail if r[1] is not None]
         thrus = [r[2] for r in tail if r[2] is not None]
-        mem_allocs = [r[3] for r in tail if r[3] is not None]
-        mem_reserved = [r[4] for r in tail if r[4] is not None]
-        avg_score = f"{(sum(scores)/len(scores)):.6f}" if scores else 'NA'
-        avg_thru = f"{(sum(thrus)/len(thrus)):.6f}" if thrus else 'NA'
-        avg_mem_alloc = f"{(sum(mem_allocs)/len(mem_allocs)):.6f}" if mem_allocs else 'NA'
-        avg_mem_reserved = f"{(sum(mem_reserved)/len(mem_reserved)):.6f}" if mem_reserved else 'NA'
-        peak_mem_reserved_candidates = [r[4] for r in rows if r[4] is not None]
-        peak_mem_reserved = f"{max(peak_mem_reserved_candidates):.6f}" if peak_mem_reserved_candidates else 'NA'
+        losses = [r[3] for r in tail if r[3] is not None]
+        mem_allocs = [r[4] for r in tail if r[4] is not None]
+        mem_reserved = [r[5] for r in tail if r[5] is not None]
+        avg_score = f"{(sum(scores)/len(scores)):.6f}" if scores else "NA"
+        avg_thru = f"{(sum(thrus)/len(thrus)):.6f}" if thrus else "NA"
+        avg_loss = f"{(sum(losses)/len(losses)):.6e}" if losses else "NA"
+        avg_mem_alloc = f"{(sum(mem_allocs)/len(mem_allocs)):.6f}" if mem_allocs else "NA"
+        avg_mem_reserved = f"{(sum(mem_reserved)/len(mem_reserved)):.6f}" if mem_reserved else "NA"
+        peak_mem_reserved_candidates = [r[5] for r in rows if r[5] is not None]
+        peak_mem_reserved = f"{max(peak_mem_reserved_candidates):.6f}" if peak_mem_reserved_candidates else "NA"
 
-        status = 'PASS' if last_step >= target_steps else 'FAIL'
-        warn_skip = txt.count('Skip zero_grad because DeepSpeed engine.module is missing')
-
+        status = "PASS" if last_step >= target_steps else "FAIL"
         err_lines = []
         for line in txt.splitlines():
-            if re.search(r'Traceback|RuntimeError|TypeError|ActorDiedError|ray.exceptions', line):
+            if re.search(r"Traceback|RuntimeError|TypeError|ActorDiedError|ray.exceptions", line):
                 err_lines.append(line.strip())
-        last_error = err_lines[-1] if err_lines else 'NA'
-        last_error = last_error.replace('\t', ' ')
+        last_error = err_lines[-1] if err_lines else "NA"
+        last_error = last_error.replace("\t", " ")
 
         f.write(
             f"{case}\t{status}\t{last_step}\t{step_target_score}\t{avg_score}\t"
             f"{step_target_thru}\t{avg_thru}\t"
+            f"{step_target_loss}\t{avg_loss}\t"
             f"{step_target_mem_alloc}\t{avg_mem_alloc}\t"
             f"{step_target_mem_reserved}\t{avg_mem_reserved}\t"
             f"{peak_mem_reserved}\t"
-            f"{warn_skip}\t{last_error}\n"
+            f"{last_error}\n"
         )
 PY
 
+python3 "$REPO_ROOT/scripts/bench/plot_ds_zero_six_grpo_curves.py" \
+  --run-root "$RUN_ROOT" \
+  --summary "$summary_file" \
+  --output "$RUN_ROOT/grpo_zero_six_curves.png" \
+  --metrics-tsv "$RUN_ROOT/grpo_zero_six_curves_metrics.tsv"
+
 echo "RUN_ROOT=$RUN_ROOT"
 echo "SUMMARY=$summary_file"
+echo "CURVE_PNG=$RUN_ROOT/grpo_zero_six_curves.png"
+echo "CURVE_METRICS=$RUN_ROOT/grpo_zero_six_curves_metrics.tsv"

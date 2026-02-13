@@ -288,6 +288,18 @@ class DeepSpeedCheckpointManager:
                 except Exception:
                     pass
 
+        if hdfs_path is not None and self.rank == 0:
+            try:
+                os.makedirs(hdfs_path, exist_ok=True)
+                dst = self._ckpt_dir(hdfs_path, global_step)
+                if os.path.exists(dst):
+                    shutil.rmtree(dst, ignore_errors=True)
+                shutil.copytree(target, dst)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("[DeepSpeedCheckpointManager] Failed to copy checkpoint to %s: %s", hdfs_path, exc)
+
+        self._prune(local_path, max_ckpt_to_keep)
+
     def _save_consolidated_fallback(self, ds_engine, module, target: str, global_step: int):
         """Best-effort consolidated save to avoid DeepSpeed recursion."""
         if module is None:
@@ -334,18 +346,6 @@ class DeepSpeedCheckpointManager:
             except Exception:
                 pass
         offload_deepspeed_model_to_cpu(ds_engine)
-
-        if hdfs_path is not None and self.rank == 0:
-            try:
-                os.makedirs(hdfs_path, exist_ok=True)
-                dst = self._ckpt_dir(hdfs_path, global_step)
-                if os.path.exists(dst):
-                    shutil.rmtree(dst, ignore_errors=True)
-                shutil.copytree(target, dst)
-            except Exception as exc:  # pragma: no cover
-                logger.warning(f"[DeepSpeedCheckpointManager] Failed to copy checkpoint to {hdfs_path}: {exc}")
-
-        self._prune(local_path, max_ckpt_to_keep)
 
     def load_checkpoint(self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: bool = True):
         load_dir = local_path

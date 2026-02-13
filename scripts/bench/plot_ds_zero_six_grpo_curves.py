@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot six-case DeepSpeed benchmark curves from train logs.
+"""Plot six-case DeepSpeed GRPO curves from train logs.
 
 Expected input layout:
   <run_root>/
@@ -33,8 +33,9 @@ CASE_ORDER = [
 METRIC_PATTERNS: dict[str, re.Pattern[str]] = {
     "score": re.compile(r"critic/score/mean:([-+0-9.eE]+)"),
     "throughput": re.compile(r"perf/throughput:([-+0-9.eE]+)"),
+    "memory_allocated_gb": re.compile(r"perf/max_memory_allocated_gb:([-+0-9.eE]+)"),
     "memory_reserved_gb": re.compile(r"perf/max_memory_reserved_gb:([-+0-9.eE]+)"),
-    "vf_loss": re.compile(r"critic/vf_loss:([-+0-9.eE]+)"),
+    "pg_loss": re.compile(r"actor/pg_loss:([-+0-9.eE]+)"),
 }
 
 
@@ -55,7 +56,7 @@ def parse_summary_cases(summary_path: Path) -> list[str]:
 
 def parse_case_log(log_path: Path, max_step: int | None = None) -> dict[int, dict[str, float]]:
     if not log_path.exists():
-        raise FileNotFoundError(f"log file not found: {log_path}")
+        return {}
     step_rows: dict[int, dict[str, float]] = {}
     with log_path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -77,7 +78,17 @@ def write_metrics_tsv(parsed: dict[str, dict[int, dict[str, float]]], output_pat
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
-        writer.writerow(["case", "step", "score", "throughput", "memory_reserved_gb", "vf_loss"])
+        writer.writerow(
+            [
+                "case",
+                "step",
+                "score",
+                "throughput",
+                "memory_allocated_gb",
+                "memory_reserved_gb",
+                "pg_loss",
+            ]
+        )
         for case in CASE_ORDER:
             rows = parsed.get(case)
             if not rows:
@@ -90,8 +101,9 @@ def write_metrics_tsv(parsed: dict[str, dict[int, dict[str, float]]], output_pat
                         step,
                         row.get("score", ""),
                         row.get("throughput", ""),
+                        row.get("memory_allocated_gb", ""),
                         row.get("memory_reserved_gb", ""),
-                        row.get("vf_loss", ""),
+                        row.get("pg_loss", ""),
                     ]
                 )
 
@@ -100,9 +112,9 @@ def plot_curves(parsed: dict[str, dict[int, dict[str, float]]], out_png: Path) -
     fig, axes = plt.subplots(2, 2, figsize=(15, 10), constrained_layout=True)
     axis_defs = [
         (axes[0, 0], "score", "critic/score/mean", "Score"),
-        (axes[0, 1], "throughput", "perf/throughput", "Tokens/s/GPU"),
+        (axes[0, 1], "throughput", "perf/throughput", "Tokens/s"),
         (axes[1, 0], "memory_reserved_gb", "perf/max_memory_reserved_gb", "GB"),
-        (axes[1, 1], "vf_loss", "critic/vf_loss", "Loss"),
+        (axes[1, 1], "pg_loss", "actor/pg_loss", "Loss"),
     ]
 
     for case in CASE_ORDER:
@@ -133,20 +145,20 @@ def plot_curves(parsed: dict[str, dict[int, dict[str, float]]], out_png: Path) -
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Plot DeepSpeed six-case benchmark curves.")
+    parser = argparse.ArgumentParser(description="Plot DeepSpeed GRPO six-case curves.")
     parser.add_argument("--run-root", type=Path, required=True, help="Benchmark run root directory")
     parser.add_argument("--summary", type=Path, default=None, help="summary.tsv path (default: <run_root>/summary.tsv)")
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="output PNG path (default: <run_root>/zero_six_curves.png)",
+        help="output PNG path (default: <run_root>/grpo_zero_six_curves.png)",
     )
     parser.add_argument(
         "--metrics-tsv",
         type=Path,
         default=None,
-        help="parsed metrics TSV path (default: <run_root>/zero_six_curves_metrics.tsv)",
+        help="parsed metrics TSV path (default: <run_root>/grpo_zero_six_curves_metrics.tsv)",
     )
     parser.add_argument(
         "--max-step",
@@ -158,8 +170,8 @@ def main() -> None:
 
     run_root: Path = args.run_root
     summary_path = args.summary or run_root / "summary.tsv"
-    output_png = args.output or run_root / "zero_six_curves.png"
-    metrics_tsv = args.metrics_tsv or run_root / "zero_six_curves_metrics.tsv"
+    output_png = args.output or run_root / "grpo_zero_six_curves.png"
+    metrics_tsv = args.metrics_tsv or run_root / "grpo_zero_six_curves_metrics.tsv"
 
     cases = parse_summary_cases(summary_path)
     parsed: dict[str, dict[int, dict[str, float]]] = {}

@@ -103,6 +103,13 @@ _BACKGROUND_LOOP: asyncio.AbstractEventLoop | None = None
 _BACKGROUND_LOOP_THREAD: threading.Thread | None = None
 _BACKGROUND_LOOP_LOCK = threading.Lock()
 
+# Reuse a single gloo subgroup for CPU object broadcast under NCCL.
+# Creating/destroying a process group per step is expensive in ZeRO-3.
+_GLOO_BCAST_GROUP: torch.distributed.ProcessGroup | None = None
+_GLOO_BCAST_WORLD_SIZE: int | None = None
+_GLOO_BCAST_RANK: int | None = None
+_GLOO_BCAST_LOCK = threading.Lock()
+
 
 def _get_engine_module(engine: Optional[DeepSpeedEngine]):
     """Safely fetch engine.module without triggering DeepSpeed __getattr__ recursion."""
@@ -225,21 +232,53 @@ def _broadcast_object_list_cpu(obj_list, src: int = 0):
     if torch.distributed.get_world_size() <= 1:
         return obj_list
 
-    group = None
     try:
         try:
             backend = torch.distributed.get_backend()
         except Exception:
             backend = None
         if backend == "nccl":
-            group = torch.distributed.new_group(backend="gloo")
+            group = _get_or_create_gloo_broadcast_group()
             torch.distributed.broadcast_object_list(obj_list, src=src, group=group)
         else:
             torch.distributed.broadcast_object_list(obj_list, src=src)
-    finally:
-        if group is not None:
-            torch.distributed.destroy_process_group(group)
+    except Exception:
+        _reset_gloo_broadcast_group_cache()
+        # Fallback to current default process group when gloo subgroup setup fails.
+        torch.distributed.broadcast_object_list(obj_list, src=src)
     return obj_list
+
+
+def _get_or_create_gloo_broadcast_group():
+    """Create and cache a gloo process group for repeated CPU object broadcasts."""
+    global _GLOO_BCAST_GROUP, _GLOO_BCAST_WORLD_SIZE, _GLOO_BCAST_RANK
+
+    if not torch.distributed.is_initialized():
+        return None
+    world_size = torch.distributed.get_world_size()
+    rank = torch.distributed.get_rank()
+
+    with _GLOO_BCAST_LOCK:
+        if (
+            _GLOO_BCAST_GROUP is not None
+            and _GLOO_BCAST_WORLD_SIZE == world_size
+            and _GLOO_BCAST_RANK == rank
+        ):
+            return _GLOO_BCAST_GROUP
+
+        _GLOO_BCAST_GROUP = torch.distributed.new_group(backend="gloo")
+        _GLOO_BCAST_WORLD_SIZE = world_size
+        _GLOO_BCAST_RANK = rank
+        return _GLOO_BCAST_GROUP
+
+
+def _reset_gloo_broadcast_group_cache():
+    """Drop cached gloo subgroup metadata so the next call recreates it."""
+    global _GLOO_BCAST_GROUP, _GLOO_BCAST_WORLD_SIZE, _GLOO_BCAST_RANK
+    with _GLOO_BCAST_LOCK:
+        _GLOO_BCAST_GROUP = None
+        _GLOO_BCAST_WORLD_SIZE = None
+        _GLOO_BCAST_RANK = None
 
 
 def _gather_zero3_state_dict(module: torch.nn.Module, engine: DeepSpeedEngine):
@@ -414,6 +453,17 @@ def _normalize_offload_flags(ds_cfg: Any):
         param_offload = False
     if zero_stage_int < 2:
         optimizer_offload = False
+
+    if offload_requested and zero_stage_int < 2:
+        logger.warning(
+            "DeepSpeed ZeRO-%s does not enable offload in this worker path; ignoring offload=%s.",
+            zero_stage_int,
+            offload_val,
+        )
+    if offload_requested and zero_stage_int >= 3 and not allow_param_offload:
+        logger.warning(
+            "ZeRO-3 param offload is gated by VERL_ENABLE_PARAM_OFFLOAD=1; param offload remains disabled."
+        )
 
     _cfg_set(ds_cfg, "param_offload", param_offload)
     _cfg_set(ds_cfg, "optimizer_offload", optimizer_offload)
@@ -933,6 +983,10 @@ class ActorRolloutRefWorker(Worker):
             self.base_sync_done = True
             return
 
+        # Optional profiling for rollout weight sync. Useful to diagnose
+        # ZeRO-3 slowdowns without changing training semantics.
+        sync_profile_enabled = os.getenv("VERL_DS_ROLLOUT_SYNC_PROFILE", "0") == "1"
+
         deepspeed_config = getattr(self.config.actor, "deepspeed_config", {}) if self._is_actor else {}
         if self.actor_engine is not None:
             _ensure_engine_has_module(self.actor_engine, self.actor_module)
@@ -943,10 +997,15 @@ class ActorRolloutRefWorker(Worker):
         )
 
         def _prepare_rollout_payload():
+            sync_profile: dict[str, float | int] = {}
+            t_prepare_start = time.perf_counter()
             aggressive_empty_cache(force_sync=True)
+            sync_profile["prepare/empty_cache_s"] = time.perf_counter() - t_prepare_start
 
             if self._is_offload_param and engine_has_module:
+                t_offload_load = time.perf_counter()
                 load_deepspeed_model_to_gpu(self.actor_engine)
+                sync_profile["prepare/load_engine_to_gpu_s"] = time.perf_counter() - t_offload_load
 
             # Collect parameters that will be streamed to rollout workers.
             peft_config = None
@@ -957,6 +1016,7 @@ class ActorRolloutRefWorker(Worker):
                 peft_config = peft_model.peft_config.get("default", None)
 
             # ZeRO-2 uses regular module state; ZeRO-3 requires consolidation.
+            t_state_collect = time.perf_counter()
             if engine_has_module:
                 if zero_stage >= 3:
                     params = _gather_zero3_state_dict(actor_module, self.actor_engine)
@@ -966,10 +1026,12 @@ class ActorRolloutRefWorker(Worker):
                     params = self.actor_engine.module.state_dict()
             else:
                 params = actor_module.state_dict()
+            sync_profile["prepare/collect_state_s"] = time.perf_counter() - t_state_collect
 
             if peft_config is not None:
                 # Before base sync: send base + adapter material.
                 # After base sync: send adapter deltas only.
+                t_lora_collect = time.perf_counter()
                 if not self.base_sync_done:
                     params = collect_lora_params(
                         module=actor_module, layered_summon=self.layered_summon, base_sync_done=self.base_sync_done
@@ -979,20 +1041,27 @@ class ActorRolloutRefWorker(Worker):
                     params = collect_lora_params(
                         module=actor_module, layered_summon=self.layered_summon, base_sync_done=self.base_sync_done
                     )
+                sync_profile["prepare/lora_collect_s"] = time.perf_counter() - t_lora_collect
 
             # Normalize key naming to rollout/vLLM expectations.
+            t_convert_keys = time.perf_counter()
             params = convert_weight_keys(params, actor_module)
+            sync_profile["prepare/convert_keys_s"] = time.perf_counter() - t_convert_keys
 
             # For sleep level 2, stream base weights and adapter weights separately.
             if peft_config is not None and getattr(self.rollout, "sleep_level", None) == 2:
+                t_collect_base = time.perf_counter()
                 base_model_params = collect_lora_params(
                     module=actor_module, layered_summon=self.layered_summon, base_sync_done=False
                 )
                 base_model_params = {replace_lora_wrapper(k, peft_config): v for k, v in base_model_params.items()}
                 base_model_params = convert_weight_keys(base_model_params, actor_module)
+                sync_profile["prepare/collect_base_lora_s"] = time.perf_counter() - t_collect_base
 
             if self._is_offload_param and engine_has_module:
+                t_offload_store = time.perf_counter()
                 offload_deepspeed_model_to_cpu(self.actor_engine)
+                sync_profile["prepare/offload_engine_to_cpu_s"] = time.perf_counter() - t_offload_store
 
             device = get_device_id()
 
@@ -1015,11 +1084,28 @@ class ActorRolloutRefWorker(Worker):
 
             # Make transfer boundaries explicit before returning payload.
             if torch.cuda.is_available():
+                t_cuda_sync = time.perf_counter()
                 torch.cuda.synchronize()
-            return params, base_model_params, per_tensor_param, per_tensor_base_param, peft_config
+                sync_profile["prepare/cuda_sync_s"] = time.perf_counter() - t_cuda_sync
 
-        params, base_model_params, per_tensor_param, per_tensor_base_param, peft_config = await asyncio.to_thread(
-            _prepare_rollout_payload
+            if sync_profile_enabled:
+                params_bytes = sum(v.numel() * v.element_size() for v in params.values()) if params else 0
+                sync_profile["prepare/params_count"] = len(params) if params is not None else 0
+                sync_profile["prepare/params_gb"] = float(params_bytes / (1024**3))
+                if base_model_params is not None:
+                    base_bytes = sum(v.numel() * v.element_size() for v in base_model_params.values())
+                    sync_profile["prepare/base_params_count"] = len(base_model_params)
+                    sync_profile["prepare/base_params_gb"] = float(base_bytes / (1024**3))
+                else:
+                    sync_profile["prepare/base_params_count"] = 0
+                    sync_profile["prepare/base_params_gb"] = 0.0
+
+            sync_profile["prepare/total_s"] = time.perf_counter() - t_prepare_start
+            return params, base_model_params, per_tensor_param, per_tensor_base_param, peft_config, sync_profile
+
+        t_rollout_mode_start = time.perf_counter()
+        params, base_model_params, per_tensor_param, per_tensor_base_param, peft_config, sync_profile = (
+            await asyncio.to_thread(_prepare_rollout_payload)
         )
         set_expandable_segments(False)
 
@@ -1033,22 +1119,40 @@ class ActorRolloutRefWorker(Worker):
         else:
             # Normal rollout path: update rollout weights.
             if self.config.rollout.free_cache_engine:
+                t_resume_weights = time.perf_counter()
                 await self.rollout.resume(tags=["weights"])
+                sync_profile["rollout/resume_weights_s"] = time.perf_counter() - t_resume_weights
 
             if per_tensor_base_param is not None:
+                t_update_base = time.perf_counter()
                 await self.rollout.update_weights(per_tensor_base_param, base_sync_done=False)
+                sync_profile["rollout/update_base_weights_s"] = time.perf_counter() - t_update_base
+            else:
+                sync_profile["rollout/update_base_weights_s"] = 0.0
+
+            t_update_main = time.perf_counter()
             await self.rollout.update_weights(
                 per_tensor_param, peft_config=peft_config, base_sync_done=self.base_sync_done
             )
+            sync_profile["rollout/update_main_weights_s"] = time.perf_counter() - t_update_main
             del params, base_model_params, per_tensor_param, per_tensor_base_param
             aggressive_empty_cache(force_sync=True)
 
             if self.config.rollout.free_cache_engine:
+                t_resume_kv = time.perf_counter()
                 await self.rollout.resume(tags=["kv_cache"])
+                sync_profile["rollout/resume_kv_cache_s"] = time.perf_counter() - t_resume_kv
 
             # Base weights are synced once; subsequent updates can be incremental.
             if not self.base_sync_done:
                 self.base_sync_done = True
+
+        sync_profile["rollout/total_s"] = time.perf_counter() - t_rollout_mode_start
+        if sync_profile_enabled:
+            sync_profile["rollout/zero_stage"] = int(zero_stage)
+            sync_profile["rollout/base_sync_done"] = int(self.base_sync_done)
+            sync_profile_fmt = ", ".join(f"{k}={v}" for k, v in sorted(sync_profile.items()))
+            logger.info("DeepSpeed rollout sync profile: %s", sync_profile_fmt)
 
         self.torch_random_states = get_torch_device().get_rng_state()
         get_torch_device().set_rng_state(self.gen_random_states)
