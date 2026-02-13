@@ -68,13 +68,13 @@ class BaseClusterParser(ABC):
         """Collect RL performance data from a single rank"""
         profiler_data_path = data_map.get(Constant.PROFILER_DATA_PATH)
         rank_id = data_map.get(Constant.RANK_ID)
-        roll = data_map.get(Constant.ROLL)
+        role = data_map.get(Constant.ROLE)
 
         if not profiler_data_path:
             logger.warning(f"Rank {rank_id}: profiler_data_path not found")
             return None
 
-        return self.parse_analysis_data(profiler_data_path, rank_id, roll)
+        return self.parse_analysis_data(profiler_data_path, rank_id, role)
 
     def reducer_func(self, mapper_res):
         """Process data collected from all ranks"""
@@ -117,19 +117,19 @@ class BaseClusterParser(ABC):
         Returns:
             list[DataMap]: A list of dictionaries, where each dict contains:
                 - rank_id (int): The rank identifier
-                - roll (str): The role name (e.g., 'actor', 'critic')
+                - role (str): The RL role name (e.g., 'rollout_generate', 'actor_compute_log_prob')
                 - profiler_data_path (str): Path to the profiler data file for this rank
 
         Important:
             - Must return a list, even if empty
-            - Each DataMap must contain all three required keys: 'rank_id', 'roll', 'profiler_data_path'
+            - Each DataMap must contain all three required keys: 'rank_id', 'role', 'profiler_data_path'
             - profiler_data_path should point to an existing file; empty string indicates missing data
             - The returned list is used by mapper_func for parallel processing
         """
         raise NotImplementedError
 
     @abstractmethod
-    def parse_analysis_data(self, profiler_data_path: str, rank_id: int, roll: str) -> list[EventRow]:
+    def parse_analysis_data(self, profiler_data_path: str, rank_id: int, role: str) -> list[EventRow]:
         """
         Parse profiling data for a specific rank and return event information.
 
@@ -141,12 +141,12 @@ class BaseClusterParser(ABC):
         Args:
             profiler_data_path: Path to the profiler data file for this rank
             rank_id: The rank identifier (for logging and data attribution)
-            roll: The role name (e.g., 'actor', 'critic')
+            role: The RL role name (e.g., 'rollout_generate', 'actor_compute_log_prob')
 
         Returns:
             list[EventRow]: A list of event dictionaries, where each dict contains:
                 - name (str): Event name (e.g., 'generate_sequence', 'compute_log_prob')
-                - roll (str): The role name (same as input parameter)
+                - role (str): The RL role name (same as input parameter)
                 - domain (str): Event domain (e.g., 'default', 'communication_group')
                 - start_time_ms (float): Event start time in milliseconds
                 - end_time_ms (float): Event end time in milliseconds

@@ -65,7 +65,7 @@ def generate_rl_timeline(
 
     Args:
         input_data: A pandas DataFrame containing events_summary data.
-                    DataFrame should have columns: roll, domain, rank_id, start_time_ms, end_time_ms
+                    DataFrame should have columns: role, domain, rank_id, start_time_ms, end_time_ms
         output_dir: Directory to save the HTML file
         output_filename: Name of the output HTML file
         title_prefix: Prefix for the chart title
@@ -103,7 +103,7 @@ def load_and_preprocess(input_data: pd.DataFrame) -> tuple[pd.DataFrame, float]:
 
     df.rename(
         columns={
-            "roll": "Roll",
+            "role": "Role",
             "name": "Name",
             "rank_id": "Rank ID",
             "start_time_ms": "Start",
@@ -113,7 +113,7 @@ def load_and_preprocess(input_data: pd.DataFrame) -> tuple[pd.DataFrame, float]:
         errors="ignore",
     )
 
-    required = ["Roll", "Name", "Rank ID", "Start", "Finish"]
+    required = ["Role", "Name", "Rank ID", "Start", "Finish"]
     for col in required:
         if col not in df.columns:
             raise ValueError(f"Required column missing: {col}")
@@ -147,7 +147,7 @@ def merge_short_events(df: pd.DataFrame, threshold_ms: float = 10.0) -> pd.DataF
                 {
                     "Start": short["Start"].min(),
                     "Finish": short["Finish"].max(),
-                    "Roll": short.iloc[0]["Roll"],
+                    "Role": short.iloc[0]["Role"],
                     "Rank ID": short.iloc[0]["Rank ID"],
                     "Name": short.iloc[0]["Name"],
                     "Duration": short["Finish"].max() - short["Start"].min(),
@@ -156,7 +156,7 @@ def merge_short_events(df: pd.DataFrame, threshold_ms: float = 10.0) -> pd.DataF
         )
         return pd.concat([long, merged], ignore_index=True)
 
-    return df.groupby(["Roll", "Rank ID", "Name"], group_keys=False).apply(_merge_group).reset_index(drop=True)
+    return df.groupby(["Role", "Rank ID", "Name"], group_keys=False).apply(_merge_group).reset_index(drop=True)
 
 
 def downsample_if_needed(
@@ -178,7 +178,7 @@ def downsample_if_needed(
 
 
 def build_y_mappings(df: pd.DataFrame):
-    df["Y_Label"] = df["Roll"] + " - Rank " + df["Rank ID"].astype(str)
+    df["Y_Label"] = df["Role"] + " - Rank " + df["Rank ID"].astype(str)
     unique_y_labels = df["Y_Label"].unique()
 
     def _extract_rank(label: str):
