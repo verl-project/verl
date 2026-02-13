@@ -80,29 +80,42 @@ def create_role_worker_mapping(config):
         dict: Mapping from roles to worker classes
     """
     # Select worker class based on strategy
-    if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-        assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from verl.experimental.fully_async_policy.fsdp_workers import (
-            CriticWorker,
+    use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+    if use_legacy_worker_impl == "disable":
+        from verl.experimental.separation.engine_workers import (
             DetachActorWorker,
             DetachAsyncRolloutWorker,
+            TrainingWorker,
         )
         from verl.single_controller.ray import RayWorkerGroup
 
         ray_worker_group_cls = RayWorkerGroup
 
-    elif config.actor_rollout_ref.actor.strategy == "megatron":
-        assert config.critic.strategy == "megatron"
-        from verl.experimental.fully_async_policy.megatron_worker import (
-            CriticWorker,
-            DetachActorWorker,
-            DetachAsyncRolloutWorker,
-        )
-        from verl.single_controller.ray import RayWorkerGroup
-
-        ray_worker_group_cls = RayWorkerGroup
+        CriticWorker = TrainingWorker
     else:
-        raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
+        if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
+            from verl.experimental.fully_async_policy.fsdp_workers import (
+                CriticWorker,
+                DetachActorWorker,
+                DetachAsyncRolloutWorker,
+            )
+            from verl.single_controller.ray import RayWorkerGroup
+
+            ray_worker_group_cls = RayWorkerGroup
+
+        elif config.actor_rollout_ref.actor.strategy == "megatron":
+            assert config.critic.strategy == "megatron"
+            from verl.experimental.fully_async_policy.megatron_worker import (
+                CriticWorker,
+                DetachActorWorker,
+                DetachAsyncRolloutWorker,
+            )
+            from verl.single_controller.ray import RayWorkerGroup
+
+            ray_worker_group_cls = RayWorkerGroup
+        else:
+            raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
 
     train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
     role_worker_mapping = {
