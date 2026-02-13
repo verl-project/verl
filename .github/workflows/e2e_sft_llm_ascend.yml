@@ -97,7 +97,6 @@ jobs:
         run: |
           pip install -r requirements-npu.txt
           pip install -e .
-          pip3 install git+https://github.com/pytorch/torchtitan.git@v0.2.1
           pip install git+https://github.com/ByteDance-Seed/VeOmni.git@v0.1.4
           pip install pandas==2.3.3
           pip uninstall -y mbridge

@@ -106,7 +106,6 @@ jobs:
           pip3 install peft
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install git+https://github.com/pytorch/torchtitan.git@v0.2.1
           pip3 install git+https://github.com/ByteDance-Seed/VeOmni.git@v0.1.4
       - name: Prepare gsm8k dataset
         run: |
