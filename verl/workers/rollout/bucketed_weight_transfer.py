@@ -169,7 +169,7 @@ class BucketedWeightSender:
 
             # Create unique name for shared memory
             shm_name = f"verl_weights_{uuid.uuid4().hex}"
-            shm = shared_memory.SharedMemory(name=shm_name, create=True, size=self.bucket_size)
+            shm = create_shared_memory(self.bucket_size, shm_name)
             buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
 
             comm_metadata = {"name": shm_name, "size": self.bucket_size}
