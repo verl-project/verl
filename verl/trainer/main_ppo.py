@@ -147,8 +147,6 @@ class TaskRunner:
             self.role_worker_mapping[role] = ray.remote(actor_rollout_cls)
             self.mapping[role] = "global_pool"
             return actor_rollout_cls, ray_worker_group_cls
-        else:
-            raise NotImplementedError("One step off policy does not support legacy worker implementation")
 
         # Note: sync mode validation is now handled in RolloutConfig.__post_init__
         # Always use async worker since sync mode is deprecated and rejected
@@ -176,9 +174,34 @@ class TaskRunner:
 
     def add_critic_worker(self, config):
         """Add critic worker to role mapping."""
-        from verl.workers.engine_workers import TrainingWorker
+        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        if config.critic.strategy in {"fsdp", "fsdp2"}:
+            if use_legacy_worker_impl in ["auto", "enable"]:
+                from verl.workers.fsdp_workers import CriticWorker
+            elif use_legacy_worker_impl == "disable":
+                # we don't need to specialize critic worker. Just use TrainingWorker
+                from verl.workers.engine_workers import TrainingWorker
 
-        CriticWorker = TrainingWorker
+                CriticWorker = TrainingWorker
+                print("Using new worker implementation")
+            else:
+                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
+
+        elif config.critic.strategy == "megatron":
+            # TODO: switch this to TrainingWorker as well
+            from verl.workers.megatron_workers import CriticWorker
+
+        elif config.critic.strategy == "veomni":
+            if use_legacy_worker_impl == "disable":
+                from verl.workers.engine_workers import TrainingWorker
+
+                CriticWorker = TrainingWorker
+                print("Using new worker implementation")
+            else:
+                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
+
+        else:
+            raise NotImplementedError
 
         from verl.trainer.ppo.ray_trainer import Role
 
