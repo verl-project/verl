@@ -60,6 +60,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
+    process_validation_metrics,
 )
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
@@ -78,7 +79,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
-from verl.utils.tracking import Tracking
+from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.utils.losses import value_loss
@@ -159,7 +160,7 @@ class ReplayBuffer:
         Returns:
             KVBatchMeta: A batch of data.
         """
-        assert (global_steps or batch_size) and (not (global_steps and batch_size)), (
+        assert (global_steps is not None or batch_size) and (not (global_steps is not None and batch_size)), (
             "Either global_steps or batch_size must be specified, but not both."
         )
 
@@ -344,7 +345,7 @@ class AgentLoopManagerTQ(AgentLoopManager):
         """
         # mark prompts as pending in replay buffer
         global_steps = prompts["global_steps"]
-        partition_id = "train" if not prompts.get("validate", False) else "val"
+        partition_id = "train" if "validate" not in prompts else "val"
         items = {uid: {"global_steps": global_steps, "status": "running"} for uid in prompts["uid"]}
         self.replay_buffer.add(partition_id, items)
 
@@ -352,7 +353,7 @@ class AgentLoopManagerTQ(AgentLoopManager):
         ray.get(
             [
                 worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
             ]
         )
 
@@ -634,8 +635,131 @@ class PPOTrainer:
     def _save_checkpoint(self):
         raise NotImplementedError
 
-    def _validate(self) -> dict:
-        raise NotImplementedError
+    def _validate(self) -> dict[str, float]:
+        # Lists to collect samples for the table
+        sample_uids = []
+        sample_inputs = []
+        sample_outputs = []
+        sample_gts = []
+        sample_scores = []
+        sample_turns = []
+        data_sources = []
+        reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+
+        for batch_dict in self.val_dataloader:
+            # 1. put batch to agent loop manager
+            batch_dict["uid"] = np.array(
+                [str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object
+            )
+            batch = tu.get_tensordict(batch_dict)
+            tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+            tu.assign_non_tensor_data(batch, "validate", True)
+            self.agent_loop_manager.generate_sequences(batch)
+
+            # 2. sample batch from replay buffer
+            batch = self.replay_buffer.sample(partition_id="val", global_steps=self.global_steps)
+
+            # 3. [OPTIONAL] compute reward score with colocated reward model
+            if self.reward_loop_manager.reward_loop_worker_handles is None:
+                self.checkpoint_manager.sleep_replicas()
+                batch = self._compute_reward_colocate(batch)
+                self.checkpoint_manager.update_weights()
+
+            # 4. collect necessary data for logging
+            fields = ["uid", "prompts", "responses", "rm_scores", "num_turns", "reward_model", "data_source"]
+            data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+            data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+            data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+
+            sample_uids.extend(data.pop("uid").tolist())
+            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["responses"]]
+            sample_outputs.extend(output_texts)
+            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["prompts"]]
+            sample_inputs.extend(input_texts)
+            scores = data["rm_scores"].sum(dim=1).tolist()
+            sample_scores.extend(scores)
+            sample_turns.extend(data.pop("num_turns").tolist())
+            reward_extra_infos_dict["reward"].extend(scores)
+
+            reward_model = data.pop("reward_model", None)
+            if reward_model is not None:
+                sample_gts.extend([item.get("ground_truth", None) for item in reward_model.tolist()])
+            else:
+                sample_gts.extend([None] * len(batch))
+
+            data_source = data.pop("data_source", None)
+            if data_source is not None:
+                data_sources.extend(data_source.tolist())
+            else:
+                data_sources.extend(["unknown"] * len(batch))
+
+            # 5. cleanup transfer queue and replay buffer
+            tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
+            self.replay_buffer.remove(batch.partition_id, batch.keys)
+
+        # logger to wandb
+        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+
+        # dump to local dir
+        val_data_dir = self.config.trainer.get("validation_data_dir", None)
+        if val_data_dir:
+            self._dump_generations(
+                inputs=sample_inputs,
+                outputs=sample_outputs,
+                gts=sample_gts,
+                scores=sample_scores,
+                reward_extra_infos_dict=reward_extra_infos_dict,
+                dump_path=val_data_dir,
+            )
+
+        return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
+
+    def _maybe_log_val_generations(self, inputs, outputs, scores):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+        generations_to_log = self.config.trainer.log_val_generations
+        if generations_to_log == 0:
+            return
+
+        # Create tuples of (input, output, score) and sort by input text
+        samples = list(zip(inputs, outputs, scores, strict=True))
+        samples.sort(key=lambda x: x[0])  # Sort by input text
+
+        # Use fixed random seed for deterministic shuffling
+        rng = np.random.RandomState(42)
+        rng.shuffle(samples)
+
+        # Take first N samples after shuffling
+        samples = samples[:generations_to_log]
+
+        # Log to each configured logger
+        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+
+    def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns) -> dict[str, float]:
+        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+        metric_dict = {}
+        for data_source, var2metric2val in data_src2var2metric2val.items():
+            core_var = "acc" if "acc" in var2metric2val else "reward"
+            for var_name, metric2val in var2metric2val.items():
+                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+                for metric_name, metric_val in metric2val.items():
+                    if (
+                        (var_name == core_var)
+                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                        and (f"@{n_max}" in metric_name)
+                    ):
+                        metric_sec = "val-core"
+                    else:
+                        metric_sec = "val-aux"
+                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+                    metric_dict[pfx] = metric_val
+
+        if len(sample_turns) > 0:
+            sample_turns = np.array(sample_turns)
+            metric_dict["val-aux/num_turns/min"] = sample_turns.min()
+            metric_dict["val-aux/num_turns/max"] = sample_turns.max()
+            metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+
+        return metric_dict
 
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
@@ -930,6 +1054,7 @@ class PPOTrainer:
             "returns",
             "rm_scores",
             "token_level_rewards",
+            "num_turns",
         ]
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
         data = data.to_padded_tensor()
@@ -948,6 +1073,16 @@ class PPOTrainer:
         gradient_norm = metrics.get("actor/grad_norm", None)
         metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
+        # 3. other auxiliary metrics
+        num_turns = np.array(data.pop("num_turns").tolist())
+        metrics.update(
+            {
+                "training/num_turns/mean": num_turns.mean(),
+                "training/num_turns/max": num_turns.max(),
+                "training/num_turns/min": num_turns.min(),
+            }
+        )
+
     def fit(self):
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -955,12 +1090,23 @@ class PPOTrainer:
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
+        self.validation_generations_logger = ValidationGenerationsLogger(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+        )
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights()
 
-        # TODO(wuxibin): validate before train
+        # perform validation before training
+        if self.config.trainer.get("val_before_train", True):
+            val_metrics = self._validate()
+            assert val_metrics, f"{val_metrics=}"
+            pprint(f"Initial validation metrics: {val_metrics}")
+            self.logger.log(data=val_metrics, step=self.global_steps)
+            if self.config.trainer.get("val_only", False):
+                return
 
         current_epoch = self.global_steps // len(self.train_dataloader)
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -981,7 +1127,7 @@ class PPOTrainer:
                 is_last_step = self.global_steps >= self.total_training_steps
                 metrics, timing_raw = {}, {}
 
-                # 1. perform rollout, update critic, and update actor
+                # 1. perform rollout and actor/critic training
                 self._start_profiling()
                 with marked_timer("step", timing_raw):
                     batch = self.step(batch_dict, metrics, timing_raw)
@@ -1011,14 +1157,13 @@ class PPOTrainer:
                 # 5. record metrics
                 self._compute_metrics(batch, metrics, timing_raw, global_steps=self.global_steps, epoch=epoch)
 
-                # remove items from transfer queue and replay buffer
+                # 6. cleanup transfer queue and replay buffer
                 tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
                 self.replay_buffer.remove(batch.partition_id, batch.keys)
 
                 self.logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
                 self.global_steps += 1
-
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
