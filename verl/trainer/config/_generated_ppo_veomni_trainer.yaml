@@ -304,7 +304,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.qat,{}}
+    qat: ${oc.select:actor_rollout_ref.actor.qat,null}
     layered_summon: false
   model:
     _target_: verl.workers.config.HFModelConfig

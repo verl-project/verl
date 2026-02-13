@@ -238,7 +238,7 @@ class RolloutConfig(BaseConfig):
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
-    qat: dict = field(default_factory=dict)
+    qat: Optional[dict] = None
 
     def __post_init__(self):
         """Validate the rollout config"""

@@ -28,6 +28,7 @@ import torch.distributed
 import torch.distributed as dist
 from codetiming import Timer
 from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf.errors import ConfigAttributeError
 from peft import LoraConfig, TaskType, get_peft_model
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
@@ -280,12 +281,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     def _init_qat_config(self):
         """Initialize QAT configuration from actor.qat."""
-        self.qat_config = self.config.actor.qat
-        self._qat_enabled = self.qat_config.enable
-        if self._qat_enabled:
-            logger.info(
-                f"QAT enabled: mode={self.qat_config.mode}, config_path={self.qat_config.quantization_config_path}"
-            )
+        try:
+            self.qat_config = self.config.actor.qat
+            self._qat_enabled = self.qat_config.enable
+            if self._qat_enabled:
+                logger.info(
+                    f"QAT enabled: mode={self.qat_config.mode}, config_path={self.qat_config.quantization_config_path}"
+                )
+        except (AttributeError, KeyError, ConfigAttributeError):
+            # QAT config not provided, disable QAT
+            self._qat_enabled = False
+            self.qat_config = None
 
     def _restore_w4a4_input_scales(self, model, model_path):
         """Restore input_global_scale and input_amax from checkpoint for W4A4 mode."""
