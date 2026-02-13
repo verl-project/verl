@@ -110,7 +110,7 @@ class TRTLLMHttpServer:
 
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
-        from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig
+        from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
         from tensorrt_llm.serve import OpenAIServer
 
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
@@ -162,7 +162,10 @@ class TRTLLMHttpServer:
                         enable_padding=True,
                         batch_sizes=self.config.cudagraph_capture_sizes,
                         max_batch_size=0 if self.config.cudagraph_capture_sizes else self.config.max_num_seqs,
-                    )
+                    ),
+                    "scheduler_config": SchedulerConfig(
+                        capacity_scheduler_policy=CapacitySchedulerPolicy.MAX_UTILIZATION,
+                    ),
                 }
             )
 
