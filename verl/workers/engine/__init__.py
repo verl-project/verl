@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .base import BaseEngine, EngineRegistry
-from .fsdp import FSDPEngine, FSDPEngineWithLMHead
+from .fsdp import DiffusersFSDPEngine, FSDPEngine, FSDPEngineWithLMHead
 
 __all__ = [
     "BaseEngine",
     "EngineRegistry",
     "FSDPEngine",
     "FSDPEngineWithLMHead",
+    "DiffusersFSDPEngine",
 ]
 
 try:

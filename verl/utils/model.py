@@ -96,7 +96,7 @@ def get_generation_config(
                 trust_remote_code=trust_remote_code,
             )
             return GenerationConfig.from_model_config(config)
-        except OSError:  # Not found
+        except (OSError, ValueError):  # Not found
             return None
 
 

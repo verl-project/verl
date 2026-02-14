@@ -116,11 +116,38 @@ over_sample_rate: 0
 # This is only effective for SGLang rollout.
 multi_stage_wake_up: false
 
+# image height for diffusion model rollout
+image_height: 512
+
+# image width for diffusion model rollout
+image_width: 512
+
+# number of inference steps for diffusion model rollout
+num_inference_steps: 10
+
+# noise level for diffusion model rollout
+noise_level: 0.7
+
+# guidance scale for classifier-free guidance
+guidance_scale: 4.5
+
+# SDE type during rollout
+sde_type: "sde"
+
+# SDE window size
+sde_window_size: null
+
+# SDE window range
+sde_window_range: null
+
 # Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail
 engine_kwargs:
 
   # vllm engine config
   vllm: {}
+
+  # vllm-omni engine config
+  vllm_omni: {}
 
   # sglang engine config
   sglang: {}
@@ -149,6 +176,15 @@ val_kwargs:
 
   # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
+
+  # number of inference steps for diffusion model rollout
+  num_inference_steps: 40
+
+  # noise level for diffusion model rollout
+  noise_level: 0.0
+
+  # random seed for validation
+  seed: 42
 
 # Multi-turn interaction config for tools or chat.
 multi_turn:

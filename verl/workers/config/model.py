@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from omegaconf import MISSING
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
 from verl.base_config import BaseConfig
 from verl.utils import hf_processor, hf_tokenizer
@@ -24,7 +24,7 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
-__all__ = ["HFModelConfig", "MtpConfig"]
+__all__ = ["HFModelConfig", "DiffusersModelConfig", "MtpConfig"]
 
 
 @dataclass
@@ -170,9 +170,16 @@ class HFModelConfig(BaseConfig):
 
         # construct hf_config
         attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
-        self.hf_config = AutoConfig.from_pretrained(
-            self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation
-        )
+
+        try:
+            self.hf_config = AutoConfig.from_pretrained(
+                self.local_hf_config_path,
+                trust_remote_code=self.trust_remote_code,
+                attn_implementation=attn_implementation,
+            )
+        except ValueError:
+            # for diffusers, we use a empty PretrainedConfig temporarily
+            self.hf_config = PretrainedConfig()
 
         override_config_kwargs = {}
 
@@ -196,9 +203,6 @@ class HFModelConfig(BaseConfig):
 
         # get model architectures
         self.architectures = getattr(self.hf_config, "architectures", None)
-        assert self.architectures is not None and len(self.architectures) == 1, (
-            "Expect only one architecture, got {}".format(self.architectures)
-        )
 
         # per model patch
         if getattr(self.hf_config, "model_type", None) == "kimi_vl":
@@ -217,6 +221,93 @@ class HFModelConfig(BaseConfig):
                         raise TypeError(
                             f"All elements in target_modules list must be strings, but found {type(x).__name__}"
                         )
+
+    def get_processor(self):
+        return self.processor if self.processor is not None else self.tokenizer
+
+
+@dataclass
+class DiffusersModelConfig(BaseConfig):
+    _mutable_fields = {
+        "tokenizer_path",
+        "tokenizer",
+        "processor",
+        "local_path",
+        "local_tokenizer_path",
+    }
+
+    path: str = MISSING
+    local_path: Optional[str] = None
+    tokenizer_path: Optional[str] = None
+    local_tokenizer_path: Optional[str] = None
+    model_type: str = "diffusion_model"
+
+    # whether to load tokenizer. This is useful when we only want to load model config
+    load_tokenizer: bool = True
+
+    tokenizer: Any = None
+    processor: Any = None
+
+    # whether to use shared memory
+    use_shm: bool = False
+    trust_remote_code: bool = False
+
+    external_lib: Optional[str] = None
+
+    override_config: dict = field(default_factory=dict)
+
+    enable_gradient_checkpointing: bool = False
+    enable_activation_offload: bool = False
+
+    use_remove_padding: bool = True
+
+    # lora related. We may setup a separate config later
+    lora_rank: int = 32
+    lora_alpha: int = 64
+    lora_init_weights: str = "gaussian"
+    target_modules: Optional[str | list[str]] = "all-linear"
+    target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
+
+    exclude_modules: Optional[str] = None
+
+    # megatron lora config
+    lora: dict[str, Any] = field(default_factory=dict)
+
+    # path to pre-trained LoRA adapter to load for continued training
+    lora_adapter_path: Optional[str] = None
+    use_liger: bool = False
+
+    # optimization related
+    use_fused_kernels: bool = False
+    fused_kernel_options: dict = field(default_factory=dict)
+
+    # TiledMLP configuration for memory-efficient MLP computation
+    tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
+
+    # sample related
+    image_height: int = 512
+    image_width: int = 512
+    num_inference_steps: int = 10
+    noise_level: float = 0.7
+    guidance_scale: float = 4.5
+    sde_type: str = "sde"  # "sde" or "cps"
+
+    def __post_init__(self):
+        import_external_libs(self.external_lib)
+        if self.tokenizer_path is None:
+            self.tokenizer_path = os.path.join(self.path, "tokenizer")
+        self.local_path = copy_to_local(self.path, use_shm=self.use_shm)
+
+        # construct tokenizer
+        if self.load_tokenizer:
+            self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
+            self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
+            if os.path.exists(os.path.join(self.local_path, "processor")):
+                self.processor = hf_processor(
+                    os.path.join(self.local_path, "processor"), trust_remote_code=self.trust_remote_code
+                )
+            else:
+                self.processor = None
 
     def get_processor(self):
         return self.processor if self.processor is not None else self.tokenizer
