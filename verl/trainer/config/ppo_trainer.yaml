@@ -209,7 +209,7 @@ global_profiler:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.utils.profiler.ProfilerConfig
 
-  # Profiling tool: choose between nsys, npu, torch, torch_memory
+  # Profiling tool: choose between nsys, npu, torch, torch_memory, precision_debugger
   tool: null
 
   # profile steps
@@ -283,6 +283,33 @@ global_profiler:
 
       # The depth of the call stack to capture for each allocation
       stack_depth: 32
+
+
+    # msprobe precision debugger
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Enable msprobe precision debugger
+      enable: False
+
+      # Path to msprobe config json
+      config_path: null
+
+      # Data directory for msprobe dumps
+      data_dir: "outputs/precision_debug"
+
+      # Profile steps
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: null
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: False
 
       # 'alloc': records only allocation events || 'state': records memory state changes || 'all': records both.
       context: "all"

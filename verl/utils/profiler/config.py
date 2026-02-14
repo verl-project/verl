@@ -80,6 +80,32 @@ class TorchMemoryToolConfig(BaseConfig):
 
 
 @dataclass
+class PrecisionDebuggerToolConfig(BaseConfig):
+    """Precision debugger tool config (msprobe)."""
+
+    enable: bool = False
+    config_path: Optional[str] = None
+    data_dir: str = "outputs/precision_debug"
+    steps: Optional[list[int]] = None
+    # Supported stages:
+    # actor_update, actor_compute_log_prob, ref_compute_log_prob,
+    # compute_values, critic_update, compute_rm_score
+    stages: Optional[list[str]] = None
+    strict: bool = False
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.enable, bool), f"enable must be bool, got {type(self.enable)}"
+        if self.config_path is not None:
+            assert isinstance(self.config_path, str), f"config_path must be str, got {type(self.config_path)}"
+        assert isinstance(self.data_dir, str), f"data_dir must be str, got {type(self.data_dir)}"
+        if self.steps is not None:
+            assert isinstance(self.steps, list), f"steps must be list[int], got {type(self.steps)}"
+        if self.stages is not None:
+            assert isinstance(self.stages, list), f"stages must be list[str], got {type(self.stages)}"
+        assert isinstance(self.strict, bool), f"strict must be bool, got {type(self.strict)}"
+
+
+@dataclass
 class NPUToolConfig(NsightToolConfig):
     """NPU profiler too; config."""
 
