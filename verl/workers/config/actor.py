@@ -23,7 +23,6 @@ from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
 from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig, VeOmniEngineConfig
-from .distillation import DistillationConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
@@ -39,6 +38,7 @@ __all__ = [
     "QATConfig",
     "TorchTitanActorConfig",
     "DistillationLossConfig",
+    "QATConfig",
     "TeacherHFModelConfig",
     "TeacherModelsConfig",
 ]
