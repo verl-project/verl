@@ -368,11 +368,7 @@ actor_rollout_ref:
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
-    torchtitan:
-      name: null
-      flavor: null
-      attn_type: sdpa
-      attn_mask_type: causal
+    attn_type: flex
     lora:
       type: lora
       merge: false

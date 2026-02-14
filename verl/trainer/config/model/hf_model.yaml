@@ -96,18 +96,5 @@ mtp:
   method: mtp
   num_speculative_tokens: 1
 
-# Torchtitan backend configuration
-# Only used when engine backend is set to "torchtitan"
-torchtitan:
-
-  # model name for torchtitan (e.g., "qwen3", "llama3")
-  name: null
-
-  # model flavor/size (e.g., "0.6B", "8B")
-  flavor: null
-
-  # attention type (e.g., "sdpa", "flex", "varlen")
-  attn_type: sdpa
-
-  # attention mask type (e.g., "causal", "block_causal")
-  attn_mask_type: causal
+# attention type (e.g., "sdpa", "flex", "varlen")
+attn_type: flex

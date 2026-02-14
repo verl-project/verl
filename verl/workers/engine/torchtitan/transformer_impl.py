@@ -56,7 +56,11 @@ from verl.utils.fsdp_utils import (
 from verl.utils.model import extract_multi_modal_inputs
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import HFModelConfig, TorchtitanEngineConfig, TorchtitanOptimizerConfig
-from verl.workers.engine.torchtitan.utils import enable_fsdp_gradient_division, get_attention_masks
+from verl.workers.engine.torchtitan.utils import (
+    derive_torchtitan_name_and_flavor,
+    enable_fsdp_gradient_division,
+    get_attention_masks,
+)
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -113,18 +117,19 @@ class TorchTitanEngine(BaseEngine):
 
         train_spec_module.get_train_spec = _get_train_spec_without_dataloader
 
+        # Derive torchtitan model name and flavor from HF config
+        torchtitan_name, torchtitan_flavor = derive_torchtitan_name_and_flavor(self.model_config.hf_config)
+
         # Get train_spec and directly override model_args before Trainer init
-        train_spec = train_spec_module.get_train_spec(self.model_config.torchtitan["name"])
-        model_args = train_spec.model_args.get(self.model_config.torchtitan["flavor"])
+        train_spec = train_spec_module.get_train_spec(torchtitan_name)
+        model_args = train_spec.model_args.get(torchtitan_flavor)
         if model_args is not None:
             if hasattr(model_args, "attn_type"):
-                model_args.attn_type = self.model_config.torchtitan["attn_type"]
-            if hasattr(model_args, "attn_mask_type"):
-                model_args.attn_mask_type = self.model_config.torchtitan["attn_mask_type"]
+                model_args.attn_type = self.model_config.attn_type
 
         model = Model(
-            name=self.model_config.torchtitan["name"],
-            flavor=self.model_config.torchtitan["flavor"],
+            name=torchtitan_name,
+            flavor=torchtitan_flavor,
             hf_assets_path=self.model_config.path,
         )
         optimizer = Optimizer(

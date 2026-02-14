@@ -1,0 +1,9 @@
+{"step":1,"data":{"train/loss":1.3715262413024902,"train/grad_norm":22.620532989501953,"train/lr":1.0000000000000001e-7,"train/mfu":0.0034872359881096366,"train/global_tokens":26946,"train/total_tokens(B)":0.000026946}}
+{"step":2,"data":{"train/loss":1.4287806749343872,"train/grad_norm":22.123323440551758,"train/lr":1.5000000000000002e-7,"train/mfu":0.00666729605801979,"train/global_tokens":25762,"train/total_tokens(B)":0.000052708}}
+{"step":3,"data":{"train/loss":1.3436442613601685,"train/grad_norm":21.362346649169922,"train/lr":2.0000000000000002e-7,"train/mfu":0.008771240662027594,"train/global_tokens":27885,"train/total_tokens(B)":0.000080593}}
+{"step":4,"data":{"train/loss":1.384500503540039,"train/grad_norm":21.472007751464844,"train/lr":2.5000000000000004e-7,"train/mfu":0.008749758374340244,"train/global_tokens":26848,"train/total_tokens(B)":0.000107441}}
+{"step":5,"data":{"train/loss":1.4218531847000122,"train/grad_norm":22.761024475097656,"train/lr":3.0000000000000004e-7,"train/mfu":0.008239677491598579,"train/global_tokens":25260,"train/total_tokens(B)":0.000132701}}
+{"step":6,"data":{"train/loss":1.3696144819259644,"train/grad_norm":20.689130783081055,"train/lr":3.5000000000000004e-7,"train/mfu":0.008588511230334939,"train/global_tokens":27166,"train/total_tokens(B)":0.000159867}}
+{"step":7,"data":{"train/loss":1.3740754127502441,"train/grad_norm":22.179712295532227,"train/lr":4.0000000000000003e-7,"train/mfu":0.008408156797373228,"train/global_tokens":25792,"train/total_tokens(B)":0.000185659}}
+{"step":8,"data":{"train/loss":1.3679600954055786,"train/grad_norm":22.597911834716797,"train/lr":4.5000000000000003e-7,"train/mfu":0.008255299580053785,"train/global_tokens":25732,"train/total_tokens(B)":0.000211391}}
+{"step":9,"data":{"train/loss":1.3341537714004517,"train/grad_norm":22.234039306640625,"train/lr":5.000000000000001e-7,"train/mfu":0.0090577837250988,"train/global_tokens":27047,"train/total_tokens(B)":0.000238438}}

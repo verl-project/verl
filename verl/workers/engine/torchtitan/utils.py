@@ -11,12 +11,85 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+
 import torch
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
 from torchtitan.models.attention import VarlenMetadata, create_attention_mask, get_causal_mask_mod
 from torchtitan.protocols.model import AttentionMasksType
+
+logger = logging.getLogger(__name__)
+
+# Mapping from HuggingFace model_type to torchtitan model name.
+# Torchtitan models not mapped here:
+#   - flux: diffusion model, not applicable to verl's RL/SFT workflows
+#   - llama3_ft: fault-tolerant variant of llama3, same HF models (mapped via "llama")
+_HF_MODEL_TYPE_TO_TORCHTITAN_NAME = {
+    "qwen2": "qwen3",
+    "qwen3": "qwen3",
+    "qwen2_moe": "qwen3",
+    "qwen3_moe": "qwen3",
+    "llama": "llama3",
+    "llama4": "llama4",
+    "deepseek_v3": "deepseek_v3",
+    "gpt_oss": "gpt_oss",
+}
+
+
+def derive_torchtitan_name_and_flavor(hf_config) -> tuple[str, str]:
+    """Derive torchtitan model name and flavor from a HuggingFace config.
+
+    The name is mapped from ``hf_config.model_type``. The flavor is found by
+    matching architecture parameters (dim, n_layers, vocab_size) against the
+    known flavors registered in the torchtitan TrainSpec.
+
+    Args:
+        hf_config: A HuggingFace AutoConfig object.
+
+    Returns:
+        A ``(name, flavor)`` tuple.
+
+    Raises:
+        ValueError: If model_type is unsupported or no matching flavor is found.
+    """
+    import torchtitan.protocols.train_spec as train_spec_module
+
+    model_type = getattr(hf_config, "model_type", None)
+    if model_type is None:
+        raise ValueError("HuggingFace config does not have 'model_type' field")
+
+    name = _HF_MODEL_TYPE_TO_TORCHTITAN_NAME.get(model_type)
+    if name is None:
+        raise ValueError(
+            f"Cannot derive torchtitan model name from HF model_type '{model_type}'. "
+            f"Supported types: {list(_HF_MODEL_TYPE_TO_TORCHTITAN_NAME.keys())}."
+        )
+
+    train_spec = train_spec_module.get_train_spec(name)
+
+    hidden_size = hf_config.hidden_size
+    num_layers = hf_config.num_hidden_layers
+    vocab_size = hf_config.vocab_size
+
+    for flavor_name, model_args in train_spec.model_args.items():
+        if (
+            getattr(model_args, "dim", None) == hidden_size
+            and getattr(model_args, "n_layers", None) == num_layers
+            and getattr(model_args, "vocab_size", None) == vocab_size
+        ):
+            logger.info(
+                f"Auto-derived torchtitan name='{name}', flavor='{flavor_name}' from HF model_type='{model_type}'"
+            )
+            return name, flavor_name
+
+    raise ValueError(
+        f"No matching torchtitan flavor found for model_type='{model_type}' "
+        f"(hidden_size={hidden_size}, num_hidden_layers={num_layers}, "
+        f"vocab_size={vocab_size}). "
+        f"Available flavors for '{name}': {list(train_spec.model_args.keys())}."
+    )
 
 
 def enable_fsdp_gradient_division(model: nn.Module, dp_size: int) -> None:
