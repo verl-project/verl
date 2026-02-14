@@ -196,6 +196,7 @@ verl 中昇腾暂不支持生态库如下：
             data.filter_overlong_prompts=True \
             data.truncation='error' \
             actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
+            +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
             actor_rollout_ref.actor.optim.lr=5e-7 \
             actor_rollout_ref.model.use_remove_padding=False \
             actor_rollout_ref.actor.entropy_coeff=0.001 \
