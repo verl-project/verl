@@ -21,6 +21,7 @@ actor_rollout_ref:
       min_lr_ratio: 0.0
       num_cycles: 0.5
       lr_scheduler_type: constant
+      zero_indexed_step: true
       warmup_style: null
       override_optimizer_config: null
     fsdp_config:
@@ -351,6 +352,11 @@ actor_rollout_ref:
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
+    torchtitan:
+      name: null
+      flavor: null
+      attn_type: sdpa
+      attn_mask_type: causal
   hybrid_engine: true
   nccl_timeout: 600
 data:
@@ -410,6 +416,7 @@ critic:
     min_lr_ratio: 0.0
     num_cycles: 0.5
     lr_scheduler_type: constant
+    zero_indexed_step: true
     warmup_style: null
     override_optimizer_config: null
   model:
