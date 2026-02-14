@@ -29,7 +29,6 @@ from veomni.optim import build_lr_scheduler, build_optimizer
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
-from verl.trainer.distillation import is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.device import get_device_id, get_device_name
@@ -40,7 +39,7 @@ from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_group,
     set_ulysses_sequence_parallel_group,
 )
-from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig, DistillationConfig
+from verl.workers.config import DistillationConfig, HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 
 from ..base import BaseEngineCtx, EngineRegistry
 from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead
@@ -84,7 +83,7 @@ class VeOmniEngine(FSDPEngine):
         self.data_parallel_mode = "fsdp2"
         self.distillation_config = distillation_config
         if distillation_config.enabled:
-            raise NotImplementedError("Distillation is not supported yet in VeOmniEngine") # TODO: JacobHelwig
+            raise NotImplementedError("Distillation is not supported yet in VeOmniEngine")  # TODO: JacobHelwig
         self.rank = dist.get_rank()
 
         fsdp_size = self.engine_config.fsdp_size
