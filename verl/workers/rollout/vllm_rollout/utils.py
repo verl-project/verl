@@ -163,6 +163,15 @@ class vLLMColocateWorkerExtension:
         # 2. patch online fp8 quant
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1":
             apply_vllm_fp8_patches()
+        # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
+        vllm_config = kwargs.get("vllm_config")
+        quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
+        _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
+        if _is_qat_model:
+            from verl.utils.qat import apply_qat_patches
+
+            apply_qat_patches()
+            logger.info("Applied QAT patches in vLLM worker subprocess")
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -172,7 +181,9 @@ class vLLMColocateWorkerExtension:
                 if k not in os.environ:
                     os.environ[k] = VLLM_ASCEND_REQUIRED_ENV_VARS[k]
 
-        return super().__new__(cls)
+        instance = super().__new__(cls)
+        instance._is_qat_model = _is_qat_model
+        return instance
 
     def monkey_patch_model(self, vocab_size: int):
         # patch compute_logits to avoid sampling OOV token
@@ -214,8 +225,14 @@ class vLLMColocateWorkerExtension:
             self.model_runner.vllm_config
         )
 
-        # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
-        if use_standard_weight_load:
+        if self._is_qat_model:
+            # QAT: Prepare for weight loading BEFORE receiving any buckets
+            from verl.utils.qat import prepare_qat_for_load_weights
+
+            prepare_qat_for_load_weights(self.model_runner.model, device=self.device)
+            logger.info("QAT: prepare_qat_for_load_weights completed")
+        elif use_standard_weight_load:
+            # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
             patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
         # receive bucket and update weights
@@ -241,7 +258,13 @@ class vLLMColocateWorkerExtension:
             if metadata["is_last"]:
                 break
 
-        if use_standard_weight_load:
+        if self._is_qat_model:
+            # QAT: call process_weights_after_loading AFTER all buckets are received
+            from verl.utils.qat import manual_process_weights_after_loading
+
+            manual_process_weights_after_loading(self.model_runner.model)
+            logger.info("QAT: process_weights_after_loading completed")
+        elif use_standard_weight_load:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
