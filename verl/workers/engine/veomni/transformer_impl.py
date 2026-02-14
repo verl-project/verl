@@ -510,6 +510,19 @@ class OmniSequenceShardCollator:
         metadata={"help": "features to slice sequence dimension."},
     )
 
+    # features to padding sequence dimension
+    padding_features: dict[str, int] = field(
+        default_factory=lambda: {
+            "pixel_values": 0,
+        },
+        metadata={"help": "features to padding sequence dimension."},
+    )
+
+    # padding scale for padding features
+    padding_scale: dict[str, int] = field(
+        default_factory=lambda: {"pixel_values": 4}, metadata={"help": "padding scale for padding features."}
+    )
+
     def __post_init__(self):
         self.sp_size = parallel_state.get_parallel_state().sp_size
         self.sp_rank = parallel_state.get_parallel_state().sp_rank
@@ -519,7 +532,35 @@ class OmniSequenceShardCollator:
         sp_chunk_size = (seq_length + self.sp_size - 1) // self.sp_size
         return feature.narrow(dim, self.sp_rank * sp_chunk_size, sp_chunk_size)
 
+    def sp_padding(
+        self, tensor: "torch.Tensor", dim: int = -1, pad_value: int = 0, pad_scale: int = 1
+    ) -> "torch.Tensor, int":
+        """
+        Pads a tensor with pad_length to aligns tensor with sp size.
+        """
+        seq_length = tensor.size(dim)
+        scale_sp_size = self.sp_size * pad_scale
+
+        sp_chunk_size = (seq_length + scale_sp_size - 1) // scale_sp_size
+        pad_size = sp_chunk_size * scale_sp_size - seq_length
+        if pad_size == 0:
+            return tensor
+
+        pad_shape = list(tensor.shape)
+        pad_shape[dim] = pad_size
+        pad = torch.full(pad_shape, fill_value=pad_value, dtype=tensor.dtype, device=tensor.device)
+        return torch.cat((tensor, pad), dim=dim)
+
     def __call__(self, batch: Sequence[dict[str, "torch.Tensor"]]) -> dict[str, "torch.Tensor"]:
+        for key in batch.keys():
+            if key in self.padding_features.keys():
+                batch[key] = self.sp_padding(
+                    batch[key],
+                    dim=self.sp_slice_features.get(key, -1),
+                    pad_value=self.padding_features[key],
+                    pad_scale=self.padding_scale.get(key, 1),
+                )
+
         # sp slice
         for key in batch.keys():
             if key in self.sp_slice_features.keys():
