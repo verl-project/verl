@@ -300,6 +300,11 @@ class RayPPOTrainer:
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        if config.actor_rollout_ref.actor.strategy == "deepspeed" or config.critic.strategy == "deepspeed":
+            if self.use_legacy_worker_impl != "enable":
+                with open_dict(config.trainer):
+                    config.trainer.use_legacy_worker_impl = "enable"
+                self.use_legacy_worker_impl = "enable"
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -710,6 +715,12 @@ class RayPPOTrainer:
                     engine_config: FSDPEngineConfig = orig_critic_cfg.model.fsdp_config
                     engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
                     engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+                elif orig_critic_cfg.strategy == "deepspeed":
+                    engine_config = getattr(orig_critic_cfg, "deepspeed_config", getattr(orig_critic_cfg, "engine", None))
+                    engine_config.use_dynamic_bsz = critic_cfg.use_dynamic_bsz
+                    engine_config.micro_batch_size_per_gpu = critic_cfg.ppo_micro_batch_size_per_gpu
+                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
                 else:
                     raise NotImplementedError(f"Unknown strategy {orig_critic_cfg.strategy=}")
 

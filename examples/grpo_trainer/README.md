@@ -68,3 +68,11 @@ bash examples/grpo_trainer/run_qwen3-8b.sh
 ```
 
 For more reference performance, please see https://verl.readthedocs.io/en/latest/algo/baseline.html
+
+## DeepSpeed Example
+
+For a minimal DeepSpeed GRPO command path (ZeRO-1/2/3 + optional offload), see:
+
+```bash
+bash examples/grpo_trainer/run_qwen3-0.6b_ds_gsm8k.sh
+```

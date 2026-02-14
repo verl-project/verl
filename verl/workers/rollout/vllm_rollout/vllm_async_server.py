@@ -38,6 +38,39 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
+
+def _patch_resource_tracker():
+    """Best-effort: avoid shared_memory tracker KeyError on worker shutdown."""
+    if os.getenv("VERL_PATCH_RESOURCE_TRACKER", "1") != "1":
+        return
+    try:
+        import multiprocessing.resource_tracker as rt
+    except Exception:
+        return
+    if getattr(rt, "_VERL_PATCHED", False):
+        return
+    rt._VERL_PATCHED = True
+    orig_register = rt.register
+    orig_unregister = rt.unregister
+
+    def register(name, rtype):  # type: ignore[override]
+        if rtype == "shared_memory":
+            return
+        return orig_register(name, rtype)
+
+    def unregister(name, rtype):  # type: ignore[override]
+        if rtype == "shared_memory":
+            return
+        try:
+            return orig_unregister(name, rtype)
+        except KeyError:
+            return
+
+    rt.register = register  # type: ignore[assignment]
+    rt.unregister = unregister  # type: ignore[assignment]
+
+
+_patch_resource_tracker()
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
@@ -189,7 +222,9 @@ class vLLMHttpServer:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
-        await self.engine.collective_rpc(
+        if kwargs is None:
+            kwargs = {}
+        return await self.engine.collective_rpc(
             method=method,
             timeout=timeout,
             args=args,

@@ -24,6 +24,7 @@ from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
+    "DeepSpeedEngineConfig",
     "FSDPEngineConfig",
     "McoreEngineConfig",
     "TrainingWorkerConfig",
@@ -221,6 +222,76 @@ class FSDPEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["fsdp", "fsdp2"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class DeepSpeedEngineConfig(EngineConfig):
+    """Configuration for DeepSpeed engine.
+
+    Args:
+        zero_stage (int): ZeRO optimization stage. One of {0, 1, 2, 3}. Default: 2.
+        offload (str): Offload target. One of {"none", "cpu", "nvme", "auto"}. Default: "none".
+        offload_dir (Optional[str]): Offload directory when ``offload`` is "nvme" or "auto".
+        model_dtype (str): Initial model dtype. Default: "fp32".
+        mixed_precision (Optional[dict[str, Any]]): Mixed precision policy. Example::
+
+            mixed_precision:
+              param_dtype: bf16
+              reduce_dtype: fp32
+              buffer_dtype: fp32
+
+        gradient_accumulation_steps (int): Default GA steps used for DeepSpeed engine init.
+        activation_checkpointing (bool): Whether to enable activation checkpointing on the model.
+    """
+
+    zero_stage: int = 2
+    offload: Literal["none", "cpu", "nvme", "auto"] = "none"
+    offload_dir: Optional[str] = None
+    param_offload: bool = False
+    optimizer_offload: bool = False
+
+    model_dtype: str = "fp32"
+    mixed_precision: Optional[dict[str, Any]] = None
+    gradient_accumulation_steps: int = 1
+    activation_checkpointing: bool = False
+
+    strategy: str = "deepspeed"
+
+    def normalize_offload_flags(self, *, allow_param_offload: bool = True) -> None:
+        """Normalize offload booleans under ZeRO-stage constraints.
+
+        Rules enforced by DeepSpeed workers:
+        - ZeRO-1: no parameter/optimizer offload
+        - ZeRO-2: optimizer offload only
+        - ZeRO-3: optimizer offload, parameter offload gated by ``allow_param_offload``
+
+        The ``offload`` shorthand (`cpu`/`nvme`/`auto`) turns on supported
+        booleans for the current ZeRO stage. Explicit boolean fields are still
+        accepted but clipped by stage constraints.
+        """
+        offload_requested = self.offload in {"cpu", "nvme", "auto"}
+        param_offload = bool(self.param_offload)
+        optimizer_offload = bool(self.optimizer_offload)
+
+        if offload_requested:
+            if self.zero_stage >= 3 and allow_param_offload:
+                param_offload = True
+            if self.zero_stage >= 2:
+                optimizer_offload = True
+
+        if self.zero_stage < 3 or not allow_param_offload:
+            param_offload = False
+        if self.zero_stage < 2:
+            optimizer_offload = False
+
+        object.__setattr__(self, "param_offload", param_offload)
+        object.__setattr__(self, "optimizer_offload", optimizer_offload)
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.zero_stage in {0, 1, 2, 3}, f"Unsupported zero_stage={self.zero_stage}"
+        assert self.offload in {"none", "cpu", "nvme", "auto"}, f"Unsupported offload={self.offload}"
+        self.normalize_offload_flags(allow_param_offload=True)
 
 
 @dataclass

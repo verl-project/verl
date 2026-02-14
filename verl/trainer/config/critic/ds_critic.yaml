@@ -1,0 +1,23 @@
+# defaults specify the default config from each component
+defaults:
+
+  # deepspeed optimizer config
+  - ../optim@optim: deepspeed
+
+  # deepspeed engine config
+  - ../engine@deepspeed_config: deepspeed
+
+  # base critic config
+  - critic
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.DeepSpeedCriticConfig
+
+# distribution strategy. Options: deepspeed
+strategy: deepspeed
+
+# Gradient clipping for critic updates
+grad_clip: 1.0

@@ -11,9 +11,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import inspect
+from typing import Any
+
 # from . import gsm8k, math, prime_math, prime_code
 
 from verl.utils.import_utils import deprecated
+
+
+def _call_score_fn(score_fn, *args: Any, **kwargs: Any):
+    """Call a score function with best-effort kwargs forwarding.
+
+    Reward functions in `verl.utils.reward_score` do not share a single kwargs
+    schema. We forward only kwargs supported by the callee (unless it accepts
+    `**kwargs`) so config-side `reward_kwargs` can be used safely.
+    """
+    signature = inspect.signature(score_fn)
+    has_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+    if has_var_kwargs:
+        return score_fn(*args, **kwargs)
+
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
+    return score_fn(*args, **filtered_kwargs)
 
 
 def default_compute_score(
@@ -41,14 +60,18 @@ def default_compute_score(
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
+    score_kwargs = dict(kwargs)
+    if extra_info is not None:
+        score_kwargs.setdefault("extra_info", extra_info)
+
     if data_source == "openai/gsm8k":
         from . import gsm8k
 
-        res = gsm8k.compute_score(solution_str, ground_truth)
+        res = _call_score_fn(gsm8k.compute_score, solution_str, ground_truth, **score_kwargs)
     elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500"]:
         from . import math_reward
 
-        res = math_reward.compute_score(solution_str, ground_truth)
+        res = _call_score_fn(math_reward.compute_score, solution_str, ground_truth, **score_kwargs)
         # [Optional] Math-Verify Integration
         # For enhanced accuracy, consider utilizing Math-Verify (https://github.com/huggingface/Math-Verify).
         # Note: Math-Verify needs to be manually installed via pip: `pip install math-verify`.
@@ -59,7 +82,7 @@ def default_compute_score(
     elif data_source in ["math_dapo", "math", "math_dapo_reasoning"] or data_source.startswith("aime"):
         from . import math_dapo
 
-        res = math_dapo.compute_score(solution_str, ground_truth)
+        res = _call_score_fn(math_dapo.compute_score, solution_str, ground_truth, **score_kwargs)
     elif data_source in [
         "numina_aops_forum",
         "numina_synthetic_math",
@@ -70,7 +93,7 @@ def default_compute_score(
     ]:
         from . import prime_math
 
-        res = prime_math.compute_score(solution_str, ground_truth)
+        res = _call_score_fn(prime_math.compute_score, solution_str, ground_truth, **score_kwargs)
     elif data_source in ["codecontests", "apps", "codeforces", "taco"]:
         # Use the passed sandbox_fusion_url if available
         if sandbox_fusion_url:
@@ -85,11 +108,11 @@ def default_compute_score(
             from . import prime_code
 
             # Assuming prime_code doesn't need the URL
-            res = prime_code.compute_score(solution_str, ground_truth, continuous=True)
+            res = _call_score_fn(prime_code.compute_score, solution_str, ground_truth, continuous=True, **score_kwargs)
     elif data_source in ["hiyouga/geometry3k"]:
         from . import geo3k
 
-        res = geo3k.compute_score(solution_str, ground_truth)
+        res = _call_score_fn(geo3k.compute_score, solution_str, ground_truth, **score_kwargs)
     elif data_source in [
         "searchR1_nq",
         "searchR1_triviaqa",
@@ -101,7 +124,7 @@ def default_compute_score(
     ]:
         from . import search_r1_like_qa_em
 
-        res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
+        res = _call_score_fn(search_r1_like_qa_em.compute_score, solution_str, ground_truth, **score_kwargs)
 
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")

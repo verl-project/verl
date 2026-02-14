@@ -101,3 +101,11 @@ Reference performance with verl v0.2:
 |-------------------------------|------------------|-------|------------------------------------------------------------------------------------------------|
 | Qwen/Qwen2.5-0.5B-Instruct     | pretrained model | 36.4  | [Qwen Blog](https://qwenlm.github.io/blog/qwen2.5-llm/)                                        |
 | Qwen/Qwen2.5-0.5B-Instruct     | PPO              | 56.7  | [PPO Command and Logs](https://github.com/eric-haibin-lin/verl-data/blob/experiments/gsm8k/Qwen2.5-0.5B-bsz256_2-prompt1024-resp512-0.567.log) |
+
+## DeepSpeed Example
+
+For a minimal DeepSpeed PPO command path (ZeRO-1/2/3 + optional offload), see:
+
+```bash
+bash examples/ppo_trainer/run_qwen3-0.6b_ds_gsm8k.sh
+```

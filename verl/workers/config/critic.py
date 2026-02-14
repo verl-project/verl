@@ -22,11 +22,11 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig
+from .engine import DeepSpeedEngineConfig, FSDPEngineConfig, McoreEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["CriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "FSDPCriticModelCfg"]
+__all__ = ["CriticConfig", "DeepSpeedCriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "FSDPCriticModelCfg"]
 
 
 @dataclass
@@ -90,6 +90,9 @@ class CriticConfig(BaseConfig):
     def __post_init__(self):
         """Validate critic configuration parameters."""
         assert self.strategy != MISSING
+
+        if isinstance(self.model, dict):
+            object.__setattr__(self, "model", HFModelConfig(**self.model))
 
         if self.model_config is None:
             warnings.warn("using model in Critic Config is deprecated, please use model_config instead", stacklevel=2)
@@ -222,6 +225,28 @@ class FSDPCriticConfig(CriticConfig):
                         f"critic.ppo_micro_batch_size ({self.ppo_micro_batch_size}) * "
                         f"ulysses_sequence_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
                     )
+            else:
+                if self.ppo_micro_batch_size_per_gpu * sp_size < n_gpus:
+                    raise ValueError(
+                        f"critic.ppo_micro_batch_size_per_gpu ({self.ppo_micro_batch_size_per_gpu}) * "
+                        f"ulysses_sequence_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
+                    )
+
+
+@dataclass
+class DeepSpeedCriticConfig(CriticConfig):
+    """Configuration for DeepSpeed-based critic."""
+
+    strategy: str = "deepspeed"
+    grad_clip: float = 1.0
+    deepspeed_config: DeepSpeedEngineConfig = field(default_factory=DeepSpeedEngineConfig)
+
+    def __post_init__(self):
+        super().__post_init__()
+        object.__setattr__(self, "engine", self.deepspeed_config)
+        normalize_offload_flags = getattr(self.deepspeed_config, "normalize_offload_flags", None)
+        if callable(normalize_offload_flags):
+            normalize_offload_flags(allow_param_offload=True)
 
 
 @dataclass

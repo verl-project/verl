@@ -22,7 +22,7 @@ from verl.trainer.config import CheckpointConfig
 from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig, VeOmniEngineConfig
+from .engine import DeepSpeedEngineConfig, FSDPEngineConfig, McoreEngineConfig, VeOmniEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
@@ -30,6 +30,7 @@ __all__ = [
     "PolicyLossConfig",
     "RouterReplayConfig",
     "ActorConfig",
+    "DeepSpeedActorConfig",
     "FSDPActorConfig",
     "McoreActorConfig",
     "VeOmniActorConfig",
@@ -339,3 +340,35 @@ class VeOmniActorConfig(ActorConfig):
         """Validate VeOmni actor configuration parameters."""
         super().__post_init__()
         self.engine = self.veomni
+
+
+@dataclass
+class DeepSpeedActorConfig(ActorConfig):
+    """Configuration for DeepSpeed actor models."""
+
+    strategy: str = "deepspeed"
+    grad_clip: float = 1.0
+    ulysses_sequence_parallel_size: int = 1
+    entropy_from_logits_with_chunking: bool = False
+    entropy_checkpointing: bool = False
+    deepspeed: DeepSpeedEngineConfig = field(default_factory=DeepSpeedEngineConfig)
+    # Alias for backward compatibility with configs that use `deepspeed_config`
+    deepspeed_config: Optional[DeepSpeedEngineConfig] = None
+    use_remove_padding: bool = False
+    use_rollout_log_probs: bool = False
+    calculate_sum_pi_squared: bool = False
+    sum_pi_squared_checkpointing: bool = False
+
+    def __post_init__(self):
+        if self.deepspeed_config is not None:
+            object.__setattr__(self, "deepspeed", self.deepspeed_config)
+
+        super().__post_init__()
+        self.engine = self.deepspeed
+        # Keep dataclass-level normalization aligned with worker runtime logic.
+        normalize_offload_flags = getattr(self.deepspeed, "normalize_offload_flags", None)
+        if callable(normalize_offload_flags):
+            normalize_offload_flags(allow_param_offload=True)
+
+        # Keep both names in sync for callers that expect either field.
+        object.__setattr__(self, "deepspeed_config", self.deepspeed)
