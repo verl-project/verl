@@ -95,6 +95,3 @@ mtp:
 
   method: mtp
   num_speculative_tokens: 1
-
-# attention type (e.g., "sdpa", "flex", "varlen")
-attn_type: flex

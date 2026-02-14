@@ -49,6 +49,9 @@ pipeline_parallel_size: 1
 # Context parallel size
 context_parallel_size: 1
 
+# Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen")
+attn_type: flex
+
 # Strategy
 strategy: torchtitan
 

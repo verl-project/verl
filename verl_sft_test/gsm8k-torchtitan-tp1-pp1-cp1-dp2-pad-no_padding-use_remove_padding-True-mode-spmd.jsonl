@@ -1,0 +1,11 @@
+{"step":1,"data":{"train/loss":0.9845026731491089,"train/grad_norm":41.59927749633789,"train/lr":1.0000000000000001e-7,"train/mfu":0.08924779067289755,"train/global_tokens":27287,"train/total_tokens(B)":0.000027287}}
+{"step":2,"data":{"train/loss":1.0653280019760132,"train/grad_norm":44.65105056762695,"train/lr":1.5000000000000002e-7,"train/mfu":0.12577317073403996,"train/global_tokens":26208,"train/total_tokens(B)":0.000053495}}
+{"step":3,"data":{"train/loss":0.9707138538360596,"train/grad_norm":39.63001251220703,"train/lr":2.0000000000000002e-7,"train/mfu":0.15960948371847455,"train/global_tokens":28079,"train/total_tokens(B)":0.000081574}}
+{"step":4,"data":{"train/loss":1.007983684539795,"train/grad_norm":41.60022735595703,"train/lr":2.5000000000000004e-7,"train/mfu":0.15679327693698175,"train/global_tokens":27014,"train/total_tokens(B)":0.000108588}}
+{"step":5,"data":{"train/loss":1.0234804153442383,"train/grad_norm":43.9514274597168,"train/lr":3.0000000000000004e-7,"train/mfu":0.15231926265467202,"train/global_tokens":25735,"train/total_tokens(B)":0.000134323}}
+{"step":6,"data":{"train/loss":0.9755195379257202,"train/grad_norm":40.321197509765625,"train/lr":3.5000000000000004e-7,"train/mfu":0.15579963047391157,"train/global_tokens":27327,"train/total_tokens(B)":0.00016165}}
+{"step":7,"data":{"train/loss":0.949874997138977,"train/grad_norm":40.84282684326172,"train/lr":4.0000000000000003e-7,"train/mfu":0.15388407265284432,"train/global_tokens":26104,"train/total_tokens(B)":0.000187754}}
+{"step":8,"data":{"train/loss":0.9001364707946777,"train/grad_norm":39.21150207519531,"train/lr":4.5000000000000003e-7,"train/mfu":0.15513893591221933,"train/global_tokens":26287,"train/total_tokens(B)":0.000214041}}
+{"step":9,"data":{"train/loss":0.9278955459594727,"train/grad_norm":39.19993209838867,"train/lr":5.000000000000001e-7,"train/mfu":0.15715224040282763,"train/global_tokens":27077,"train/total_tokens(B)":0.000241118}}
+{"step":10,"data":{"train/loss":0.844592273235321,"train/grad_norm":34.300537109375,"train/lr":5.5e-7,"train/mfu":0.15358858332840145,"train/global_tokens":25488,"train/total_tokens(B)":0.000266606}}
+{"step":11,"data":{"train/loss":0.7962491512298584,"train/grad_norm":30.656286239624023,"train/lr":6.000000000000001e-7,"train/mfu":0.1556112081663192,"train/global_tokens":26916,"train/total_tokens(B)":0.000293522}}

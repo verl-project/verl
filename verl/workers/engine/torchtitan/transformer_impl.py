@@ -125,7 +125,7 @@ class TorchTitanEngine(BaseEngine):
         model_args = train_spec.model_args.get(torchtitan_flavor)
         if model_args is not None:
             if hasattr(model_args, "attn_type"):
-                model_args.attn_type = self.model_config.attn_type
+                model_args.attn_type = self.engine_config.attn_type
 
         model = Model(
             name=torchtitan_name,

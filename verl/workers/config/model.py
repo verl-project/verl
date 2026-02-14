@@ -141,9 +141,6 @@ class HFModelConfig(BaseConfig):
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
-    # Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen")
-    attn_type: str = "flex"
-
     def __post_init__(self):
         import_external_libs(self.external_lib)
 
