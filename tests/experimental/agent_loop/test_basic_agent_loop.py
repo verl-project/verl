@@ -42,10 +42,10 @@ def init_config() -> DictConfig:
                 # test sleep/wake_up with fsdp offload
                 "actor_rollout_ref.actor.fsdp_config.param_offload=True",
                 "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
-                "reward_model.reward_manager.name=dapo",
-                "+reward_model.reward_kwargs.overlong_buffer_cfg.enable=False",
-                "+reward_model.reward_kwargs.overlong_buffer_cfg.len=3072",
-                "+reward_model.reward_kwargs.max_resp_len=4096",
+                "reward.reward_manager.name=dapo",
+                "+reward.reward_kwargs.overlong_buffer_cfg.enable=False",
+                "+reward.reward_kwargs.overlong_buffer_cfg.len=3072",
+                "+reward.reward_kwargs.max_resp_len=4096",
             ],
         )
 

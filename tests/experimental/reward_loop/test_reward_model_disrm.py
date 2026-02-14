@@ -121,19 +121,19 @@ def test_reward_model_manager():
     reward_model_name = os.path.expanduser("~/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B")
 
     config.actor_rollout_ref.model.path = rollout_model_name
-    config.reward_model.reward_manager.name = "dapo"
-    config.reward_model.enable = True
-    config.reward_model.num_workers = 1
-    config.reward_model.enable_resource_pool = True
-    config.reward_model.n_gpus_per_node = 8
-    config.reward_model.nnodes = 1
-    config.reward_model.model_path = reward_model_name
-    config.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
-    config.reward_model.rollout.gpu_memory_utilization = 0.9
-    config.reward_model.rollout.tensor_model_parallel_size = 2
-    config.reward_model.rollout.skip_tokenizer_init = False
-    config.reward_model.rollout.prompt_length = 2048
-    config.reward_model.rollout.response_length = 4096
+    config.reward.num_workers = 1
+    config.reward.reward_manager.name = "dapo"
+    config.reward.reward_model.enable = True
+    config.reward.reward_model.enable_resource_pool = True
+    config.reward.reward_model.n_gpus_per_node = 8
+    config.reward.reward_model.nnodes = 1
+    config.reward.reward_model.model_path = reward_model_name
+    config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
+    config.reward.reward_model.rollout.gpu_memory_utilization = 0.9
+    config.reward.reward_model.rollout.tensor_model_parallel_size = 2
+    config.reward.reward_model.rollout.skip_tokenizer_init = False
+    config.reward.reward_model.rollout.prompt_length = 2048
+    config.reward.reward_model.rollout.response_length = 4096
 
     # 1. init reward model manager
     reward_loop_manager = RewardLoopManager(config)

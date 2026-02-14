@@ -20,7 +20,7 @@ import aiohttp
 import numpy as np
 import ray
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
@@ -33,6 +33,60 @@ from .reward_model import RewardModelManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def migrate_legacy_reward_impl(config):
+    """
+    Migrate the legacy reward model implementation to the new one.
+    """
+    # 1. reward workers migration
+    # config.reward_model.num_workers -> config.reward.num_workers
+    if config.reward_model.num_workers is not None:
+        config.reward.num_workers = config.reward_model.num_workers
+
+    # 2.reward manager migration
+    # config.reward_model.reward_manager -> config.reward.reward_manager
+    if config.reward_model.reward_manager is not None:
+        config.reward.reward_manager.name = config.reward_model.reward_manager
+    if config.reward_model.reward_loop_source is not None:
+        config.reward.reward_manager.source = config.reward_model.reward_loop_source
+        config.reward.reward_manager.module.path = config.reward_model.reward_loop_module_path
+        config.reward.reward_manager.module.name = config.reward_model.reward_loop_class_name
+
+    # 3. custom reward function migration
+    # config.custom_reward_function -> config.reward.custom_reward_function
+    if not all(v is None for v in config.custom_reward_function.values()):
+        config.reward.custom_reward_function = config.custom_reward_function
+
+    # 4. reward model migration
+    # config.reward_model -> config.reward.reward_model
+    for key in ["enable", "enable_resource_pool", "n_gpus_per_node", "nnodes"]:
+        if config.reward_model.get(key) is not None:
+            config.reward.reward_model[key] = config.reward_model[key]
+    if config.reward_model.model.path is not None:
+        config.reward.reward_model.model_path = config.reward_model.model.path
+    # config.reward_model.reward_kwargs -> config.reward.reward_kwargs (for dapo algo)
+    if config.reward_model.get("reward_kwargs") is not None:
+        with open_dict(config.reward):
+            config.reward["reward_kwargs"] = config.reward_model["reward_kwargs"]
+    # config.reward_model.rollout -> config.reward.reward_model.rollout
+    legacy_rollout = config.reward_model.rollout
+    for key in legacy_rollout.keys():
+        if legacy_rollout[key] is not None:
+            config.reward.reward_model.rollout[key] = legacy_rollout[key]
+
+    # 5. sandbox_fusion migration
+    # config.sandbox_fusion -> reward.sandbox_fusion
+    if not all(v is None for v in config.sandbox_fusion.values()):
+        config.reward.sandbox_fusion = config.sandbox_fusion
+
+    # 6. delete legacy config from configs
+    with open_dict(config):
+        del config.reward_model
+        del config.custom_reward_function
+        del config.sandbox_fusion
+
+    return config
 
 
 class RewardLoopWorker:
@@ -65,8 +119,8 @@ class RewardLoopWorker:
         input_tokenizer_local_path = copy_to_local(self.config.actor_rollout_ref.model.path)
         self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
         self.reward_model_tokenizer = None
-        if self.config.reward_model.enable:
-            reward_model_tokenizer_local_path = copy_to_local(self.config.reward_model.model_path)
+        if self.config.reward.reward_model.enable:
+            reward_model_tokenizer_local_path = copy_to_local(self.config.reward.reward_model.model_path)
             self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
 
         self.reward_manager = load_reward_manager(
@@ -85,11 +139,11 @@ class RewardLoopWorker:
 
     async def compute_score(self, data: DataProto) -> dict:
         assert len(data) == 1, "RewardLoopWorker only support single data item"
-        if self.config.custom_reward_function.path is not None:
+        if self.config.reward.custom_reward_function.path is not None:
             # directly use user-customized reward function
             return await self.reward_manager.run_single(data)
         else:
-            if self.config.reward_model.enable:
+            if self.config.reward.reward_model.enable:
                 # we assume the rm is disrm
                 # genrm must set custom_reward_function
                 return await self.compute_score_disrm(data)
@@ -174,15 +228,13 @@ class RewardLoopWorker:
 
     async def compute_score_disrm(self, data: DataProto) -> dict:
         disrm_prompt = await self._preprocess_reward_inputs(data)
-        engine_name = self.config.reward_model.rollout.name
-        model_name = self.config.reward_model.model_path
+        engine_name = self.config.reward.reward_model.rollout.name
+        model_name = self.config.reward.reward_model.model_path
         if engine_name == "vllm":
-            # TODO (dyy): the "activation" has been changed to "use_activation" in vllm 0.11.2
             payloads = {
                 "model": model_name,
                 "input": disrm_prompt,
-                "activation": False,
-                # "add_special_tokens": False,  # vllm >= 0.11.2
+                "use_activation": False,
             }
             output = await self._post_request(payloads, "classify")
             rm_score = output["data"][-1]["probs"][-1]
@@ -224,8 +276,8 @@ class RewardLoopManager:
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
         self.config = config
-        if self.config.reward_model.enable:
-            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
+        if self.config.reward.reward_model.enable:
+            self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
         else:
             self.reward_model_manager = None
@@ -236,7 +288,7 @@ class RewardLoopManager:
 
     def _init_reward_loop_workers(self):
         self.reward_loop_workers = []
-        num_workers = self.config.reward_model.num_workers
+        num_workers = self.config.reward.num_workers
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
         for i in range(num_workers):

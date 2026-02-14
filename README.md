@@ -182,7 +182,6 @@ verl is fully embracing FSDP2! FSDP2 is recommended by torch distributed team, p
 actor_rollout_ref.ref.strategy=fsdp2
 actor_rollout_ref.actor.strategy=fsdp2
 critic.strategy=fsdp2
-reward_model.strategy=fsdp2
 ```
 
 Furthermore, FSDP2 cpu offloading is compatible with gradient accumulation. You can turn it on to save memory with `actor_rollout_ref.actor.fsdp_config.offload_policy=True`. For more details, see https://github.com/volcengine/verl/pull/1026

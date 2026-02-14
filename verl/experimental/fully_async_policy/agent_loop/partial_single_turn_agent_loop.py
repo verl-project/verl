@@ -124,6 +124,8 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                 "is_cancel": is_cancel,
                 "param_version_start": param_version_start,
                 "param_version_end": param_version_end,
+                "turn_scores": [],
+                "tool_rewards": [],
             },
             multi_modal_data=multi_modal_data,
             # multi_modal_data={"image": image_data} if image_data is not None else {},

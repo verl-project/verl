@@ -22,7 +22,7 @@ from verl.trainer.config.config import ModuleConfig
 
 from .rollout import RolloutConfig
 
-__all__ = ["SandboxFusionConfig", "RewardModelConfig"]
+__all__ = ["SandboxFusionConfig", "RewardConfig", "RewardModelConfig"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -82,20 +82,24 @@ class SandboxFusionConfig(BaseConfig):
 class RewardModelConfig(BaseConfig):
     _mutable_fields = BaseConfig._mutable_fields
 
-    use_reward_loop: bool = True
-
     enable: bool = False
     enable_resource_pool: bool = False
     n_gpus_per_node: int = 0
     nnodes: int = 0
+    model_path: Optional[str] = None
+    inference: RolloutConfig = field(default_factory=RolloutConfig)
+
+
+@dataclass
+class RewardConfig(BaseConfig):
+    _mutable_fields = BaseConfig._mutable_fields
 
     # reward manager args
     num_workers: int = 8
     reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
 
     # reward model args
-    model_path: Optional[str] = None
-    inference: RolloutConfig = field(default_factory=RolloutConfig)
+    reward_model: RewardModelConfig = field(default_factory=RewardModelConfig)
 
     # sandbox fusion args
     sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)

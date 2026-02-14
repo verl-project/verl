@@ -142,6 +142,28 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_critic:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cfg = omega_conf_to_dataclass(self.config.critic)
+
+            if self.use_legacy_worker_impl == "disable":
+                # convert critic_cfg into TrainingWorkerConfig
+                from verl.workers.config import FSDPEngineConfig
+                from verl.workers.engine_workers import TrainingWorkerConfig
+
+                self.orig_critic_cfg = critic_cfg
+                if self.orig_critic_cfg.strategy == "fsdp":
+                    engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
+                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+                else:
+                    raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
+
+                critic_cfg = TrainingWorkerConfig(
+                    model_type="value_model",
+                    model_config=self.orig_critic_cfg.model_config,
+                    engine_config=engine_config,
+                    optimizer_config=self.orig_critic_cfg.optim,
+                    checkpoint_config=self.orig_critic_cfg.checkpoint,
+                )
+
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
@@ -162,7 +184,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_rm:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
+            rm_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.RewardModel], config=self.config.reward.reward_model
+            )
             self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
 
     def _init_worker_groups(self):
@@ -202,7 +226,17 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
     def _init_models(self):
         if self.use_critic:
             self.critic_wg = self.all_wg[str(Role.Critic)]
-            self.critic_wg.init_model()
+            if self.use_legacy_worker_impl == "disable":
+                self.critic_wg.reset()
+                # assign critic loss
+                from functools import partial
+
+                from verl.workers.utils.losses import value_loss
+
+                value_loss_ = partial(value_loss, config=self.orig_critic_cfg)
+                self.critic_wg.set_loss_fn(value_loss_)
+            else:
+                self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
@@ -217,19 +251,16 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.actor_rollout_wg.init_model()
 
     def _init_reward_loop(self):
-        if self.use_reward_loop:
-            # create reward loop manager
-            if self.use_reward_loop:
-                from verl.experimental.reward_loop import RewardLoopManager
+        from verl.experimental.reward_loop import RewardLoopManager
 
-                # initalize reward loop manager
-                # reward model (colocate or standalone): get resource_pool
-                # no reward model: resource_pool = None
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-                self.reward_loop_manager = RewardLoopManager(
-                    config=self.config,
-                    rm_resource_pool=resource_pool,
-                )
+        # initalize reward loop manager
+        # reward model (colocate or standalone): get resource_pool
+        # no reward model: resource_pool = None
+        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        self.reward_loop_manager = RewardLoopManager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+        )
 
     def _init_async_rollout_manager(self):
         pass
@@ -373,15 +404,12 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
         with marked_timer("gen", timing_raw, color="red"):
-            if not self.async_rollout_mode:
-                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
-            else:
-                if self.curr_step_profile:
-                    self.async_rollout_manager.start_profile(global_step=self.global_steps)
-                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                self.checkpoint_manager.sleep_replicas()
-                if self.curr_step_profile:
-                    self.async_rollout_manager.stop_profile()
+            if self.curr_step_profile:
+                self.async_rollout_manager.start_profile(global_step=self.global_steps)
+            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+            self.checkpoint_manager.sleep_replicas()
+            if self.curr_step_profile:
+                self.async_rollout_manager.stop_profile()
 
             timing_raw.update(gen_batch_output.meta_info["timing"])
             gen_batch_output.meta_info.pop("timing", None)
@@ -390,15 +418,12 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             with marked_timer("gen_max", timing_raw, color="purple"):
                 gen_baseline_batch = deepcopy(gen_batch)
                 gen_baseline_batch.meta_info["do_sample"] = False
-                if not self.async_rollout_mode:
-                    gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-                else:
-                    if self.curr_step_profile:
-                        self.async_rollout_manager.start_profile()
-                    gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                    self.checkpoint_manager.sleep_replicas()
-                    if self.curr_step_profile:
-                        self.async_rollout_manager.stop_profile()
+                if self.curr_step_profile:
+                    self.async_rollout_manager.start_profile()
+                gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                self.checkpoint_manager.sleep_replicas()
+                if self.curr_step_profile:
+                    self.async_rollout_manager.stop_profile()
                 batch = batch.union(gen_baseline_output)
                 # compute reward model score on batch
                 rm_scores = None

@@ -263,12 +263,22 @@ class vLLMHttpServer:
 
         if quantization == "fp8":
             hf_overrides["quantization_config"] = fp8_block_quant_kwargs
-        compilation_config = engine_kwargs.get("compilation_config", None)
-        if compilation_config is None:
-            compilation_config = json.dumps({"cudagraph_mode": "FULL_AND_PIECEWISE"})
-        else:
-            cudagraph_mode = compilation_config.get("cudagraph_mode", "FULL_AND_PIECEWISE")
-            compilation_config = json.dumps({"cudagraph_mode": cudagraph_mode})
+        compilation_config = engine_kwargs.pop("compilation_config", None) or {}
+        if isinstance(compilation_config, str):
+            compilation_config = json.loads(compilation_config)
+        compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
+
+        # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
+        dcp_size = engine_kwargs.get("decode_context_parallel_size", 1) or 1
+        if dcp_size > 1 and compilation_config["cudagraph_mode"] == "FULL_AND_PIECEWISE":
+            logger.warning(
+                "FULL cuda graph is not supported with DCP (decode_context_parallel_size=%d), "
+                "downgrading cudagraph_mode to PIECEWISE.",
+                dcp_size,
+            )
+            compilation_config["cudagraph_mode"] = "PIECEWISE"
+
+        compilation_config = json.dumps(compilation_config)
         args = {
             "dtype": self.config.dtype,
             "load_format": self.config.load_format,

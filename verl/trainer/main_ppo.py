@@ -23,6 +23,7 @@ import ray
 from omegaconf import OmegaConf
 
 from verl.experimental.dataset.sampler import AbstractSampler
+from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
@@ -40,7 +41,7 @@ def main(config):
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
-
+    config = migrate_legacy_reward_impl(config)
     run_ppo(config)
 
 
@@ -214,18 +215,18 @@ class TaskRunner:
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
-        # TODO Here you can use the new registration method to support dynamic registration of roles
-        if config.reward_model.enable_resource_pool:
-            if config.reward_model.n_gpus_per_node <= 0:
-                raise ValueError("config.reward_model.n_gpus_per_node must be greater than 0")
-            if config.reward_model.nnodes <= 0:
-                raise ValueError("config.reward_model.nnodes must be greater than 0")
 
-            reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
+        if config.reward.reward_model.enable_resource_pool:
+            if config.reward.reward_model.n_gpus_per_node <= 0:
+                raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
+            if config.reward.reward_model.nnodes <= 0:
+                raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
+
+            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
         else:
-            config.reward_model.nnodes = config.trainer.nnodes
-            config.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
+            config.reward.reward_model.nnodes = config.trainer.nnodes
+            config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
@@ -236,10 +237,10 @@ class TaskRunner:
         """Add reward model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if config.reward_model.enable:
+        if config.reward.reward_model.enable:
             # we do not use reward model workers, so we only register reward model in resource pool
             # without continue to register reward model worker in role mapping
-            if config.reward_model.enable_resource_pool:
+            if config.reward.reward_model.enable_resource_pool:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
                 self.mapping[Role.RewardModel] = "global_pool"

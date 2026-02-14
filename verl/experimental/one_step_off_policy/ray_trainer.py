@@ -93,7 +93,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         self.use_reference_policy = need_reference_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
-        self.use_reward_loop = self.config.reward_model.use_reward_loop
 
         self.use_critic = need_critic(self.config)
 
@@ -182,9 +181,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-        enable_agent_reward_loop = self.use_reward_loop and (
-            not self.use_rm or self.config.reward_model.enable_resource_pool
-        )
+        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None

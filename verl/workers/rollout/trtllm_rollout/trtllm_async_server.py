@@ -110,12 +110,14 @@ class TRTLLMHttpServer:
 
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
-        from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig
+        from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
         from tensorrt_llm.serve import OpenAIServer
+
+        assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
         kv_cache_config = KvCacheConfig(
-            enable_block_reuse=True,
+            enable_block_reuse=self.config.enable_prefix_caching,
             free_gpu_memory_fraction=self.config.gpu_memory_utilization,
         )
 
@@ -124,6 +126,9 @@ class TRTLLMHttpServer:
         llm_kwargs = {
             "model": self.model_config.local_path,
             "backend": "pytorch",
+            "dtype": self.config.dtype,
+            "enable_chunked_prefill": self.config.enable_chunked_prefill,
+            "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "orchestrator_type": "ray",
             "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
             "kv_cache_config": kv_cache_config,
@@ -131,11 +136,13 @@ class TRTLLMHttpServer:
             "max_batch_size": self.config.max_num_seqs,
             "max_num_tokens": self.config.max_num_batched_tokens,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
+            "pipeline_parallel_size": self.config.pipeline_model_parallel_size,
+            "moe_expert_parallel_size": self.config.expert_parallel_size,
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
             "per_worker_gpu_share": per_worker_gpu_share,
-            "enable_sleep": True,
+            "enable_sleep": self.config.enable_sleep_mode,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,
@@ -155,7 +162,10 @@ class TRTLLMHttpServer:
                         enable_padding=True,
                         batch_sizes=self.config.cudagraph_capture_sizes,
                         max_batch_size=0 if self.config.cudagraph_capture_sizes else self.config.max_num_seqs,
-                    )
+                    ),
+                    "scheduler_config": SchedulerConfig(
+                        capacity_scheduler_policy=CapacitySchedulerPolicy.MAX_UTILIZATION,
+                    ),
                 }
             )
 
