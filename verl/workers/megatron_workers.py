@@ -155,7 +155,6 @@ class MegatronWorker(Worker):
         if enable_mtp:
             assert hf_config.num_nextn_predict_layers > 0, "MTP requires at least one nextn_predict_layer"
             assert megatron_config.use_mbridge, "MTP requires use_mbridge to be True"
-            assert megatron_config.vanilla_mbridge, "MTP requires vanilla_mbridge to be True"
             override_transformer_config["mtp_loss_scaling_factor"] = self.config.model.mtp.mtp_loss_scaling_factor
         else:
             if hasattr(hf_config, "num_nextn_predict_layers"):
