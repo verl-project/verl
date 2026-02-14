@@ -23,12 +23,15 @@ and steps.
 -  global_profiler: Control the ranks and mode of profiling
 
    -  tool: The profiling tool to use, options are nsys, npu, torch,
-      torch_memory.
+      torch_memory, precision_debugger.
    -  steps: This parameter can be set as a list that has
       collection steps, such as [2, 4], which means it will collect steps 2
       and 4. If set to null, no collection occurs.
    -  save_path: The path to save the collected data. Default is
       "outputs/profile".
+
+For msprobe PrecisionDebugger usage and configuration, see
+:doc:`../perf/precision_debugger`.
 
 
 Role collection control

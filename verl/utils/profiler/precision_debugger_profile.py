@@ -111,7 +111,7 @@ class PrecisionDebuggerProfiler:
     def _resolve_global_step(self_instance, args, kwargs):
         for val in list(args) + list(kwargs.values()):
             if hasattr(val, "meta_info"):
-                meta = getattr(val, "meta_info")
+                meta = val.meta_info
                 if isinstance(meta, dict) and "global_steps" in meta:
                     return meta.get("global_steps")
             if isinstance(val, dict) and "global_steps" in val:
