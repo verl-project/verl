@@ -67,7 +67,10 @@ async def test_standalone_rollout(init_config, tp_size):
     rollout_server_class = get_rollout_replica_class(init_config.actor_rollout_ref.rollout.name)
     rollout_servers = [
         rollout_server_class(
-            replica_rank=replica_rank, config=rollout_config, model_config=model_config, gpus_per_node=2
+            replica_rank=replica_rank,
+            config=rollout_config,
+            model_config=model_config,
+            gpus_per_node=init_config.trainer.n_gpus_per_node,
         )
         for replica_rank in range(num_replicas)
     ]
