@@ -16,12 +16,12 @@ name = "verl"
 # We'll mark the version as "dynamic" because it's read from the file "verl/version/version" 
 # (PEP 621 calls this "dynamic version"). 
 # The actual version is specified in the [tool.setuptools.dynamic] section below.
-dynamic = ["version", "dependencies", "optional-dependencies", "authors", "urls"]
+dynamic = ["version", "dependencies", "authors", "urls"]
 
 description = "verl: Volcano Engine Reinforcement Learning for LLM"
 license = {text = "Apache-2.0"}  # Changed from file to text format
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.12"
 
 # -------------------------------
 # tool.ruff - Linting configuration
@@ -64,6 +64,9 @@ ignore = [
     # deprecated import
     "UP035",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"examples/ray/tutorial.ipynb" = ["E402", "E501"]
 
 # -------------------------------
 # tool.mypy - typechecking config
@@ -111,3 +114,9 @@ verl = [
   "trainer/config/*.yaml",
   "trainer/config/*/*.yaml",
 ]
+
+[project.optional-dependencies]
+vllm = ["vllm>=0.8.5,<=0.12.0"]
+sglang = ["sglang>=0.1.0"]
+atropos-vllm = ["vllm>=0.8.5,<=0.12.0"]
+atropos-sglang = ["sglang>=0.1.0"]
