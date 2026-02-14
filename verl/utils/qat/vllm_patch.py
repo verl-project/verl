@@ -30,6 +30,8 @@ from unittest.mock import patch
 import torch
 from torch.nn import Parameter
 
+from verl.utils.device import get_device_name
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -205,7 +207,7 @@ def _create_param_from_meta(
     """Create a Parameter from saved metadata. Used by rebuild and tensor swap."""
     shape = meta["shape"]
     dtype = meta["dtype"]
-    dev = device or meta.get("device", "cuda")
+    dev = device or meta.get("device", get_device_name())
     param_class = meta.get("param_class", Parameter)
 
     weight_loaders = getattr(module, "_weight_loaders", {})

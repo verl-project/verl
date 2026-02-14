@@ -35,6 +35,8 @@ from compressed_tensors.quantization.quant_args import (
 )
 from compressed_tensors.quantization.utils.helpers import generate_gparam
 
+from verl.utils.device import get_device_name, get_torch_device
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -131,7 +133,7 @@ class QATQuantizer:
         self._is_w4a4 = self.mode == "w4a4"  # W4A4 needs input_global_scale
         self.group_size = group_size
         self.ignore_patterns = ignore_patterns or ["lm_head", "embed_tokens", "re:.*mlp.gate$"]
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or torch.device(get_device_name())
         self.param_dtype = param_dtype
 
         self._compressor = NVFP4PackedCompressor()
@@ -298,7 +300,7 @@ class QATQuantizer:
         if layer_buffer:
             yield from self._process_layer_group(current_layer_idx, layer_buffer, input_global_scales, output_device)
 
-        torch.cuda.empty_cache()
+        get_torch_device().empty_cache()
 
 
 __all__ = [
