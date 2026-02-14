@@ -70,7 +70,7 @@ from verl.utils.ulysses import (
     ulysses_pad,
     ulysses_pad_and_slice_inputs,
 )
-from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, FSDPDistillationConfig, HFModelConfig
+from verl.workers.config import DistillationConfig, FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
