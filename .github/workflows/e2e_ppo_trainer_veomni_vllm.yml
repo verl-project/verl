@@ -134,7 +134,7 @@ jobs:
       - name: Running GEO3K E2E training tests on 8 L20 GPUs with veomni engine (FSDP_SIZE=8, USP=1)
         run: |
           ray stop --force
-          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct TRAIN_FILES=${HOME}/data/geo3k/train.parquet VAL_FILES=${HOME}/data/gsm8k/test.parquet VAL_BEFORE_TRAIN=True NUM_GPUS=8 FSDP_SIZE=8 SP_SIZE=1 EP_SIZE=1 VERL_EXP_NAME="qwen3-2b-vl-function-reward-minimal-fsdp-size8" bash tests/special_e2e/run_ppo_trainer_veomni.sh
+          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct TRAIN_FILES=${HOME}/data/geo3k/train.parquet VAL_FILES=${HOME}/data/gsm8k/test.parquet VAL_BEFORE_TRAIN=True NUM_GPUS=8 FSDP_SIZE=4 SP_SIZE=2 EP_SIZE=1 VERL_EXP_NAME="qwen3-2b-vl-function-reward-minimal-fsdp-size8" bash tests/special_e2e/run_ppo_trainer_veomni.sh
 
   cleanup:
     runs-on: ubuntu-latest
