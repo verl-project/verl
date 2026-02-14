@@ -132,7 +132,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
 
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
-        actor_rollout_ref.actor.strategy=fsdp2 \
+        actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
         critic.strategy=fsdp2 \
         actor_rollout_ref.actor.grad_clip=1.0 \
         actor_rollout_ref.model.use_remove_padding=True \

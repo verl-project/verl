@@ -122,7 +122,7 @@ actor_offload=False
 
 python3 -m verl.experimental.one_step_off_policy.main_ppo \
     "${common_params[@]}" \
-    actor_rollout_ref.actor.strategy=$ACTOR_STRATEGY \
+    actor_rollout_ref.actor.fsdp_config.strategy=$ACTOR_STRATEGY \
     critic.strategy=fsdp2 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.model.use_remove_padding=True \

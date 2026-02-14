@@ -422,6 +422,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             if batch is None:
                 raise TrainingStopException("Training terminated: queue returned None")
             self._collect_metrics_from_samples(batch, metrics)
+        batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         return batch
 
     def _compute_old_log_prob(self, batch: DataProto):
