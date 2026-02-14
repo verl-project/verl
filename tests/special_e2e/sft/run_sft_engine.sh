@@ -96,7 +96,6 @@ MEGATRON_ENGINE_CONFIG="\
 TORCHTITAN_ENGINE_CONFIG="\
     engine=${backend} \
     model=hf_model \
-    model.attn_type=flex \
     model.path=${MODEL_PATH} \
     optim=${backend} \
     optim.lr=1e-5 \
