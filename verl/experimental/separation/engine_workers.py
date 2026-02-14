@@ -18,63 +18,23 @@ import os
 
 from omegaconf import DictConfig
 
-from verl.experimental.fully_async_policy.base_detach_sync import BaseDetachNcclSync
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.device import (
     get_device_name,
 )
-from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
 
-__all__ = ["DetachActorWorker", "TrainingWorker"]
+__all__ = ["DetachActorWorker"]
 
 
-class DetachNcclSync(BaseDetachNcclSync, ActorRolloutRefWorker):
+class DetachActorWorker(ActorRolloutRefWorker):
     def __init__(self, config: DictConfig, role: str):
-        BaseDetachNcclSync.__init__(self, config, role)
         ActorRolloutRefWorker.__init__(self, config, role)
-
-    def _get_actor_params(self):
-        pass
-
-    def load_model_to_gpu(self):
-        if self.config.actor.strategy in ["fsdp", "fsdp2"]:
-            from verl.utils.fsdp_utils import load_fsdp_model_to_gpu
-
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        elif self.config.actor.strategy == "megatron":
-            from verl.utils.megatron_utils import load_megatron_model_to_gpu
-
-            load_megatron_model_to_gpu(self.actor_module, False)
-        else:
-            raise NotImplementedError(f"Unsupported strategy: {self.config.actor.strategy}")
-
-    def offload_model_to_cpu(self):
-        if self.config.actor.strategy in ["fsdp", "fsdp2"]:
-            from verl.utils.fsdp_utils import offload_fsdp_model_to_cpu
-
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        elif self.config.actor.strategy == "megatron":
-            from verl.utils.megatron_utils import offload_megatron_model_to_cpu
-
-            offload_megatron_model_to_cpu(self.actor_module)
-        else:
-            raise NotImplementedError(f"Unsupported strategy: {self.config.actor.strategy}")
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self):
-        params_generator, _ = self.actor.engine.get_per_tensor_param()
-        await self.checkpoint_engine.send_weights(params_generator)
-
-
-class DetachActorWorker(DetachNcclSync):
-    def __init__(self, config: DictConfig, role: str):
-        print("[DetachActorWorker] Initializing via DetachNcclSync...")
-        DetachNcclSync.__init__(self, config, role)
         self._strategy_handlers = None
         self.copy_handler, self.restore_handler = self._get_strategy_handlers()
 

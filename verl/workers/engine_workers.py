@@ -626,7 +626,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 0. send_weights only for async training with disaggregated trainer and rollout
         # naive backend is not used for now, skip init it for cosistency with legacy worker impl.
         if self.config.rollout.checkpoint_engine.backend != "naive":
-            per_tensor_param, _ = self.engine.get_per_tensor_param()
+            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 

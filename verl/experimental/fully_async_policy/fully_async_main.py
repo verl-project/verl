@@ -82,11 +82,9 @@ def create_role_worker_mapping(config):
     # Select worker class based on strategy
     use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
     if use_legacy_worker_impl == "disable":
-        from verl.experimental.separation.engine_workers import (
-            DetachActorWorker,
-            TrainingWorker,
-        )
+        from verl.experimental.separation.engine_workers import DetachActorWorker
         from verl.single_controller.ray import RayWorkerGroup
+        from verl.workers.engine_workers import TrainingWorker
 
         ray_worker_group_cls = RayWorkerGroup
 

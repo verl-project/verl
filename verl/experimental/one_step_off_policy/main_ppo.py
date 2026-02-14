@@ -77,19 +77,15 @@ def create_role_worker_mapping(config):
     Returns:
         dict: Mapping from roles to worker classes
     """
-    from verl.experimental.separation.engine_workers import (
-        DetachActorWorker,
-        TrainingWorker,
-    )
+    from verl.experimental.separation.engine_workers import DetachActorWorker
     from verl.single_controller.ray import RayWorkerGroup
+    from verl.workers.engine_workers import TrainingWorker
 
     ray_worker_group_cls = RayWorkerGroup
 
-    CriticWorker = TrainingWorker
-
     role_worker_mapping = {
         Role.Actor: ray.remote(DetachActorWorker),
-        Role.Critic: ray.remote(CriticWorker),
+        Role.Critic: ray.remote(TrainingWorker),
     }
 
     # Add reference policy (if KL loss or reward is required)
