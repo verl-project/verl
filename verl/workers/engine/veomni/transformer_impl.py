@@ -534,7 +534,7 @@ class OmniSequenceShardCollator:
 
     def sp_padding(
         self, tensor: "torch.Tensor", dim: int = -1, pad_value: int = 0, pad_scale: int = 1
-    ) -> "torch.Tensor, int":
+    ) -> "torch.Tensor":
         """
         Pads a tensor with pad_length to aligns tensor with sp size.
         """
