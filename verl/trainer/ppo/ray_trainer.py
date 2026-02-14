@@ -51,7 +51,14 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model, need_distillation_policy
+from verl.trainer.ppo.utils import (
+    Role,
+    WorkerType,
+    need_critic,
+    need_distillation_policy,
+    need_reference_policy,
+    need_reward_model,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -773,13 +780,15 @@ class RayPPOTrainer:
                 total_required_world_size = sum(teacher_world_sizes)
                 if total_required_world_size != world_size:
                     raise ValueError(
-                        f"If num_gpus_per_node is specified for all teachers, the total required world size {total_required_world_size} "
+                        f"If num_gpus_per_node is specified for all teachers, "
+                        f"the total required world size {total_required_world_size} "
                         f"must equal to available world size {world_size}."
                     )
             else:
                 if sum(teacher_world_sizes) != world_size:
                     raise ValueError(
-                        f"The world size {world_size} is not divisible by number of teachers {teacher_models_config.num_teachers}; "
+                        f"The world size {world_size} is not divisible by number "
+                        f" of teachers {teacher_models_config.num_teachers}; "
                         f" Tried {uniform_teacher_world_size=}"
                     )
 
@@ -796,7 +805,7 @@ class RayPPOTrainer:
             if distillation_config.enable_resource_pool:
                 # remove the original teacher resource pool since it's been split into sub-pools
                 del self.resource_pool_to_cls[resource_pool]
-                
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -1238,13 +1247,13 @@ class RayPPOTrainer:
                 output = teacher_wg.acquire_teacher_knowledge(domain_batch_td)
 
                 # gather output
-                if not output_nested_tensors_ls:
-                    output_nested_tensors_ls = {key: [None] * len(batch_td) for key in distillation_inputs}
                 distillation_inputs = extract_distillation_inputs(
                     stage=Stage.ACQUIRE_TEACHER_KNOWLEDGE,
                     output=output,
                     config=self.config.actor_rollout_ref.distillation,
                 )
+                if not output_nested_tensors_ls:
+                    output_nested_tensors_ls = {key: [None] * len(batch_td) for key in distillation_inputs}
 
                 for key, distillation_input_nested in distillation_inputs.items():
                     distillation_input_ls = distillation_input_nested.values().split_with_sizes(

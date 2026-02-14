@@ -394,53 +394,63 @@ actor_rollout_ref:
       mode: disabled
       record_file: null
       replay_file: null
-    teacher_model:
-      _target_: verl.workers.config.HFModelConfig
-      path: ~/models/deepseek-llm-7b-chat
-      hf_config_path: null
-      tokenizer_path: null
-      use_shm: false
-      trust_remote_code: false
-      custom_chat_template: null
-      external_lib: null
-      override_config: {}
-      enable_gradient_checkpointing: true
-      enable_activation_offload: false
-      use_remove_padding: true
-      lora_rank: 0
-      lora_alpha: 16
-      target_modules: all-linear
-      exclude_modules: null
-      lora_adapter_path: null
-      use_liger: false
-      use_fused_kernels: false
-      fused_kernel_options:
-        impl_backend: torch
-      tiled_mlp:
-        enabled: false
-        num_shards: 4
-      mtp:
-        _target_: verl.workers.config.MtpConfig
-        enable: false
-        enable_train: false
-        enable_rollout: false
-        detach_encoder: false
-        mtp_loss_scaling_factor: 0.1
-        speculative_algorithm: EAGLE
-        speculative_num_steps: 3
-        speculative_eagle_topk: 1
-        speculative_num_draft_tokens: 4
-        method: mtp
-        num_speculative_tokens: 1
+    teacher_models:
+      teacher0:
+        _target_: verl.workers.config.TeacherHFModelConfig
+        path: null
+        hf_config_path: null
+        tokenizer_path: null
+        use_shm: false
+        trust_remote_code: false
+        custom_chat_template: null
+        external_lib: null
+        override_config: {}
+        enable_gradient_checkpointing: true
+        enable_activation_offload: false
+        use_remove_padding: true
+        lora_rank: 0
+        lora_alpha: 16
+        target_modules: all-linear
+        exclude_modules: null
+        lora_adapter_path: null
+        use_liger: false
+        use_fused_kernels: false
+        fused_kernel_options:
+          impl_backend: torch
+        tiled_mlp:
+          enabled: false
+          num_shards: 4
+        mtp:
+          _target_: verl.workers.config.MtpConfig
+          enable: false
+          enable_train: false
+          enable_rollout: false
+          detach_encoder: false
+          mtp_loss_scaling_factor: 0.1
+          speculative_algorithm: EAGLE
+          speculative_num_steps: 3
+          speculative_eagle_topk: 1
+          speculative_num_draft_tokens: 4
+          method: mtp
+          num_speculative_tokens: 1
+        domain: null
+        num_gpus_per_node: null
+      _target_: verl.workers.config.TeacherModelsConfig
+      num_teachers: 1
     _target_: verl.workers.config.FSDPDistillationConfig
     enabled: false
-    loss_mode: k3
-    topk: 32
-    use_policy_loss: true
-    distillation_loss_coef: 1.0
-    jsd_beta: 0.5
-    loss_max_clamp: null
-    log_prob_min_clamp: null
+    enable_resource_pool: false
+    n_gpus_per_node: 8
+    nnodes: 0
+    distillation_loss:
+      _target_: verl.workers.config.DistillationLossConfig
+      loss_mode: k3
+      topk: 32
+      use_policy_loss: true
+      distillation_loss_coef: 1.0
+      jsd_beta: 0.5
+      loss_max_clamp: null
+      log_prob_min_clamp: null
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
       wrap_policy:
