@@ -10,13 +10,13 @@
 4. **reward**：基于prompt和生成的response，奖励模型评估奖励值R_N。
 5. **update**：基于计算得到的R_N、ref logprob、logprob计算优化函数和策略梯度，对actor模型进行更新
 
-![rl_data_stream](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/rl_data_stream.png)
+![rl_data_stream](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/rl_data_stream.png)
 
 ## profilling工具使能
 
 ### 使能方法
 
-使能和配置教程可参考：[verl/docs/ascend_tutorial/ascend_profiling_zh.rst at main · verl-project/verl](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/ascend_profiling_zh.rst)
+使能和配置教程可参考：[verl/docs/ascend_tutorial/ascend_profiling_zh.rst at main · verl-project/verl](https://github.com/verl-project/verl/raw/main/docs/ascend_tutorial/ascend_profiling_zh.rst)
 
 ## 性能分析方法论
 
@@ -28,7 +28,7 @@
 - **价值**：快速掌握不同阶段耗时占比
 - **效果展示**：
 
-![Bubble_analysis](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/Bubble_analysis.png)
+![Bubble_analysis](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/Bubble_analysis.png)
 
 #### 2. 负载均衡分析
 
@@ -37,16 +37,16 @@
 
 - **效果展示：**
 
-![Load_Balancing_Analysis](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/Load_Balancing_Analysis.gif)
+![Load_Balancing_Analysis](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/Load_Balancing_Analysis.gif)
 
 #### 3. 集群整体性能分析
 
 - **操作**：结合MSTT的rl_analysis功能，生成集群Timeline缩略图，观察各阶段整体耗时
 - **价值**：宏观掌握集群性能瓶颈
-- **操作指南**：[rl_analysis使用文档](https://gitcode.com/Ascend/mstt/blob/pre-research/profiler/msprof_analyze/docs/features/rl_analysis.md)
+- **操作指南**：[rl_analysis使用文档](https://gitcode.com/Ascend/mstt/raw/pre-research/profiler/msprof_analyze/docs/features/rl_analysis.md)
 - **效果展示**：
 
-![Cluster%20Performance%20Analysis](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/Cluster%20Performance%20Analysis.png)
+![Cluster%20Performance%20Analysis](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/Cluster%20Performance%20Analysis.png)
 
 ### 细粒度分析
 
@@ -58,7 +58,7 @@
 
 - **效果展示**：
 
-![performance%20analysis](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/performance%20analysis.png)
+![performance%20analysis](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/performance%20analysis.png)
 
 #### 内存分析
 
@@ -68,7 +68,7 @@
 - **价值**：观察框架、CANN内存申请释放情况，可结合调用栈跟踪到前端python代码。
 - **效果展示**：结合调用栈进行内存变化分析。效果如下所示：
 
-![in-memory%20analytics](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/in-memory%20analytics.gif)
+![in-memory%20analytics](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/in-memory%20analytics.gif)
 
 ##### **使用 msleaks 工具进行深层次内存分析**
 
@@ -76,7 +76,7 @@
 - **价值**：可以查看框架内存申请总量折线图/内存块图，并直接对应调用栈，可深层次分析框架内存使用情况。
 - **效果展示**：
 
-![msleaks](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/msleaks.gif)
+![msleaks](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/msleaks.gif)
 
 ## 性能分析案例
 
@@ -86,11 +86,11 @@
 
 host bound是指CPU任务量综合大于NPU，导致NPU执行出现空泡的现象。可以通过看Host2Device的同步连线来判断，如果连线都是歪的，那证明这里的set信号早于wait信号，NPU一ready就执行了，那也是device bound：
 
-![host_bound_1](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/host_bound_1.png)
+![host_bound_1](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/host_bound_1.png)
 
 如果确诊为host bound，那么我们可以打开CPU侧，找出各算子的下发耗时。注意找的时候需要找出所有CPU耗时的累加值，而不能找单层，因为首次调用的耗时是很长的。例如下图的GmmSwigluQuant，CPU上首次调用需要1ms，后续每次只需要200us。
 
-![host_bound_2](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/host_bound_2.png)
+![host_bound_2](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/host_bound_2.png)
 
 此时有的算子在负重前行，有的算子拖了后腿，后者多于了前者。我们优先**找出来host耗时大于device的top算子，这些算子是拖后腿的**，可以交予算子团队重点分析。
 
@@ -104,11 +104,11 @@ host bound是指CPU任务量综合大于NPU，导致NPU执行出现空泡的现�
 
 举一个正例，对于某次Matmul的输出shape为[m, n0 + n1]，在这后面我们接了两个slice，输入均为这个[m, n0 + n1]的tensor，输出分别为[m, n0]和[m, n1]。第一个优化的思路是将两个slice改为一个split，这样耗时可以基本减半，[m, n0 + n1]的显存也可以尽早释放。进一步优化的思路是将矩阵乘的权重从[k, n0 + n1]分割为[k, n0]和[k, n1]，将原来的矩阵乘任务分成两个（前提是这两个的耗时加起来不比之前的劣化太多，分核策略不能出问题），从而彻底消除这个slice/split操作。
 
-![network_1](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/network_1.png)
+![network_1](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/network_1.png)
 
 举一个反例，Rmsnorm(fp16)+Cast(fp16->fp32)+Matmul(fp32)，Rmsnorm虽然输入输出都是fp16，但考虑到累加运算的精度，内部是fp32做计算的。如果将Cast融到Rmsnorm内，本就内部使用fp32做计算的Rmsnorm就可以省去一个末尾fp32->fp16的cast，加上我们干掉的Cast，总共节省两个cast的同时避免了一次精度丢失。虽然这样看起来精度性能双收了，但fp16进，fp32出的Rmsnorm是反原则的（核心输入和输出需要是同数据类型），除非我们能在广大开源模型中频繁找到这样的结构，证明它的普适性，否则算子团队是不允许做这样的算子的。
 
-![network_2](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/network_2.png)
+![network_2](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/network_2.png)
 
 ### 3.算子性能初诊
 
@@ -118,7 +118,7 @@ Profiling工具会统计这些流水线在不同核上的平均繁忙时间（xx
 
 以下图为例，第一行是一个FA算子，第二行是一个Matmul算子，FA在vec流水线上达到了88.1%的利用率，Matmul算子在mac流水线上达到了89.8%的利用率，他们的性能可以认为是合格的。
 
-![Operator%20performance](https://github.com/chengminhua/verl_data/blob/main/MindStudio_Insight_use/Operator%20performance.png)
+![Operator%20performance](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/Operator%20performance.png)
 
 
 
