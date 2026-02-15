@@ -338,8 +338,8 @@ class vLLMHttpServer:
             data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
             assert self.num_workers == data_parallel_size_local * self.config.tensor_model_parallel_size, (
                 f"num workers ({self.num_workers}) should be equal to dp_size_local "
+                f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
             )
-            f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
 
             args.update(
                 {
