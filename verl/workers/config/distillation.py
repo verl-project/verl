@@ -22,65 +22,71 @@ from verl.trainer.config.config import ModuleConfig
 
 from .rollout import RolloutConfig
 
-__all__ = ["SandboxFusionConfig", "RewardConfig", "RewardModelConfig"]
+__all__ = ["DistillationLossConfig", "DistillationConfig"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-
 @dataclass
-class RewardManagerConfig(BaseConfig):
-    """Configuration for reward manager.
+class DistillationLossConfig(BaseConfig):
+    """Configuration for distillation loss settings.
 
-        A reward manager defines the mechanism of computing rule-based reward and handling different reward sources.
-
-    Args:
-        source (str): Source of the reward manager. Options: ``"register"``, ``"importlib"``. Default: ``"register"``.
-        name (str, optional):
-            - When ``source`` is ``"register"``, the name is used in `get_reward_manager_cls(name)``.
-                See ``verl/experimental/reward/reward_manager.py`` for options. Default: ``"naive"``.
-            - When ``source`` is ``"importlib"``, the name is used in ``getattr(module, name)``,
-                e.g., ``"DAPORewardManager"``.
-        module (ModuleConfig, optional): Optional configuration for the external module defining the reward manager,
+    loss_mode (str):
+        Distillation loss function to use.
+    topk (int, optional):
+        Number of top tokens to consider for top-k distillation losses.
+    use_policy_loss (bool):
+        Whether to include policy gradient loss alongside distillation loss.
+    distillation_loss_coef (float):
+        Coefficient for distillation loss when combined with policy loss.
+    jsd_beta (float):
+        Interpolation weight for JSD loss. When beta=0, behaves like forward KL.
+        When beta=1, behaves like reverse KL.
+    loss_max_clamp (float, optional):
+        Maximum value to clamp distillation loss. If None, no clamping is applied.
+    log_prob_min_clamp (float, optional):
+        Minimum value to clamp log probabilities for stability, e.g., log q - log p where p or q are
+        very close to zero. If None, no clamping is applied.
+    loss_settings (DistillationLossSettings, optional):
+        Runtime-populated settings based on loss_mode. Not set by user.
     """
 
-    source: str = "register"
-    name: str = "naive"
-    module: Optional[ModuleConfig] = field(default_factory=ModuleConfig)
+    loss_mode: str = "k3"
+    topk: Optional[int] = 128
+    use_policy_loss: bool = True
+    distillation_loss_coef: float = 1.0
+    jsd_beta: float = 0.5
+    loss_max_clamp: Optional[float] = 10.0
+    log_prob_min_clamp: Optional[float] = -10.0
+
+    # Store distillation loss settings for computing the specified loss_mode
+    # Not set by user, populated at runtime
+    loss_settings: Optional[dict] = None
 
     def __post_init__(self):
-        super().__post_init__()
-        if self.source == "register":
-            from verl.experimental.reward_loop.reward_manager.registry import REWARD_MANAGER
-
-            assert self.name in REWARD_MANAGER, (
-                f"Reward manager is not registered: {self.name=} ,{REWARD_MANAGER.keys()=}"
-            )
-        elif self.source == "importlib":
-            # NOTE: The existence is not checked since it depends on which machine the config is initialized on.
-            assert self.module is not None and self.module.path is not None, (
-                "When source is importlib, module.path should be set."
-            )
+        self._mutable_fields.add("loss_settings")
 
 
 @dataclass
-class SandboxFusionConfig(BaseConfig):
-    """Configuration for cloud/local sandbox fusion.
-
-    Args:
-        url (Optional[str]): Cloud/local function URL for sandbox execution.
-        max_concurrent (int): Max concurrent requests allowed to sandbox.
-        memory_limit_mb (int): Max memory limit for each sandbox process in MB.
+class DistillationConfig(BaseConfig):
+    """Configuration for on-policy distillation training.
+    
+    enabled (bool):
+        Whether distillation is enabled.
+    enable_resource_pool (bool):
+        Whether to enable separate resource pool for teacher model(s).
+    n_gpus_per_node (int):
+        Number of GPUs per node to use for distillation teacher model(s).
+    nnodes (int):
+        Number of nodes to use for distillation teacher model(s).
+    model_path (str, optional):
+        Model path for the teacher model. Can be a local path or a Hugging Face model
+    inference (RolloutConfig):
+        Rollout configuration for the teacher model inference during distillation.
+    distillation_loss: DistillationLossConfig:
+        Configuration for distillation loss settings.    
     """
-
-    url: Optional[str] = None
-    max_concurrent: int = 64
-    memory_limit_mb: int = 1024
-
-
-@dataclass
-class RewardModelConfig(BaseConfig):
-    _mutable_fields = BaseConfig._mutable_fields
+    num_workers: int = 8
 
     enable: bool = False
     enable_resource_pool: bool = False
@@ -89,17 +95,5 @@ class RewardModelConfig(BaseConfig):
     model_path: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
 
+    distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
-@dataclass
-class RewardConfig(BaseConfig):
-    _mutable_fields = BaseConfig._mutable_fields
-
-    # reward manager args
-    num_workers: int = 8
-    reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
-
-    # reward model args
-    reward_model: RewardModelConfig = field(default_factory=RewardModelConfig)
-
-    # sandbox fusion args
-    sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)
