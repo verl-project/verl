@@ -20,6 +20,7 @@ from .model import *  # noqa: F401
 from .optimizer import *  # noqa: F401
 from .reward import *  # noqa: F401
 from .rollout import *  # noqa: F401
+from .distillation import *  # noqa: F401
 
 __all__ = (
     actor.__all__
@@ -29,4 +30,5 @@ __all__ = (
     + optimizer.__all__
     + rollout.__all__
     + model.__all__
+    + distillation.__all__
 )
