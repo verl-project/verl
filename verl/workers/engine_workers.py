@@ -116,10 +116,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
             repatch(self.engine_config.get("override_transformer_config", {}))
 
-        if repatch is not None:
-            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
-            repatch(self.engine_config.get("override_transformer_config", {}))
-
         # TODO: add DistProfilerExtension
         self.profiler_config = self.config.profiler_config
         if self.profiler_config is not None:
