@@ -567,8 +567,8 @@ class FSDPSFTTrainer:
 
             if self.lora:
                 lora_meta = {
-                    "r": int(getattr(self.config.model, "lora_rank", 0)),
-                    "lora_alpha": int(getattr(self.config.model, "lora_alpha", 0)),
+                    "r": int(getattr(self.config.model, "lora_rank", 0) or 0),
+                    "lora_alpha": int(getattr(self.config.model, "lora_alpha", 0) or 0),
                 }
                 lora_meta_path = os.path.join(local_global_step_folder, "lora_train_meta.json")
                 with open(lora_meta_path, "w", encoding="utf-8") as f:
