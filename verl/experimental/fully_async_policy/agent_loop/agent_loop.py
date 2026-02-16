@@ -14,7 +14,7 @@
 import asyncio
 import logging
 import os
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 import hydra
 import numpy as np
@@ -37,6 +37,7 @@ from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
 )
+from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -52,7 +53,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-    ) -> tuple[list[Any], list[Any], Any] | tuple[Sequence[int], list[float], bool]:
+    ) -> tuple[TokenOutput, bool]:
         """Generate tokens from prompt ids, used for async partial.
 
         Args:
@@ -62,9 +63,8 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
 
         Returns:
             output: A tuple representing the generation output.
-            - Element 0 (Sequence[int]): Generated response token IDs.
-            - Element 1 (list[float]): Log probabilities for the response token IDs.
-            - Element 2 (bool): A flag or status indicating cancellation.
+            - Element 0 (TokenOutput): Generated tokens and related information (token IDs, logprobs, routed experts).
+            - Element 1 (bool): A flag or status indicating cancellation.
         """
         server = self._choose_server(request_id)
         output = await server.generate_for_partial.remote(
