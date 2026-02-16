@@ -171,13 +171,16 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         with simple_timer("generate_sequences", agent_data.metrics):
             # partial interface
             if self.enable_partial_rollout:
-                response_ids, log_probs, is_cancel = await self.server_manager.generate_for_partial(
+                token_outputs, is_cancel = await self.server_manager.generate_for_partial(
                     request_id=agent_data.request_id,
                     prompt_ids=agent_data.prompt_ids,
                     sampling_params=sampling_params,
                     image_data=agent_data.image_data,
                     video_data=agent_data.video_data,
                 )
+                response_ids = token_outputs.token_ids
+                log_probs = token_outputs.log_probs
+                routed_experts = token_outputs.routed_experts  # already contains routed experts for prefix
 
                 if is_cancel:
                     # Save the generated parts
@@ -203,6 +206,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 )
                 response_ids = output.token_ids
                 log_probs = output.log_probs
+                routed_experts = output.routed_experts
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = response_ids
@@ -210,6 +214,8 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         if log_probs:
             agent_data.response_logprobs += log_probs
+        if routed_experts is not None:
+            agent_data.routed_experts = routed_experts
 
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
             return AgentState.TERMINATED
@@ -255,6 +261,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
             else None,
+            routed_experts=agent_data.routed_experts[: self.response_length] if agent_data.routed_experts else None,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             extra_fields={},
