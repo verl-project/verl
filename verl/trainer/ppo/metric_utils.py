@@ -379,6 +379,55 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
     return maj_val
 
 
+def calc_pass_at_k(correctness: list[bool | int | float], k: int) -> float:
+    """
+    Calculate pass@k: the probability that at least one sample is correct when sampling k solutions.
+
+    Uses the unbiased estimator formula: pass@k = 1 - C(n-c, k) / C(n, k)
+    where n is the total number of samples, c is the number of correct samples, and k is the number
+    of samples to select.
+
+    Args:
+        correctness: List of boolean or numeric values indicating whether each solution is correct.
+                    Truthy values (True, 1, non-zero) are considered correct.
+        k: Number of samples to select (k <= len(correctness)).
+
+    Returns:
+        The estimated pass@k probability. Returns 1.0 if at least k samples are correct.
+        Returns 0.0 if no samples are correct or k > n.
+
+    Example:
+        >>> calc_pass_at_k([True, False, False], k=1)
+        0.333...  # 1/3 chance of selecting the correct one
+        >>> calc_pass_at_k([True, True, False], k=2)
+        1.0  # At least one of the 2 selected will always be correct
+        >>> calc_pass_at_k([False, False, False], k=2)
+        0.0  # No correct samples
+    """
+    n = len(correctness)
+    c = sum(1 for x in correctness if x)  # count correct samples
+
+    if n == 0 or k > n or k <= 0:
+        return 0.0
+
+    if c == 0:
+        return 0.0
+
+    if c >= k:
+        return 1.0
+
+    # Use the unbiased estimator: pass@k = 1 - C(n-c, k) / C(n, k)
+    # This handles the case where we have n samples but want to evaluate for k samples
+    try:
+        from math import comb
+
+        numerator = comb(n - c, k)
+        denominator = comb(n, k)
+        return 1.0 - numerator / denominator
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
 def process_validation_metrics(
     data_sources: list[str], sample_uids: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
 ) -> dict[str, dict[str, dict[str, float]]]:
@@ -413,6 +462,8 @@ def process_validation_metrics(
         - "best@N/std": Standard deviation of the best values in bootstrap samples
         - "worst@N/mean": Mean of the worst values in bootstrap samples
         - "worst@N/std": Standard deviation of the worst values in bootstrap samples
+        - "pass@N/mean": Mean pass@N rate (probability that at least one of N samples is correct)
+        - "pass@N/std": Standard deviation of pass@N rate in bootstrap samples
         - "maj@N/mean": Mean of majority voting results in bootstrap samples (if "pred" exists)
         - "maj@N/std": Standard deviation of majority voting results (if "pred" exists)
 
@@ -459,6 +510,16 @@ def process_validation_metrics(
                         )
                         metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
                         metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
+
+                        # Calculate pass@k metric
+                        [(pass_k_mean, pass_k_std)] = bootstrap_metric(
+                            data=var_vals,
+                            subset_size=n,
+                            reduce_fns=[partial(calc_pass_at_k, k=n)],
+                            seed=seed,
+                        )
+                        metric[f"pass@{n}/mean"], metric[f"pass@{n}/std"] = pass_k_mean, pass_k_std
+
                         if var2vals.get("pred", None) is not None:
                             vote_data = [
                                 {"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"], strict=True)
