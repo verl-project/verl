@@ -24,7 +24,6 @@ import numpy as np
 import ray
 import vllm.entrypoints.cli.serve
 from packaging import version
-from ray.actor import ActorHandle
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import run_headless
@@ -90,7 +89,7 @@ class vLLMHttpServer:
         config: RolloutConfig,
         model_config: HFModelConfig,
         rollout_mode: RolloutMode,
-        workers: list[ActorHandle],
+        num_workers: int,
         replica_rank: int,
         node_rank: int,
         gpus_per_node: int,
@@ -102,6 +101,7 @@ class vLLMHttpServer:
             config (RolloutConfig): full config.
             model_config (HFModelConfig): model config.
             rollout_mode (RolloutMode): rollout mode.
+            num_workers (int): number of workers on this node.
             replica_rank (int): replica rank, a replica may contain multiple nodes.
             node_rank (int): node rank.
             gpus_per_node (int): number of gpus per node.
@@ -123,7 +123,7 @@ class vLLMHttpServer:
                 )
 
         self.rollout_mode = rollout_mode
-        self.workers = workers
+        self.num_workers = num_workers
 
         self.replica_rank = replica_rank
         self.node_rank = node_rank
@@ -350,10 +350,10 @@ class vLLMHttpServer:
                 "gpus_per_node should be divisible by tensor_model_parallel_size"
             )
             data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
-            assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
-                f"num workers ({len(self.workers)}) should be equal to dp_size_local "
+            assert self.num_workers == data_parallel_size_local * self.config.tensor_model_parallel_size, (
+                f"num workers ({self.num_workers}) should be equal to dp_size_local "
+                f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
             )
-            f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
 
             args.update(
                 {
@@ -842,7 +842,7 @@ class vLLMReplica(RolloutReplica):
                 config=self.config,
                 model_config=self.model_config,
                 rollout_mode=self.rollout_mode,
-                workers=workers,
+                num_workers=len(workers),
                 replica_rank=self.replica_rank,
                 node_rank=node_rank,
                 gpus_per_node=gpus_per_replica_node,
