@@ -346,21 +346,40 @@ class vLLMHttpServer:
             args["speculative_config"] = speculative_config
 
         if self.config.expert_parallel_size > 1:
-            assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
-                "gpus_per_node should be divisible by tensor_model_parallel_size"
-            )
             data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
-            assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
-                f"num workers ({len(self.workers)}) should be equal to dp_size_local "
-            )
-            f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
+            if data_parallel_size_local > 0:
+                # Each node contains one or more full data parallel workers
+                assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
+                    "gpus_per_node should be divisible by tensor_model_parallel_size or vice versa"
+                )
+                assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
+                    f"num workers ({len(self.workers)}) should be equal to dp_size_local * "
+                    f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size}) "
+                    f"if one data parallel worker fits in on node"
+                )
+                data_parallel_start_rank = self.node_rank * data_parallel_size_local
+            else:
+                # Each data parallel worker is distributed across multiple nodes
+                assert self.config.data_parallel_size == 1, (
+                    "expert parallelism is not supported with multi-node data parallelism"
+                )
+                nodes_per_data_parallel_worker = (
+                    self.config.tensor_model_parallel_size // self.gpus_per_node
+                )  # only used when > 0
+                assert len(self.workers) == self.gpus_per_node, (
+                    f"num workers ({len(self.workers)}) should be equal to gpus_per_node * "
+                    f"({self.gpus_per_node}) if one data parallel worker "
+                    f"does not fit in on one node"
+                )
+                data_parallel_size_local = 1
+                data_parallel_start_rank = self.node_rank // nodes_per_data_parallel_worker
 
             args.update(
                 {
                     "enable_expert_parallel": self.config.expert_parallel_size > 1,
                     "data_parallel_size": self.config.data_parallel_size,
                     "data_parallel_size_local": data_parallel_size_local,
-                    "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
+                    "data_parallel_start_rank": data_parallel_start_rank,
                     "data_parallel_address": self._master_address,
                     "data_parallel_rpc_port": self._dp_rpc_port,
                 }
