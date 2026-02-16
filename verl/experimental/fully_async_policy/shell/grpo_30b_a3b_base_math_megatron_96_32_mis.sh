@@ -131,7 +131,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    async_training.compute_prox_log_prob=True \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_rs=${rollout_rs} \
     algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \

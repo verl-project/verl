@@ -148,6 +148,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
         self.send_buf = None
         self.recv_buf = None
 
+        torch.cuda.empty_cache()
+
     @classmethod
     def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
         trainer_kwargs = {

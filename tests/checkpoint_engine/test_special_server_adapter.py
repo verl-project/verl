@@ -101,7 +101,7 @@ async def test_server_adapter(init_config):
 
     # 3. create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(
-        backend=checkpoint_engine_config.backend, trainer=trainer, replicas=rollout_replicas
+        config=checkpoint_engine_config, trainer=trainer, replicas=rollout_replicas
     )
     for i in range(3):
         await checkpoint_manager.update_weights()
