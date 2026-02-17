@@ -252,7 +252,7 @@ class BaseModelMerger(ABC):
             print(f"Warning: local_dir is not set. Falling back to lora_rank={lora_rank} for lora_alpha.")
             return lora_rank
 
-        local_dir = Path(self.config.local_dir)
+        local_dir = Path(self.config.local_dir).resolve()
         adapter_config_candidates = [
             local_dir / "lora_adapter" / "adapter_config.json",
             local_dir / "adapter_config.json",
@@ -260,11 +260,15 @@ class BaseModelMerger(ABC):
         ]
 
         for config_path in adapter_config_candidates:
-            if not config_path.exists():
+            # Validate that the resolved path stays within local_dir to prevent path traversal
+            resolved = config_path.resolve()
+            if not str(resolved).startswith(str(local_dir)):
+                continue
+            if not resolved.exists():
                 continue
 
             try:
-                with open(config_path, encoding="utf-8") as f:
+                with open(resolved, encoding="utf-8") as f:
                     adapter_config = json.load(f)
             except (OSError, json.JSONDecodeError) as e:
                 print(f"Warning: Failed to load LoRA adapter config from {config_path}: {e}")
