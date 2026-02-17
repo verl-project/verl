@@ -350,10 +350,10 @@ class vLLMHttpServer:
             if data_parallel_size_local > 0:
                 # Each node contains one or more full data parallel workers
                 assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
-                    "gpus_per_node should be divisible by tensor_model_parallel_size or vice versa"
+                    "gpus_per_node should be divisible by tensor_model_parallel_size"
                 )
                 assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
-                    f"num workers ({len(self.workers)}) should be equal to dp_size_local * "
+                    f"num workers ({len(self.workers)}) should be equal to dp_size_local "
                     f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size}) "
                     f"if one data parallel worker fits in on node"
                 )
@@ -363,11 +363,15 @@ class vLLMHttpServer:
                 assert self.config.data_parallel_size == 1, (
                     "expert parallelism is not supported with multi-node data parallelism"
                 )
+                assert self.config.tensor_model_parallel_size % self.gpus_per_node == 0, (
+                    "When tensor parallelism spans multiple nodes, tensor_model_parallel_size "
+                    "must be divisible by gpus_per_node."
+                )
                 nodes_per_data_parallel_worker = (
                     self.config.tensor_model_parallel_size // self.gpus_per_node
                 )  # only used when > 0
                 assert len(self.workers) == self.gpus_per_node, (
-                    f"num workers ({len(self.workers)}) should be equal to gpus_per_node * "
+                    f"num workers ({len(self.workers)}) should be equal to gpus_per_node "
                     f"({self.gpus_per_node}) if one data parallel worker "
                     f"does not fit in on one node"
                 )
