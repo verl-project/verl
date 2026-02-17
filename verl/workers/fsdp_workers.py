@@ -856,6 +856,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
         use_remove_padding = self.config.model.get("use_remove_padding", False)
+        truncate_padding = self.config.model.get("truncate_padding", False)
         use_shm = self.config.model.get("use_shm", False)
         use_fused_kernels = self.config.model.get("use_fused_kernels", False)
 
@@ -952,6 +953,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
+                self.config.ref.truncate_padding = truncate_padding
                 self.config.ref.use_fused_kernels = use_fused_kernels
                 if use_prefix_grouper:
                     self.config.ref.use_prefix_grouper = use_prefix_grouper

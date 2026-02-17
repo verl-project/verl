@@ -491,6 +491,86 @@ def pad_2d_list_to_length(response, pad_token_id, max_length=None):
     return tensor
 
 
+def pad_and_stack(tensors: list[torch.Tensor], pad_value: float = 0) -> torch.Tensor:
+    """Stack tensors with different shapes by padding each to the maximum size per dimension.
+
+    All input tensors must have the same number of dimensions. Each dimension is
+    padded (on the right) to the maximum size across all tensors in that dimension.
+
+    Args:
+        tensors: List of N-dimensional tensors to pad and stack. Must all have the same ndim.
+        pad_value: Value to use for padding. Defaults to 0.
+
+    Returns:
+        Stacked and padded tensor with shape [len(tensors), max_d0, max_d1, ...].
+
+    Raises:
+        ValueError: If tensors list is empty or tensors have different ndim.
+
+    Example:
+        >>> tensors = [torch.ones(3, 5), torch.ones(2, 8)]
+        >>> result = pad_and_stack(tensors, pad_value=0)
+        >>> result.shape
+        torch.Size([2, 3, 8])
+    """
+    if not tensors:
+        raise ValueError("tensors list cannot be empty")
+
+    ndim = tensors[0].ndim
+    if not all(t.ndim == ndim for t in tensors):
+        raise ValueError(f"All tensors must have the same number of dimensions. Got: {[t.ndim for t in tensors]}")
+
+    max_sizes = [max(t.shape[d] for t in tensors) for d in range(ndim)]
+
+    def pad_tensor(tensor):
+        # F.pad expects padding in reverse dimension order: (last_dim_left, last_dim_right, ..., first_dim_left, first_dim_right)
+        pad_list = [val for d in range(ndim - 1, -1, -1) for val in [0, max_sizes[d] - tensor.shape[d]]]
+        return F.pad(tensor, pad_list, mode="constant", value=pad_value)
+
+    padded_tensors = [pad_tensor(tensor) for tensor in tensors]
+    return torch.stack(padded_tensors, dim=0)
+
+
+def pad_along_dim(tensor: torch.Tensor, target_length: int, pad_value: float = 0, dim: int = -1) -> torch.Tensor:
+    """Pad a tensor along a specific dimension to a target length.
+
+    Pads on the right side of the specified dimension. Useful for aligning
+    variable-length outputs back to a common size after per-sequence processing.
+
+    Args:
+        tensor: Input tensor to pad.
+        target_length: Target length for the specified dimension.
+        pad_value: Value to use for padding. Defaults to 0.
+        dim: Dimension along which to pad. Defaults to -1 (last dimension).
+
+    Returns:
+        Padded tensor with the specified dimension extended to target_length.
+
+    Raises:
+        ValueError: If current length exceeds target_length.
+
+    Example:
+        >>> x = torch.ones(2, 5)
+        >>> result = pad_along_dim(x, target_length=8, pad_value=0, dim=1)
+        >>> result.shape
+        torch.Size([2, 8])
+    """
+    current_length = tensor.shape[dim]
+    if current_length > target_length:
+        raise ValueError(
+            f"Cannot pad dimension {dim} from length {current_length} to {target_length}. "
+            f"Current length exceeds target length."
+        )
+    if current_length == target_length:
+        return tensor
+
+    pad_length = target_length - current_length
+    pad_shape = list(tensor.shape)
+    pad_shape[dim] = pad_length
+    padding = torch.full(pad_shape, pad_value, dtype=tensor.dtype, device=tensor.device)
+    return torch.cat([tensor, padding], dim=dim)
+
+
 def pad_sequence_to_length(tensors, max_seq_len, pad_token_id, left_pad=False):
     """
     pad a 2D tensors (e.g. responses, logprobs) in the last dim to max_seq_length.
