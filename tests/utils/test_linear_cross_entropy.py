@@ -404,4 +404,6 @@ if __name__ == "__main__":
         test.verify_correctness()
         test.check_storage_all()
 
+    test_lce_non_divisible_vocab_padding()
+
     # torch.cuda.memory._dump_snapshot("test_linear_cross_entropy.pkl")
