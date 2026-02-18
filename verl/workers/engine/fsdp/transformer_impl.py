@@ -31,7 +31,10 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
-from verl.models.transformers.monkey_patch import apply_monkey_patch
+from verl.models.transformers.monkey_patch import (
+    apply_monkey_patch, 
+    apply_monkey_patch_before_from_pretrained
+)
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
@@ -217,6 +220,11 @@ class FSDPEngine(BaseEngine):
             torch_dtype = torch.float32 if not self.engine_config.forward_only else torch.bfloat16
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
+
+        if self.use_remove_padding or self.ulysses_sequence_parallel_size > 1:
+            # Some patches (e.g. replacing a submodule class) must happen before `from_pretrained`,
+            # otherwise already-instantiated modules will keep the original forward signatures.
+            apply_monkey_patch_before_from_pretrained(model_config=self.model_config.hf_config)
 
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
