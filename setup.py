@@ -92,7 +92,11 @@ setup(
     extras_require=extras_require,
     package_data={
         "": ["version/*"],
-        "verl": ["trainer/config/*.yaml"],
+        "verl": [
+            "trainer/config/*.yaml",
+            "trainer/config/*/*.yaml",
+            "experimental/*/config/*.yaml",
+        ],
     },
     include_package_data=True,
     long_description=long_description,
