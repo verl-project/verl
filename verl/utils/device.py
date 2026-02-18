@@ -144,6 +144,8 @@ def set_expandable_segments(enable: bool) -> None:
     """
     if is_cuda_available:
         torch.cuda.memory._set_allocator_settings(f"expandable_segments:{enable}")
+    elif is_npu_available:
+        torch.npu.memory._set_allocator_settings(f"expandable_segments:{enable}")
 
 
 def auto_set_device(config) -> None:
