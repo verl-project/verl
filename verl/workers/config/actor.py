@@ -22,7 +22,7 @@ from verl.trainer.config import CheckpointConfig
 from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig, VeOmniEngineConfig
+from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig, VeOmniEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
@@ -34,6 +34,7 @@ __all__ = [
     "McoreActorConfig",
     "VeOmniActorConfig",
     "QATConfig",
+    "TorchTitanActorConfig",
 ]
 
 
@@ -339,3 +340,27 @@ class VeOmniActorConfig(ActorConfig):
         """Validate VeOmni actor configuration parameters."""
         super().__post_init__()
         self.engine = self.veomni
+
+
+@dataclass
+class TorchTitanActorConfig(ActorConfig):
+    """Configuration for TorchTitan actor models.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        strategy (str): Training strategy set to 'torchtitan' for TorchTitan parallelism.
+        torchtitan (TorchtitanEngineConfig): Configuration for TorchTitan engine settings.
+        use_remove_padding (bool): Whether to remove padding tokens in inputs during training
+        use_rollout_log_probs (bool): Whether to use log probabilities from rollout engine
+    """
+
+    strategy: str = "torchtitan"
+    torchtitan: TorchtitanEngineConfig = field(default_factory=TorchtitanEngineConfig)
+    use_remove_padding: bool = False
+    use_rollout_log_probs: bool = False
+
+    def __post_init__(self):
+        """Validate TorchTitan actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.torchtitan
