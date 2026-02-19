@@ -17,10 +17,10 @@ e2e test verl.single_controller.ray
 
 import os
 
-import ray
-
 from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+
+import ray  # noqa: E402 isort: skip
 
 
 @ray.remote
