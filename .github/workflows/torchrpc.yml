@@ -1,0 +1,61 @@
+name: torchrpc
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+      - v0.*
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "verl/single_controller/*.py"
+      - .github/workflows/torchrpc.yml
+      - "!recipe/**/*.py"
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  torchrpc:
+    runs-on: [L20x8]
+    timeout-minutes: 30 # Increase this timeout value as needed
+    env:
+      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TORCHRPC_RANK: "0"
+      TORCHRPC_WORLD_SIZE: "1"
+      MASTER_ADDR: "127.0.0.1"
+      MASTER_PORT: "9943"
+    container:
+      image: whatcanyousee/verl:ngc-cu124-vllm0.8.3-sglang0.4.5-mcore0.12.0-te2.2
+      options: --gpus all --shm-size=10g
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip install .[test,vllm]
+      - name: Patch TorchRPC
+        run: |
+          python3 verl/single_controller/torchrpc/patch_torchrpc.py
+      - name: Running TorchRPC tests that need 8 GPUs
+        run: |
+          cd tests/torchrpc
+          pytest -s -x .
+      - name: Running arithmetic_sequence e2e test for TorchRPC
+        run: |
+          bash tests/e2e/run_torchrpc_trainer.sh
