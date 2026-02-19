@@ -560,7 +560,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # 3.2 initialize rollout engine
-            rollout_cls: type[BaseRollout] = get_rollout_class(rollout_config.name, rollout_config.mode)
+            rollout_cls: type[BaseRollout] = get_rollout_class(rollout_config.name)
             self.rollout = rollout_cls(
                 config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
             )

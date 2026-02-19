@@ -809,8 +809,6 @@ class RayPPOTrainer:
         )
 
         # create async rollout manager and request scheduler
-        # Note: mode is always "async" since sync mode is deprecated
-        self.async_rollout_mode = True
 
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")

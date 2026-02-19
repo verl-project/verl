@@ -21,14 +21,13 @@ from verl.experimental.reward_loop import RewardLoopManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
-from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
+from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 
 
 def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerGroup:
     # =========================== 1. Create hybrid ActorRollout workers ===========================
-    actor_rollout_cls = (
-        AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-    )
+    actor_rollout_cls = AsyncActorRolloutRefWorker
+
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(actor_rollout_cls),
     }
@@ -68,9 +67,6 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
         all_wg.update(spawn_wg)
     actor_rollout_wg = all_wg["actor_rollout"]
     actor_rollout_wg.init_model()
-
-    if config.actor_rollout_ref.rollout.mode == "sync":
-        raise ValueError("Agent loop tests require async rollout mode. Please set rollout.mode=async.")
 
     # =========================== 2. Create AgentLoopManager ===========================
     rm_resource_pool = (
