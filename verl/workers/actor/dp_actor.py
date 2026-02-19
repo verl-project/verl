@@ -374,15 +374,15 @@ class DataParallelPPOActor(BasePPOActor):
                     for key in model_inputs:
                         rolled = torch.empty_like(model_inputs[key])
                         for i in range(batch_size):
-                            rolled[i] = torch.roll(model_inputs[key][i], -int(left_padding[i]), dims=0)
+                            rolled[i] = torch.roll(model_inputs[key][i], -int(left_padding[i]), dims=-1)
                         model_inputs[key] = rolled
                     response_start_idx -= left_padding
                     response_end_idx -= left_padding
 
                     # Trim common right padding (all padding is on the right after rolling)
-                    common_pad_right = model_inputs["attention_mask"].flip(dims=[1]).argmax(dim=1).min().item()
+                    common_pad_right = model_inputs["attention_mask"].flip(dims=[-1]).argmax(dim=-1).min().item()
                     if common_pad_right > 0:
-                        model_inputs = {k: t[:, : seqlen - common_pad_right] for k, t in model_inputs.items()}
+                        model_inputs = {k: t[..., : seqlen - common_pad_right] for k, t in model_inputs.items()}
 
                 extra_args = {}
                 if self.use_fused_kernels:
