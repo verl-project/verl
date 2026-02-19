@@ -13,8 +13,10 @@ data:
   # Single-turn settings
   prompt_key: question
   response_key: answer
+  system_prompt_key: null
   prompt_dict_keys: null
   response_dict_keys: null
+  system_prompt_dict_keys: null
   # Multi-turn settings
   multiturn:
     enable: false  # Set to true to use multi-turn dataset

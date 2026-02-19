@@ -43,6 +43,8 @@ class SFTDataset(Dataset):
         prompt_dict_keys = config.get("prompt_dict_keys", None)
         response_key = config.get("response_key", "response")
         response_dict_keys = config.get("response_dict_keys", None)
+        system_prompt_key = config.get("system_prompt_key", None)
+        system_prompt_dict_keys = config.get("system_prompt_dict_keys", None)
         max_length = config.get("max_length", 1024)
         truncation = config.get("truncation", "error")
         use_shm = config.get("use_shm", False)
@@ -65,8 +67,10 @@ class SFTDataset(Dataset):
 
         self.prompt_key = prompt_key if isinstance(prompt_key, tuple | list) else [prompt_key]
         self.response_key = response_key if isinstance(response_key, tuple | list) else [response_key]
+        self.system_prompt_key = system_prompt_key if isinstance(system_prompt_key, tuple | list) else [system_prompt_key]
         self.prompt_dict_keys = prompt_dict_keys if prompt_dict_keys else []
         self.response_dict_keys = response_dict_keys if response_dict_keys else []
+        self.system_prompt_dict_keys = system_prompt_dict_keys if system_prompt_dict_keys else []
 
         self.max_length = max_length
 
@@ -130,6 +134,20 @@ class SFTDataset(Dataset):
             self.responses = self.responses.squeeze()
         self.responses = self.responses.tolist()
 
+        # Extract system prompts if configured
+        self.system_prompts = None
+        if self.system_prompt_key and self.system_prompt_key[0] is not None:
+            self.system_prompts = self.dataframe[self.system_prompt_key]
+            for key in self.system_prompt_dict_keys:
+                try:
+                    self.system_prompts = self.system_prompts.apply(lambda x: series_to_item(x)[key], axis=1)  # noqa: B023
+                except Exception:
+                    print(f"self.system_prompts={self.system_prompts}")
+                    raise
+            if isinstance(self.system_prompts, pd.DataFrame):
+                self.system_prompts = self.system_prompts.squeeze()
+            self.system_prompts = self.system_prompts.tolist()
+
     def __len__(self):
         return len(self.prompts)
 
@@ -140,7 +158,10 @@ class SFTDataset(Dataset):
         response = self.responses[item]
 
         # apply chat template
-        prompt_chat = [{"role": "user", "content": prompt}]
+        prompt_chat = []
+        if self.system_prompts and self.system_prompts[item]:
+            prompt_chat.append({"role": "system", "content": self.system_prompts[item]})
+        prompt_chat.append({"role": "user", "content": prompt})
 
         # string
         prompt_chat_str = tokenizer.apply_chat_template(
