@@ -47,4 +47,15 @@ warmup_style: null
 # optimizer: _AdamW
 # override_optimizer_config:
 #   bf16_stochastic_round: true
+# Example for SOAP optimizer (paper defaults):
+# optimizer_impl: verl.optimizers.soap
+# optimizer: SOAP
+# lr: 3e-3
+# betas: [0.95, 0.95]
+# override_optimizer_config:
+#   precondition_frequency: 10
+#   max_precond_dim: 10000
+#   merge_dims: false
+#   precondition_1d: false
+# For a full SOAP config, see trainer/config/optim/soap.yaml.
 override_optimizer_config: null
