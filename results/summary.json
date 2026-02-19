@@ -1,0 +1,9 @@
+{
+  "metadata": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "dataset": "GSM8K",
+    "gpus": 8,
+    "notes": "Populate with tokens/s, step time, max memory per GPU, reward/KL metrics."
+  },
+  "runs": []
+}

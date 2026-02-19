@@ -1,0 +1,23 @@
+# Target class for this configuration
+_target_: verl.workers.config.OptimizerConfig
+
+# Learning rate
+lr: 1e-5
+
+# LR warmup steps ratio
+lr_warmup_steps_ratio: 0.0
+
+# Total training steps
+total_training_steps: -1
+
+# Weight decay
+weight_decay: 0.01
+
+# LR warmup steps
+lr_warmup_steps: -1
+
+# Betas for Adam optimizer
+betas: [0.9, 0.999]
+
+# Clip gradient
+clip_grad: 1.0

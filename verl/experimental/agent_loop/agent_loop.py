@@ -421,6 +421,8 @@ class AgentLoopWorker:
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        if "rng_seed" in batch.meta_info:
+            sampling_params["seed"] = int(batch.meta_info["rng_seed"])
 
         # override sampling params for validation
         if batch.meta_info.get("validate", False):

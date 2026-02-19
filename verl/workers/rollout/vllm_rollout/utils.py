@@ -13,6 +13,7 @@
 # limitations under the License.
 import ctypes
 import gc
+import hashlib
 import json
 import logging
 import os
@@ -40,6 +41,30 @@ VLLM_LORA_NAME = "123"
 VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
+
+
+def _weight_sync_digest_entry(name: str, tensor: torch.Tensor) -> tuple[int, int]:
+    """Compute an order-insensitive digest entry for one tensor."""
+    view = tensor.detach()
+    numel = int(view.numel())
+    hasher = hashlib.sha256()
+    hasher.update(name.encode("utf-8"))
+    hasher.update(str(tuple(view.shape)).encode("utf-8"))
+    hasher.update(str(view.dtype).encode("utf-8"))
+    hasher.update(str(numel).encode("utf-8"))
+
+    if numel > 0:
+        flat = view.reshape(-1)
+        n_sample = min(8, numel)
+        if n_sample == 1:
+            sample = flat[:1]
+        else:
+            idx = torch.arange(n_sample, device=flat.device, dtype=torch.long)
+            idx = (idx * (numel - 1)) // (n_sample - 1)
+            sample = flat.index_select(0, idx)
+        hasher.update(sample.float().cpu().numpy().tobytes())
+
+    return int.from_bytes(hasher.digest()[:16], byteorder="big", signed=False), numel
 
 
 def set_death_signal():
@@ -191,7 +216,17 @@ class vLLMColocateWorkerExtension:
         # patch weight loader to support MoE model
         patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self,
+        peft_config: dict = None,
+        base_sync_done=False,
+        use_shm: bool = False,
+        debug_weight_sync_id: str | None = None,
+        debug_weight_sync_label: str | None = None,
+        debug_weight_expected_digest: str | None = None,
+        debug_weight_expected_num_tensors: int | None = None,
+        debug_weight_expected_numel: int | None = None,
+    ):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
@@ -234,6 +269,9 @@ class vLLMColocateWorkerExtension:
         elif use_standard_weight_load:
             # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
             patch_vllm_moe_model_weight_loader(self.model_runner.model)
+        debug_digest_acc = 0
+        debug_num_tensors = 0
+        debug_numel = 0
 
         # receive bucket and update weights
         while True:
@@ -251,6 +289,11 @@ class vLLMColocateWorkerExtension:
                 else:
                     tensor = tensor.to(self.device)
                 weights.append((name, tensor))
+                if debug_weight_sync_id is not None:
+                    digest_part, numel = _weight_sync_digest_entry(name, tensor)
+                    debug_digest_acc ^= digest_part
+                    debug_num_tensors += 1
+                    debug_numel += numel
             get_torch_device().synchronize()
             socket.send(b"")
             self._update_weights(weights, peft_config=peft_config, base_sync_done=base_sync_done)
@@ -271,6 +314,34 @@ class vLLMColocateWorkerExtension:
             model = self.model_runner.model
             model_config = self.model_runner.vllm_config.model_config
             process_weights_after_loading(model, model_config, self.device)
+
+        if debug_weight_sync_id is not None:
+            actual_digest = f"{debug_digest_acc:032x}"
+            expected_n = -1 if debug_weight_expected_num_tensors is None else int(debug_weight_expected_num_tensors)
+            expected_numel = -1 if debug_weight_expected_numel is None else int(debug_weight_expected_numel)
+            match = (
+                (debug_weight_expected_digest is None or actual_digest == debug_weight_expected_digest)
+                and (debug_weight_expected_num_tensors is None or debug_num_tensors == debug_weight_expected_num_tensors)
+                and (debug_weight_expected_numel is None or debug_numel == debug_weight_expected_numel)
+            )
+            log_fn = logger.info if match else logger.error
+            log_fn(
+                "[WEIGHT_SYNC_DEBUG][receiver] sync_id=%s label=%s digest=%s expected=%s tensors=%s/%s numel=%s/%s match=%s",
+                debug_weight_sync_id,
+                debug_weight_sync_label or "unknown",
+                actual_digest,
+                debug_weight_expected_digest or "NA",
+                debug_num_tensors,
+                expected_n,
+                debug_numel,
+                expected_numel,
+                int(match),
+            )
+            if not match and os.getenv("VERL_DEBUG_WEIGHT_SYNC_CHECK_STRICT", "0") == "1":
+                raise RuntimeError(
+                    f"Weight sync digest mismatch: sync_id={debug_weight_sync_id}, "
+                    f"actual={actual_digest}, expected={debug_weight_expected_digest}"
+                )
 
         # clean up
         socket.close()

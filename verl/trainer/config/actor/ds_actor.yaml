@@ -1,0 +1,35 @@
+# defaults specify the default config from each component
+defaults:
+
+  # deepspeed optimizer config
+  - ../optim@optim: deepspeed
+
+  # deepspeed engine config
+  - ../engine@deepspeed: deepspeed
+
+  # base actor config
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl.workers.config.DeepSpeedActorConfig
+
+# distribution strategy. Options: deepspeed
+strategy: deepspeed
+
+# Gradient clipping for actor updates
+grad_clip: 1.0
+
+# Whether to remove padding tokens in inputs during training
+use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+
+# Whether to reuse rollout log probs instead of recomputing in actor
+use_rollout_log_probs: false
+
+# Enable sum_pi_squared computation for logit-gradient norm proxy
+calculate_sum_pi_squared: false
+
+# Enable activation checkpointing for sum_pi_squared
+sum_pi_squared_checkpointing: false

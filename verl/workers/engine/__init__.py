@@ -22,6 +22,14 @@ __all__ = [
 ]
 
 try:
+    from .deepspeed import DeepSpeedEngineWithLMHead, DeepSpeedEngineWithValueHead
+
+    __all__ += ["DeepSpeedEngineWithLMHead", "DeepSpeedEngineWithValueHead"]
+except ImportError:
+    DeepSpeedEngineWithLMHead = None
+    DeepSpeedEngineWithValueHead = None
+
+try:
     from .veomni import VeOmniEngine, VeOmniEngineWithLMHead
 
     __all__ += ["VeOmniEngine", "VeOmniEngineWithLMHead"]
