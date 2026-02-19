@@ -34,7 +34,7 @@ RUN ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     # Install torch & torch_npu & torchvision
-    pip install torch==2.7.1 torch_npu==2.7.1.post2 torchvision==0.22.1 transformers==4.57.6 && \
+    pip install torch==2.7.1 torch_npu==2.7.1 torchvision==0.22.1 transformers==4.57.6 && \
     # Install vllm
     cd vllm && VLLM_TARGET_DEVICE=empty pip install -v -e . && cd .. && \
     # Install vllm-ascend
@@ -45,6 +45,9 @@ RUN ARCH=$(uname -m) && \
     pip uninstall -y triton triton-ascend && \
     # Install mbridge
     pip install mbridge && \
+    # Reinstall the torch_npu==2.7.1.post2 package, as it is a prerequisite for 
+    # configuring expandable segments on Ascend NPU.
+    pip install torch_npu==2.7.1.post2 && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
