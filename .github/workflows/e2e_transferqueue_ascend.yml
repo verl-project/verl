@@ -110,6 +110,8 @@ jobs:
         run: |
           pip install -r requirements-npu.txt
           pip install --no-deps -e .
+          # TODO: remove this line after the base image is updated with torch_npu 2.7.1.post2
+          pip install torch_npu==2.7.1.post2
           pip install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple TransferQueue==0.1.5
       - name: Check final pip list
         run: |
