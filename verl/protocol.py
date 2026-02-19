@@ -380,11 +380,31 @@ class DataProto:
             tensor_data = self.batch[item] if self.batch is not None else None
             non_tensor_data = {key: val[item] for key, val in self.non_tensor_batch.items()}
             return DataProtoItem(batch=tensor_data, non_tensor_batch=non_tensor_data, meta_info=self.meta_info)
-
-        # # Case 4: Unsupported type
+        # Case 4: string - return the column in batch/non_tensor_batch or meta_info
+        elif isinstance(item, str):
+            if item in self.batch:
+                return self.batch[item]
+            elif item in self.non_tensor_batch[item]:
+                return self.non_tensor_batch[item]
+            elif item in self.meta_info:
+                return self.meta_info[item]
+            else:
+                raise KeyError(f'The Proto does not have key {item} in its batch or meta_info')
+        # # Case 5: Unsupported type
         else:
             raise TypeError(f"Indexing with {type(item)} is not supported")
 
+    def __setitem__(self, index, value):
+        extra_keys = (value.batch.keys() - self.batch.keys()) | (value.non_tensor_batch.keys() - self.non_tensor_batch.keys())
+        if extra_keys:
+            raise KeyError(f'Columns {extra_keys} exists in source but not in target, cannot update values in partial rows')
+        if not isinstance(value, (DataProto, DataProtoItem)):
+            raise ValueError('value must be a DataProto or DataProtoItem')
+        for target_key, target_value in value.batch.items():
+            self.batch[target_key][index] = target_value
+        for target_key, target_value in value.non_tensor_batch.items():
+            self.non_tensor_batch[target_key][index] = target_value
+    
     def __getstate__(self):
         if version.parse(tensordict.__version__) >= version.parse("0.5.0") and self.batch is not None:
             # Check if batch is empty to avoid torch.cat error in consolidate
