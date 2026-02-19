@@ -192,7 +192,9 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
-                        messages = self._build_messages(doc)
+                        # Create a copy to avoid modifying the original doc when _build_messages uses pop
+                        doc_copy = copy.deepcopy(doc)
+                        messages = self._build_messages(doc_copy)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
                         if self.tool_schemas is not None:
