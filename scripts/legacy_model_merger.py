@@ -586,15 +586,15 @@ class MegatronModelMerger(BaseModelMerger):
         """
         Checks if the key is a valid Megatron state key.
 
-        Now the model merger only supports keys that start with "decoder/embedding/output_layer" in TransformerLayer.
+        Now the model merger only supports keys that start with "decoder/embedding/output_layer/vision_model" in TransformerLayer.
         Shall not use key starts with "model."
         """
         if key.startswith("model."):
             raise ValueError(
-                f"Invalid key {key} in Megatron state_dict. Expected keys to start with 'decoder/embedding/output_layer' in TransformerLayer."
+                f"Invalid key {key} in Megatron state_dict. Expected keys to start with 'decoder/embedding/output_layer/vision_model' in TransformerLayer."
             )
 
-        skip_checking_keys = ["embedding.word_embeddings", "output_layer"]
+        skip_checking_keys = ["embedding.word_embeddings", "output_layer", "vision_model"]
         for skip_key in skip_checking_keys:
             if skip_key in key:
                 print(f"skip checking key {key}")
