@@ -56,6 +56,33 @@ DockerFile镜像构建 & 使用
 
         pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 
+3. CANN 安装指令：
+
+    .. code-block:: bash
+
+        # 安装所需的 Python 包
+        pip install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+
+        # 下载并安装 CANN 工具包
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run
+        ./Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run --full
+
+        # 配置 CANN 环境变量
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+        # 下载并安装对应设备型号的 CANN 内核包（kernels），例如：910B
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run
+        ./Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run --install
+
+        # 下载并安装 NNAL（ATB）组件
+        wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run
+        ./Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run --install
+
+        # 配置 NNAL (ATB) 环境变量
+        source /usr/local/Ascend/nnal/atb/set_env.sh
 
 安装其他软件包
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
