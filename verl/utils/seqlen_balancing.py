@@ -391,6 +391,13 @@ def synchronize_micro_batches_num_across_ranks(
     dist.all_reduce(num_micro_batches_tensor, op=dist.ReduceOp.MAX, group=dp_group)
     max_num_micro_batches = num_micro_batches_tensor.cpu().item()
 
+    if not micro_batches_idx and max_num_micro_batches > 0:
+        rank = dist.get_rank(dp_group)
+        raise RuntimeError(
+            f"Cannot create {max_num_micro_batches} micro-batches from an empty batch on rank {rank}. "
+            "All ranks in a DP group must have a non-empty batch if any rank does."
+        )
+
     while len(micro_batches_idx) < max_num_micro_batches:
         largest_batch_idx = max(range(len(micro_batches_idx)), key=lambda i: len(micro_batches_idx[i]))
         largest_batch = micro_batches_idx[largest_batch_idx]
@@ -441,6 +448,11 @@ def get_truncate_padding_micro_batches(
     )
 
     micro_batches_idx = []
+
+    if not sorted_sequence_lengths_with_idx:
+        if same_micro_num_in_dp:
+            micro_batches_idx = synchronize_micro_batches_num_across_ranks(micro_batches_idx, dp_group)
+        return micro_batches_idx
 
     longest_sequence_length, longest_sequence_idx = sorted_sequence_lengths_with_idx[0]
     current_micro_batch_idx = [longest_sequence_idx]
