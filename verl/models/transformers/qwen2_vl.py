@@ -35,6 +35,7 @@ from verl.utils.ulysses import (
     gather_seq_scatter_heads,
     get_ulysses_sequence_parallel_group,
     get_ulysses_sequence_parallel_world_size,
+    ulysses_pad_and_slice_inputs,
     validate_ulysses_config,
 )
 
@@ -59,6 +60,17 @@ if is_npu_available:
     _flash_use_top_left_mask = flash_attn_supports_top_left_mask()
 
 _flash_deterministic_enabled = os.getenv("FLASH_ATTENTION_DETERMINISTIC", "0") == "1"
+
+def slice_labels_ulysses_sp(labels: torch.Tensor):
+    group = get_ulysses_sequence_parallel_group()
+    if group is not None:
+        ulysses_sequence_parallel_size = get_ulysses_sequence_parallel_world_size()
+        labels, _, _ = ulysses_pad_and_slice_inputs(
+            labels,
+            position_ids_rmpad=None,
+            sp_size=ulysses_sequence_parallel_size,
+        )
+    return labels   
 
 
 def get_rope_index(
@@ -500,6 +512,9 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
+    # Slice labels if using USP
+    rolled_labels = slice_labels_ulysses_sp(rolled_labels)
+
     fused_linear_for_ppo = FusedLinearForPPO()
     log_probs, entropy = fused_linear_for_ppo.forward(
         hidden_states=hidden_states,
@@ -533,6 +548,8 @@ def forward_with_triton_backend(
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
+
+    rolled_labels = slice_labels_ulysses_sp(rolled_labels)
 
     log_probs, entropy = linear_cross_entropy(
         hidden_states,
