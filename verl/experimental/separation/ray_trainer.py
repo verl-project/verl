@@ -711,7 +711,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         gradient_norm = metrics.get("actor/grad_norm", None)
         metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
-        if self.prometheus_client is not None:
+        if getattr(self, "prometheus_client", None) is not None:
             prometheus_metrics = self.prometheus_client.query_all_metrics(prefix="rollout/")
             metrics.update(prometheus_metrics)
 
