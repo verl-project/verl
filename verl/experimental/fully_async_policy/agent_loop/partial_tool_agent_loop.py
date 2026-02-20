@@ -91,19 +91,16 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
 
         # Initialize interaction if needed
         interaction = None
-        interaction_kwargs = {}
+        interaction_kwargs: dict[str, Any] = {}
         if self.interaction_config_file:
-            interaction_kwargs = kwargs["extra_info"]["interaction_kwargs"]
-            if "name" not in interaction_kwargs:
-                raise ValueError("'name' key is required in interaction_kwargs")
-            interaction_name = interaction_kwargs["name"]
-            if interaction_name not in self.interaction_map:
-                raise ValueError(
-                    f"Interaction '{interaction_name}' not found in interaction_map. Available interactions: "
-                    f"{list(self.interaction_map.keys())}"
-                )
-            interaction = self.interaction_map[interaction_name]
-            await interaction.start_interaction(request_id, **interaction_kwargs)
+            # Allow mixing datasets where some rows have no interaction config: treat missing/None as "no interaction".
+            interaction_kwargs = kwargs["extra_info"].get("interaction_kwargs", None) or {}
+            interaction_name = interaction_kwargs.get("name", None)
+
+            if interaction_name and interaction_name in self.interaction_map:
+                interaction = self.interaction_map[interaction_name]
+                await interaction.start_interaction(request_id, **interaction_kwargs)
+
         # Create AgentData instance to encapsulate all state
         agent_data = AgentData(
             messages=messages,
@@ -222,7 +219,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
 
         # Handle interaction if needed
-        if self.interaction_config_file:
+        if self.interaction_config_file and agent_data.interaction is not None:
             assistant_message = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.decode(agent_data.response_ids, skip_special_tokens=True)
             )
@@ -232,7 +229,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         # Determine next state
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
-        elif self.interaction_config_file:
+        elif self.interaction_config_file and agent_data.interaction is not None:
             return AgentState.INTERACTING
         else:
             return AgentState.TERMINATED
