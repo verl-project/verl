@@ -403,6 +403,38 @@ def apply_monkey_patch(
             patch_vlm_for_ulysses_input_slicing(Qwen2_5_VLTextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen2VLTextModel)
 
+        # Step 4: patch VisionTransformer for Vision DP (image-level distribution)
+        if ulysses_sp_size > 1:
+            from verl.utils.vision_dp import create_dp_vision_forward
+
+            # Patch Qwen2-VL VisionTransformer
+            try:
+                from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
+
+                original_vision_forward = Qwen2VisionTransformerPretrainedModel.forward
+                Qwen2VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original_vision_forward)
+                print(
+                    f"Monkey patch Qwen2VisionTransformerPretrainedModel.forward"
+                    f" for Vision DP (dp_size={ulysses_sp_size})"
+                )
+            except ImportError as e:
+                print(f"Warning: Could not patch Qwen2VisionTransformer for Vision DP: {e}")
+
+            # Patch Qwen2.5-VL VisionTransformer (uses a different class)
+            try:
+                from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+                    Qwen2_5_VisionTransformerPretrainedModel,
+                )
+
+                original_vision_forward_25 = Qwen2_5_VisionTransformerPretrainedModel.forward
+                Qwen2_5_VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original_vision_forward_25)
+                print(
+                    f"Monkey patch Qwen2_5_VisionTransformerPretrainedModel.forward"
+                    f" for Vision DP (dp_size={ulysses_sp_size})"
+                )
+            except ImportError as e:
+                print(f"Warning: Could not patch Qwen2_5VisionTransformer for Vision DP: {e}")
+
     elif model.config.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
         # Step 1: patch model to support image-text mixed data
         from transformers.models.qwen3_vl.modeling_qwen3_vl import (
@@ -436,6 +468,30 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3VLTextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3VLMoeTextModel)
+
+        # Step 3: patch VisionTransformer for Vision DP (image-level distribution)
+        if ulysses_sp_size > 1:
+            from verl.utils.vision_dp import create_dp_vision_forward
+
+            # Patch Qwen3-VL VisionModel
+            try:
+                from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
+
+                original_vision_forward_q3 = Qwen3VLVisionModel.forward
+                Qwen3VLVisionModel.forward = create_dp_vision_forward(original_vision_forward_q3)
+                print(f"Monkey patch Qwen3VLVisionModel.forward for Vision DP (dp_size={ulysses_sp_size})")
+            except ImportError as e:
+                print(f"Warning: Could not patch Qwen3VLVisionModel for Vision DP: {e}")
+
+            # Patch Qwen3-VL-MoE VisionModel
+            try:
+                from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeVisionModel
+
+                original_vision_forward_q3moe = Qwen3VLMoeVisionModel.forward
+                Qwen3VLMoeVisionModel.forward = create_dp_vision_forward(original_vision_forward_q3moe)
+                print(f"Monkey patch Qwen3VLMoeVisionModel.forward for Vision DP (dp_size={ulysses_sp_size})")
+            except ImportError as e:
+                print(f"Warning: Could not patch Qwen3VLMoeVisionModel for Vision DP: {e}")
 
     elif model.config.model_type == "glm4v":
         # Step 1: patch model to support image-text mixed data
