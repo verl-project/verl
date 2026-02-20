@@ -39,7 +39,7 @@ defaults:
   - algorithm@algorithm.rollout_correction: rollout_correction
 
   # distillation config
-  - distillation@actor_rollout_ref.distillation: dp_distillation
+  - distillation@distillation: distillation
 
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
