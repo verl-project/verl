@@ -27,7 +27,6 @@ from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerGroup:
     # =========================== 1. Create hybrid ActorRollout workers ===========================
     actor_rollout_cls = AsyncActorRolloutRefWorker
-
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(actor_rollout_cls),
     }

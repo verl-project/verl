@@ -27,6 +27,7 @@ __all__ = [
     "FSDPEngineConfig",
     "McoreEngineConfig",
     "TrainingWorkerConfig",
+    "TorchtitanEngineConfig",
     "VeOmniEngineConfig",
     "EngineConfig",
     "EngineRouterReplayConfig",
@@ -307,6 +308,65 @@ class VeOmniEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class TorchtitanEngineConfig(EngineConfig):
+    """Configuration for Torchtitan.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        wrap_policy (Dict[str, Any]): Configuration for FSDP wrap policy.
+        reshard_after_forward (Literal["default", "always", "never"]): The policy for applying
+            `reshard_after_forward` within an FSDP setup, default "default"
+        forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
+        use_orig_params (bool): Whether to use original parameters when initialize FSDP, default False
+        mixed_precision (bool): Mixed precision configuration for FSDP, default False
+        offload_policy (bool): Whether to offload policy model parameters, default False
+        data_parallel_size (int): Data parallel group size, default 1
+        data_parallel_replicate_size (int): Data parallel replicate size, default 1
+        data_parallel_shard_size (int): Data parallel shard degree, default 1
+        tensor_parallel_size (int): Tensor parallel size, default 1
+        expert_parallel_size (int): Expert parallel size, default 1
+        expert_tensor_parallel_size (int): Expert tensor parallel size, default 1
+        pipeline_parallel_size (int): Pipeline parallel size, default 1
+        context_parallel_size (int): Context parallel size, default 1
+        attn_type (str): Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen"),
+            default "flex"
+        strategy (str): Strategy to use for distributed training, default "torchtitan"
+        seed (int): Random seed for reproducibility.
+        full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
+            in distributed training. Important: this will negatively impact performance, so only use it for
+            debugging.
+
+    """
+
+    wrap_policy: dict[str, Any] = field(default_factory=dict)
+    reshard_after_forward: Literal["default", "always", "never"] = "default"
+    forward_prefetch: bool = False
+    use_orig_params: bool = False
+    mixed_precision: bool = False
+    offload_policy: bool = False
+    use_torch_compile: bool = True
+    entropy_from_logits_with_chunking: bool = False
+    entropy_checkpointing: bool = False
+    data_parallel_size: int = 1
+    data_parallel_replicate_size: int = 1
+    data_parallel_shard_size: int = 1
+    tensor_parallel_size: int = 1
+    expert_parallel_size: int = 1
+    expert_tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    context_parallel_size: int = 1
+    attn_type: str = "flex"
+    strategy: str = "torchtitan"
+    seed: int = 42
+    full_determinism: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.strategy in ["torchtitan"], f"strategy {self.strategy} not supported"
 
 
 @dataclass
