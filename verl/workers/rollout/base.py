@@ -79,24 +79,23 @@ class BaseRollout(ABC):
 
 
 _ROLLOUT_REGISTRY = {
-    ("vllm", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
-    ("sglang", "async"): "verl.workers.rollout.sglang_rollout.sglang_rollout.ServerAdapter",
-    ("trtllm", "async"): "verl.workers.rollout.trtllm_rollout.trtllm_rollout.ServerAdapter",
+    "vllm": "verl.workers.rollout.vllm_rollout.ServerAdapter",
+    "sglang": "verl.workers.rollout.sglang_rollout.sglang_rollout.ServerAdapter",
+    "trtllm": "verl.workers.rollout.trtllm_rollout.trtllm_rollout.ServerAdapter",
 }
 
 
-def get_rollout_class(rollout_name: str, mode: str = "async") -> type[BaseRollout]:
+def get_rollout_class(rollout_name: str) -> type[BaseRollout]:
     """Get the rollout class by name.
 
     Args:
         rollout_name: The name of the rollout.
-        mode: The mode of the rollout, async: server mode.
 
     Returns:
         The rollout class.
     """
-    assert (rollout_name, mode) in _ROLLOUT_REGISTRY, f"Rollout {rollout_name} with mode {mode} not found"
-    fqdn = _ROLLOUT_REGISTRY[(rollout_name, mode)]
+    assert rollout_name in _ROLLOUT_REGISTRY, f"Rollout {rollout_name} not found"
+    fqdn = _ROLLOUT_REGISTRY[rollout_name]
     module_name, class_name = fqdn.rsplit(".", 1)
     rollout_module = importlib.import_module(module_name)
     return getattr(rollout_module, class_name)

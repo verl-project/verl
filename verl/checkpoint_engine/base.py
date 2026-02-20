@@ -261,9 +261,9 @@ class CheckpointEngineWorker(Worker):
 
         # sglang and trt-llm need device_mesh for internal communication
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
-        self.server_adapter: BaseRollout = server_adapter or get_rollout_class(
-            rollout_config.name, rollout_config.mode
-        )(config=rollout_config, model_config=model_config, device_mesh=None)
+        self.server_adapter: BaseRollout = server_adapter or get_rollout_class(rollout_config.name)(
+            config=rollout_config, model_config=model_config, device_mesh=None
+        )
 
         backend = rollout_config.checkpoint_engine.backend
         bucket_size = rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20

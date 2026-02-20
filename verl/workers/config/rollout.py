@@ -137,7 +137,7 @@ class RolloutConfig(BaseConfig):
     _mutable_fields = {"max_model_len", "load_format"}
 
     name: Optional[str] = MISSING
-    mode: str = "async"
+    mode: Optional[str] = None
 
     temperature: float = 1.0
     top_k: int = -1
@@ -243,15 +243,11 @@ class RolloutConfig(BaseConfig):
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported
-        if self.mode == "sync":
-            raise ValueError(
-                "Rollout mode 'sync' has been removed. Please set "
-                "`actor_rollout_ref.rollout.mode=async` or remove the mode setting entirely."
-            )
-        if self.mode != "async":
+        if self.mode is not None:
             warnings.warn(
-                f"Unknown rollout mode '{self.mode}'. Only 'async' mode is supported. "
-                "The 'mode' field is deprecated and will be removed in a future version.",
+                f"The 'mode' field in RolloutConfig is deprecated and has no effect. "
+                f"All rollouts now use async mode. Please remove 'mode: {self.mode}' "
+                f"from your configuration file. This field will be removed in a future version.",
                 DeprecationWarning,
                 stacklevel=2,
             )

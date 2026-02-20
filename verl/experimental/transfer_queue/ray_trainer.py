@@ -803,35 +803,28 @@ class RayPPOTrainer:
             rm_resource_pool=resource_pool,
         )
 
-        # create async rollout manager and request scheduler
-        self.async_rollout_mode = False
-        if self.config.actor_rollout_ref.rollout.mode == "async":
-            from .agent_loop import AgentLoopManager
+        from .agent_loop import AgentLoopManager
 
-            self.async_rollout_mode = True
+        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
-            enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        self.async_rollout_manager = AgentLoopManager(
+            config=self.config,
+            worker_group=self.actor_rollout_wg,
+            reward_loop_worker_handles=reward_loop_worker_handles,
+        )
 
-            reward_loop_worker_handles = (
-                self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
-            )
-            self.async_rollout_manager = AgentLoopManager(
-                config=self.config,
-                worker_group=self.actor_rollout_wg,
-                reward_loop_worker_handles=reward_loop_worker_handles,
-            )
+        self.checkpoint_manager = CheckpointEngineManager(
+            backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+            trainer=self.actor_rollout_wg,
+            replicas=self.async_rollout_manager.rollout_replicas,
+        )
 
-            self.checkpoint_manager = CheckpointEngineManager(
-                backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
-                trainer=self.actor_rollout_wg,
-                replicas=self.async_rollout_manager.rollout_replicas,
-            )
+        # sleep all replicas to load checkpoint
+        self.checkpoint_manager.sleep_replicas()
 
-            # sleep all replicas to load checkpoint
-            self.checkpoint_manager.sleep_replicas()
-
-            # TODO (TQ): initialize tq during worker init when enable TQ switch is stable
-            self.async_rollout_manager.create_transferqueue_client_for_workers()
+        # TODO (TQ): initialize tq during worker init when enable TQ switch is stable
+        self.async_rollout_manager.create_transferqueue_client_for_workers()
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe

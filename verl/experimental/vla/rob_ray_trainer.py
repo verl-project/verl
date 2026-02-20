@@ -183,14 +183,10 @@ class RobRayPPOTrainer(RayPPOTrainer):
         self.env_wg = all_wg["env"]
 
         # create async rollout manager and request scheduler
-        self.async_rollout_mode = False
-        if self.config.actor_rollout_ref.rollout.mode == "async_envloop":
-            from verl.experimental.vla.env_loop import EnvLoop
 
-            self.async_rollout_mode = True
-            self.async_rollout_manager = EnvLoop(
-                config=self.config, rollout_wg=self.actor_rollout_wg, env_wg=self.env_wg
-            )
+        from verl.experimental.vla.env_loop import EnvLoop
+
+        self.async_rollout_manager = EnvLoop(config=self.config, rollout_wg=self.actor_rollout_wg, env_wg=self.env_wg)
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         # pop those keys for generation

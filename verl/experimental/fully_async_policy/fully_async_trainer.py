@@ -305,11 +305,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
             )
 
-            # create async rollout manager and request scheduler
-            assert self.config.actor_rollout_ref.rollout.mode == "async"
             from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
 
-            self.async_rollout_mode = True
             self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
                 config=self.config,
                 worker_group=self.actor_rollout_wg,
