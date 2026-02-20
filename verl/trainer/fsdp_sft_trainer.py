@@ -191,6 +191,11 @@ class FSDPSFTTrainer:
             pin_memory_device=device_name,
         )
 
+        if self.val_dataset is None:
+            self.val_sampler = None
+            self.val_dataloader = None
+            return
+
         self.val_sampler = DistributedSampler(
             self.val_dataset, shuffle=False, num_replicas=world_size, rank=rank, drop_last=True
         )
@@ -230,6 +235,13 @@ class FSDPSFTTrainer:
             )
         if self.config.ulysses_sequence_parallel_size > 1:
             assert self.use_remove_padding, "Sequence parallel is only supported when remove_padding is enabled"
+
+        if self.use_remove_padding or self.config.ulysses_sequence_parallel_size > 1:
+            # Some patches (e.g. replacing a submodule class) must happen before `from_pretrained`,
+            # otherwise already-instantiated modules will keep the original forward signatures.
+            from verl.models.transformers.monkey_patch import apply_monkey_patch_before_from_pretrained
+
+            apply_monkey_patch_before_from_pretrained(model_config=config)
 
         # This may be very large
         init_context = get_init_weight_context_manager(
@@ -778,7 +790,7 @@ class FSDPSFTTrainer:
                 is_save_step = global_step % self.config.trainer.save_freq == 0
 
                 # early exit or validation step
-                if is_last_step or (self.config.trainer.test_freq > 0 and is_valid_step):
+                if self.config.trainer.test_freq > 0 and (is_last_step or is_valid_step):
                     # Perform validation
                     val_losses = []
                     for val_data in self.val_dataloader:
@@ -823,9 +835,15 @@ def run_sft(config):
     train_dataset = create_sft_dataset(
         config.data.train_files, config.data, tokenizer, max_samples=config.data.get("train_max_samples", -1)
     )
-    val_dataset = create_sft_dataset(
-        config.data.val_files, config.data, tokenizer, max_samples=config.data.get("val_max_samples", -1)
-    )
+
+    if config.data.val_files is not None and config.trainer.test_freq > 0:
+        val_dataset = create_sft_dataset(
+            config.data.val_files, config.data, tokenizer, max_samples=config.data.get("val_max_samples", -1)
+        )
+    else:
+        val_dataset = None
+        if device_mesh.get_rank() == 0:
+            print("No validation dataset provided, will skip validation")
 
     trainer = FSDPSFTTrainer(
         config=config,
