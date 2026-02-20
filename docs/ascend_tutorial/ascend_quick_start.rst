@@ -1,7 +1,7 @@
 Ascend Quickstart
 ===================================
 
-Last updated: 12/11/2025.
+Last updated: 2/13/2026.
 
 我们在 verl 上增加对华为昇腾设备的支持。
 
@@ -67,19 +67,20 @@ DockerFile镜像构建 & 使用
     +---------------+----------------------+
     | triton-ascend | == 3.2.0rc4          |
     +---------------+----------------------+
-    | transformers  | latest release       |
+    | transformers  | == 4.57.6            |
     +---------------+----------------------+
-
+    
+    tips: verl is not support transformers 5.0.0 or higher
     安装指令：
-
+    
     .. code-block:: bash
-
+    
         # 安装torchvision，版本需要和torch匹配
         pip install torchvision==0.22.1
-
+    
         # 清理环境上可能存在的历史triton/triton-ascend软件包残留
         pip uninstall -y triton triton-ascend
-
+    
         # 安装triton-ascend，不需要单独安装triton
         pip install triton-ascend==3.2.0rc4
 
@@ -115,30 +116,30 @@ DockerFile镜像构建 & 使用
 MindSpeed 源码安装指令：
 
     .. code-block:: bash
-
+    
         # 下载 MindSpeed，切换到指定commit-id，并下载 Megatron-LM
         git clone https://gitcode.com/Ascend/MindSpeed.git
         cd MindSpeed && git checkout f2b0977e && cd ..
         git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
-
+    
         # 安装 MindSpeed & Megatron
         pip install -e MindSpeed
-
+    
         # 将 Megatron-LM 源码路径配置到 PYTHONPATH 环境变量中
         export PYTHONPATH=$PYTHONPATH:"$(pwd)/Megatron-LM"
-
+    
         # （可选）如希望 shell 关闭，或系统重启后，PYTHONPATH 环境变量仍然生效，建议将它添加到 .bashrc 配置文件中
         echo "export PYTHONPATH=$PYTHONPATH:\"$(pwd)/Megatron-LM\"" >> ~/.bashrc
-
+    
         # 安装 mbridge
         pip install mbridge
 
 MindSpeed 对应 Megatron-LM 后端使用场景，使用方式如下：
 
     1. 使能 verl worker 模型 ``strategy`` 配置为 ``megatron`` ，例如 ``actor_rollout_ref.actor.strategy=megatron``。
-
+    
     2. MindSpeed 自定义入参可通过 ``override_transformer_config`` 参数传入，例如对 actor 模型开启 FA 特性可使用 ``+actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True``。
-
+    
     3. 更多特性信息可参考 `MindSpeed & verl 文档 <https://gitcode.com/Ascend/MindSpeed/blob/master/docs/user-guide/verl.md>`_ 。
 
 
@@ -163,7 +164,7 @@ verl 中昇腾暂不支持生态库如下：
     +---------------+----------------+
     | liger-kernel  | not supported  |
     +---------------+----------------+
-
+    
     1. 不支持通过 flash_attn 使能 flash attention 加速，支持通过 transformers 使用。
     2. 不支持 liger-kernel 使能。
 
@@ -175,17 +176,17 @@ verl 中昇腾暂不支持生态库如下：
 1.下载数据集并将数据集预处理为parquet格式，以便包含计算RL奖励所需的必要字段
 
     .. code-block:: bash
-
+    
         python3 examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k
 
 2.执行训练
 
     .. code-block:: bash
-
+    
         set -x
-
+    
         export VLLM_ATTENTION_BACKEND=XFORMERS
-
+    
         python3 -m verl.trainer.main_ppo \
             algorithm.adv_estimator=grpo \
             data.train_files=$HOME/data/gsm8k/train.parquet \

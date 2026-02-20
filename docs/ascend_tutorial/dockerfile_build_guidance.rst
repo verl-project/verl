@@ -66,7 +66,7 @@ A3              8.3.RC1         SGLang          `Dockerfile.ascend.sglang_8.3.rc
    # vLLM
    docker build -f Dockerfile.ascend_8.3.rc1_a2 -t verl-ascend:8.3.rc1-a2 .
    # SGLang
-   docker build -f Dockerfile.ascend_8.3.rc1_a2 -t verl-ascend-sglang:8.3.rc1-a2 .
+   docker build -f Dockerfile.ascend.sglang_8.3.rc1_a2 -t verl-ascend-sglang:8.3.rc1-a2 .
 
 公开镜像地址
 --------------------
