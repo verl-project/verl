@@ -348,6 +348,52 @@ class TestLinearCrossEntropy:
         self.check_storage("Kernel", linear_cross_entropy)
 
 
+def test_lce_non_divisible_vocab_padding():
+    """Regression test for the logsumexp padding bug.
+
+    When vocab_size % BLOCK_SIZE_N != 0 the last tile has fewer than
+    BLOCK_SIZE_N valid entries. Without the fix, out-of-bounds positions
+    are loaded as weight=0 → logit=0 → exp(0)=1, adding phantom probability
+    mass to the logsumexp denominator. For peaked softmax distributions
+    (small denominator) this causes large log-prob errors.
+
+    Reproducing construction: one token-logit at +3, all others at -15
+    → denominator ≈ 20, phantom adds ≈ 25 → error ≈ 0.82 per token.
+    """
+    if not torch.cuda.is_available():
+        return
+
+    torch.manual_seed(0)
+
+    V = 152064  # vocab_size % 1024 == 512 (triggers bug)
+    V_div = 149 * 1024  # vocab_size % 1024 == 0 (control)
+    D = 3584
+    N = 512
+    T = 1.5
+
+    def reference(hidden, weight, labels):
+        h = hidden.squeeze(0).float()
+        logits = torch.matmul(h, weight.float().T) / T
+        lp = -torch.nn.functional.cross_entropy(logits, labels.squeeze(0), reduction="none")
+        pd = torch.nn.functional.softmax(logits, dim=-1)
+        ent = torch.logsumexp(logits, dim=-1) - (pd * logits).sum(-1)
+        return lp, ent
+
+    for vocab_size, desc in [(V, "non-divisible vocab (mod1024=512)"), (V_div, "divisible vocab (mod1024=0)")]:
+        w = torch.zeros(vocab_size, D, dtype=torch.bfloat16, device="cuda")
+        w[:, 0] = -15.0 * T
+        w[0, 0] = 3.0 * T
+        h = torch.zeros(1, N, D, dtype=torch.bfloat16, device="cuda")
+        h[:, :, 0] = 1.0
+        labels = torch.zeros(1, N, dtype=torch.long, device="cuda")
+
+        ref_lp, ref_ent = reference(h, w, labels)
+        ker_lp, ker_ent = linear_cross_entropy(h, w, labels, T)
+
+        torch.testing.assert_close(ref_lp, ker_lp, atol=1e-3, rtol=1e-3, msg=f"logprob mismatch: {desc}")
+        torch.testing.assert_close(ref_ent, ker_ent, atol=1e-3, rtol=1e-3, msg=f"entropy mismatch: {desc}")
+
+
 if __name__ == "__main__":
     # torch.cuda.memory._record_memory_history()
 
@@ -357,5 +403,7 @@ if __name__ == "__main__":
 
         test.verify_correctness()
         test.check_storage_all()
+
+    test_lce_non_divisible_vocab_padding()
 
     # torch.cuda.memory._dump_snapshot("test_linear_cross_entropy.pkl")
