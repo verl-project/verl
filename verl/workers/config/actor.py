@@ -20,6 +20,7 @@ from omegaconf import MISSING
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 from verl.utils.profiler.config import ProfilerConfig
+from verl.utils.qat import QATConfig
 
 from .engine import FSDPEngineConfig, McoreEngineConfig, VeOmniEngineConfig
 from .model import HFModelConfig
@@ -32,6 +33,7 @@ __all__ = [
     "FSDPActorConfig",
     "McoreActorConfig",
     "VeOmniActorConfig",
+    "QATConfig",
 ]
 
 
@@ -294,6 +296,7 @@ class FSDPActorConfig(ActorConfig):
     use_rollout_log_probs: bool = False
     calculate_sum_pi_squared: bool = False
     sum_pi_squared_checkpointing: bool = False
+    qat: QATConfig = field(default_factory=QATConfig)
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""

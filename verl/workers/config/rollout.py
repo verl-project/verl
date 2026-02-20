@@ -243,6 +243,8 @@ class RolloutConfig(BaseConfig):
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
+    qat: Optional[dict] = None
+
     # diffusion use
     image_height: int = 512
     image_width: int = 512
