@@ -4,13 +4,9 @@ _target_: verl.workers.config.DistillationConfig
 # specify the default per-component configs
 defaults:
 
-  # distillation config, inheriting from trainer/config/ref/ref.yaml
-  # Use absolute path + @_here_ to flatten fields at current level
-  - /ref/ref@_here_
-
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
-  # Model config for teacher
-  - teacher_model@teacher_models: models
+  # Config for inferencing teacher
+  - rollout@teacher_inference: rollout
 
   # load the default config, then apply the fields in the current yaml
   # self config override anything above
