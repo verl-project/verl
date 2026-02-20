@@ -98,8 +98,20 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        train_dataset = create_rl_dataset(
+            config.data.train_files,
+            config.data,
+            tokenizer,
+            processor,
+            max_samples=config.data.get("train_max_samples", -1),
+        )
+        val_dataset = create_rl_dataset(
+            config.data.val_files,
+            config.data,
+            tokenizer,
+            processor,
+            max_samples=config.data.get("val_max_samples", -1),
+        )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         self._validate_config()
