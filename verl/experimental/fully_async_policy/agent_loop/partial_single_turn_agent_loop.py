@@ -95,13 +95,16 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                 # The samples without partial rollout are returned directly.
                 return output
         with simple_timer("generate_sequences", metrics):
-            response_ids, response_logprobs, is_cancel = await self.server_manager.generate_for_partial(
+            token_outputs, is_cancel = await self.server_manager.generate_for_partial(
                 request_id=request_id,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
             )
+            response_ids = token_outputs.token_ids
+            response_logprobs = token_outputs.log_probs
+            routed_experts = token_outputs.routed_experts  # already contains routed experts for prefix
         if not output:
             response_mask = [1] * len(response_ids)
         else:
@@ -118,6 +121,9 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
             response_ids=response_ids[: self.response_length],
             response_mask=response_mask[: self.response_length],
             response_logprobs=response_logprobs[: self.response_length],
+            routed_experts=(
+                routed_experts[: len(prompt_ids) + self.response_length] if routed_experts is not None else None
+            ),
             num_turns=2,
             metrics=metrics,
             extra_fields={
