@@ -139,6 +139,11 @@ class MegatronPPOActor(BasePPOActor):
             assert self.mtp_config.enable, "MTP requires mtp_config.enable to be True"
 
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
+        if getattr(self.mtp_config, "enable", False) and self.use_fused_kernels:
+            self.use_fused_kernels = False
+            logger.warning_once(
+                "MTP is not compatible with fused kernels for now. Automatically disable use_fused_kernels."
+            )
         if self.use_fused_kernels and not getattr(self.config, "overlap_moe_expert_parallel_comm", False):
             # do not patch if overlap_moe_expert_parallel_comm is enabled
             logger.warning_once(
