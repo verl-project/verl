@@ -189,9 +189,9 @@ class SFTDataset(Dataset):
         position_ids = compute_position_id_with_mask(attention_mask)
 
         loss_mask = attention_mask.clone()
-        if prompt_length > 1:
-            # mask out prompt for SFT.
-            loss_mask[: min(prompt_length, loss_mask.size(0))] = 0
+
+        # mask out prompt for SFT.
+        loss_mask[: min(prompt_length, loss_mask.size(0))] = 0
 
         return {
             "input_ids": input_ids,
