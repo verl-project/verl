@@ -69,11 +69,20 @@ algorithm:
   # Trade-off between bias and variance in the GAE estimator
   lam: 1.0
 
-  # Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
+  # Advantage estimator type: "gae", "grpo", "f_grpo", "reinforce_plus_plus", etc.
   adv_estimator: gae
 
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
+
+  # F-GRPO focal weighting γ (>= 0), only used when adv_estimator: f_grpo
+  f_grpo_gamma: 1.0
+
+  # F-GRPO reward value for correct rollouts (R_c), used in μ̂_pos(x)
+  f_grpo_reward_correct: 1.0
+
+  # F-GRPO reward value for wrong rollouts (R_w), used in μ̂_pos(x)
+  f_grpo_reward_wrong: 0.0
 
   # Whether to enable in-reward KL penalty
   use_kl_in_reward: False

@@ -576,6 +576,9 @@ algorithm:
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: true
+  f_grpo_gamma: 1.0
+  f_grpo_reward_correct: 1.0
+  f_grpo_reward_wrong: 0.0
   use_kl_in_reward: false
   kl_penalty: kl
   kl_ctrl:
