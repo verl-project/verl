@@ -1,0 +1,68 @@
+# Target class for this configuration
+_target_: verl.workers.config.TorchtitanEngineConfig
+
+# policy for wrapping the model
+wrap_policy:
+  # Minimum number of parameters to trigger wrapping a layer with FSDP
+  min_num_params: 0
+
+# The policy for applying `reshard_after_forward` within an FSDP setup
+# Options: "default", "always", "never"
+reshard_after_forward: default
+
+# Prefetch the next forward-pass all-gather before the current forward computation.
+forward_prefetch: false
+
+# Whether to use original parameters
+use_orig_params: false
+
+# Mixed precision configuration for FSDP
+mixed_precision: false
+
+# Whether to use torch compile
+use_torch_compile: true
+
+# Whether to use entropy_from_logits_with_chunking
+entropy_from_logits_with_chunking: false
+
+# Whether to use entropy checkpointing
+entropy_checkpointing: false
+
+# Data parallel size (FSDP group size)
+data_parallel_size: 1
+
+# Data parallel replicate size
+data_parallel_replicate_size: 1
+
+# Data parallel shard size
+data_parallel_shard_size: 1
+
+# Tensor parallel size
+tensor_parallel_size: 1
+
+# Expert parallel size
+expert_parallel_size: 1
+
+# Pipeline parallel size
+pipeline_parallel_size: 1
+
+# Context parallel size
+context_parallel_size: 1
+
+# Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen")
+attn_type: flex
+
+# Strategy
+strategy: torchtitan
+
+# Random seed for reproducibility
+seed: 42
+
+# Whether to enable full determinism for distributed training, only for debugging
+full_determinism: false
+
+# Whether to use forward only
+forward_only: false
+
+# Mixed precision training param dtype
+dtype: bfloat16

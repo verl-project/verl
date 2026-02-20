@@ -21,6 +21,7 @@ actor_rollout_ref:
       min_lr_ratio: 0.0
       num_cycles: 0.5
       lr_scheduler_type: constant
+      zero_indexed_step: true
       warmup_style: null
       override_optimizer_config: null
     fsdp_config:
@@ -410,6 +411,7 @@ critic:
     min_lr_ratio: 0.0
     num_cycles: 0.5
     lr_scheduler_type: constant
+    zero_indexed_step: true
     warmup_style: null
     override_optimizer_config: null
   model:
