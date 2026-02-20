@@ -158,7 +158,6 @@ class SFTDataset(Dataset):
         response_attention_mask = response_ids_output["attention_mask"][0]
 
         prompt_length = prompt_ids.shape[0]
-        response_length = response_ids.shape[0]
 
         input_ids = torch.cat((prompt_ids, response_ids), dim=-1)
         attention_mask = torch.cat((prompt_attention_mask, response_attention_mask), dim=-1)
@@ -192,9 +191,7 @@ class SFTDataset(Dataset):
         loss_mask = attention_mask.clone()
         if prompt_length > 1:
             # mask out prompt for SFT.
-            loss_mask[: min(prompt_length, loss_mask.size(0)) - 1] = 0
-        # mask out the last token in response
-        loss_mask[min(prompt_length + response_length, loss_mask.size(0)) - 1] = 0
+            loss_mask[: min(prompt_length, loss_mask.size(0))] = 0
 
         return {
             "input_ids": input_ids,
