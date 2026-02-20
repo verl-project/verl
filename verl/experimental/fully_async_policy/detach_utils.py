@@ -23,6 +23,55 @@ from verl import DataProto
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
 from verl.trainer.ppo.ray_trainer import compute_response_mask
 
+_DEFAULT_ASYNC_AGENT_LOOP_MAPPING: dict[str, str] = {
+    # Map synchronous agent loops to their fully-async partial-rollout counterparts.
+    "tool_agent": "async_partial_tool_agent",
+    "single_turn_agent": "partial_single_turn_agent",
+}
+
+
+def _as_agent_name_list(agent_name_value: Any, batch_len: int) -> list[str]:
+    """Normalize agent_name to a list[str] with length batch_len when possible."""
+    if isinstance(agent_name_value, np.ndarray):
+        names = agent_name_value.tolist()
+    elif isinstance(agent_name_value, list | tuple):
+        names = list(agent_name_value)
+    else:
+        names = [agent_name_value]
+
+    names = [str(n) for n in names if n is not None]
+    if len(names) == 1 and batch_len > 1:
+        names = names * batch_len
+    return names
+
+
+def _resolve_async_agent_loop_mapping(config: Any) -> dict[str, str]:
+    """Return merged agent-loop mapping for fully_async_policy.
+
+    Users can configure this via:
+
+    async_training:
+      agent_loop_mapping:
+        tool_agent: async_partial_tool_agent
+        single_turn_agent: partial_single_turn_agent
+        my_custom_agent: my_custom_partial_agent
+    """
+    mapping: dict[str, str] = dict(_DEFAULT_ASYNC_AGENT_LOOP_MAPPING)
+    async_cfg = getattr(config, "async_training", None)
+    if async_cfg is None:
+        return mapping
+
+    # Support a couple of key names for compatibility.
+    user_mapping = (
+        async_cfg.get("agent_loop_mapping", None)
+        or async_cfg.get("agent_name_mapping", None)
+        or async_cfg.get("agent_loop_map", None)
+        or {}
+    )
+    if isinstance(user_mapping, dict):
+        mapping.update({str(k): str(v) for k, v in user_mapping.items()})
+    return mapping
+
 
 @dataclass
 class RolloutSample:
@@ -80,15 +129,24 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
             non_tensor_batch_keys=existing_non_tensor_keys,
         )
 
-    # Setting selected agent, that supports partial
-    if config.actor_rollout_ref.rollout.multi_turn.enable:
-        full_batch.non_tensor_batch["agent_name"] = np.array(
-            ["async_partial_tool_agent"] * len(full_batch), dtype=object
-        )
+    # Select an agent loop that supports partial rollout in fully_async_policy.
+    # - If `agent_name` is not present, default to the partial-capable agent loop.
+    # - If `agent_name` is present, optionally remap it via async_training.agent_loop_mapping.
+    mapping = _resolve_async_agent_loop_mapping(config)
+    batch_len = len(full_batch)
+
+    if "agent_name" not in full_batch.non_tensor_batch or full_batch.non_tensor_batch["agent_name"] is None:
+        if config.actor_rollout_ref.rollout.multi_turn.enable:
+            default_name = "async_partial_tool_agent"
+        else:
+            default_name = "partial_single_turn_agent"
+        full_batch.non_tensor_batch["agent_name"] = np.array([default_name] * batch_len, dtype=object)
     else:
-        full_batch.non_tensor_batch["agent_name"] = np.array(
-            ["partial_single_turn_agent"] * len(full_batch), dtype=object
-        )
+        existing_names = _as_agent_name_list(full_batch.non_tensor_batch["agent_name"], batch_len)
+        mapped_names = [mapping.get(name, name) for name in existing_names]
+        if len(mapped_names) == 1 and batch_len > 1:
+            mapped_names = mapped_names * batch_len
+        full_batch.non_tensor_batch["agent_name"] = np.array(mapped_names, dtype=object)
 
     # Add global step count to generated data
     full_batch = full_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)

@@ -31,6 +31,11 @@ async_training:
   # whether to use trainer do_validate
   use_trainer_do_validate: False
 
+  # Optional: map agent loop names from datasets/configs to their fully-async partial-rollout counterparts.
+  #
+  # agent_loop_mapping:
+  #   single_turn_agent: partial_single_turn_agent
+  #   tool_agent: async_partial_tool_agent
 
 # Rollout config
 rollout:

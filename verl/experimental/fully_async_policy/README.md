@@ -105,6 +105,7 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.trigger_parameter_sync_step`                     | Indicates how many local updates FullyAsyncTrainer performs before a parameter synchronization |
 | `async_training.staleness_threshold`                             | Freshness control                                                                              |
 | `async_training.partial_rollout`                                 | Whether to perform partial_rollout                                                             |
+| `async_training.agent_loop_mapping`                              | Optional mapping from dataset/config agent loop names to partial-capable agent loops           |
 | `async_training.use_trainer_do_validate`                         | Whether use trainer node to do validate process, default `False`                               |
 
 **Further Explanation:**
