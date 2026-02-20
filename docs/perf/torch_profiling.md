@@ -4,6 +4,8 @@ Last updated: 01/13/2026.
 
 This guide explains how to use the native [PyTorch Profiler](https://pytorch.org/tutorials/recipes/recipes/profiler_recipe.html) for profiling verl training runs.
 
+See also: [Precision Debugger (msprobe)](precision_debugger.md).
+
 ## Configuration
 
 Profiling in verl can be configured through parameters in the trainer configuration file (e.g., `ppo_trainer.yaml`).

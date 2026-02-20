@@ -23,9 +23,12 @@ Last updated: 12/20/2025.
 
 -  global_profiler: 控制采集的rank和模式
 
-   -  tool: 使用的采集工具，选项有 nsys、npu、torch、torch_memory。
+   -  tool: 使用的采集工具，选项有 nsys、npu、torch、torch_memory、precision_debugger。
    -  steps: 此参数可以设置为包含采集步数的列表，例如 [2, 4]，表示将采集第2步和第4步。如果设置为 null，则不进行采集。
    -  save_path: 保存采集数据的路径。默认值为 "outputs/profile"。
+
+关于 msprobe PrecisionDebugger 的使用与配置，请参考
+:doc:`../perf/precision_debugger`。
 
 角色profiler控制
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
