@@ -282,6 +282,14 @@ def _fused_GPTModel_forward(
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
 
+    # If labels is None, we cannot use the fused kernel. This happens when the
+    # non-fused caller path (gptmodel_forward_no_padding) invokes the model without
+    # labels (MTP disabled), but the model's forward is still patched.
+    # Fall back to standard logit computation matching original GPTModel._postprocess.
+    if labels is None:
+        logits, _ = model.output_layer(hidden_states, weight=output_weight)
+        return logits
+
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
         output_weight,
