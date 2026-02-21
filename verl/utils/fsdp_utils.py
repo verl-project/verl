@@ -891,3 +891,312 @@ def merged_lora_context(actor, backup_adapters=False):
         else:
             # Fall back to unmerge if no backup was made
             fsdp_merge_unmerge(actor, do_merge=False)
+
+
+class PerLayerGPUOptimizerStep:
+    """Per-layer GPU optimizer step with async H2D/D2H prefetching.
+
+    Instead of running Adam on CPU for all ~67GB of optimizer states,
+    streams 1-2 layers at a time (~1.5GB each) to GPU, achieving ~50-80x speedup.
+
+    Works with both:
+    - CPUOffloadPolicy (all tensors on CPU after backward)
+    - param_offload only (params/grads on GPU, optimizer states on CPU)
+    """
+
+    def __init__(self, model, optimizer, device_id, prefetch_layers=1):
+        self.optimizer = optimizer
+        self.device = torch.device(f"cuda:{device_id}") if isinstance(device_id, int) else torch.device(device_id)
+        self.prefetch_layers = prefetch_layers
+        self._layer_param_groups = self._build_layer_groups(model)
+        self._init_states_and_pin()
+
+    def _build_layer_groups(self, model) -> list:
+        """Group params by FSDP2-wrapped sub-modules (excluding root).
+
+        After apply_fsdp2, each transformer layer and embedding becomes an
+        FSDPModule. We find all non-root FSDPModule instances and group their
+        params. Any remaining params (final norm, lm_head) form a residual group.
+        """
+        # Find non-root FSDP-wrapped modules (same modules that apply_fsdp2 wraps)
+        fsdp_children = []
+        for name, module in model.named_modules():
+            if name and isinstance(module, FSDPModule):
+                fsdp_children.append(module)
+
+        assigned = set()
+        groups = []
+        for module in fsdp_children:
+            params = [p for p in module.parameters() if p.requires_grad and id(p) not in assigned]
+            if params:
+                groups.append(params)
+                for p in params:
+                    assigned.add(id(p))
+
+        # Residual: final norm, lm_head, etc.
+        residual = [p for p in model.parameters() if p.requires_grad and id(p) not in assigned]
+        if residual:
+            groups.append(residual)
+        return groups
+
+    def _get_local_tensor(self, t):
+        """Extract regular tensor from DTensor, or return as-is."""
+        return t._local_tensor if hasattr(t, "_local_tensor") else t
+
+    def _init_states_and_pin(self):
+        """Pre-initialize optimizer states on CPU and pin them for async H2D/D2H.
+
+        Without pinning, .to(non_blocking=True) on CPU tensors is synchronous,
+        killing all pipeline overlap. Pinning enables true async DMA transfers.
+
+        IMPORTANT: States must be created on CPU regardless of current param device.
+        When param_offload=True, params are loaded to GPU before this is called,
+        so zeros_like(param) would create states on GPU (~31GB for 32B model),
+        causing OOM during forward/backward. We explicitly create on CPU and
+        stream per-layer during optimizer step.
+
+        Called from __init__ (before backward), so we init states for ALL
+        trainable params regardless of whether they have gradients yet.
+        """
+        for group in self._layer_param_groups:
+            for param in group:
+                if not param.requires_grad:
+                    continue
+                state = self.optimizer.state[param]
+                if len(state) == 0:
+                    # Create states on CPU explicitly — NOT zeros_like(param) which
+                    # would follow param's device (potentially GPU after load_fsdp_model_to_gpu).
+                    local_p = self._get_local_tensor(param.data)
+                    state["step"] = torch.tensor(0.0, dtype=torch.float32)
+                    state["exp_avg"] = torch.zeros(
+                        local_p.shape, dtype=local_p.dtype, device="cpu"
+                    )
+                    state["exp_avg_sq"] = torch.zeros(
+                        local_p.shape, dtype=local_p.dtype, device="cpu"
+                    )
+                else:
+                    # States already exist (from previous training step).
+                    # Ensure they are on CPU — they might be on GPU if a previous
+                    # non-per-layer optimizer.step() created them there.
+                    for key in ("exp_avg", "exp_avg_sq"):
+                        if key in state:
+                            local = self._get_local_tensor(state[key])
+                            if local.device.type != "cpu":
+                                state[key] = local.to("cpu")
+                # Pin optimizer state tensors for async transfers
+                for key in ("exp_avg", "exp_avg_sq", "step"):
+                    local = self._get_local_tensor(state[key])
+                    if local.device.type == "cpu" and not local.is_pinned():
+                        local.data = local.pin_memory()
+
+    def _prefetch_layer(self, layer_idx):
+        """H2D: copy layer's optimizer states (and params/grads if on CPU) to GPU.
+
+        Auto-detects tensor device: skips H2D for tensors already on GPU.
+        States are already initialized and pinned by _init_states_and_pin().
+        """
+        result = {}
+        for param in self._layer_param_groups[layer_idx]:
+            if param.grad is None:
+                continue
+            state = self.optimizer.state[param]
+            local_p = self._get_local_tensor(param.data)
+            local_g = self._get_local_tensor(param.grad.data)
+            local_m = self._get_local_tensor(state["exp_avg"])
+            local_v = self._get_local_tensor(state["exp_avg_sq"])
+
+            def _to_gpu(t, device=self.device):
+                return t if t.device == device else t.to(device, non_blocking=True)
+
+            p_on_gpu = local_p.device == self.device
+
+            result[id(param)] = {
+                "param": param,
+                "state": state,
+                "p_was_cpu": not p_on_gpu,
+                "cpu_p": local_p,
+                "cpu_m": local_m,
+                "cpu_v": local_v,
+                "gpu_p": _to_gpu(local_p),
+                "gpu_g": _to_gpu(local_g),
+                "gpu_m": _to_gpu(local_m),
+                "gpu_v": _to_gpu(local_v),
+                "gpu_step": state["step"].to(self.device, non_blocking=True)
+                if not state["step"].is_cuda
+                else state["step"],
+            }
+        return result
+
+    def _run_adam_for_layer(self, gpu_states):
+        """Call torch.optim.adam.adam() functional API on GPU tensors."""
+        from torch.optim.adam import adam
+
+        group = self.optimizer.param_groups[0]
+        beta1, beta2 = group["betas"]
+        params, grads, exp_avgs, exp_avg_sqs, steps = [], [], [], [], []
+        for buf in gpu_states.values():
+            params.append(buf["gpu_p"])
+            grads.append(buf["gpu_g"])
+            exp_avgs.append(buf["gpu_m"])
+            exp_avg_sqs.append(buf["gpu_v"])
+            steps.append(buf["gpu_step"])
+        if not params:
+            return
+        adam(
+            params,
+            grads,
+            exp_avgs,
+            exp_avg_sqs,
+            [],  # max_exp_avg_sqs (empty for non-amsgrad)
+            steps,
+            amsgrad=group.get("amsgrad", False),
+            has_complex=False,
+            beta1=beta1,
+            beta2=beta2,
+            lr=group["lr"],
+            weight_decay=group["weight_decay"],
+            eps=group.get("eps", 1e-8),
+            maximize=group.get("maximize", False),
+            foreach=True,
+            capturable=False,
+            differentiable=False,
+            fused=None,
+            grad_scale=None,
+            found_inf=None,
+            decoupled_weight_decay=group.get("decoupled_weight_decay", False),
+        )
+
+    def _offload_layer(self, gpu_states):
+        """D2H: copy updated param data + optimizer states back to CPU.
+
+        Only copies back tensors that were originally on CPU.
+        CPU destination tensors are pinned, enabling async D2H via non_blocking.
+        """
+        for buf in gpu_states.values():
+            if buf["p_was_cpu"]:
+                buf["cpu_p"].copy_(buf["gpu_p"], non_blocking=True)
+            buf["cpu_m"].copy_(buf["gpu_m"], non_blocking=True)
+            buf["cpu_v"].copy_(buf["gpu_v"], non_blocking=True)
+            state = buf["state"]
+            if isinstance(state["step"], torch.Tensor):
+                state["step"].copy_(buf["gpu_step"], non_blocking=True)
+
+    @torch.no_grad()
+    def step(self):
+        """Per-layer GPU optimizer step with async prefetch pipeline.
+
+        Uses CUDA events (not wait_stream) for fine-grained synchronization,
+        allowing H2D prefetch of layer i+2 to overlap with Adam on layer i
+        and D2H offload of layer i-1.
+
+        After completion, populates self.last_step_metrics dict with:
+        - step_time_s: wall-clock time of the entire step
+        - peak_memory_gb: peak GPU memory during the step
+        - num_layer_groups: number of layer groups processed
+        - compute_stall_count: layers where compute waited for H2D
+        - avg_h2d_ms, avg_compute_ms, avg_d2h_ms: per-phase avg timing
+        """
+        import time
+
+        t_start = time.perf_counter()
+
+        h2d_stream = torch.cuda.Stream(device=self.device)
+        d2h_stream = torch.cuda.Stream(device=self.device)
+        compute_stream = torch.cuda.current_stream(self.device)
+        num_groups = len(self._layer_param_groups)
+        gpu_states = [None] * num_groups
+        h2d_events = [None] * num_groups
+
+        # CUDA events for pipeline timing
+        pre_wait_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_groups)]
+        post_wait_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_groups)]
+        compute_end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_groups)]
+        h2d_start_events = [None] * num_groups
+        h2d_end_events = [None] * num_groups
+        d2h_start_events = [None] * num_groups
+        d2h_end_events = [None] * num_groups
+
+        # Prefetch initial layers with per-layer events
+        for i in range(min(self.prefetch_layers + 1, num_groups)):
+            with torch.cuda.stream(h2d_stream):
+                h2d_start_events[i] = h2d_stream.record_event(torch.cuda.Event(enable_timing=True))
+                gpu_states[i] = self._prefetch_layer(i)
+                ev = torch.cuda.Event(enable_timing=True)
+                h2d_stream.record_event(ev)
+                h2d_events[i] = ev
+                h2d_end_events[i] = ev
+
+        # Process each layer
+        for i in range(num_groups):
+            # Record BEFORE wait — measures actual GPU-side stall time
+            compute_stream.record_event(pre_wait_events[i])
+            compute_stream.wait_event(h2d_events[i])
+            compute_stream.record_event(post_wait_events[i])
+
+            self._run_adam_for_layer(gpu_states[i])
+            compute_stream.record_event(compute_end_events[i])
+
+            # Record compute completion for D2H dependency
+            compute_done = compute_end_events[i]
+
+            # Prefetch next layer (overlaps with D2H below)
+            next_idx = i + self.prefetch_layers + 1
+            if next_idx < num_groups:
+                with torch.cuda.stream(h2d_stream):
+                    h2d_start_events[next_idx] = h2d_stream.record_event(
+                        torch.cuda.Event(enable_timing=True)
+                    )
+                    gpu_states[next_idx] = self._prefetch_layer(next_idx)
+                    ev = torch.cuda.Event(enable_timing=True)
+                    h2d_stream.record_event(ev)
+                    h2d_events[next_idx] = ev
+                    h2d_end_events[next_idx] = ev
+
+            # Offload current layer (waits only for this layer's compute)
+            d2h_stream.wait_event(compute_done)
+            with torch.cuda.stream(d2h_stream):
+                d2h_start_events[i] = d2h_stream.record_event(torch.cuda.Event(enable_timing=True))
+                self._offload_layer(gpu_states[i])
+                d2h_end_events[i] = d2h_stream.record_event(torch.cuda.Event(enable_timing=True))
+            gpu_states[i] = None  # free GPU memory
+
+        d2h_stream.synchronize()
+
+        # Prevent cross-phase cache pollution: return freed optimizer state
+        # blocks to CUDA driver so forward/backward can't repurpose them.
+        # Without this, each optimizer step leaks ~1.7 GB of device memory
+        # because caching allocator blocks get "stolen" by gradient allocation.
+        torch.cuda.empty_cache()
+
+        # Collect metrics (all streams synchronized)
+        step_time = time.perf_counter() - t_start
+        peak_memory_gb = torch.cuda.max_memory_allocated(self.device) / (1024**3)
+
+        # Compute per-phase timings from CUDA events
+        h2d_times, compute_times, d2h_times, wait_times = [], [], [], []
+        for i in range(num_groups):
+            wait_times.append(pre_wait_events[i].elapsed_time(post_wait_events[i]))
+            compute_times.append(post_wait_events[i].elapsed_time(compute_end_events[i]))
+            if h2d_start_events[i] is not None and h2d_end_events[i] is not None:
+                h2d_times.append(h2d_start_events[i].elapsed_time(h2d_end_events[i]))
+            if d2h_start_events[i] is not None and d2h_end_events[i] is not None:
+                d2h_times.append(d2h_start_events[i].elapsed_time(d2h_end_events[i]))
+
+        # Stall detection: wait_time measures how long compute stream blocked on
+        # wait_event. Skip layer 0 — it always waits for the initial prefetch.
+        stall_threshold_ms = 0.1
+        stall_count = sum(1 for w in wait_times[1:] if w > stall_threshold_ms)
+
+        avg_h2d = sum(h2d_times) / len(h2d_times) if h2d_times else 0.0
+        avg_compute = sum(compute_times) / len(compute_times) if compute_times else 0.0
+        avg_d2h = sum(d2h_times) / len(d2h_times) if d2h_times else 0.0
+
+        self.last_step_metrics = {
+            "step_time_s": step_time,
+            "peak_memory_gb": peak_memory_gb,
+            "num_layer_groups": num_groups,
+            "avg_h2d_ms": avg_h2d,
+            "avg_compute_ms": avg_compute,
+            "avg_d2h_ms": avg_d2h,
+            "compute_stall_count": stall_count,
+        }

@@ -61,6 +61,7 @@ from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
+    PerLayerGPUOptimizerStep,
     apply_fsdp2,
     collect_lora_params,
     fsdp2_load_full_state_dict,
@@ -987,7 +988,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        if self._is_offload_optimizer:
+
+        # Set up per-layer GPU optimizer step or load all optimizer states
+        _use_per_layer = self.config.actor.fsdp_config.get("per_layer_optimizer_step", False)
+        if _use_per_layer:
+            stepper = PerLayerGPUOptimizerStep(
+                model=self.actor_module_fsdp,
+                optimizer=self.actor_optimizer,
+                device_id=get_device_id(),
+                prefetch_layers=self.config.actor.fsdp_config.get("optimizer_step_prefetch_layers", 1),
+            )
+            self.actor._per_layer_optimizer_stepper = stepper
+        elif self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
 
         with self.ulysses_sharding_manager:
@@ -1018,10 +1030,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             output = output.to("cpu")
 
+        # Clean up per-layer stepper
+        if _use_per_layer:
+            self.actor._per_layer_optimizer_stepper = None
+            torch.cuda.empty_cache()
+
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             log_gpu_memory_usage("After offload actor model during update_actor", logger=logger)
-        if self._is_offload_optimizer:
+        if self._is_offload_optimizer and not _use_per_layer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
