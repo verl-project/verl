@@ -6,7 +6,7 @@ defaults:
 
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
   # Config for inferencing teacher
-  - rollout@teacher_inference: rollout
+  - ../rollout@teacher_model.teacher_inference: rollout
 
   # load the default config, then apply the fields in the current yaml
   # self config override anything above
@@ -51,3 +51,14 @@ distillation_loss:
 
   # Optional min clamp value for log probabilities for stability, e.g., log q - log p where p or q are very close to zero.
   log_prob_min_clamp: null
+
+# teacher model config
+teacher_model:
+
+  # Whether to deploy the model to a separate resource pool.
+  # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
+  enable_resource_pool: False
+  n_gpus_per_node: 8
+  nnodes: 0
+
+  model_path: null
