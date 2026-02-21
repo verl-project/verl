@@ -169,6 +169,23 @@ class FSDPEngine(BaseEngine):
         # This is used to import external_lib into the huggingface systems
         self._build_model_optimizer()
 
+        # Create per-layer optimizer stepper (model on GPU at this point)
+        if self.engine_config.per_layer_optimizer_step and self.optimizer is not None:
+            if self.engine_config.offload_policy:
+                raise ValueError(
+                    "per_layer_optimizer_step requires offload_policy=False. "
+                    "CPUOffloadPolicy is incompatible with per-layer GPU optimizer step."
+                )
+            from verl.utils.fsdp_utils import PerLayerGPUOptimizerStep
+            self._per_layer_optimizer_stepper = PerLayerGPUOptimizerStep(
+                model=self.module,
+                optimizer=self.optimizer,
+                device_id=get_device_id(),
+                prefetch_layers=self.engine_config.optimizer_step_prefetch_layers,
+            )
+        else:
+            self._per_layer_optimizer_stepper = None
+
         self.checkpoint_manager = FSDPCheckpointManager(
             model=self.module,
             optimizer=self.optimizer,
@@ -565,6 +582,8 @@ class FSDPEngine(BaseEngine):
         if not torch.isfinite(grad_norm):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.optimizer.zero_grad()
+        elif self._per_layer_optimizer_stepper is not None:
+            self._per_layer_optimizer_stepper.step()
         else:
             self.optimizer.step()
         return grad_norm.item()
@@ -590,17 +609,21 @@ class FSDPEngine(BaseEngine):
 
         device_name = get_device_name()
 
+        # Per-layer optimizer step manages its own optimizer states via H2D/D2H;
+        # skip bulk optimizer load/offload to avoid conflicts.
+        _skip_optimizer = self._per_layer_optimizer_stepper is not None
+
         assert device in (device_name, "cpu")
         if device == device_name:
             if model:
                 load_fsdp_model_to_gpu(self.module)
-            if optimizer and self.optimizer is not None:
+            if optimizer and self.optimizer is not None and not _skip_optimizer:
                 load_fsdp_optimizer(self.optimizer, device)
             gc.collect()
         elif device == "cpu":
             if model:
                 offload_fsdp_model_to_cpu(self.module)
-            if optimizer and self.optimizer is not None:
+            if optimizer and self.optimizer is not None and not _skip_optimizer:
                 offload_fsdp_optimizer(self.optimizer)
         else:
             raise ValueError(f"Invalid device type: {device}")
