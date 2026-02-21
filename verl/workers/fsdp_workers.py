@@ -750,6 +750,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         if hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
+            # SGLang servers load base weights from `model_path` at launch. When using LoRA training,
+            # the base model weights are typically frozen, so we don't need to sync base weights via
+            # the rollout weight-update path. Mark base as "synced" to only collect LoRA params.
+            if self.config.rollout.get("name", None) == "sglang" and not self.base_sync_done:
+                self.base_sync_done = True
             params = collect_lora_params(
                 module=self.actor_module_fsdp,
                 layered_summon=self.config.rollout.get("layered_summon", False),
