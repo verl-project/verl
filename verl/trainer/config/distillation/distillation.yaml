@@ -6,7 +6,7 @@ defaults:
 
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
   # Config for inferencing teacher
-  - ../rollout@teacher_model.teacher_inference: rollout
+  # - ../rollout@teacher_model.inference: rollout
 
   # load the default config, then apply the fields in the current yaml
   # self config override anything above
@@ -54,7 +54,7 @@ distillation_loss:
 
 # teacher model config
 teacher_model:
-
+  _target_: verl.workers.config.DistillationTeacherModelConfig
   # Whether to deploy the model to a separate resource pool.
   # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
   enable_resource_pool: False
@@ -62,3 +62,28 @@ teacher_model:
   nnodes: 0
 
   model_path: null
+
+  inference:
+    _target_: verl.workers.config.RolloutConfig
+    name: ${oc.select:actor_rollout_ref.rollout.name}
+    dtype: ${oc.select:actor_rollout_ref.rollout.dtype}
+    gpu_memory_utilization: 0.5
+    enforce_eager: true
+    cudagraph_capture_sizes: null
+    free_cache_engine: true
+    data_parallel_size: 1
+    expert_parallel_size: 1
+    tensor_model_parallel_size: 2
+    max_num_batched_tokens: 8192
+    max_model_len: null
+    max_num_seqs: 1024
+    load_format: auto
+    engine_kwargs: {}
+    limit_images: null
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
+    disable_log_stats: true
+    skip_tokenizer_init: false
+
+    prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
+    response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
