@@ -173,6 +173,8 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded attention mask."""
     response_logprobs: Optional[torch.Tensor] = None
     """Padded log probabilities for the response tokens."""
+    teacher_logprobs: Optional[torch.Tensor] = None
+    """Padded log probabilities from teacher model for the response tokens."""
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
@@ -349,12 +351,14 @@ class AgentLoopWorker:
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
             reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+            teacher_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming teacher computation.
         """
         self.config = config
 
@@ -364,6 +368,8 @@ class AgentLoopWorker:
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self.teacher_loop_worker_handles = teacher_loop_worker_handles
+        self.distillation_enabled = self.teacher_loop_worker_handles is not None
 
         model_path = config.actor_rollout_ref.model.path
         self.model_name = "/".join(model_path.split("/")[-2:])
@@ -610,6 +616,15 @@ class AgentLoopWorker:
             position_ids=position_ids,
             kwargs=kwargs,
         )
+        await self._compute_teacher_logprobs(
+            output,
+            prompts=prompt_output["input_ids"],
+            responses=response_output["input_ids"],
+            attention_mask=attention_mask,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            kwargs=kwargs,
+        )
 
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
@@ -622,6 +637,8 @@ class AgentLoopWorker:
             routed_experts=routed_experts,
             multi_modal_inputs=multi_modal_inputs,
             multi_modal_data=output.multi_modal_data,
+            teacher_logprobs=output.teacher_logprobs if self.distillation_enabled else None,
+            # TODO: topk indices for teacher
             reward_score=output.reward_score,
             num_turns=output.num_turns,
             metrics=output.metrics,
@@ -716,6 +733,34 @@ class AgentLoopWorker:
             result = await selected_reward_loop_worker_handle.compute_score.remote(data)
             output.reward_score = result["reward_score"]
             output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+
+    async def _compute_teacher_logprobs(self, output, prompts, responses, attention_mask, input_ids, position_ids, kwargs):
+        """Compute teacher logprobs for single sample."""
+        if self.distillation_enabled:
+            batch = TensorDict(
+                {
+                    "prompts": prompts,  # [1, prompt_length]
+                    "responses": responses,  # [1, response_length]
+                    "attention_mask": attention_mask,  # [1, prompt_length + response_length]
+                    "input_ids": input_ids,  # [1, prompt_length + response_length]
+                    "position_ids": position_ids,
+                },
+                batch_size=1,
+            )
+            non_tensor_batch = {
+                **{k: np.array([v]) for k, v in kwargs.items()},
+                "__num_turns__": np.array([output.num_turns]),
+                "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+            }
+
+            data = DataProto(
+                batch=batch,
+                non_tensor_batch=non_tensor_batch,
+            )
+            selected_teacher_loop_worker_handle = random.choice(self.teacher_loop_worker_handles)
+            result = await selected_teacher_loop_worker_handle.compute_logprobs.remote(data)
+            output.teacher_logprobs = result["teacher_logprobs"]
+            output.extra_fields["teacher_extra_info"] = result["teacher_extra_info"]
 
     def _postprocess(
         self,
@@ -854,6 +899,7 @@ class AgentLoopManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
 
@@ -862,10 +908,12 @@ class AgentLoopManager:
             worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
             rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
             reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+            teacher_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming teacher computation.
         """
         self.config = config
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self.teacher_loop_worker_handles = teacher_loop_worker_handles
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
@@ -938,7 +986,7 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
+                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles, self.teacher_loop_worker_handles)
             )
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
