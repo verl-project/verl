@@ -569,7 +569,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-
             self.loss_fn = partial(ppo_loss, config=actor_config, distillation_config=distillation_config)
             self.actor = TrainingWorker(config=actor_training_config)
             self.actor.reset()

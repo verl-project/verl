@@ -29,129 +29,49 @@ from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 
-from .reward_model import RewardModelManager
+from .teacher_model import TeacherModelManager
+from verl.workers.config import DistillationConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def migrate_legacy_reward_impl(config):
+class TeacherLoopWorker:
     """
-    Migrate the legacy reward model implementation to the new one.
-    """
-    # 1. reward workers migration
-    # config.reward_model.num_workers -> config.reward.num_workers
-    if config.reward_model.num_workers is not None:
-        config.reward.num_workers = config.reward_model.num_workers
-
-    # 2.reward manager migration
-    # config.reward_model.reward_manager -> config.reward.reward_manager
-    if config.reward_model.reward_manager is not None:
-        config.reward.reward_manager.name = config.reward_model.reward_manager
-    if config.reward_model.reward_loop_source is not None:
-        config.reward.reward_manager.source = config.reward_model.reward_loop_source
-        config.reward.reward_manager.module.path = config.reward_model.reward_loop_module_path
-        config.reward.reward_manager.module.name = config.reward_model.reward_loop_class_name
-
-    # 3. custom reward function migration
-    # config.custom_reward_function -> config.reward.custom_reward_function
-    if not all(v is None for v in config.custom_reward_function.values()):
-        config.reward.custom_reward_function = config.custom_reward_function
-
-    # 4. reward model migration
-    # config.reward_model -> config.reward.reward_model
-    for key in ["enable", "enable_resource_pool", "n_gpus_per_node", "nnodes"]:
-        if config.reward_model.get(key) is not None:
-            config.reward.reward_model[key] = config.reward_model[key]
-    if config.reward_model.model.path is not None:
-        config.reward.reward_model.model_path = config.reward_model.model.path
-    # config.reward_model.reward_kwargs -> config.reward.reward_kwargs (for dapo algo)
-    if config.reward_model.get("reward_kwargs") is not None:
-        with open_dict(config.reward):
-            config.reward["reward_kwargs"] = config.reward_model["reward_kwargs"]
-    # config.reward_model.rollout -> config.reward.reward_model.rollout
-    legacy_rollout = config.reward_model.rollout
-    for key in legacy_rollout.keys():
-        if legacy_rollout[key] is not None:
-            config.reward.reward_model.rollout[key] = legacy_rollout[key]
-
-    # 5. sandbox_fusion migration
-    # config.sandbox_fusion -> reward.sandbox_fusion
-    if not all(v is None for v in config.sandbox_fusion.values()):
-        config.reward.sandbox_fusion = config.sandbox_fusion
-
-    # 6. delete legacy config from configs
-    with open_dict(config):
-        del config.reward_model
-        del config.custom_reward_function
-        del config.sandbox_fusion
-
-    return config
-
-
-class RewardLoopWorker:
-    """
-    RewardLoopWork can tackle reward computation:
-    (1) rule-based reward computation
-    (2) reward model-based reward computation (both disrm and genrm)
-    (3) high-flexible user-customized reward function (can access rm by posting requests to reward_model_router)
-
-    Reward Computation Logic:
-    - if user-customized reward function is provided:
-        -> directly use user-customized reward function
-    - if user-customized reward function is not provided:
-        -> rm is not enabled: use default rule-based reward function
-        -> rm is disrm: compute reward score using disrm
-        -> rm is genrm: raise error (user-costomized reward func must be provided)
+    TeacherLoopWorker: TODO
     """
 
-    def __init__(self, config: DictConfig, reward_router_address: str = None):
+    def __init__(self, config: DictConfig, teacher_router_address: str = None):
         """
         Args:
             config: DictConfig, the config for reward loop worker.
-            reward_router_address: str, the address of reward router.
+            teacher_router_address: str, the address of teacher router.
         """
         self.config = config
-        self.reward_router_address = reward_router_address
-        self._init_reward_fn()
+        self.teacher_router_address = teacher_router_address
+        self._init_teacher_model()
 
-    def _init_reward_fn(self):
-        input_tokenizer_local_path = copy_to_local(self.config.actor_rollout_ref.model.path)
-        self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
-        self.reward_model_tokenizer = None
-        if self.config.reward.reward_model.enable:
-            reward_model_tokenizer_local_path = copy_to_local(self.config.reward.reward_model.model_path)
-            self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
-
-        self.reward_manager = load_reward_manager(
+    def _init_teacher_model(self):
+        self.teacher_manager = TeacherModelManager(
             self.config,
-            self.input_tokenizer,
-            reward_router_address=self.reward_router_address,
+            reward_router_address=self.teacher_router_address,
             reward_model_tokenizer=self.reward_model_tokenizer,
         )
 
-    async def compute_score_batch(self, data: DataProto) -> list[dict]:
+    async def compute_logprobs_batch(self, data: DataProto) -> list[dict]:
+        raise NotImplementedError
         tasks = []
         for i in range(len(data)):
             tasks.append(asyncio.create_task(self.compute_score(data[i : i + 1])))
         outputs = await asyncio.gather(*tasks)
         return outputs
 
-    async def compute_score(self, data: DataProto) -> dict:
-        assert len(data) == 1, "RewardLoopWorker only support single data item"
-        if self.config.reward.custom_reward_function.path is not None:
-            # directly use user-customized reward function
-            return await self.reward_manager.run_single(data)
-        else:
-            if self.config.reward.reward_model.enable:
-                # we assume the rm is disrm
-                # genrm must set custom_reward_function
-                return await self.compute_score_disrm(data)
-            else:
-                return await self.reward_manager.run_single(data)
+    async def compute_logprobs(self, data: DataProto) -> dict:
+        assert len(data) == 1, "TeacherLoopWorker only support single data item"
+        return await self.compute_score_disrm(data) # Update name
 
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 16):
-        url = f"http://{self.reward_router_address}/{endpoint}"
+        url = f"http://{self.teacher_router_address}/{endpoint}"
         last_exception = None
         for attempt in range(max_retries):
             try:
@@ -239,6 +159,7 @@ class RewardLoopWorker:
             output = await self._post_request(payloads, "classify")
             rm_score = output["data"][-1]["probs"][-1]
         elif engine_name == "sglang":
+            raise ValueError("SGLang backend does not support distillation currently.")
             payloads = {
                 "model": model_name,
                 "input": disrm_prompt,
@@ -247,7 +168,7 @@ class RewardLoopWorker:
             rm_score = output["data"][-1]["embedding"][-1]
         elif engine_name == "trtllm":
             # TODO: remove this once TRT-LLM switches to TorchSampler
-            raise ValueError("TensorRT-LLM backend does not support reward models currently.")
+            raise ValueError("TensorRT-LLM backend does not support distillation currently.")
 
             payloads = {
                 "model": model_name,
@@ -268,56 +189,54 @@ class RewardLoopWorker:
         return {"reward_score": rm_score}
 
 
-class RewardLoopManager:
+class TeacherLoopManager:
     """
-    RewardLoopManager run in single controller.
-    This class will create reward loop workers and manage them.
+    TeacherLoopManager run in single controller.
+    This class will create teacher loop workers and manage them.
     """
 
-    def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
+    def __init__(self, config: DictConfig, teacher_resource_pool: RayResourcePool = None):
         self.config = config
-        if self.config.reward.reward_model.enable:
-            self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
-            self.reward_router_address = self.reward_model_manager.get_router_address()
-        else:
-            self.reward_model_manager = None
-            self.reward_router_address = None
+        self.teacher_model_manager = TeacherModelManager(config.distillation.teacher_model, teacher_resource_pool)
+        self.teacher_router_address = self.teacher_model_manager.get_router_address()
 
-        self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
-        self._init_reward_loop_workers()
+        self.teacher_loop_workers_class = ray.remote(TeacherLoopWorker)
+        self._init_teacher_loop_workers()
 
-    def _init_reward_loop_workers(self):
-        self.reward_loop_workers = []
-        num_workers = self.config.reward.num_workers
+    def _init_teacher_loop_workers(self):
+        self.teacher_loop_workers = []
+        num_workers = self.config.distillation.num_workers
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
-            self.reward_loop_workers.append(
-                self.reward_loop_workers_class.options(
-                    name=f"reward_loop_worker_{i}",
+            self.teacher_loop_workers.append(
+                self.teacher_loop_workers_class.options(
+                    name=f"teacher_loop_worker_{i}",
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id,
                         soft=True,
                     ),
-                ).remote(self.config, self.reward_router_address)
+                ).remote(self.config, self.teacher_router_address)
             )
 
-    def compute_rm_score(self, data: DataProto) -> DataProto:
-        if self.reward_model_manager is not None:
-            self.reward_model_manager.wake_up()
+    def compute_teacher_logprobs(self, data: DataProto) -> DataProto:
+        breakpoint()
+        if self.teacher_model_manager is not None:
+            self.teacher_model_manager.wake_up()
 
-        chunks = data.chunk(len(self.reward_loop_workers))
+        chunks = data.chunk(len(self.teacher_loop_workers))
         outputs = ray.get(
             [
                 worker.compute_score_batch.remote(chunk)
-                for worker, chunk in zip(self.reward_loop_workers, chunks, strict=True)
+                for worker, chunk in zip(self.teacher_loop_workers, chunks, strict=True)
             ]
         )
         outputs_flat = [item for sublist in outputs for item in sublist]
 
-        # compute rm score
+        # compute teacher logprobs
+        raise NotImplementedError
         scores = [item["reward_score"] for item in outputs_flat]
         prompt_length = data.batch["prompts"].size(1)
         valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)

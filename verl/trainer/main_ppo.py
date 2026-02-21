@@ -26,7 +26,7 @@ from verl.experimental.dataset.sampler import AbstractSampler
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
-from verl.trainer.ppo.utils import need_critic, need_distillation_policy, need_reference_policy
+from verl.trainer.ppo.utils import need_critic, need_teacher_policy, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
@@ -140,7 +140,7 @@ class TaskRunner:
             ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
             # NOTE: In new model engine, ref policy and actor rollout are in same ActorRolloutRefWorker,
             # while in legacy model engine, ref policy is in a separate ActorRolloutRefWorker.
-            if (need_reference_policy(config) and not ref_in_actor) or need_distillation_policy(config):
+            if (need_reference_policy(config) and not ref_in_actor) or need_teacher_policy(config):
                 role = Role.ActorRolloutRef
             else:
                 role = Role.ActorRollout
@@ -228,14 +228,14 @@ class TaskRunner:
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
-        distillation_config = config.actor_rollout_ref.distillation
-        if distillation_config.enabled and distillation_config.enable_resource_pool:
-            if distillation_config.n_gpus_per_node <= 0:
-                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
-            if distillation_config.nnodes <= 0:
-                raise ValueError("config.distillation.nnodes must be greater than 0")
+        distillation_config = config.distillation
+        if distillation_config.enabled and distillation_config.teacher_model.enable_resource_pool:
+            if distillation_config.teacher_model.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
+            if distillation_config.teacher_model.nnodes <= 0:
+                raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
 
-            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
+            teacher_pool = [distillation_config.teacher_model.n_gpus_per_node] * distillation_config.teacher_model.nnodes
             resource_pool_spec["teacher_pool"] = teacher_pool
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -273,7 +273,7 @@ class TaskRunner:
         """Add distillation policy worker if distillation is used."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if need_distillation_policy(config):
+        if need_teacher_policy(config):
             if config.trainer.get("use_legacy_worker_impl", "auto") != "disable":
                 raise NotImplementedError(
                     "Distillation is not supported with legacy worker implementation. "
@@ -322,7 +322,7 @@ class TaskRunner:
         # validate config
         validate_config(
             config=config,
-            use_distillation_policy=need_distillation_policy(config),
+            use_distillation_policy=need_teacher_policy(config),
             use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )

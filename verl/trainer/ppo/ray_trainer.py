@@ -55,7 +55,7 @@ from verl.trainer.ppo.utils import (
     Role,
     WorkerType,
     need_critic,
-    need_distillation_policy,
+    need_teacher_policy,
     need_reference_policy,
     need_reward_model,
 )
@@ -285,7 +285,7 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
-        self.use_distillation_policy = need_distillation_policy(self.config)
+        self.use_teacher_policy = need_teacher_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
 
@@ -745,7 +745,7 @@ class RayPPOTrainer:
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
         # create distillation policy if needed
-        if self.use_distillation_policy:
+        if self.use_teacher_policy:
             # TODO: add docs
             assert Role.TeacherPolicy in self.role_worker_mapping
             from verl.workers.config import TeacherHFModelConfig, TeacherModelsConfig
@@ -861,7 +861,7 @@ class RayPPOTrainer:
                 assert str(Role.ActorRolloutRef) in all_wg, f"{all_wg.keys()=}"
                 self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
 
-        if self.use_distillation_policy:
+        if self.use_teacher_policy:
             self.teacher_policy_wgs = dict()
             for teacher_id in range(teacher_models_config.num_teachers):
                 teacher_role = f"{str(Role.TeacherPolicy)}_{teacher_id}"
@@ -891,6 +891,16 @@ class RayPPOTrainer:
         # Note: mode is always "async" since sync mode is deprecated
         self.async_rollout_mode = True
 
+        # initialize teacher loop manager
+        if self.use_teacher_policy:
+            from verl.experimental.teacher_loop import TeacherLoopManager
+
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherPolicy)
+            self.teacher_loop_manager = TeacherLoopManager(
+                config=self.config,
+                teacher_resource_pool=teacher_resource_pool,
+            )
+
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
@@ -903,14 +913,20 @@ class RayPPOTrainer:
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
         enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
+        # teacher reward loop: streaming teacher logprob computation
+        enable_teacher_loop = self.use_teacher_policy
+
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
+        # same for teacher loop and teacher policy workers
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        teacher_loop_worker_handles = self.teacher_loop_manager.teacher_loop_workers if enable_teacher_loop else None
         self.async_rollout_manager = AgentLoopManager(
             config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
+            teacher_loop_worker_handles=teacher_loop_worker_handles,
         )
 
         self.checkpoint_manager = CheckpointEngineManager(
@@ -1588,7 +1604,7 @@ class RayPPOTrainer:
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
-                    if self.use_distillation_policy:
+                    if self.use_teacher_policy:
                         with marked_timer(str(Role.TeacherPolicy), timing_raw, color="teal"):
                             distillation_inputs = self._acquire_teacher_knowledge(batch)
                             batch = batch.union(distillation_inputs)
