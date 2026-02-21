@@ -22,7 +22,7 @@ from verl.trainer.config.config import ModuleConfig
 
 from .rollout import RolloutConfig
 
-__all__ = ["DistillationLossConfig", "TeacherModelConfig", "DistillationConfig"]
+__all__ = ["DistillationLossConfig", "DistillationTeacherModelConfig", "DistillationConfig"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -68,7 +68,7 @@ class DistillationLossConfig(BaseConfig):
 
 
 @dataclass
-class TeacherModelConfig(BaseConfig):
+class DistillationTeacherModelConfig(BaseConfig):
     """Configuration for on-policy distillation teacher.
     
     enable_resource_pool (bool):
@@ -79,7 +79,7 @@ class TeacherModelConfig(BaseConfig):
         Number of nodes to use for distillation teacher model(s).
     model_path (str, optional):
         Model path for the teacher model. Can be a local path or a Hugging Face model
-    teacher_inference (RolloutConfig):
+    inference (RolloutConfig):
         Rollout configuration for the teacher model inference during distillation.
     """
     _mutable_fields = BaseConfig._mutable_fields
@@ -88,7 +88,7 @@ class TeacherModelConfig(BaseConfig):
     n_gpus_per_node: int = 0
     nnodes: int = 0
     model_path: Optional[str] = None
-    teacher_inference: RolloutConfig = field(default_factory=RolloutConfig)
+    inference: RolloutConfig = field(default_factory=RolloutConfig)
 
 
 
@@ -110,5 +110,5 @@ class DistillationConfig(BaseConfig):
 
     enabled: bool = False
     num_workers: int = 8
-    teacher_model: TeacherModelConfig = field(default_factory=TeacherModelConfig)
+    teacher_model: DistillationTeacherModelConfig = field(default_factory=DistillationTeacherModelConfig)
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
