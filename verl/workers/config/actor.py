@@ -33,14 +33,9 @@ __all__ = [
     "FSDPActorConfig",
     "McoreActorConfig",
     "VeOmniActorConfig",
-    "FSDPDistillationConfig", 
-    "DistillationConfig" 
     "QATConfig",
     "TorchTitanActorConfig",
-    "DistillationLossConfig",
     "QATConfig",
-    "TeacherHFModelConfig",
-    "TeacherModelsConfig",
 ]
 
 
