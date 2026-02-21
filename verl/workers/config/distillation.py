@@ -22,7 +22,7 @@ from verl.trainer.config.config import ModuleConfig
 
 from .rollout import RolloutConfig
 
-__all__ = ["DistillationLossConfig", "DistillationConfig"]
+__all__ = ["DistillationLossConfig", "TeacherModelConfig", "DistillationConfig"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -68,11 +68,9 @@ class DistillationLossConfig(BaseConfig):
 
 
 @dataclass
-class DistillationConfig(BaseConfig):
-    """Configuration for on-policy distillation training.
+class TeacherModelConfig(BaseConfig):
+    """Configuration for on-policy distillation teacher.
     
-    enabled (bool):
-        Whether distillation is enabled.
     enable_resource_pool (bool):
         Whether to enable separate resource pool for teacher model(s).
     n_gpus_per_node (int):
@@ -81,19 +79,36 @@ class DistillationConfig(BaseConfig):
         Number of nodes to use for distillation teacher model(s).
     model_path (str, optional):
         Model path for the teacher model. Can be a local path or a Hugging Face model
-    inference (RolloutConfig):
+    teacher_inference (RolloutConfig):
         Rollout configuration for the teacher model inference during distillation.
-    distillation_loss: DistillationLossConfig:
-        Configuration for distillation loss settings.    
     """
-    num_workers: int = 8
+    _mutable_fields = BaseConfig._mutable_fields
 
-    enable: bool = False
     enable_resource_pool: bool = False
     n_gpus_per_node: int = 0
     nnodes: int = 0
     model_path: Optional[str] = None
-    inference: RolloutConfig = field(default_factory=RolloutConfig)
+    teacher_inference: RolloutConfig = field(default_factory=RolloutConfig)
 
+
+
+@dataclass
+class DistillationConfig(BaseConfig):
+    """Configuration for on-policy distillation.
+
+    enabled (bool):
+        Whether on-policy distillation is enabled.
+    num_workers (int):
+        Number of teacher model replicas.
+    teacher_model (TeacherModelConfig):
+        Configuration for the teacher model used for distillation.
+    distillation_loss (DistillationLossConfig):
+        Configuration for distillation loss settings.
+    """
+
+    _mutable_fields = BaseConfig._mutable_fields
+
+    enabled: bool = False
+    num_workers: int = 8
+    teacher_model: TeacherModelConfig = field(default_factory=TeacherModelConfig)
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
-
