@@ -421,23 +421,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
-
-def prepare_ref_config(target_config: ActorConfig, actor_config: ActorConfig):
-    """TODO"""
-    with open_dict(target_config):
-        target_config.ppo_mini_batch_size = actor_config.ppo_mini_batch_size
-        target_config.ppo_micro_batch_size = (
-            target_config.pop("log_prob_micro_batch_size", None) or actor_config.ppo_micro_batch_size
-        )
-        target_config.ppo_micro_batch_size_per_gpu = (
-            target_config.pop("log_prob_micro_batch_size_per_gpu", None) or actor_config.ppo_micro_batch_size_per_gpu
-        )
-        target_config.use_dynamic_bsz = target_config.pop("log_prob_use_dynamic_bsz", False)
-        target_config.ppo_max_token_len_per_gpu = (
-            target_config.pop("log_prob_max_token_len_per_gpu", None) or actor_config.ppo_max_token_len_per_gpu
-        )
-
-
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """Hybrid worker that includes actor model, rollout and optional ref model.
     For standalone actor or rollout, use ActorWorker or BaseRollout respectively.
@@ -445,9 +428,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     NOTE: ActorRolloutRefWorker no longer support spmd mode and run native server mode.
     """
 
-    def __init__(self, config: DictConfig, role: str, **kwargs):
+    def __init__(self, config: DictConfig, role: str, distillation_config: DistillationConfig, **kwargs):
         Worker.__init__(self)
         self.config = config
+        self.distillation_config = distillation_config
         self.role = role
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
@@ -498,7 +482,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 1. build reference model
         if "ref" in self.role:
             # TODO: align ref config with actor config
-            prepare_ref_config(self.config.ref, self.config.actor)
+            with open_dict(self.config.ref):
+                self.config.ref.ppo_mini_batch_size = self.config.actor.ppo_mini_batch_size
+                self.config.ref.ppo_micro_batch_size = self.config.ref.pop("log_prob_micro_batch_size", None)
+                self.config.ref.ppo_micro_batch_size_per_gpu = self.config.ref.pop(
+                    "log_prob_micro_batch_size_per_gpu", None
+                )
+                self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
+                self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
             ref_config.model_config = model_config
 
@@ -509,7 +500,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
-                distillation_config=None,
             )
 
             # assign engine configs
@@ -529,9 +519,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
 
-            distillation_config = self.config.get("distillation")
+            distillation_config = self.distillation_config
             if is_distillation_enabled(distillation_config):
-                prepare_ref_config(distillation_config, actor_config)
                 distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
                 loss_config: DistillationLossConfig = distillation_config.distillation_loss
                 distillation_config.distillation_loss.loss_settings = get_distillation_loss_settings(
@@ -569,7 +558,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-
             self.loss_fn = partial(ppo_loss, config=actor_config, distillation_config=distillation_config)
             self.actor = TrainingWorker(config=actor_training_config)
             self.actor.reset()
@@ -722,66 +710,3 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         """
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
-
-
-class TeacherWorker(Worker, DistProfilerExtension):
-    """TODO"""
-
-    def __init__(self, config: DictConfig, teacher_id: int, **kwargs):
-        Worker.__init__(self)
-        self.config = config
-        self.teacher_id = teacher_id
-        omega_profiler_config = config.distillation.get("profiler", {})
-
-        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
-            tool_config = omega_conf_to_dataclass(
-                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
-            )
-        else:
-            tool_config = None
-
-        DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
-        )
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
-        prepare_ref_config(self.config.distillation, self.config.actor)
-        distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
-        distillation_loss_config: DistillationLossConfig = distillation_config.distillation_loss
-        distillation_config.distillation_loss.loss_settings = get_distillation_loss_settings(
-            distillation_loss_config.loss_mode
-        )
-        model_config = distillation_config.teacher_models.get_teacher_config(self.teacher_id)
-        distillation_config.model_config = model_config
-
-        # construct TrainingWorkerConfig
-        distillation_training_config = TrainingWorkerConfig(
-            model_type="language_model",
-            model_config=distillation_config.model_config,
-            engine_config=distillation_config.engine,
-            optimizer_config=distillation_config.optim,
-            checkpoint_config=distillation_config.checkpoint,
-            distillation_config=distillation_config,
-        )
-
-        # assign engine configs
-        distillation_training_config.engine_config.use_dynamic_bsz = self.config.distillation.use_dynamic_bsz
-        distillation_training_config.engine_config.infer_max_token_len_per_gpu = (
-            self.config.distillation.ppo_max_token_len_per_gpu
-        )
-        distillation_training_config.engine_config.infer_micro_batch_size_per_gpu = (
-            self.config.distillation.ppo_micro_batch_size_per_gpu
-        )
-        distillation_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
-
-        self.teacher = TrainingWorker(config=distillation_training_config)
-        self.teacher.reset()
-        self.set_dispatch_collect(mesh_name="teacher", **self.teacher.get_dispatch_collect())
-
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="teacher"))
-    @DistProfiler.annotate(color="olive", role="acquire_teacher_knowledge")
-    def acquire_teacher_knowledge(self, data: TensorDict) -> TensorDict:
-        output = self.teacher.infer_batch(data=data)
-        return output.cpu() if output is not None else None
