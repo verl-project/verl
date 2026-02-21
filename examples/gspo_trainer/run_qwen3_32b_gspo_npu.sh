@@ -40,8 +40,8 @@ WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 
 # Data Length Configuration
-max_prompt_length=$((1024 * 16))
-max_response_length=$((1024 * 16))
+max_prompt_length=$((1024 * 2))
+max_response_length=$((1024 * 8))
 
 # Training Batch Configuration
 train_prompt_bsz=256
@@ -60,20 +60,21 @@ clip_ratio_low=0.0003
 clip_ratio_high=0.0004
 loss_agg_mode="seq-mean-token-mean"
 
+# FSDP Parallelism Configuration
+actor_strategy=fsdp2
+ref_strategy=fsdp2
+sp_size=4
+fsdp_size=-1
+
 # Performance and Memory Management Configuration
 offload=True
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
 
-# FSDP Parallelism Configuration
-actor_strategy=fsdp2
-ref_strategy=fsdp2
-sp_size=4
-fsdp_size=-1
 # vLLM Configuration
 gen_tp=4
-gpu_memory_utilization=0.9
+gpu_memory_utilization=0.7
 max_model_len=$((max_prompt_length + max_response_length))
 max_num_batched_tokens=$((max_prompt_length + max_response_length))
 
@@ -161,7 +162,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=True
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[8, 16, 32, 64, 128, 192, 256, 384]"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[8, 16, 32, 64, 128, 192, 256]"
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.val_kwargs.do_sample=True

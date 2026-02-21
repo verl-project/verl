@@ -182,7 +182,6 @@ verl is fully embracing FSDP2! FSDP2 is recommended by torch distributed team, p
 actor_rollout_ref.ref.strategy=fsdp2
 actor_rollout_ref.actor.strategy=fsdp2
 critic.strategy=fsdp2
-reward_model.strategy=fsdp2
 ```
 
 Furthermore, FSDP2 cpu offloading is compatible with gradient accumulation. You can turn it on to save memory with `actor_rollout_ref.actor.fsdp_config.offload_policy=True`. For more details, see https://github.com/volcengine/verl/pull/1026
@@ -284,6 +283,7 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [NoisyRollout](https://github.com/NUS-TRAIL/NoisyRollout): Reinforcing Visual Reasoning with Data Augmentation ![GitHub Repo stars](https://img.shields.io/github/stars/NUS-TRAIL/NoisyRollout)
 - [SPEAR](https://github.com/TencentYoutuResearch/SPEAR): **Self-imitation** with **Progressive Exploration** for Agentic Reinforcement Learning (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/TencentYoutuResearch/SPEAR)
 - [RuleReasoner](https://github.com/bigai-nlco/RuleReasoner): **RuleReasoner:** Reinforced Rule-based Reasoning via **Domain-aware Dynamic Sampling** (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/bigai-nlco/RuleReasoner)
+- [MetaphorStar](https://metaphorstar.github.io/): **Image Metaphor** Understanding and Reasoning with End-to-End **Visual Reinforcement Learning** ![GitHub Repo stars](https://img.shields.io/github/stars/MING-ZCH/MetaphorStar)
 
 ## Contribution Guide
 

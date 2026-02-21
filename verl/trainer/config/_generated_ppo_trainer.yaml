@@ -21,6 +21,7 @@ actor_rollout_ref:
       min_lr_ratio: 0.0
       num_cycles: 0.5
       lr_scheduler_type: constant
+      zero_indexed_step: true
       warmup_style: null
       override_optimizer_config: null
     fsdp_config:
@@ -126,6 +127,16 @@ actor_rollout_ref:
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
     calculate_sum_pi_squared: false
     sum_pi_squared_checkpointing: false
+    qat:
+      enable: false
+      mode: w4a16
+      group_size: 16
+      ignore_patterns:
+      - lm_head
+      - embed_tokens
+      - re:.*mlp.gate$
+      activation_observer: static_minmax
+      quantization_config_path: null
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: ${actor_rollout_ref.actor.strategy}
@@ -301,6 +312,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
+    qat: ${oc.select:actor_rollout_ref.actor.qat,null}
     layered_summon: false
   model:
     _target_: verl.workers.config.HFModelConfig
@@ -399,6 +411,7 @@ critic:
     min_lr_ratio: 0.0
     num_cycles: 0.5
     lr_scheduler_type: constant
+    zero_indexed_step: true
     warmup_style: null
     override_optimizer_config: null
   model:
@@ -492,13 +505,54 @@ critic:
   forward_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size_per_gpu,null}
   ulysses_sequence_parallel_size: 1
   grad_clip: 1.0
+custom_reward_function:
+  path: null
+  name: null
 reward_model:
-  enable: false
-  use_reward_loop: true
+  num_workers: null
+  reward_manager: null
+  enable: null
+  enable_resource_pool: null
+  n_gpus_per_node: null
+  nnodes: null
+  reward_loop_source: null
+  reward_loop_module_path: null
+  reward_loop_class_name: null
+  model:
+    path: null
+    external_lib: null
+    trust_remote_code: null
+  rollout:
+    name: null
+    dtype: null
+    gpu_memory_utilization: null
+    enforce_eager: null
+    cudagraph_capture_sizes: null
+    free_cache_engine: null
+    data_parallel_size: null
+    expert_parallel_size: null
+    tensor_model_parallel_size: null
+    max_num_batched_tokens: null
+    max_model_len: null
+    max_num_seqs: null
+    load_format: null
+    engine_kwargs: null
+    limit_images: null
+    enable_chunked_prefill: null
+    enable_prefix_caching: null
+    disable_log_stats: null
+    skip_tokenizer_init: null
+    prompt_length: null
+    response_length: null
+sandbox_fusion:
+  url: null
+  max_concurrent: null
+  memory_limit_mb: null
+reward:
   num_workers: 8
-  enable_resource_pool: false
-  n_gpus_per_node: 8
-  nnodes: 0
+  custom_reward_function:
+    path: null
+    name: compute_score
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
     source: register
@@ -507,30 +561,35 @@ reward_model:
       _target_: verl.trainer.config.config.ModuleConfig
       path: null
       name: custom_reward_manager
-  model_path: null
-  rollout:
-    _target_: verl.workers.config.RolloutConfig
-    name: ???
-    dtype: bfloat16
-    gpu_memory_utilization: 0.5
-    enforce_eager: true
-    cudagraph_capture_sizes: null
-    free_cache_engine: true
-    data_parallel_size: 1
-    expert_parallel_size: 1
-    tensor_model_parallel_size: 2
-    max_num_batched_tokens: 8192
-    max_model_len: null
-    max_num_seqs: 1024
-    load_format: auto
-    engine_kwargs: {}
-    limit_images: null
-    enable_chunked_prefill: true
-    enable_prefix_caching: true
-    disable_log_stats: true
-    skip_tokenizer_init: false
-    prompt_length: 2048
-    response_length: 2048
+  reward_model:
+    enable: false
+    enable_resource_pool: false
+    n_gpus_per_node: 8
+    nnodes: 0
+    model_path: null
+    rollout:
+      _target_: verl.workers.config.RolloutConfig
+      name: ???
+      dtype: bfloat16
+      gpu_memory_utilization: 0.5
+      enforce_eager: true
+      cudagraph_capture_sizes: null
+      free_cache_engine: true
+      data_parallel_size: 1
+      expert_parallel_size: 1
+      tensor_model_parallel_size: 2
+      max_num_batched_tokens: 8192
+      max_model_len: null
+      max_num_seqs: 1024
+      load_format: auto
+      engine_kwargs: {}
+      limit_images: null
+      enable_chunked_prefill: true
+      enable_prefix_caching: true
+      disable_log_stats: true
+      skip_tokenizer_init: false
+      prompt_length: 2048
+      response_length: 2048
   sandbox_fusion:
     url: null
     max_concurrent: 64
@@ -561,9 +620,6 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
-custom_reward_function:
-  path: null
-  name: compute_score
 trainer:
   balance_batch: true
   total_epochs: 30

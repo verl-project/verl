@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from verl.experimental.reward_loop.reward_manager.base import RawRewardFn, RewardManagerBase
     from verl.trainer.config.config import ModuleConfig
-    from verl.workers.config.reward_model import RewardManagerConfig
+    from verl.workers.config.reward import RewardManagerConfig
 
 
 def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
@@ -67,7 +67,7 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
         AttributeError: If the specified function name isn't found in the module.
     """
 
-    reward_fn_config = config.get("custom_reward_function") or {}
+    reward_fn_config = config.reward.get("custom_reward_function") or {}
     module_path = reward_fn_config.get("path")
     if not module_path:
         return None
@@ -104,7 +104,7 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
     compute_score = get_custom_reward_fn(config)
     final_compute_score = compute_score
 
-    reward_manager_cfg: RewardManagerConfig = config.reward_model.reward_manager
+    reward_manager_cfg: RewardManagerConfig = config.reward.reward_manager
     reward_manager_cls: type[RewardManagerBase]
     if reward_manager_cfg.source == "register":
         from verl.experimental.reward_loop.reward_manager import get_reward_manager_cls
@@ -124,7 +124,7 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
         )
 
     if compute_score is None:
-        sandbox_config = config.reward_model.get("sandbox_fusion")
+        sandbox_config = config.reward.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None
         memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024) if sandbox_config else 1024
         if sandbox_url:

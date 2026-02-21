@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from .transformer_impl import TorchTitanEngine, TorchTitanEngineWithLMHead
 
-from .reward_model import MegatronRewardModel
-
-__all__ = ["MegatronRewardModel"]
+__all__ = ["TorchTitanEngine", "TorchTitanEngineWithLMHead"]

@@ -295,7 +295,6 @@ class RayPPOTrainer:
         self.use_reference_policy = need_reference_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
-        self.use_reward_loop = self.config.reward_model.use_reward_loop
 
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -488,19 +487,18 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
-        reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
+        reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
 
         # pop those keys for generation
         batch_keys_to_pop = []
-        non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_model_keys
+        non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_keys
         gen_batch = batch.pop(
             batch_keys=batch_keys_to_pop,
             non_tensor_batch_keys=list(non_tensor_batch_keys_to_pop),
         )
 
         # For agent loop, we need reward model keys to compute score.
-        if self.async_rollout_mode:
-            gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
+        gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
 
         return gen_batch
 
@@ -537,12 +535,6 @@ class RayPPOTrainer:
                 repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
             )
 
-            # The invocation of the reward function is agnostic to whether a reward model is used.
-            # Decisions about when (e.g., training vs. validation) and whether to invoke the reward model
-            # are delegated to user-defined reward functions.
-            # if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
-            #     return {}
-
             ground_truths = [
                 item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
             ]
@@ -560,16 +552,9 @@ class RayPPOTrainer:
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
-            size_divisor = (
-                self.actor_rollout_wg.world_size
-                if not self.async_rollout_mode
-                else self.config.actor_rollout_ref.rollout.agent.num_workers
-            )
+            size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-            else:
-                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+            test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
                 # for colocate reward models, we need to sleep rollout model
@@ -766,9 +751,6 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
-        if self.use_rm and not self.use_reward_loop:
-            raise RuntimeError("Reward model worker group is not supported, please set use_reward_loop=True")
-
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -792,6 +774,8 @@ class RayPPOTrainer:
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
@@ -832,17 +816,16 @@ class RayPPOTrainer:
             self.ref_policy_wg = self.actor_rollout_wg
 
         # create reward loop manager
-        if self.use_reward_loop:
-            from verl.experimental.reward_loop import RewardLoopManager
+        from verl.experimental.reward_loop import RewardLoopManager
 
-            # initalize reward loop manager
-            # reward model (colocate or standalone): get resource_pool
-            # no reward model: resource_pool = None
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-            self.reward_loop_manager = RewardLoopManager(
-                config=self.config,
-                rm_resource_pool=resource_pool,
-            )
+        # initalize reward loop manager
+        # reward model (colocate or standalone): get resource_pool
+        # no reward model: resource_pool = None
+        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        self.reward_loop_manager = RewardLoopManager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+        )
 
         # create async rollout manager and request scheduler
         # Note: mode is always "async" since sync mode is deprecated
@@ -858,12 +841,10 @@ class RayPPOTrainer:
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-        enable_agent_reward_loop = self.use_reward_loop and (
-            not self.use_rm or self.config.reward_model.enable_resource_pool
-        )
+        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
-
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager(
             config=self.config,
@@ -1288,7 +1269,7 @@ class RayPPOTrainer:
                 return
 
         if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
-            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
+            rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
@@ -1340,15 +1321,12 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
-                        else:
-                            if curr_step_profile:
-                                self.async_rollout_manager.start_profile()
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                            self.checkpoint_manager.sleep_replicas()
-                            if curr_step_profile:
-                                self.async_rollout_manager.stop_profile()
+                        if curr_step_profile:
+                            self.async_rollout_manager.start_profile()
+                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                        self.checkpoint_manager.sleep_replicas()
+                        if curr_step_profile:
+                            self.async_rollout_manager.stop_profile()
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
@@ -1357,15 +1335,12 @@ class RayPPOTrainer:
                         with marked_timer("gen_max", timing_raw, color="purple"):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
-                            if not self.async_rollout_mode:
-                                gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-                            else:
-                                if curr_step_profile:
-                                    self.async_rollout_manager.start_profile()
-                                gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                                self.checkpoint_manager.sleep_replicas()
-                                if curr_step_profile:
-                                    self.async_rollout_manager.stop_profile()
+                            if curr_step_profile:
+                                self.async_rollout_manager.start_profile()
+                            gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                            self.checkpoint_manager.sleep_replicas()
+                            if curr_step_profile:
+                                self.async_rollout_manager.stop_profile()
                             batch = batch.union(gen_baseline_output)
                             # compute reward model score on batch
                             rm_scores = None

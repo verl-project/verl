@@ -49,7 +49,7 @@ class AbstractRewardManager(ABC):
     ) -> torch.Tensor | dict[str, Any] | None:
         """
         Extract reward from already-computed rm_scores if available.
-        This is used when use_reward_loop=True and rewards are already computed during generate_sequences.
+        This has been deprecated.
 
         Args:
             data: DataProto object containing the batch data

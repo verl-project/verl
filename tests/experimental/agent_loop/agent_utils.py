@@ -21,14 +21,12 @@ from verl.experimental.reward_loop import RewardLoopManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
-from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
+from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 
 
 def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerGroup:
     # =========================== 1. Create hybrid ActorRollout workers ===========================
-    actor_rollout_cls = (
-        AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-    )
+    actor_rollout_cls = AsyncActorRolloutRefWorker
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(actor_rollout_cls),
     }
@@ -40,14 +38,14 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     mapping = {
         Role.ActorRollout: global_pool_id,
     }
-    if config.reward_model.enable_resource_pool:
+    if config.reward.reward_model.enable_resource_pool:
         mapping[Role.RewardModel] = "reward_pool"
-        if config.reward_model.n_gpus_per_node <= 0:
-            raise ValueError("config.reward_model.n_gpus_per_node must be greater than 0")
-        if config.reward_model.nnodes <= 0:
-            raise ValueError("config.reward_model.nnodes must be greater than 0")
+        if config.reward.reward_model.n_gpus_per_node <= 0:
+            raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
+        if config.reward.reward_model.nnodes <= 0:
+            raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
 
-        reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
+        reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
         resource_pool_spec["reward_pool"] = reward_pool
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
     resource_pool_manager.create_resource_pool()
@@ -73,7 +71,9 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
         raise ValueError("Agent loop tests require async rollout mode. Please set rollout.mode=async.")
 
     # =========================== 2. Create AgentLoopManager ===========================
-    rm_resource_pool = resource_pool_manager.get_resource_pool(Role.RewardModel) if config.reward_model.enable else None
+    rm_resource_pool = (
+        resource_pool_manager.get_resource_pool(Role.RewardModel) if config.reward.reward_model.enable else None
+    )
     reward_loop_manager = RewardLoopManager(
         config=config,
         rm_resource_pool=rm_resource_pool,

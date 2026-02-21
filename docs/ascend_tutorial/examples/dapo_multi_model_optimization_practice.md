@@ -1,4 +1,6 @@
-# DAPO 介绍
+# DAPO multi model optimization practice
+
+## DAPO 介绍
 
 Last updated: 01/27/2026.
 
@@ -18,7 +20,7 @@ DAPO的论文可以参考：[DAPO](https://arxiv.org/pdf/2503.14476)，其中包
 reward_model.reward_manager.name=dapo
 ```
 
-- **Clip-Higher 更高裁剪 **
+- **Clip-Higher 更高裁剪**
   `clip_ratio_low` 和 `clip_ratio_high` 用于指定 DAPO 目标函数中的 $\varepsilon_{\text {low }}$ 和 $\varepsilon_{\text {high }}$。
 
 ```
@@ -26,7 +28,7 @@ clip_ratio_low=0.2  # 裁剪比例下限，默认值为0.2
 clip_ratio_high=0.28 # 裁剪比例上限，默认值为0.28
 ```
 
-- **动态采样的相关配置 **
+- **动态采样的相关配置**
   将 `filter_groups.enable` 设置为 `True` 会过滤掉输出 `metric` 完全相同的组，例如对于 `acc` 指标，过滤掉输出准确率全部为 1 或 0 的组。
   训练器会使用 `gen_batch_size` 进行重复采样，直到生成足够数量的符合条件的组，或者达到 `max_num_gen_batches` 所指定的上限为止。
 
@@ -37,7 +39,7 @@ algorithm.filter_groups.metric=${filter_groups_metric} # 使用准确率作为�
 algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} # 最大生成批次数量,最多重复生成数据的次数
 ```
 
-- **Token-level Loss **
+- **Token-level Loss**
   将 `loss_agg_mode` 设置为 `token-mean` 意味着计算一个批次中所有序列内所有 token 的（策略梯度）损失的平均值。
 
 ```
@@ -45,7 +47,7 @@ actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
 #注意：“token-mean”是默认行为。
 ```
 
-- **奖励模型对超长回答的惩罚配置 **
+- **奖励模型对超长回答的惩罚配置**
   将 `overlong_buffer.enable` 设置为 `True` 将对输出长度过长但仍未超过硬上下文限制的输出进行惩罚。具体来说，当输出的长度超过 `max_response_length - overlong_buffer.len` 且超出 `0` 到 `overlong_buffer.len` 个 token 时，惩罚值会从 `0` 线性增加到 `overlong_buffer.penalty_factor`。
 
 ```
@@ -56,13 +58,34 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 
 相关参数涉及的代码可以参考：[Recipe: Decoupled Clip and Dynamic Sampling Policy Optimization (DAPO)](https://github.com/verl-project/verl-recipe/blob/main/dapo/README.md)
 
-# 硬件要求
+## 硬件要求
 
 当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 2台Atlas 800T A3。关键软件版本可以参考：[Ascend Quickstart](https://github.com/volcengine/verl/blob/main/docs/ascend_tutorial/ascend_quick_start.rst)
 
-# 模型训练
+## 安装基础环境
 
-## 数据集准备
+| software | version|
+| --- | --- |
+| Python| >= 3.10, <3.12 |
+| CANN | == 8.3.RC1 |
+| torch | == 2.7.1 |
+| torch_npu | == 2.7.1 |
+| verl | main分支 commitId=252d76908b903ad8fb6969eb3a5e5f873c95ea2b |
+| vllm | 	v0.11.0 |
+| vllm-ascend | v0.11.0-dev|
+| transformers | 	4.57.3|
+
+在本实践中, 我们通过指定 verl 的commit id 以避免引入其他问题
+```
+cd verl
+git checkout 252d76908b903ad8fb6969eb3a5e5f873c95ea2b
+# 指定相应的recipe版本
+git submodule update --init --recursive recipe
+```
+
+## 模型训练
+
+### 数据集准备
 
 Geometry3k 数据集是由加利福尼亚大学洛杉矶分校与浙江大学联合研发的几何领域专用数据集，核心面向视觉问答（VQA）任务展开研究与模型训练。该数据集总计包含 3002 个样本，采用图像和文本两种模态数据形式构建，其中文本模态涵盖各类几何问题描述，图像则以可视化图表呈现问题中的几何图形信息，包括三角形、圆形、四边形等基础几何形状，以及不同图形间的位置、嵌套、相交等关联关系。可以从Hugging Face库下载对应的原始数据集：[Geometry3k ](https://huggingface.co/datasets/hiyouga/geometry3k)
 
@@ -71,12 +94,12 @@ Geometry3k 数据集是由加利福尼亚大学洛杉矶分校与浙江大学联
 python ./examples/data_preprocess/geo3k.py --local_dir=./data/geo3k
 ```
 
-## 权重下载
+### 权重下载
 
 从Hugging Face库下载对应的模型权重：[Qwen3-VL-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct/tree/main
 )
 
-## 全局变量导入
+### 全局变量导入
 
 - 为了确保 Ray 进程能够正常回收内存，需要安装并使能 jemalloc 库进行内存管理，用于更好管理内存，避免长跑过程中内存 OOM。
 
@@ -97,7 +120,7 @@ export USE_OPTIMIZED_MODEL=0
 export VLLM_USE_V1=1
 ```
 
-昇腾多卡通信的兜底配置，延长连接超时时间，避免集群环境下训练启动因连接慢而失败
+- 昇腾多卡通信的兜底配置，延长连接超时时间，避免集群环境下训练启动因连接慢而失败
 
 ```
 export HCCL_CONNECT_TIMEOUT=5400
@@ -109,15 +132,32 @@ export HCCL_CONNECT_TIMEOUT=5400
 export VLLM_ASCEND_ENABLE_NZ=0
 ```
 
-- 根据使用机器的情况，修改相关配置， 例如双机机 A2 可设置`trainer.nnodes`为 1 、`trainer.n_gpus_per_node`为8
+### 训练
+```
+# Model Weights Paths
+MODEL_PATH=hf_weights/Qwen3-VL-30B-A3B-Instruct
+RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
+CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 
-## 训练脚本
+# File System Paths
+TRAIN_FILE=$RAY_DATA_HOME/datasets/geo3k/train.parquet
+TEST_FILE=$RAY_DATA_HOME/datasets/geo3k/test.parquet
 
-基于以上修改，提供了示例配置文件，创建 run_dapo_qwen3_vl_30b.sh 文件。
+#保存频率，-1默认不保存，如需评测请修改此参数
+trainer.save_freq=-1
+```
 
-```bash
-set -xeuo pipefail
+对于单机任务 Qwen3-VL-30B , 修改脚本中参数`trainer.nnodes`为 1， `trainer.n_gpus_per_node` 为16，然后直接bash执行verl仓上示例脚本
 
+```
+bash recipe/dapo/run dapo_qwen3_vl_30b_fsdp2_npu.sh
+```
+对于多节点任务 Qwen3-VL-30B ，我们推荐使用以下脚本进行大规模多节点训练拉起
+
+```
+pkill -9 python
+ray stop --force
+rm -rf /tmp/ray
 export VLLM_USE_V1=1
 export HCCL_CONNECT_TIMEOUT=5400
 export VLLM_ASCEND_ENABLE_NZ=0
@@ -126,150 +166,77 @@ export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
 export USE_OPTIMIZED_MODEL=0
 
-project_name='DAPO'
-exp_name='DAPO-Qwen3-vl-30B'
+# 修改为当前需要跑的用例路径
+DEFAULT_SH="./run_*.sh"
+echo "Use $DEFAULT_SH"
 
-adv_estimator=grpo
+ulimit -n 32768
+mkdir logs
 
-use_kl_in_reward=False
-kl_coef=0.0
-use_kl_loss=False
-kl_loss_coef=0.0
+NNODES=2
+NPUS_PER_NODE=8
+# 修改为对应主节点IP
+MASTER_ADDR="IP FOR MASTER NODE"
+# 修改为当前节点的通信网卡
+SOCKET_IFNAME="Your SOCKET IFNAME"
+export HCCL_SOCKET_IFNAME="SOCKET IFNAME FOR CURRENT NODE"
+export GLOO_SOCKET_IFNAME="SOCKET IFNAME FOR CURRENT NODE"
+# 获取当前IP
+CURRENT_IP=$(ifconfig $SOCKET_IFNAME | grep -Eo 'inet (addr:)?([0-9]{1,3}\.){3}[0-9]{1,3}' | awk '{print $NF}')
+if [ "$MASTER_ADDR" = "$CURRENT_IP" ]; then
+  # 主节点启动
+  ray start --head --port 6766 --dashboard-host=$MASTER_ADDR --node-ip-address=$CURRENT_IP --dashboard-port=8260 --resources='{"NPU": '$NPUS_PER_NODE'}'
 
-clip_ratio_low=0.2
-clip_ratio_high=0.28
+  while true; do
+      ray_status_output=$(ray status)
+      npu_count=$(echo "$ray_status_output" | grep -oP '(?<=/)\d+\.\d+(?=\s*NPU)' | head -n 1)
+      npu_count_int=$(echo "$npu_count" | awk '{print int($1)}')
+      device_count=$((npu_count_int / $NPUS_PER_NODE))
 
-max_prompt_length=1024
-max_response_length=2048
-enable_overlong_buffer=False
-overlong_buffer_len=$((1024 * 2))
-overlong_penalty_factor=1.0
+      # 判断device_count 是否与 NNODES 相等
+      if [ "$device_count" -eq "$NNODES" ]; then
+          echo "Ray cluster is ready with $device_count devices (from $npu_count NPU resources), starting Python script."
+          ray status
+          bash $DEFAULT_SH
+          break
+      else
+          echo "Waiting for Ray to allocate $NNODES devices. Current device count: $device_count"
+          sleep 5
+      fi
+  done
+else
+  # 子节点尝试往主节点注册 ray 直到成功
+  while true; do
+      # 尝试连接 ray 集群
+      ray start --address="$MASTER_ADDR:6766" --resources='{"NPU": '$NPUS_PER_NODE'}' --node-ip-address=$CURRENT_IP
 
-loss_agg_mode="token-mean"
+      # 检查连接是否成功
+      ray status
+      if [ $? -eq 0 ]; then
+          echo "Successfully connected to the Ray cluster!"
+          break
+      else
+          echo "Failed to connect to the Ray cluster. Retrying in 5 seconds..."
+          sleep 5
+      fi
+  done
+fi
 
-enable_filter_groups=True
-filter_groups_metric=acc
-max_num_gen_batches=4
-train_prompt_bsz=64
-gen_prompt_bsz=$((train_prompt_bsz * 3))
-n_resp_per_prompt=8
-train_prompt_mini_bsz=16
+sleep 600
+```
+DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 [Qwen3_VL_30B](https://github.com/verl-project/verl-recipe/blob/main/dapo/run%20dapo_qwen3_vl_30b_fsdp2_npu.sh) 路径。
 
-# Ray
-PWD=./
-RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
-WORKING_DIR=${WORKING_DIR:-"${PWD}"}
-RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
+NNODES 和 NPUS_PER_NODE:修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为2和8。
 
-# Paths
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-VL-30B-A3B-Instruct"}
-CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/geo3k/train.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/geo3k/test.parquet"}
+MASTER_ADDR:修改为对应主节点 IP。即所有节点的 MASTER_ADDR 应该相同。
 
-# Algorithm
-temperature=1.0
-top_p=1.0
-top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=0.7
+SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网卡，通信网卡可以通过以下命令获取：
 
-# Performance Related Parameter
-sp_size=8
-use_dynamic_bsz=True
-actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
-infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
-gen_tp=8
-fsdp_size=16
-
-ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
-    --working-dir "${WORKING_DIR}" \
-    --address "${RAY_ADDRESS}" \
-    -- python3 -m recipe.dapo.main_dapo \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
-    data.prompt_key=prompt \
-    data.truncation='left' \
-    data.max_prompt_length=${max_prompt_length} \
-    data.max_response_length=${max_response_length} \
-    data.gen_batch_size=${gen_prompt_bsz} \
-    data.train_batch_size=${train_prompt_bsz} \
-    actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
-    algorithm.adv_estimator=${adv_estimator} \
-    algorithm.use_kl_in_reward=${use_kl_in_reward} \
-    algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
-    actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
-    actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
-    actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
-    actor_rollout_ref.actor.clip_ratio_c=10.0 \
-    algorithm.filter_groups.enable=${enable_filter_groups} \
-    algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
-    algorithm.filter_groups.metric=${filter_groups_metric} \
-    actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
-    actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
-    actor_rollout_ref.actor.optim.weight_decay=0.1 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.actor.entropy_coeff=0 \
-    actor_rollout_ref.actor.grad_clip=1.0 \
-    actor_rollout_ref.rollout.enforce_eager=True \
-    actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.70 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.temperature=${temperature} \
-    actor_rollout_ref.rollout.top_p=${top_p} \
-    actor_rollout_ref.rollout.top_k="${top_k}" \
-    actor_rollout_ref.rollout.val_kwargs.temperature=${temperature} \
-    actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
-    actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.n=1 \
-    actor_rollout_ref.rollout.expert_parallel_size=8 \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
-    actor_rollout_ref.rollout.name=vllm \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
-    actor_rollout_ref.actor.strategy=fsdp2 \
-    actor_rollout_ref.ref.strategy=fsdp2 \
-    critic.strategy=fsdp2 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
-    reward_model.reward_manager.name=dapo \
-    reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
-    reward_model.overlong_buffer.len=${overlong_buffer_len} \
-    reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
-    trainer.logger=console \
-    trainer.project_name="${project_name}" \
-    trainer.experiment_name="${exp_name}" \
-    trainer.n_gpus_per_node=8 \
-    trainer.nnodes=2 \
-    trainer.val_before_train=True \
-    trainer.test_freq=1 \
-    trainer.save_freq=20 \
-    trainer.resume_mode=auto \
-    trainer.device=npu \
-    trainer.total_epochs=30 \
-    trainer.total_training_steps=100 \
-    trainer.default_local_dir="${CKPTS_DIR}"
+```
+ifconfig |grep "$(hostname -I |awk '{print $1}'|awk -F '.' '{print $0}')" -B 1|awk -F ':' '{print$1}' | head -1 | tail -1
 ```
 
-# 优化参考
+## 优化参考
 
 - **启动动态批次大小**
   根据单 GPU 的最大 Token 总数（ppo_max_token_len_per_gpu）动态调整批次大小
