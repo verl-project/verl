@@ -181,9 +181,12 @@ Install dependencies
     # Make sure you have activated verl conda env
     # If you need to run with megatron
     bash scripts/install_vllm_sglang_mcore.sh
+    # If there's something run with package version, you can try:
+    bash scripts/install_vllm_sglang_mcore_stable.sh
     # Or if you simply need to run with FSDP
     USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
-
+    # If there's something run with package version, you can try:
+    USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore_stable.sh
 
 If you encounter errors in this step, please check the script and manually follow the steps in the script.
 
