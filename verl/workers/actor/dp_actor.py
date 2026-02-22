@@ -367,28 +367,35 @@ class DataParallelPPOActor(BasePPOActor):
                     "position_ids": position_ids,
                 }
 
-                response_start_idx = torch.full((batch_size,), seqlen - response_length - 1, device=input_ids.device)
-                response_end_idx = torch.full((batch_size,), seqlen - 1, device=input_ids.device)
+                response_start_idx = torch.full((batch_size,), seqlen - response_length - 1, device=input_ids.device)  # (B,)
+                response_end_idx = torch.full((batch_size,), seqlen - 1, device=input_ids.device)  # (B,)
 
                 if self.truncate_padding:
-                    # Roll left padding to the right so real tokens are contiguous on the left
-                    left_padding = attention_mask.argmax(dim=1)
-                    shifts = left_padding.long()
-                    arange_l = torch.arange(seqlen, device=input_ids.device)
+                    # Minimize padding so the model sees shorter sequences:
+                    # 1. Roll each sequence's left padding to the right, making real
+                    #    tokens contiguous starting at position 0.
+                    # 2. Trim columns of padding that are common to every sequence
+                    #    in the micro-batch (now all on the right after rolling).
+                    # 3. Adjust per-sequence response indices accordingly.
+
+                    left_padding = attention_mask.argmax(dim=1)  # (B,)
+                    shifts = left_padding.long()  # (B,)
+                    arange_l = torch.arange(seqlen, device=input_ids.device)  # (L,)
                     roll_indices = (arange_l + shifts.unsqueeze(1)) % seqlen  # (B, L)
+
                     for key, t in list(model_inputs.items()):
-                        if t.dim() == 2:
+                        if t.dim() == 2:  # (B, L) — input_ids, attention_mask
                             model_inputs[key] = torch.gather(t, 1, roll_indices)
                         elif t.dim() == 3:
-                            if t.shape[0] == batch_size:
+                            if t.shape[0] == batch_size:  # (B, C, L) — e.g. position_ids after transpose
                                 expanded = roll_indices.unsqueeze(1).expand(
                                     -1, t.shape[1], -1
-                                )
+                                )  # (B, C, L)
                                 model_inputs[key] = torch.gather(t, 2, expanded)
-                            else:
+                            else:  # (C, B, L) — e.g. qwen2vl mrope position_ids
                                 expanded = roll_indices.unsqueeze(0).expand(
                                     t.shape[0], -1, -1
-                                )
+                                )  # (C, B, L)
                                 model_inputs[key] = torch.gather(t, 2, expanded)
                         else:
                             rolled = torch.empty_like(t)
@@ -397,14 +404,15 @@ class DataParallelPPOActor(BasePPOActor):
                                     t[i], -int(left_padding[i]), dims=-1
                                 )
                             model_inputs[key] = rolled
+
                     response_start_idx -= left_padding
                     response_end_idx -= left_padding
 
-                    # Trim common right padding (all padding is on the right after rolling)
-                    mask = model_inputs["attention_mask"]
+                    # Trim columns of right padding shared by all sequences
+                    mask = model_inputs["attention_mask"]  # (B, L)
                     last_one_idx = (
                         mask * torch.arange(seqlen, device=mask.device)
-                    ).max(dim=-1)[0]
+                    ).max(dim=-1)[0]  # (B,)
                     common_pad_right = (seqlen - 1 - last_one_idx).min().item()
                     if common_pad_right > 0:
                         model_inputs = {
@@ -425,20 +433,28 @@ class DataParallelPPOActor(BasePPOActor):
                 )
 
                 def _extract_response_tokens(tensor):
+                    """Slice each sequence's response window and pad to uniform length.
+
+                    Args:
+                        tensor: (B, L, ...) model output (logits, log_probs, or entropy).
+
+                    Returns:
+                        (B, max_response_len, ...) padded tensor.
+                    """
                     slices = [
                         tensor[i, int(response_start_idx[i]) : int(response_end_idx[i])] for i in range(batch_size)
                     ]
                     return pad_and_stack(slices, pad_value=0)
 
                 if self.use_fused_kernels:
-                    log_probs = _extract_response_tokens(output.log_probs)
-                    entropy = _extract_response_tokens(output.entropy)
+                    log_probs = _extract_response_tokens(output.log_probs)  # (B, response_len)
+                    entropy = _extract_response_tokens(output.entropy)  # (B, response_len)
                 else:
-                    response_logits = _extract_response_tokens(output.logits)
+                    response_logits = _extract_response_tokens(output.logits)  # (B, response_len, vocab)
                     response_logits.div_(temperature)
 
-                    labels = micro_batch["responses"][:, : response_logits.shape[1]]
-                    log_probs = logprobs_from_logits(logits=response_logits, labels=labels)
+                    labels = micro_batch["responses"][:, : response_logits.shape[1]]  # (B, response_len)
+                    log_probs = logprobs_from_logits(logits=response_logits, labels=labels)  # (B, response_len)
 
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
