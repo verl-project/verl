@@ -26,38 +26,6 @@ def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
     return kld.sum(dim=-1)
 
 
-def jensen_shannon_divergence(log_q: torch.Tensor, log_p: torch.Tensor, beta: float) -> torch.Tensor:
-    """
-    Compute Jensen-Shannon Divergence between two distributions given their log probabilities.
-
-    JSD(β) = β * KL(p || m) + (1 - β) * KL(q || m), where m = beta * p + (1 - beta) * q
-
-    The gradients of JSD(β) behave similarly to forward KL and reverse KL when β is close
-    to 0 and 1 respectively. See https://arxiv.org/abs/2306.13649
-
-    Args:
-        log_q (torch.Tensor):
-            Student log probabilities, shape (batch_size, response_length, vocab_size) or
-            (batch_size, response_length, topk).
-        log_p (torch.Tensor):
-            Teacher log probabilities, same shape as log_q.
-        beta (float):
-            JSD interpolation weight. When beta=0, behaves like forward KL.
-            When beta=1, behaves like reverse KL.
-
-    Returns:
-        torch.Tensor: JSD loss per token, shape (batch_size, response_length).
-    """
-    q = log_q.exp()
-    p = log_p.exp()
-    m = beta * p + (1 - beta) * q
-    log_m = m.log()
-    kl1 = kl_divergence(log_q=log_m, log_p=log_p)
-    kl2 = kl_divergence(log_q=log_m, log_p=log_q)
-    loss = beta * kl1 + (1 - beta) * kl2
-    return loss
-
-
 def kullback_leibler_divergence(log_q: torch.Tensor, log_p: torch.Tensor, loss_mode: str) -> torch.Tensor:
     """
     Compute forward or reverse KL divergence between two distributions given their log probabilities.
