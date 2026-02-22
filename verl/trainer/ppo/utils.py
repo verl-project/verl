@@ -37,7 +37,7 @@ class Role(Enum):
     RewardModel = 5
     ActorRolloutRef = 6
     Env = 7
-    TeacherPolicy = 8
+    TeacherModel = 8
 
     def __str__(self):
         return self._get_role_string()
@@ -51,7 +51,7 @@ class Role(Enum):
             Role.RefPolicy: "ref",
             Role.RewardModel: "rm",
             Role.ActorRolloutRef: "actor_rollout_ref",
-            Role.TeacherPolicy: "teacher",
+            Role.TeacherModel: "teacher",
         }
         return role_mapping.get(self, self.name.lower())
 
@@ -83,7 +83,7 @@ def need_teacher_policy(
     config: DictConfig,
 ) -> bool:
     """Given the config, do we need distillation policy."""
-    return is_distillation_enabled(config.actor_rollout_ref.get("distillation"))
+    return is_distillation_enabled(config.get("distillation"))
 
 
 def need_reward_model(
