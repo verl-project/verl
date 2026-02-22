@@ -1,10 +1,25 @@
-from collections import defaultdict
-from pathlib import Path
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import logging
 import os
-from schema import Constant, DataMap, EventRow
+from collections import defaultdict
+from pathlib import Path
+
 from parser import BaseClusterParser, register_cluster_parser
+from schema import Constant, DataMap, EventRow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,9 +28,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 @register_cluster_parser("mstx")
 class MstxClusterParser(BaseClusterParser):
-
     def __init__(self, params) -> None:
         super().__init__(params)
 
@@ -173,7 +188,7 @@ class MstxClusterParser(BaseClusterParser):
 
     def _get_rank_path_with_role(self, data_map) -> list[DataMap]:
         """Get json path information for all ranks.
-        
+
         This function is intentionally decoupled from class state; pass required
         dependencies in via arguments.
         """
@@ -182,7 +197,7 @@ class MstxClusterParser(BaseClusterParser):
             logger.error("RL analysis currently only supports processing all ranks")
             return []
 
-        rank_ids_with_role= list(data_map.keys())
+        rank_ids_with_role = list(data_map.keys())
         data_paths: list[dict] = []
         for task_role, rank_id in rank_ids_with_role:
             rank_path_list = data_map[(task_role, rank_id)]
@@ -229,9 +244,7 @@ class MstxClusterParser(BaseClusterParser):
     def _get_rank_id(self, dir_name: str):
         files = os.listdir(dir_name)
         for file_name in files:
-            if file_name.startswith(Constant.ASCEND_PROFILER_INFO_HEAD) and file_name.endswith(
-                Constant.JSON_EXTENSION
-            ):
+            if file_name.startswith(Constant.ASCEND_PROFILER_INFO_HEAD) and file_name.endswith(Constant.JSON_EXTENSION):
                 rank_id_str = file_name[len(Constant.ASCEND_PROFILER_INFO_HEAD) : -1 * len(Constant.JSON_EXTENSION)]
                 try:
                     rank_id = int(rank_id_str)

@@ -1,13 +1,28 @@
-from logging import RootLogger
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import stat
 from dataclasses import dataclass
 from typing import TypedDict
 
+
 class DataMap(TypedDict):
     rank_id: int
     role: str
     profiler_data_path: str
+
 
 class EventRow(TypedDict):
     name: str
@@ -18,6 +33,7 @@ class EventRow(TypedDict):
     duration_ms: float
     rank_id: int
     tid: int | str
+
 
 @dataclass
 class FigureConfig:
@@ -33,6 +49,7 @@ class FigureConfig:
     margin_right: int = 50
     margin_top: int = 80
     margin_bottom: int = 50
+
 
 class Constant:
     ROLE = "role"
@@ -51,6 +68,10 @@ class Constant:
     ASCEND_PROFILER_SUFFIX = "ascend_pt"
     ASCEND_PROFILER_INFO_HEAD = "profiler_info_"
     ASCEND_PROFILER_METADATA_JSON = "profiler_metadata.json"
+
+    # for NV profile
+    NVTX_PROFILER_SUFFIX = ".json.gz"
+    NVTX_PROFILER_ASYNC_LLM = "async_llm"
 
     # result files type
     TEXT = "text"
