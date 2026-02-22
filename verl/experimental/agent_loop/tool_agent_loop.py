@@ -88,7 +88,7 @@ class AgentData:
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
 
-        self.routed_experts: None
+        self.routed_experts = None
 
         # Extra fields for dynamic addition, e.g., tool session data
         self.extra_fields: dict[str, Any] = {}
