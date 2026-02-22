@@ -108,32 +108,6 @@ def compute_distillation_inputs(
         raise ValueError
 
 
-def extract_distillation_inputs(
-    stage: Stage, output: TensorDict, config: DistillationConfig
-) -> dict[str, torch.Tensor]:
-    """Extract distillation loss inputs from model output for a given stage. Used in trainer."""
-    loss_config: DistillationLossConfig = config.distillation_loss
-    distillation_settings = get_distillation_loss_settings(loss_config.loss_mode)
-    if isinstance(stage, Stage):
-        stage = stage.value
-    if distillation_settings.use_full:
-        raise NotImplementedError(
-            "Full log probs are not currently supported for distillation loss. Please use top-k log probs instead."
-        )
-    elif distillation_settings.use_estimator:
-        return {TEACHER_LOG_PROBS_KEY: output["log_probs"]}
-    elif distillation_settings.use_topk:
-        if stage == Stage.ACQUIRE_TEACHER_KNOWLEDGE.value:
-            return {
-                TEACHER_TOPK_INDICES_KEY: output[TEACHER_TOPK_INDICES_KEY],
-                TEACHER_TOPK_LOG_PROBS_KEY: output[TEACHER_TOPK_LOG_PROBS_KEY],
-            }
-        else:
-            raise ValueError(f"Unexpected stage: {stage}")
-    else:
-        raise ValueError(f"Unexpected distillation settings: {distillation_settings}")
-
-
 def prepare_distillation_inputs(
     log_prob: torch.Tensor, data: TensorDict, model_output: dict[str, torch.Tensor], config: DistillationConfig
 ) -> DistillationLossInputs:
