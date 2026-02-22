@@ -67,6 +67,8 @@ class DataParallelPPOActor(BasePPOActor):
 
         if self.use_remove_padding and self.truncate_padding:
             raise ValueError("You cannot enable both use_remove_padding and truncate_padding")
+        if self.truncate_padding and self.config.ulysses_sequence_parallel_size > 1:
+            raise ValueError("truncate_padding is not compatible with Ulysses sequence parallelism")
 
         if self.use_remove_padding:
             self.padding_mode = PaddingMode.REMOVE_PADDING
