@@ -371,18 +371,44 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.truncate_padding:
                     # Roll left padding to the right so real tokens are contiguous on the left
                     left_padding = attention_mask.argmax(dim=1)
-                    for key in model_inputs:
-                        rolled = torch.empty_like(model_inputs[key])
-                        for i in range(batch_size):
-                            rolled[i] = torch.roll(model_inputs[key][i], -int(left_padding[i]), dims=-1)
-                        model_inputs[key] = rolled
+                    shifts = left_padding.long()
+                    arange_l = torch.arange(seqlen, device=input_ids.device)
+                    roll_indices = (arange_l + shifts.unsqueeze(1)) % seqlen  # (B, L)
+                    for key, t in list(model_inputs.items()):
+                        if t.dim() == 2:
+                            model_inputs[key] = torch.gather(t, 1, roll_indices)
+                        elif t.dim() == 3:
+                            if t.shape[0] == batch_size:
+                                expanded = roll_indices.unsqueeze(1).expand(
+                                    -1, t.shape[1], -1
+                                )
+                                model_inputs[key] = torch.gather(t, 2, expanded)
+                            else:
+                                expanded = roll_indices.unsqueeze(0).expand(
+                                    t.shape[0], -1, -1
+                                )
+                                model_inputs[key] = torch.gather(t, 2, expanded)
+                        else:
+                            rolled = torch.empty_like(t)
+                            for i in range(batch_size):
+                                rolled[i] = torch.roll(
+                                    t[i], -int(left_padding[i]), dims=-1
+                                )
+                            model_inputs[key] = rolled
                     response_start_idx -= left_padding
                     response_end_idx -= left_padding
 
                     # Trim common right padding (all padding is on the right after rolling)
-                    common_pad_right = model_inputs["attention_mask"].flip(dims=[-1]).argmax(dim=-1).min().item()
+                    mask = model_inputs["attention_mask"]
+                    last_one_idx = (
+                        mask * torch.arange(seqlen, device=mask.device)
+                    ).max(dim=-1)[0]
+                    common_pad_right = (seqlen - 1 - last_one_idx).min().item()
                     if common_pad_right > 0:
-                        model_inputs = {k: t[..., : seqlen - common_pad_right] for k, t in model_inputs.items()}
+                        model_inputs = {
+                            k: t[..., : seqlen - common_pad_right]
+                            for k, t in model_inputs.items()
+                        }
 
                 extra_args = {}
                 if self.use_fused_kernels:
