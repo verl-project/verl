@@ -813,7 +813,6 @@ class MegatronPPOActor(BasePPOActor):
                 # allgather already execute in optimizer.step in new megatron
                 pass
             else:
-                # raise NotImplementedError
                 logger.warning("Policy update failed, no update is made. This can be caused by gradient overflow in fp16 training.")
 
             if self.config.router_replay.mode in ["R2", "R3"]:
