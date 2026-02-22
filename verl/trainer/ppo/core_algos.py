@@ -1078,8 +1078,8 @@ def agg_loss(
     elif loss_agg_mode == "seq-mean-token-sum-norm":
         if loss_scale_factor is None:
             raise ValueError(
-                f"WARNING: {loss_agg_mode=} but {loss_scale_factor=}. "
-                f'If not intented for custom scaling factor, try setting loss_agg_mode="seq-mean-token-sum".'
+                f"{loss_agg_mode=} but {loss_scale_factor=}. "
+                'If not intented for custom scaling factor, try setting loss_agg_mode="seq-mean-token-sum".'
             )
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
         loss = torch.sum(seq_losses) / loss_scale_factor * dp_size
