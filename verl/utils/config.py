@@ -72,7 +72,9 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
 
 
 def validate_config(
-    config: DictConfig, use_reference_policy: bool, use_critic: bool
+    config: DictConfig,
+    use_reference_policy: bool,
+    use_critic: bool,
 ) -> None:
     """Validate an OmegaConf DictConfig.
 
@@ -156,7 +158,6 @@ def validate_config(
                 config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu,
                 "actor_rollout_ref.ref",
             )
-
 
         #  The rollout section also has log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
         check_mutually_exclusive(
