@@ -15,14 +15,8 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
-# Whether to enable separate resource pool for teacher model(s)
-enable_resource_pool: false
-
-# Number of GPUs per node to use for distillation teacher model(s)
-n_gpus_per_node: 8
-
-# Number of nodes to use for distillation teacher model(s)
-nnodes: 0
+# we launch num_workers teacher managers to parallelize the teacher logprob computation
+num_workers: 8
 
 # distillation loss config
 distillation_loss:
@@ -55,10 +49,14 @@ distillation_loss:
 # teacher model config
 teacher_model:
   _target_: verl.workers.config.DistillationTeacherModelConfig
-  # Whether to deploy the model to a separate resource pool.
-  # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
-  enable_resource_pool: False
+
+  # Whether to enable separate resource pool for teacher model(s)
+  enable_resource_pool: false
+
+  # Number of GPUs per node to use for distillation teacher model(s)
   n_gpus_per_node: 8
+
+  # Number of nodes to use for distillation teacher model(s)
   nnodes: 0
 
   model_path: null
