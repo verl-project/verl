@@ -29,6 +29,7 @@ __all__ = [
     "TrainingWorkerConfig",
     "TorchtitanEngineConfig",
     "VeOmniEngineConfig",
+    "AutomodelEngineConfig",
     "EngineConfig",
     "EngineRouterReplayConfig",
 ]
@@ -367,6 +368,51 @@ class TorchtitanEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["torchtitan"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class AutomodelEngineConfig(EngineConfig):
+    """Configuration for Automodel (nemo_automodel) backend.
+
+    The Automodel backend uses NeMoAutoModelForCausalLM for model loading and
+    supports FSDP2, MegatronFSDP, and DDP distributed strategies with optional
+    TP, CP, and EP parallelism.
+
+    Args:
+        strategy (str): Backend strategy identifier, must be "automodel".
+        distributed_strategy (str): Distributed training strategy: "fsdp2", "megatron_fsdp", or "ddp".
+        tp_size (int): Tensor parallel size.
+        pp_size (int): Pipeline parallel size (only pp_size=1 supported initially).
+        cp_size (int): Context parallel size.
+        ep_size (int): Expert parallel size for MoE models.
+        activation_checkpointing (bool): Whether to enable activation checkpointing.
+        enable_fp8 (bool): Whether to enable FP8 training.
+        enable_compile (bool): Whether to enable torch.compile for the model.
+        entropy_from_logits_with_chunking (bool): Whether to use chunked entropy computation.
+        use_torch_compile (bool): Whether to use torch.compile for entropy computation.
+        entropy_checkpointing (bool): Whether to use checkpointing for entropy computation.
+    """
+
+    strategy: str = "automodel"
+    distributed_strategy: str = "fsdp2"
+    tp_size: int = 1
+    pp_size: int = 1
+    cp_size: int = 1
+    ep_size: int = 1
+    activation_checkpointing: bool = False
+    enable_fp8: bool = False
+    enable_compile: bool = False
+    entropy_from_logits_with_chunking: bool = False
+    use_torch_compile: bool = True
+    entropy_checkpointing: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.strategy == "automodel", f"strategy must be 'automodel', got {self.strategy}"
+        assert self.distributed_strategy in ["fsdp2", "megatron_fsdp", "ddp"], (
+            f"distributed_strategy {self.distributed_strategy} not supported"
+        )
+        assert self.pp_size == 1, "Pipeline parallelism (pp_size > 1) is not yet supported for automodel backend"
 
 
 @dataclass

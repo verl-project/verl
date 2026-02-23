@@ -26,6 +26,7 @@ __all__ = [
     "build_optimizer",
     "VeOmniOptimizerConfig",
     "TorchtitanOptimizerConfig",
+    "AutomodelOptimizerConfig",
 ]
 
 
@@ -168,6 +169,43 @@ class TorchtitanOptimizerConfig(OptimizerConfig):
     eps: float = 1e-8
     decay_type: str = "linear"
     min_lr_factor: float = 0.0
+
+
+@dataclass
+class AutomodelOptimizerConfig(OptimizerConfig):
+    """Automodel optimizer configuration extending base OptimizerConfig.
+
+    Uses the same optimizer building mechanism as FSDP (dynamic import from optimizer_impl).
+    LR scheduling is handled by Automodel's OptimizerParamScheduler.
+
+    Args:
+        optimizer (str): Optimizer class name (e.g., "AdamW").
+        optimizer_impl (str): Module path to import optimizer from (e.g., "torch.optim").
+        lr (float): Learning rate (maps to max_lr in OptimizerParamScheduler).
+        init_lr_ratio (Optional[float]): Initial LR ratio for warmup start (init_lr = lr * init_lr_ratio).
+        min_lr_ratio (Optional[float]): Minimum LR ratio after decay (min_lr = lr * min_lr_ratio).
+        lr_scheduler_type (str): LR decay style: "constant", "cosine", "linear", or "inverse-square-root".
+        wd_incr_style (str): Weight decay increment style: "constant", "linear", or "cosine".
+        num_cycles (float): Kept for backward compatibility (unused by Automodel scheduler).
+        zero_indexed_step (bool): Kept for backward compatibility (unused by Automodel scheduler).
+    """
+
+    _mutable_fields = OptimizerConfig._mutable_fields.copy()
+    _mutable_fields.add("lr_scheduler_type")
+
+    optimizer: str = "AdamW"
+    optimizer_impl: str = "torch.optim"
+    init_lr_ratio: Optional[float] = 0.1
+    min_lr_ratio: Optional[float] = 0.01
+    lr_scheduler_type: str = "cosine"
+    wd_incr_style: str = "constant"
+    num_cycles: float = 0.5
+    override_optimizer_config: Optional[dict] = None
+    zero_indexed_step: bool = True
+
+    def __post_init__(self):
+        assert self.lr_scheduler_type in ["constant", "cosine", "linear", "inverse-square-root"]
+        return super().__post_init__()
 
 
 def build_optimizer(parameters, config: FSDPOptimizerConfig):
