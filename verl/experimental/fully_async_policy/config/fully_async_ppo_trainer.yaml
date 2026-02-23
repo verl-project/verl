@@ -27,6 +27,9 @@ async_training:
   # whether to use trainer do_validate
   use_trainer_do_validate: False
 
+  # wether validation is performed concurrently with rollouts
+  parallel_validate_and_rollout: False
+
 # Rollout config
 rollout:
 
@@ -47,6 +50,9 @@ rollout:
 
   # Test frequency, how many times a parameter update triggers a validation
   test_freq: 1
+
+  # Max concurrent samples processed per rollout replica
+  max_concurrent_samples_per_replica: 16
 
 data:
   # Number of samples generated, currently only support 1
