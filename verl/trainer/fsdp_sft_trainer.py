@@ -458,7 +458,8 @@ class FSDPSFTTrainer:
 
             if self.config.data.balance_dp_token:
                 torch.distributed.all_reduce(valid_token_this_rank)
-                dp_size = self.ulysses_device_mesh.size("dp") if use_sp else torch.distributed.get_world_size()
+                # Valid token is reduced over all ranks (including SP ranks), set dp size to world size
+                dp_size = torch.distributed.get_world_size()
             else:
                 dp_size = 1
 
