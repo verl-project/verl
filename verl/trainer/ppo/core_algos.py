@@ -763,7 +763,7 @@ def compute_optimal_token_baseline_advantage(
     old_log_probs: torch.Tensor,
     sum_pi_squared: torch.Tensor,
     rollout_is_weights: torch.Tensor = None,
-    handle_zero_tail: bool = False,
+    handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
