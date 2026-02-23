@@ -1,5 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +20,7 @@ import torch
 from hydra import compose, initialize_config_dir
 from PIL import Image
 
-from verl.experimental.reward_loop import DiffusionRewardLoopManager
+from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
 from verl.utils import hf_tokenizer
 
@@ -81,7 +80,7 @@ def test_diffusion_reward_model_manager():
     config.reward.custom_reward_function.path = "tests/experimental/reward_loop/reward_fn.py"
     config.reward.custom_reward_function.name = "compute_score_ocr"
     config.reward.num_workers = 1
-    config.reward.reward_manager.name = "diffusion"
+    config.reward.reward_manager.name = "image"
     config.reward.reward_model.enable = True
     config.reward.reward_model.enable_resource_pool = True
     config.reward.reward_model.n_gpus_per_node = 2
@@ -95,7 +94,7 @@ def test_diffusion_reward_model_manager():
     config.reward.reward_model.rollout.response_length = 4096
 
     # 1. init reward model manager
-    reward_loop_manager = DiffusionRewardLoopManager(config)
+    reward_loop_manager = RewardLoopManager(config)
 
     # 2. init test data
     rollout_tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path)

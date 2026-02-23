@@ -21,6 +21,7 @@ actor_rollout_ref:
       min_lr_ratio: 0.0
       num_cycles: 0.5
       lr_scheduler_type: constant
+      zero_indexed_step: true
       warmup_style: null
       override_optimizer_config: null
     fsdp_config:
@@ -126,6 +127,16 @@ actor_rollout_ref:
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
     calculate_sum_pi_squared: false
     sum_pi_squared_checkpointing: false
+    qat:
+      enable: false
+      mode: w4a16
+      group_size: 16
+      ignore_patterns:
+      - lm_head
+      - embed_tokens
+      - re:.*mlp.gate$
+      activation_observer: static_minmax
+      quantization_config_path: null
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: ${actor_rollout_ref.actor.strategy}
@@ -313,6 +324,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
+    qat: ${oc.select:actor_rollout_ref.actor.qat,null}
     layered_summon: false
   model:
     _target_: verl.workers.config.DiffusersModelConfig
@@ -403,6 +415,7 @@ critic:
     min_lr_ratio: 0.0
     num_cycles: 0.5
     lr_scheduler_type: constant
+    zero_indexed_step: true
     warmup_style: null
     override_optimizer_config: null
   model:

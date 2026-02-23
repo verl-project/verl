@@ -42,7 +42,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import ActorConfig, DiffusersModelConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -182,17 +182,20 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # Here each metric in metrics can be a list (micro-batch metrics) or a singleton
         # we should always sum the loss of each micro-batch as we scale by global_bsz/global_token
         loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
-        torch.distributed.all_reduce(
-            loss, op=torch.distributed.ReduceOp.AVG, group=self.engine.get_data_parallel_group()
-        )
+        dp_group = self.engine.get_data_parallel_group()
+        if dp_group is not None:
+            torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
         loss = loss.item()
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
         lr = metrics.pop("lr", None)
 
-        # For other metrics, we perform all gather in dp group
-        final_metrics = allgather_dict_into_dict(data=metrics, group=self.engine.get_data_parallel_group())
+        # For other metrics, we perform all gather in dp group (only if DP > 1)
+        if dp_group is not None:
+            final_metrics = allgather_dict_into_dict(data=metrics, group=dp_group)
+        else:
+            final_metrics = metrics
         final_metrics["loss"] = loss
         if grad_norm is not None:
             final_metrics["grad_norm"] = grad_norm
@@ -470,7 +473,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        model_config = omega_conf_to_dataclass(self.config.model)
+        model_config: HFModelConfig | DiffusersModelConfig = omega_conf_to_dataclass(self.config.model)
 
         # 1. build reference model
         if "ref" in self.role:

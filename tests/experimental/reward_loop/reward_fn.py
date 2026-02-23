@@ -1,5 +1,4 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,7 +33,7 @@ Problem:
 Solution:
 {solution}
 
-Please evaluate how well the solution addresses the problem.
+Please evaluate how well the solution addresses the problem. 
 Give a score from 1 to 10, where:
 - 1 means the solution is completely irrelevant or incorrect.
 - 5 means the solution is partially correct but incomplete or not well reasoned.

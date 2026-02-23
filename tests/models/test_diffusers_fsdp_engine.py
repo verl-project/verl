@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,10 +23,10 @@ import torch
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
+from verl.utils.diffusers.schedulers import FlowMatchSDEDiscreteScheduler
+from verl.utils.diffusers.utils import set_timesteps
 from verl.workers.config import DiffusersModelConfig, FSDPActorConfig, TrainingWorkerConfig
 from verl.workers.engine_workers import TrainingWorker
-from verl.workers.utils.diffusers_patch.schedulers import FlowMatchSDEDiscreteScheduler
-from verl.workers.utils.diffusers_patch.utils import set_timesteps
 from verl.workers.utils.losses import ppo_loss
 from verl.workers.utils.padding import embeds_padding_2_no_padding
 

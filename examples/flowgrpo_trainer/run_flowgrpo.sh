@@ -2,6 +2,9 @@
 set -x
 export TOKENIZERS_PARALLELISM="false"
 
+ocr_train_path=$HOME/data/ocr/train.parquet
+ocr_test_path=$HOME/data/ocr/test.parquet
+
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
@@ -9,17 +12,14 @@ reward_path=tests/experimental/reward_loop/reward_fn.py
 reward_model_name=$HOME/models/Qwen/Qwen2.5-VL-3B-Instruct
 
 
-python3 -m verl.trainer.main_flowgrpo \
+python3 -m verl.trainer.main_ppo --config-path=config \
+    --config-name='ppo_diffusion_trainer.yaml' \
     algorithm.adv_estimator=flow_grpo \
-    data.train_files=$HOME/dataset/ocr/train.txt \
-    data.val_files=$HOME/dataset/ocr/test.txt \
+    data.train_files=$ocr_train_path \
+    data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
-    data.val_max_samples=128 \
     data.max_prompt_length=1058 \
     data.filter_overlong_prompts=True \
-    data.data_source=ocr \
-    data.custom_cls.path=verl/utils/dataset/qwen_dataset.py \
-    data.custom_cls.name=QwenDataset \
     +data.apply_chat_template_kwargs.max_length=1058 \
     +data.apply_chat_template_kwargs.padding=True \
     +data.apply_chat_template_kwargs.truncation=True \
@@ -32,7 +32,6 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
-    actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
@@ -41,16 +40,18 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
-    actor_rollout_ref.rollout.guidance_scale=1.0 \
+    actor_rollout_ref.rollout.guidance_scale=4.0 \
     actor_rollout_ref.rollout.agent.default_agent_loop=diffusion_single_turn_agent \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.max_model_len=1058 \
-    actor_rollout_ref.rollout.sde_window_size=3 \
+    actor_rollout_ref.rollout.noise_level=1.0 \
+    actor_rollout_ref.rollout.sde_window_size=2 \
     actor_rollout_ref.rollout.sde_window_range="[0,5]" \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.custom_pipeline=verl.workers.utils.vllm_omni_patch.pipelines.pipeline_qwenimage.QwenImagePipelineWithLogProb \
+    actor_rollout_ref.rollout.val_kwargs.num_inference_steps=50 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.custom_pipeline=verl.utils.vllm_omni.pipelines.QwenImagePipelineWithLogProb \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
-    reward.reward_manager.name=diffusion \
+    reward.reward_manager.name=image \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.enable=True \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
@@ -61,8 +62,9 @@ python3 -m verl.trainer.main_flowgrpo \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_ocr \
     trainer.log_val_generations=8 \
+    trainer.val_before_train=False \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=100 \
-    trainer.test_freq=5 \
+    trainer.save_freq=30 \
+    trainer.test_freq=30 \
     trainer.total_epochs=15 $@

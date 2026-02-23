@@ -2038,6 +2038,20 @@ def kl_penalty_forward(logprob: torch.FloatTensor, ref_logprob: torch.FloatTenso
     raise NotImplementedError
 
 
+def kl_penalty_image(
+    prev_sample_mean: torch.Tensor, ref_prev_sample_mean: torch.Tensor, std_dev_t: torch.Tensor
+) -> torch.Tensor:
+    """Compute KL divergence given previous sample mean and reference previous sample mean (for images or videos).
+
+    Args:
+        prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
+        ref_prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
+        std_dev_t: (torch.Tensor) shape is (bs, 1, 1)
+    """
+    kl_loss = ((prev_sample_mean - ref_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t**2)
+    return kl_loss.mean()
+
+
 def compute_pf_ppo_reweight_data(
     data,
     reweight_method: str = "pow",

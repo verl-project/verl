@@ -568,7 +568,7 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     return total_norm
 
 
-def layered_summon_lora_params(fsdp_module) -> OrderedDict:
+def layered_summon_lora_params(fsdp_module, is_diffusers=False) -> OrderedDict:
     from peft.utils.save_and_load import get_peft_model_state_dict
 
     def __prefix_submodules(module, prefix):
@@ -577,58 +577,33 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
                 yield name, submodule
 
     lora_params = OrderedDict()
-    prefix_list = [
-        # fsdp
-        "_fsdp_wrapped_module.base_model.model.",
-        "_fsdp_wrapped_module.base_model.model.model.",
-        "_fsdp_wrapped_module.base_model.model.model.layers.",
-        "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
-        # fsdp2
-        "base_model.model.",
-        "base_model.model.model.",
-        "base_model.model.model.layers.",
-        "base_model.model.model.language_model.layers.",
-    ]
+    if is_diffusers:
+        prefix_list = [
+            # fsdp
+            "_fsdp_wrapped_module.transformer_blocks.",
+            # fsdp2
+            "transformer_blocks.",
+        ]
+    else:
+        prefix_list = [
+            # fsdp
+            "_fsdp_wrapped_module.base_model.model.",
+            "_fsdp_wrapped_module.base_model.model.model.",
+            "_fsdp_wrapped_module.base_model.model.model.layers.",
+            "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
+            # fsdp2
+            "base_model.model.",
+            "base_model.model.model.",
+            "base_model.model.model.layers.",
+            "base_model.model.model.language_model.layers.",
+        ]
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for prefix in prefix_list:
         for name, submodule in __prefix_submodules(fsdp_module, prefix):
-            prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
-            if name.endswith(".model") or name.endswith(".layers"):
-                continue
-            if fsdp_version(submodule) > 0:
-                with FSDP.summon_full_params(submodule, writeback=False):
-                    sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=submodule.state_dict())
-                    sub_lora_params = {
-                        f"{prefix}.{name}": param.full_tensor().detach().cpu()
-                        if hasattr(param, "full_tensor")
-                        else param.detach().cpu()
-                        for name, param in sub_lora_params.items()
-                    }
-                    lora_params.update(sub_lora_params)
-                    submodule._is_root = False
-                get_torch_device().empty_cache()
-    return lora_params
-
-
-def layered_summon_lora_params_diffusers(fsdp_module) -> OrderedDict:
-    from peft.utils.save_and_load import get_peft_model_state_dict
-
-    def __prefix_submodules(module, prefix):
-        for name, submodule in module.named_modules():
-            if name.startswith(prefix) and "." not in name[len(prefix) :]:
-                yield name, submodule
-
-    lora_params = OrderedDict()
-    prefix_list = [
-        # fsdp
-        "_fsdp_wrapped_module.transformer_blocks.",
-        # fsdp2
-        "transformer_blocks.",
-    ]
-    peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
-    for prefix in prefix_list:
-        for name, submodule in __prefix_submodules(fsdp_module, prefix):
-            prefix = name.replace("_fsdp_wrapped_module.", "")
+            if is_diffusers:
+                prefix = name.replace("_fsdp_wrapped_module.", "")
+            else:
+                prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
             if name.endswith(".model") or name.endswith(".layers"):
                 continue
             if fsdp_version(submodule) > 0:
@@ -664,9 +639,7 @@ def collect_lora_params(
                     "To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let "
                     "rollout.load_format=safetensors"
                 )
-            lora_params = (
-                layered_summon_lora_params_diffusers(module) if is_diffusers else layered_summon_lora_params(module)
-            )
+            lora_params = layered_summon_lora_params(module, is_diffusers=is_diffusers)
         else:
             with FSDP.summon_full_params(module, writeback=False):
                 if base_sync_done:

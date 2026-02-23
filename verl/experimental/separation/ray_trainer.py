@@ -404,15 +404,12 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
         with marked_timer("gen", timing_raw, color="red"):
-            if not self.async_rollout_mode:
-                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
-            else:
-                if self.curr_step_profile:
-                    self.async_rollout_manager.start_profile(global_step=self.global_steps)
-                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                self.checkpoint_manager.sleep_replicas()
-                if self.curr_step_profile:
-                    self.async_rollout_manager.stop_profile()
+            if self.curr_step_profile:
+                self.async_rollout_manager.start_profile(global_step=self.global_steps)
+            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+            self.checkpoint_manager.sleep_replicas()
+            if self.curr_step_profile:
+                self.async_rollout_manager.stop_profile()
 
             timing_raw.update(gen_batch_output.meta_info["timing"])
             gen_batch_output.meta_info.pop("timing", None)
@@ -421,15 +418,12 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             with marked_timer("gen_max", timing_raw, color="purple"):
                 gen_baseline_batch = deepcopy(gen_batch)
                 gen_baseline_batch.meta_info["do_sample"] = False
-                if not self.async_rollout_mode:
-                    gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-                else:
-                    if self.curr_step_profile:
-                        self.async_rollout_manager.start_profile()
-                    gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                    self.checkpoint_manager.sleep_replicas()
-                    if self.curr_step_profile:
-                        self.async_rollout_manager.stop_profile()
+                if self.curr_step_profile:
+                    self.async_rollout_manager.start_profile()
+                gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                self.checkpoint_manager.sleep_replicas()
+                if self.curr_step_profile:
+                    self.async_rollout_manager.stop_profile()
                 batch = batch.union(gen_baseline_output)
                 # compute reward model score on batch
                 rm_scores = None

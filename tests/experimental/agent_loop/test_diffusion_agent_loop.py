@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,9 +17,8 @@ import numpy as np
 import pytest
 import ray
 from omegaconf import DictConfig
-from PIL import Image
 
-from verl.experimental.agent_loop.diffusion_agent_loop import DiffusionAgentLoopManager
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 
 
@@ -38,18 +37,17 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.enforce_eager = True
     config.actor_rollout_ref.rollout.n = 4
     config.actor_rollout_ref.rollout.num_inference_steps = 10
-    config.actor_rollout_ref.rollout.guidance_scale = 1.0
+    config.actor_rollout_ref.rollout.guidance_scale = 4.0
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
     config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
-    config.actor_rollout_ref.rollout.sde_window_size = 3
+    config.actor_rollout_ref.rollout.noise_level = 1.0
+    config.actor_rollout_ref.rollout.sde_window_size = 2
     config.actor_rollout_ref.rollout.sde_window_range = [0, 5]
 
-    qwen_pipeline = "verl.workers.utils.vllm_omni_patch.pipelines.pipeline_qwenimage.QwenImagePipelineWithLogProb"
+    qwen_pipeline = "verl.utils.vllm_omni.pipelines.QwenImagePipelineWithLogProb"
     config.actor_rollout_ref.rollout.engine_kwargs.vllm_omni = {"custom_pipeline": qwen_pipeline}
-    config.data.custom_cls.path = "verl/utils/dataset/qwen_dataset.py"
-    config.data.custom_cls.name = "QwenDataset"
-    config.reward.reward_manager.name = "diffusion"
+    config.reward.reward_manager.name = "image"
     config.trainer.n_gpus_per_node = 4
 
     tokenizer_max_length = 1024
@@ -76,7 +74,7 @@ def test_single_turn(init_config):
         }
     )
 
-    agent_loop_manager = DiffusionAgentLoopManager(init_config)
+    agent_loop_manager = AgentLoopManager(init_config)
 
     system_prompt = (
         "Describe the image by detailing the color, shape, size, texture, quantity, text, "
@@ -93,9 +91,19 @@ def test_single_turn(init_config):
             ]
         )
 
+    raw_negative_prompts = []
+    for user_prompt in user_prompts:
+        raw_negative_prompts.append(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": " "},
+            ]
+        )
+
     batch = DataProto(
         non_tensor_batch={
             "raw_prompt": np.array(raw_prompts),
+            "raw_negative_prompt": np.array(raw_negative_prompts),
             "data_source": np.array(["jpeg_compressibility"] * len(raw_prompts)),
             "reward_model": np.array([{"style": "rule", "ground_truth": ""}] * len(raw_prompts)),
         },
@@ -120,12 +128,6 @@ def test_single_turn(init_config):
     # check turns
     num_turns = result.non_tensor_batch["__num_turns__"]
     assert np.all(num_turns == 2)
-
-    # TODO: for visualization, drop later
-    images_pil = (result.batch["responses"].permute(0, 2, 3, 1).numpy() * 255.0).astype("uint8")
-    for i, image in enumerate(images_pil):
-        image_path = os.path.join(f"{i}.jpg")
-        Image.fromarray(image).save(image_path)
 
     print("Test passed!")
     ray.shutdown()

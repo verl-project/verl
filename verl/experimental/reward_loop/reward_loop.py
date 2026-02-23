@@ -13,14 +13,17 @@
 # limitations under the License.
 
 import asyncio
+import base64
 import logging
 import os
+from io import BytesIO
 
 import aiohttp
 import numpy as np
 import ray
 import torch
 from omegaconf import DictConfig, open_dict
+from PIL import Image
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
@@ -28,6 +31,7 @@ from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
+from verl.utils.ray_utils import get_event_loop
 
 from .reward_model import RewardModelManager
 
@@ -114,9 +118,10 @@ class RewardLoopWorker:
         self.config = config
         self.reward_router_address = reward_router_address
         self._init_reward_fn()
+        self.loop = get_event_loop()
 
     def _init_reward_fn(self):
-        input_tokenizer_local_path = copy_to_local(self.config.actor_rollout_ref.model.path)
+        input_tokenizer_local_path = copy_to_local(self.config.actor_rollout_ref.model.tokenizer_path)
         self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
         self.reward_model_tokenizer = None
         if self.config.reward.reward_model.enable:
@@ -199,17 +204,32 @@ class RewardLoopWorker:
         chat: list = list(data_item.non_tensor_batch["raw_prompt"])
 
         # extract response
-        response_ids = data_item.batch["responses"]
-        response_length = response_ids.shape[-1]
-        valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
-        valid_response_ids = response_ids[:valid_response_length]
+        response = data_item.batch["responses"]
+        if response.ndim == 3:
+            # handling multi-modal response
+            response_image = response
+            if isinstance(response_image, torch.Tensor):
+                response_image = response_image.float().permute(1, 2, 0).cpu().numpy()
+            assert response_image.shape[-1] == 3, "must be in HWC format"
+            response_image = (response_image * 255).round().clip(0, 255).astype(np.uint8)
+            response_image = Image.fromarray(response_image)
 
-        # decode
-        rollout_response = self.input_tokenizer.decode(valid_response_ids)
-        # remove bos and eos
-        rollout_response = rollout_response.replace(self.input_tokenizer.eos_token, "")
+            image_base64 = await self.loop.run_in_executor(None, self._pil_image_to_base64, response_image)
+            query = self.prepare_query_for_multi_modal(image_base64)
 
-        chat.append({"role": "assistant", "content": rollout_response})
+            chat.append({"role": "assistant", "content": query})
+        else:
+            response_ids = response
+            response_length = response_ids.shape[-1]
+            valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+
+            # decode
+            rollout_response = self.input_tokenizer.decode(valid_response_ids)
+            # remove bos and eos
+            rollout_response = rollout_response.replace(self.input_tokenizer.eos_token, "")
+
+            chat.append({"role": "assistant", "content": rollout_response})
 
         rm_prompt = self.reward_model_tokenizer.apply_chat_template(
             chat,
@@ -267,6 +287,22 @@ class RewardLoopWorker:
 
         return {"reward_score": rm_score}
 
+    def _pil_image_to_base64(self, image: Image.Image) -> str:
+        buffered = BytesIO()
+        image.save(buffered, format="PNG")
+        encoded_image_text = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        base64_image = f"data:image;base64,{encoded_image_text}"
+        return base64_image
+
+    def prepare_query_for_multi_modal(self, image_base64: str) -> list:
+        query = [
+            {
+                "type": "image_url",
+                "image_url": {"url": image_base64},
+            },
+        ]
+        return query
+
 
 class RewardLoopManager:
     """
@@ -319,12 +355,15 @@ class RewardLoopManager:
 
         # compute rm score
         scores = [item["reward_score"] for item in outputs_flat]
-        prompt_length = data.batch["prompts"].size(1)
-        valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
-        rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        rm_scores[torch.arange(rm_scores.size(0)), valid_response_length - 1] = torch.tensor(
-            scores, dtype=torch.float32
-        )
+        if self.config.reward.reward_manager.name == "image":
+            rm_scores = torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
+        else:
+            prompt_length = data.batch["prompts"].size(1)
+            valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
+            rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+            rm_scores[torch.arange(rm_scores.size(0)), valid_response_length - 1] = torch.tensor(
+                scores, dtype=torch.float32
+            )
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
 
         reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]

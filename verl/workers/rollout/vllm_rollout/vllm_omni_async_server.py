@@ -1,5 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -195,11 +194,15 @@ class vLLMOmniHttpServer:
             set_expandable_segments(True)
 
         quantization = self.config.quantization
-
-        if quantization is not None:
-            raise NotImplementedError("vLLM-Omni server does not support quantization yet.")
-
         hf_overrides = {}
+
+        # Handle QAT (Quantization-Aware Training) configuration
+        qat_config_dict = getattr(self.config, "qat", {}) or {}
+        if qat_config_dict.get("enable", False):
+            raise NotImplementedError("vLLM-Omni server does not support QAT (Quantization-Aware Training) yet.")
+        elif quantization is not None:
+            # Handle other quantization methods (fp8, torchao)
+            raise NotImplementedError("vLLM-Omni server does not support quantization yet.")
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
@@ -376,6 +379,7 @@ class vLLMOmniHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        negative_prompt_ids: Optional[list[int]] = None,
         priority: int = 0,
     ) -> ImageOutput:
         """Generate sequence with token-in-image-out."""
@@ -410,6 +414,7 @@ class vLLMOmniHttpServer:
             request_id=request_id,
             lora_request=lora_request,
             priority=priority,
+            negative_prompt_ids=negative_prompt_ids,
             **vllm_omni_sampling_params,
         )
 

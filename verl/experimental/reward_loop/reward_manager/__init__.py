@@ -17,14 +17,14 @@ from .dapo import DAPORewardManager
 from .naive import NaiveRewardManager
 from .limited import RateLimitedRewardManager
 from .remote import RemoteRewardManager
-from .diffusion import DiffusionRewardManager
+from .image import ImageRewardManager
 
 __all__ = [
     "DAPORewardManager",
     "NaiveRewardManager",
     "RateLimitedRewardManager",
     "RemoteRewardManager",
-    "DiffusionRewardManager",
+    "ImageRewardManager",
     "register",
     "get_reward_manager_cls",
 ]

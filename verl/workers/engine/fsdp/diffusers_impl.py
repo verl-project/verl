@@ -1,5 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +16,7 @@ The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 """
 
 import gc
+import json
 import logging
 import os
 import warnings
@@ -59,8 +59,8 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import convert_to_regular_types
+from verl.utils.ulysses import get_ulysses_sequence_parallel_group, set_ulysses_sequence_parallel_group
 from verl.workers.config import DiffusersModelConfig, FSDPEngineConfig, FSDPOptimizerConfig
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, prepare_micro_batches
@@ -175,20 +175,27 @@ class DiffusersFSDPEngine(BaseEngine):
 
         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
         self.ulysses_device_mesh = None
+        self.ulysses_parallel_group = None
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_sequence_parallel_size
         dp_size = self.get_data_parallel_size()
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
                 device_name, mesh_shape=(dp_size, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
             )
+            self.ulysses_parallel_group = self.ulysses_device_mesh["sp"].get_group()
 
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
     def _build_module(self):
         from diffusers import AutoModel
 
         from verl.utils.torch_dtypes import PrecisionType
+
+        # for checkpoint saving
+        def save_config(self, save_directory: str | os.PathLike):
+            output_config_file = os.path.join(save_directory, "config.json")
+            with open(output_config_file, "w", encoding="utf-8") as f:
+                json.dump(self, f, indent=4, sort_keys=True)
 
         torch_dtype = self.engine_config.model_dtype
 
@@ -224,6 +231,11 @@ class DiffusersFSDPEngine(BaseEngine):
 
             if self.model_config.enable_gradient_checkpointing:
                 module.enable_gradient_checkpointing()
+
+            # for checkpoint saving
+            module.can_generate = lambda: False
+            module.config.save_pretrained = save_config.__get__(module.config)
+
         return module
 
     def _build_lora_module(self, module):
@@ -353,8 +365,8 @@ class DiffusersFSDPEngine(BaseEngine):
 
     def _build_scheduler(self):
         # TODO (mike): generalize to other diffusers scheduler later
-        from ...utils.diffusers_patch.schedulers import FlowMatchSDEDiscreteScheduler
-        from ...utils.diffusers_patch.utils import set_timesteps
+        from verl.utils.diffusers.schedulers import FlowMatchSDEDiscreteScheduler
+        from verl.utils.diffusers.utils import set_timesteps
 
         scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
             pretrained_model_name_or_path=self.model_config.local_path, subfolder="scheduler"
@@ -648,13 +660,11 @@ class DiffusersFSDPEngine(BaseEngine):
         return model_inputs, negative_model_inputs
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
-        use_kl_loss = tu.get_non_tensor_data(micro_batch, "use_kl_loss", False)
         log_prob, prev_sample_mean, std_dev_t = output
         model_output = {}
         model_output["log_probs"] = log_prob
-        if use_kl_loss:
-            model_output["prev_sample_mean"] = prev_sample_mean
-            model_output["std_dev_t"] = std_dev_t
+        model_output["prev_sample_mean"] = prev_sample_mean
+        model_output["std_dev_t"] = std_dev_t
         return model_output
 
     def forward_model_with_scheduler(self, model_inputs, negative_model_inputs, micro_batch, step):
@@ -704,6 +714,10 @@ class DiffusersFSDPEngine(BaseEngine):
             )
             if micro_batch.get("ref_log_prob", None) is not None:
                 data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
+
+            if micro_batch.get("ref_prev_sample_mean", None) is not None:
+                data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
+
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
@@ -910,12 +924,13 @@ class EngineEvalModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, DiffusersFSDPEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.eval()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, DiffusersFSDPEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -935,11 +950,12 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, DiffusersFSDPEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, DiffusersFSDPEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
         self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)

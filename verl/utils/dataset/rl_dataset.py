@@ -140,6 +140,9 @@ class RLHFDataset(Dataset):
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
 
+        # For diffusion model training only
+        self.negative_prompt_key = config.get("negative_prompt_key", "negative_prompt")
+
         self._download()
         self._read_files_and_tokenize()
 
@@ -282,7 +285,7 @@ class RLHFDataset(Dataset):
     def __len__(self):
         return len(self.dataframe)
 
-    def _build_messages(self, example: dict):
+    def _build_messages(self, example: dict, key: str):
         """Replace <image> and <video> placeholder in messages with corresponding image and video
         which is required by processor.apply_chat_template.
         - <image>: {"type": "image", **image}
@@ -294,7 +297,7 @@ class RLHFDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[self.prompt_key]
+        messages: list = example[key]
         # When concatenating image and video datasets, pop will return None for image or video sample
         images = example.pop(self.image_key, None) or []
         videos = example.pop(self.video_key, None) or []
@@ -341,7 +344,11 @@ class RLHFDataset(Dataset):
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
         row_dict: dict = self.dataframe[item]
-        row_dict["raw_prompt"] = self._build_messages(row_dict)
+        row_dict["raw_prompt"] = self._build_messages(row_dict, key=self.prompt_key)
+        try:
+            row_dict["raw_negative_prompt"] = self._build_messages(row_dict, key=self.negative_prompt_key)
+        except IndexError:
+            pass
 
         # TODO(wuxibin): We still need a dummy tensor to make sure DataProto.batch is not empty.
         # Remove this after deprecate DataProto by TensorDict.

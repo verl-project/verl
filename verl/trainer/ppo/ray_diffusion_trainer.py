@@ -1,7 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright 2023-2024 SGLang Team
-# Copyright 2025 ModelBest Inc. and/or its affiliates
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -61,52 +58,13 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
-from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import embeds_padding_2_no_padding
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
-    """Apply KL penalty to the token-level rewards.
-
-    This function computes the KL divergence between the reference policy and current policy,
-    then applies a penalty to the token-level rewards based on this divergence.
-
-    Args:
-        data (DataProto): The data containing batched model outputs and inputs.
-        kl_ctrl (core_algos.AdaptiveKLController): Controller for adaptive KL penalty.
-        kl_penalty (str, optional): Type of KL penalty to apply. Defaults to "kl".
-
-    Returns:
-        tuple: A tuple containing:
-            - The updated data with token-level rewards adjusted by KL penalty
-            - A dictionary of metrics related to the KL penalty
-    """
-    response_mask = data.batch["response_mask"]
-    token_level_scores = data.batch["token_level_scores"]
-    batch_size = data.batch.batch_size[0]
-
-    # compute kl between ref_policy and current policy
-    # When apply_kl_penalty, algorithm.use_kl_in_reward=True, so the reference model has been enabled.
-    kld = core_algos.kl_penalty(
-        data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
-    )  # (batch_size, response_length)
-    kld = kld * response_mask
-    beta = kl_ctrl.value
-
-    token_level_rewards = token_level_scores - beta * kld
-
-    current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
-    current_kl = torch.mean(current_kl, dim=0).item()
-
-    # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
-    kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
-    data.batch["token_level_rewards"] = token_level_rewards
-
-    metrics = {"actor/reward_kl_penalty": current_kl, "actor/reward_kl_penalty_coeff": beta}
-
-    return data, metrics
+    raise NotImplementedError("KL penalty is not supported.")
 
 
 def compute_response_mask(data: DataProto):
@@ -464,8 +422,7 @@ class RayFlowGRPOTrainer:
         )
 
         # For agent loop, we need reward model keys to compute score.
-        if self.async_rollout_mode:
-            gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
+        gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
 
         return gen_batch
 
@@ -509,9 +466,6 @@ class RayFlowGRPOTrainer:
 
             test_gen_batch = self._get_gen_batch(test_batch)
             test_gen_batch.meta_info = {
-                "noise_level": self.config.actor_rollout_ref.rollout.val_kwargs.noise_level,
-                "num_inference_steps": self.config.actor_rollout_ref.rollout.val_kwargs.num_inference_steps,
-                "seed": self.config.actor_rollout_ref.rollout.val_kwargs.seed,
                 "recompute_log_prob": False,
                 "validate": True,
                 "global_steps": self.global_steps,
@@ -519,16 +473,9 @@ class RayFlowGRPOTrainer:
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
-            size_divisor = (
-                self.actor_rollout_wg.world_size
-                if not self.async_rollout_mode
-                else self.config.actor_rollout_ref.rollout.agent.num_workers
-            )
+            size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-            else:
-                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+            test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
                 # for colocate reward models, we need to sleep rollout model
@@ -748,6 +695,8 @@ class RayFlowGRPOTrainer:
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
@@ -788,7 +737,7 @@ class RayFlowGRPOTrainer:
             self.ref_policy_wg = self.actor_rollout_wg
 
         # create reward loop manager
-        from verl.experimental.reward_loop import DiffusionRewardLoopManager as RewardLoopManager
+        from verl.experimental.reward_loop import RewardLoopManager
 
         # initalize reward loop manager
         # reward model (colocate or standalone): get resource_pool
@@ -808,7 +757,7 @@ class RayFlowGRPOTrainer:
         if manager_class_fqn:
             AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
-            from verl.experimental.agent_loop import DiffusionAgentLoopManager as AgentLoopManager
+            from verl.experimental.agent_loop import AgentLoopManager
 
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
@@ -1106,8 +1055,11 @@ class RayFlowGRPOTrainer:
                 output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
             # gather output
             log_probs = tu.get(output, "log_probs")
+            prev_sample_mean = tu.get(output, "prev_sample_mean")
             # step 5: rebuild a tensordict and convert to dataproto
-            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
+            ref_log_prob = tu.get_tensordict(
+                {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
+            )
             ref_log_prob = DataProto.from_tensordict(ref_log_prob)
         else:
             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
@@ -1243,7 +1195,7 @@ class RayFlowGRPOTrainer:
                 return
 
         if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
-            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
+            rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
@@ -1294,15 +1246,12 @@ class RayFlowGRPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
-                        else:
-                            if curr_step_profile:
-                                self.async_rollout_manager.start_profile()
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                            self.checkpoint_manager.sleep_replicas()
-                            if curr_step_profile:
-                                self.async_rollout_manager.stop_profile()
+                        if curr_step_profile:
+                            self.async_rollout_manager.start_profile()
+                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                        self.checkpoint_manager.sleep_replicas()
+                        if curr_step_profile:
+                            self.async_rollout_manager.stop_profile()
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)

@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
-from verl.workers.utils.diffusers_patch.schedulers import FlowMatchSDEDiscreteScheduler
-from verl.workers.utils.vllm_omni_patch.data import DiffusionOutput
+from verl.utils.diffusers.schedulers import FlowMatchSDEDiscreteScheduler
+from verl.utils.vllm_omni.data import DiffusionOutput
 
 
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
@@ -195,7 +195,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         req: OmniDiffusionRequest,
         prompt_ids: torch.Tensor | list[int] | None = None,
         prompt_mask: torch.Tensor | None = None,
-        negative_prompt_ids: torch.Tensor | None = None,
+        negative_prompt_ids: torch.Tensor | list[int] | None = None,
         negative_prompt_mask: torch.Tensor | None = None,
         true_cfg_scale: float = 4.0,
         height: int | None = None,
@@ -257,6 +257,9 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
         else:
             batch_size = prompt_embeds.shape[0]
+
+        if isinstance(negative_prompt_ids, list):
+            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         has_neg_prompt = negative_prompt_ids is not None or (
             negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None

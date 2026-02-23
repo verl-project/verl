@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.ppo.ray_diffusion_trainer import RayFlowGRPOTrainer
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
@@ -305,9 +306,13 @@ class TaskRunner:
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        if os.path.exists(os.path.join(local_path, "processor")):
+            processor_path = os.path.join(local_path, "processor")
+        else:
+            processor_path = local_path
+        processor = hf_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=True)
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
@@ -333,7 +338,12 @@ class TaskRunner:
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
+        trainer_cls = (
+            RayFlowGRPOTrainer
+            if config.actor_rollout_ref.model.get("model_type", None) == "diffusion_model"
+            else RayPPOTrainer
+        )
+        trainer = trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,

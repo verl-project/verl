@@ -23,6 +23,14 @@ __all__ = [
 ]
 
 try:
+    from .torchtitan import TorchTitanEngine, TorchTitanEngineWithLMHead
+
+    __all__ += ["TorchTitanEngine", "TorchTitanEngineWithLMHead"]
+except ImportError:
+    TorchTitanEngine = None
+    TorchTitanEngineWithLMHead = None
+
+try:
     from .veomni import VeOmniEngine, VeOmniEngineWithLMHead
 
     __all__ += ["VeOmniEngine", "VeOmniEngineWithLMHead"]

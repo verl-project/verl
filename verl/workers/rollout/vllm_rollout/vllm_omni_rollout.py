@@ -1,5 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,7 +34,6 @@ import ray
 import zmq
 from torch.distributed.device_mesh import DeviceMesh
 
-from verl.third_party.vllm_omni import VLLM_OMNI_SLEEP_LEVEL
 from verl.utils.device import get_device_id, is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
@@ -71,12 +69,7 @@ class vLLMOmniServerAdapter(ServerAdapter):
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
 
-        if config.layered_summon or config.expert_parallel_size > 1:
-            logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
-            self.sleep_level = 1
-        else:
-            self.sleep_level = VLLM_OMNI_SLEEP_LEVEL
-
+        self.sleep_level = 1
         self.device_uuid = get_device_uuid(get_device_id())
         self.zmq_context = zmq.Context()
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"

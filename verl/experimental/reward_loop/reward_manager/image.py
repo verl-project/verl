@@ -1,5 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,21 +20,11 @@ from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score_image
 
 
-@register("diffusion")
-class DiffusionRewardManager(RewardManagerBase):
-    """The reward manager for diffusion models."""
+@register("image")
+class ImageRewardManager(RewardManagerBase):
+    """The reward manager for image response."""
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
-        """Initialize reward manager.
-
-        Args:
-            config (DictConfig): YAML config.
-            tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
-            compute_score (Callable, optional): Custom reward score function. Defaults to None.
-            reward_router_address (str, optional): The address of the reward router service. Defaults to None.
-            reward_model_tokenizer (AutoTokenizer): Tokenizer for tokenize reward messages.
-        """
-
         super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score_image
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
@@ -62,7 +51,6 @@ class DiffusionRewardManager(RewardManagerBase):
             {
                 "reward_router_address": self.reward_router_address,
                 "reward_model_tokenizer": self.reward_model_tokenizer,
-                "model_name": self.config.reward.reward_model.model_path,
             }
             if self.reward_router_address is not None
             else {}

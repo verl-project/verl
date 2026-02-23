@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .diffuser_impl import DiffusersFSDPEngine
+from .diffusers_impl import DiffusersFSDPEngine
 from .transformer_impl import FSDPEngine, FSDPEngineWithLMHead
 
 __all__ = ["FSDPEngine", "FSDPEngineWithLMHead", "DiffusersFSDPEngine"]
