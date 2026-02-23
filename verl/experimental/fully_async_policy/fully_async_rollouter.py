@@ -519,13 +519,15 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     self.paused = True
                 while self.active_tasks:
                     async with self.lock:
-                        # After acquiring the lock, the number of active_tasks may change, need to be verified again
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
+                        tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
+
+                    if tasks_to_wait:
+                        done_tasks, _ = await asyncio.wait(tasks_to_wait, return_when=asyncio.FIRST_COMPLETED)
                         for task in done_tasks:
                             await task
+
+                        async with self.lock:
+                            self.active_tasks -= done_tasks
 
                 async with self.lock:
                     while self.paused:
