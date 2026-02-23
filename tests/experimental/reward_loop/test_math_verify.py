@@ -47,7 +47,6 @@ def test_agent_reward_loop_standalone():
     config.actor_rollout_ref.model.path = rollout_model_path
     config.actor_rollout_ref.actor.use_dynamic_bsz = True
     config.actor_rollout_ref.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
-    config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
     config.actor_rollout_ref.rollout.enforce_eager = True

@@ -10,12 +10,9 @@ CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 
-rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
+export VLLM_USE_V1=1
+return_raw_chat="True"
 # Algorithm parameters
 adv_estimator=grpo
 
@@ -196,7 +193,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.name=${rollout_name} \
-    actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.rollout.enforce_eager=True \

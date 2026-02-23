@@ -60,7 +60,6 @@ $PYTHON -m verl.experimental.vla.main_ppo \
     +actor_rollout_ref.algorithm='grpo' \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
-    actor_rollout_ref.rollout.mode=async_envloop \
     actor_rollout_ref.actor.optim.lr=5e-6 \
     actor_rollout_ref.actor.optim.warmup_style=constant \
     actor_rollout_ref.actor.ppo_mini_batch_size=128 \

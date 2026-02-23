@@ -141,7 +141,6 @@ gpu_memory_utilization=0.8
 
 ROLLOUT_CONFIG="
     actor_rollout_ref.rollout.name=$rollout_name \
-    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$infer_tp \
     actor_rollout_ref.rollout.data_parallel_size=$infer_dp \
     actor_rollout_ref.rollout.expert_parallel_size=$infer_ep \

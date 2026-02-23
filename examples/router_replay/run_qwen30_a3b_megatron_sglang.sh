@@ -89,7 +89,6 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
     actor_rollout_ref.rollout.skip_tokenizer_init=True \
-    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
     actor_rollout_ref.rollout.gpu_memory_utilization=$gpu_memory_utilization \
     actor_rollout_ref.rollout.n=8 \

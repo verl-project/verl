@@ -61,7 +61,6 @@ def init_config() -> DictConfig:
     model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-VL-3B-Instruct")
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
-    config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.enforce_eager = True
     config.actor_rollout_ref.rollout.prompt_length = 10240
     config.actor_rollout_ref.rollout.response_length = 4096

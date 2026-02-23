@@ -1,8 +1,6 @@
 set -x
 
 
-# For async rollout mode, dataset should return raw chat.
-rollout_mode="async"
 rollout_name="sglang" # sglang or vllm
 return_raw_chat="True"
 if [ "$rollout_name" = "vllm" ]; then
@@ -34,7 +32,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=$rollout_name \
-    actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=5 \

@@ -14,12 +14,9 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 # hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 
-rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
+export VLLM_USE_V1=1
+return_raw_chat="True"
 
 # Algorithm parameters
 adv_estimator=grpo
@@ -107,7 +104,6 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.name=${rollout_name}
-    actor_rollout_ref.rollout.mode=${rollout_mode}
     actor_rollout_ref.rollout.disable_log_stats=False
     reward.reward_manager.name=dapo
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}

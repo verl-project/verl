@@ -84,7 +84,6 @@ $PYTHON -m verl.experimental.vla.main_sac \
     actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[SiglipEncoderLayer,GemmaDecoderLayerWithExpert] \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.model.tokenizer_path=$TOKENIZER_PATH \
-    actor_rollout_ref.rollout.mode=async_envloop \
     actor_rollout_ref.actor.optim.lr=5e-6 \
     actor_rollout_ref.actor.optim.warmup_style=constant \
     actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \

@@ -74,7 +74,6 @@ def test_vllm_abort():
         config.trainer.nnodes = 1
         config.actor_rollout_ref.model.path = MODEL_PATH
         config.actor_rollout_ref.rollout.name = ROLLOUT_NAME
-        config.actor_rollout_ref.rollout.mode = "async"
         config.actor_rollout_ref.rollout.tensor_model_parallel_size = TP_SIZE
         config.actor_rollout_ref.rollout.prompt_length = 512
         config.actor_rollout_ref.rollout.response_length = 512  # Longer for abort test

@@ -156,7 +156,6 @@ class TestTRTLLMServerAdapter:
             model_root = os.path.expanduser(os.getenv("TRTLLM_TEST_MODEL_PATH_ROOT", "~/models"))
             config.actor_rollout_ref.model.path = os.path.join(model_root, "Qwen/Qwen2.5-1.5B-Instruct")
             config.actor_rollout_ref.rollout.name = "trtllm"
-            config.actor_rollout_ref.rollout.mode = "async"
             config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
 
             rollout_config = config.actor_rollout_ref.rollout

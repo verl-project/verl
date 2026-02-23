@@ -27,7 +27,7 @@ from verl.trainer.main_ppo import create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.device import get_device_name
-from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
+from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 
 
 def test_agent_reward_loop_standalone():
@@ -54,7 +54,6 @@ def test_agent_reward_loop_standalone():
     config.actor_rollout_ref.model.path = rollout_model_path
     config.actor_rollout_ref.actor.use_dynamic_bsz = True
     config.actor_rollout_ref.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
-    config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.8
     config.actor_rollout_ref.rollout.enforce_eager = True
@@ -79,9 +78,7 @@ def test_agent_reward_loop_standalone():
     config.reward.custom_reward_function.name = "compute_score_gsm8k"
 
     # 1. init reward model manager
-    actor_rollout_cls = (
-        AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-    )
+    actor_rollout_cls = AsyncActorRolloutRefWorker
     global_pool_id = "global_pool"
     resource_pool_spec = {
         global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,

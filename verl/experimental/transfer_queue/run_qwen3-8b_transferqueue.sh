@@ -12,12 +12,9 @@ log_file="${log_dir}/qwen3-8b_tq_${timestamp}.log"
 # You may try to enable zero-copy serialization for TransferQueue when using SimpleStorageUnit backend.
 export TQ_ZERO_COPY_SERIALIZATION=False
 
-rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
+export VLLM_USE_V1=1
+return_raw_chat="True"
 
 # You may also refer to tests/special_e2e/run_transferqueue.sh for more demo scripts
 
@@ -49,7 +46,6 @@ python3 -m verl.experimental.transfer_queue.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.max_num_batched_tokens=10240 \
     actor_rollout_ref.rollout.name=$rollout_name \
-    actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
