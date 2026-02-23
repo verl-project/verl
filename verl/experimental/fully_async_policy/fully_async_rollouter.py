@@ -282,9 +282,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     timing_raw=timing_raw, metrics=None, global_steps=global_steps, param_version=version
                 )
             elif need_validate and not self.parallel_validate_and_rollout:
-                data = self._validate_wrapper(timing_raw, version, global_steps, use_trainer_do_validate)
+                await self.async_rollout_manager.resume()
+                await self.do_validate_async(timing_raw, version, global_steps, use_trainer_do_validate)
 
-            if not need_validate or not self.parallel_validate_and_rollout:
+            if not need_validate:
                 await self.message_queue_client.put_validate(ray.cloudpickle.dumps(data))
 
             self.version_start_time = time.time()
@@ -292,10 +293,15 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         if need_validate and self.parallel_validate_and_rollout:
             if self.validate_task and not self.validate_task.done():
                 print("[FullyAsyncRollouter] validate_task is running, wait last validate_task to finish")
-                self.validate_task.get()
+                await self.validate_task
             self.validate_task = asyncio.create_task(
                 self.do_validate_async(timing_raw, version, global_steps, use_trainer_do_validate)
             )
+
+    async def wait_validate_task(self):
+        """Wait for the background validate task (parallel_validate_and_rollout=True) to complete."""
+        if self.validate_task and not self.validate_task.done():
+            await self.validate_task
 
     def _validate_wrapper(
         self, timing_raw: dict, version: int, global_steps: int = 0, use_trainer_do_validate: bool = False

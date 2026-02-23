@@ -142,6 +142,7 @@ class ParameterSynchronizer:
             ray.get(self.wait_last_update)
         if self.wait_last_resume:
             ray.get(self.wait_last_resume)
+        ray.get(self.rollouter.wait_validate_task.remote())
         if self.validate_task:
             ray.get(self.validate_task)
         print(f"[ParameterSynchronizer] Wait last validate cost: {time.time() - start_time:.2f} seconds")
