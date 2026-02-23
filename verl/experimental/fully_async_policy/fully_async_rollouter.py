@@ -211,7 +211,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
             )
 
-            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * self.config.rollout.get("max_concurrent_samples_per_replica", 16)
+            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * self.config.rollout.get(
+                "max_concurrent_samples_per_replica", 16
+            )
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
             self.max_queue_size = self.max_required_samples
 
@@ -548,9 +550,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                         tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
 
                     if tasks_to_wait:
-                        done_tasks, _ = await asyncio.wait(
-                            tasks_to_wait, return_when=asyncio.FIRST_COMPLETED
-                        )
+                        done_tasks, _ = await asyncio.wait(tasks_to_wait, return_when=asyncio.FIRST_COMPLETED)
                         for task in done_tasks:
                             await task
 
@@ -564,9 +564,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
 
                 if tasks_to_wait:
-                    done_tasks, _ = await asyncio.wait(
-                        tasks_to_wait, return_when=asyncio.FIRST_COMPLETED
-                    )
+                    done_tasks, _ = await asyncio.wait(tasks_to_wait, return_when=asyncio.FIRST_COMPLETED)
                     for task in done_tasks:
                         await task
 
