@@ -27,6 +27,7 @@ import ray.actor
 from qwen_vl_utils import fetch_image
 
 from .base_tool import BaseTool
+from .registry import register_tool
 from .schemas import OpenAIFunctionToolSchema, ToolResponse
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ def init_visual_execution_pool(
         raise NotImplementedError("Process mode is not implemented yet")
 
 
+@register_tool("image_zoom_in")
 class ImageZoomInTool(BaseTool):
     """A tool for zooming in on an image by cropping it based on a bounding box.
 

@@ -18,6 +18,7 @@ import os
 import re
 
 from verl.tools.mcp_base_tool import MCPBaseTool
+from verl.tools.registry import register_tool
 
 from .schemas import OpenAIFunctionToolSchema
 
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+@register_tool("mcp_search")
 class MCPSearchTool(MCPBaseTool):
     def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
         super().__init__(config, tool_schema)
