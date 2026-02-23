@@ -528,23 +528,33 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 )
                 while self.active_tasks:
                     async with self.lock:
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
+                        tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
+
+                    if tasks_to_wait:
+                        done_tasks, _ = await asyncio.wait(
+                            tasks_to_wait, return_when=asyncio.FIRST_COMPLETED
+                        )
                         for task in done_tasks:
                             await task
+
+                        async with self.lock:
+                            self.active_tasks -= done_tasks
                 break
 
             # Check whether the number of concurrent tasks exceeds the limit
             while len(self.active_tasks) >= self.max_concurrent_samples:
                 async with self.lock:
-                    if self.active_tasks:
-                        done_tasks, self.active_tasks = await asyncio.wait(
-                            self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                        )
+                    tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
+
+                if tasks_to_wait:
+                    done_tasks, _ = await asyncio.wait(
+                        tasks_to_wait, return_when=asyncio.FIRST_COMPLETED
+                    )
                     for task in done_tasks:
                         await task
+
+                    async with self.lock:
+                        self.active_tasks -= done_tasks
 
             # Submit single sample processing
             async with self.lock:
@@ -739,22 +749,32 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     async def pause(self):
         """pause rollout"""
         print("[FullyAsyncRollouter][Public][Pause] partial rollout:", self.config.async_training.partial_rollout)
+
+        # Acquire lock to set paused state and copy tasks
         async with self.lock:
             self.paused = True
-            # Cancel all rollout tasks
-            if self.config.async_training.partial_rollout:
-                await self.async_rollout_manager.cancel()
-                print("[FullyAsyncRollouter][Public][Pause] Unfinished rollout tasks canceled")
-            if self.active_tasks:
-                await asyncio.gather(*self.active_tasks, return_exceptions=True)
-                self.active_tasks.clear()
-                print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
+            tasks_to_wait = set(self.active_tasks)
+            self.monitor_loop_trigger = False
+
+        # Cancel all rollout tasks
+        if self.config.async_training.partial_rollout:
+            await self.async_rollout_manager.cancel()
+            print("[FullyAsyncRollouter][Public][Pause] Unfinished rollout tasks canceled")
+
+        # Wait for all active tasks to complete outside the lock to avoid blocking
+        if tasks_to_wait:
+            await asyncio.gather(*tasks_to_wait, return_exceptions=True)
+            print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
+        
+        # Re-acquire lock to clear tasks
+        async with self.lock:
+            self.active_tasks.clear()
             print("[FullyAsyncRollouter][Public][Pause] Prefix cache reset")
             # Always clear KV cache to release GPU memory during weight synchronization,
             # regardless of partial_rollout setting.
             await self.async_rollout_manager.clear_kv_cache()
             self.monitor_loop_trigger = False
-
+            
     async def resume(self, dependency_ref: ObjectRef = None):
         if dependency_ref is not None:
             ray.get(dependency_ref)

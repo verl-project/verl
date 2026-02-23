@@ -365,7 +365,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self._log_validation_data()
         # 2. perform addtional parameter_sync and validate if trainer already updated
         if self.current_param_version % self.config.rollout.test_freq != 0 or self.local_trigger_step > 1:
-            await self._trigger_parameter_sync_after_step(validate=True, global_steps=self.global_steps)
+            await self._trigger_parameter_sync_after_step(validate=True)
             ray.get(self.param_synchronizer.wait_last_valid.remote())
             self._log_validation_data()
         self.progress_bar.close()
