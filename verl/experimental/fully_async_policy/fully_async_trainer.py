@@ -609,6 +609,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             f"current_param_version to {self.current_param_version}"
         )
         print(f"[FullyAsyncTrainer] Resuming from  {global_step_folder}")
+        if self.progress_bar is not None:
+            self.progress_bar.n = max(0, self.global_steps - 1)
+            self.progress_bar.refresh()
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, str(Role.Critic))
