@@ -236,6 +236,15 @@ class FSDPSFTTrainer:
             use_meta_tensor=not config.tie_word_embeddings, mesh=self.device_mesh
         )
 
+        # Perform RoPE scaling when self.config.model.rope_scaling is not None
+        from verl.utils.model import print_model_size, update_model_config
+        override_config_kwargs = {}
+        if 'rope_scaling' in self.config.model and self.config.model.rope_scaling is not None:
+            override_config_kwargs['rope_scaling'] = dict(self.config.model.rope_scaling)
+            print(f'rope_scaling setted. rope_scaling={override_config_kwargs["rope_scaling"]}')
+        update_model_config(config, override_config_kwargs=override_config_kwargs)
+        print(f'Model config after override: {config}')
+
         with init_context():
             self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
                 local_model_path,
