@@ -859,14 +859,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         use_shm = self.config.model.get("use_shm", False)
         use_fused_kernels = self.config.model.get("use_fused_kernels", False)
 
-        if self._is_actor or self._is_rollout:
-            # we need the model for actor and rollout
-            if self._is_actor:
-                optim_config = self.config.actor.optim
-                fsdp_config = omega_conf_to_dataclass(self.config.actor.fsdp_config)
-            else:
-                optim_config = None
-                fsdp_config = FSDPEngineConfig()
+        if self._is_actor:
+            # we need the model for actor only
+            optim_config = self.config.actor.optim
+            fsdp_config = omega_conf_to_dataclass(self.config.actor.fsdp_config)
 
             local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
             # TiledMLP configuration for memory-efficient MLP computation
@@ -907,6 +903,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
                 log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
+        else:
+             self.actor_module_fsdp = None
 
         if self._is_actor:
             actor_cfg = omega_conf_to_dataclass(self.config.actor)
@@ -966,19 +964,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 checkpoint_config=self.config.actor.checkpoint,
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
-            )
-
-        if not self._is_actor and self._is_rollout:
-            # If ActorRolloutRefWorker is initialized as a standalone rollout,
-            # create a checkpoint manager for FSDP model to allow loading FSDP checkpoints for rollout.
-
-            checkpoint_contents = OmegaConf.create({"load_contents": ["model"], "save_contents": []})
-            self.checkpoint_manager = FSDPCheckpointManager(
-                model=self.actor_module_fsdp,
-                optimizer=None,
-                lr_scheduler=None,
-                processing_class=self.processor if self.processor is not None else self.tokenizer,
-                checkpoint_config=checkpoint_contents,
             )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -1214,10 +1199,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
-        assert self._is_actor or (not self._is_actor and self._is_rollout), (
-            f"Checkpoint loading is only supported for Actor or standalone Rollout Workers, but got "
-            f"{self._is_actor} and {self._is_rollout}"
-        )
+        assert self._is_actor
 
         # No checkpoint to load, just offload the model and optimizer to CPU
         if local_path is None:
