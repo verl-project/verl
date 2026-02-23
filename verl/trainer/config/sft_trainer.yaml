@@ -71,6 +71,9 @@ trainer:
   n_gpus_per_node: 8
   max_ckpt_to_keep: null  # Maximum number of checkpoints to keep, set to null to keep all
 
+  # flag for "DFT" trainer: <https://arxiv.org/pdf/2508.05629>
+  use_dft: False
+
   # Resume mode: "auto", "disable", or "resume_path"
   # "auto": resume from last checkpoint if available
   # "disable": start from scratch

@@ -36,8 +36,9 @@ from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.fsdp import CPUOffload, MixedPrecision, ShardingStrategy
+from torch.distributed.fsdp import CPUOffload
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.utils.data import Dataset, DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -49,30 +50,22 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, get_
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.dataset import SFTDataset
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
-from verl.utils.device import (
-    auto_set_device,
-    get_device_id,
-    get_device_name,
-    is_cuda_available,
-    is_npu_available,
-)
-from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
+from verl.utils.device import (get_device_id, get_device_name,
+                               is_cuda_available, is_npu_available)
+from verl.utils.distributed import (destroy_global_process_group,
+                                    initialize_global_process_group)
 from verl.utils.fs import copy_to_local
-from verl.utils.fsdp_utils import (
-    CPUOffloadPolicy,
-    MixedPrecisionPolicy,
-    apply_fsdp2,
-    fsdp2_clip_grad_norm_,
-    fsdp2_load_full_state_dict,
-    get_fsdp_wrap_policy,
-    get_init_weight_context_manager,
-    init_fn,
-)
+from verl.utils.fsdp_utils import (CPUOffloadPolicy, MixedPrecisionPolicy,
+                                   apply_fsdp2, fsdp2_clip_grad_norm_,
+                                   fsdp2_load_full_state_dict,
+                                   get_fsdp_wrap_policy,
+                                   get_init_weight_context_manager, init_fn)
 from verl.utils.logger import log_with_rank
 from verl.utils.profiler import log_gpu_memory_usage
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_dtypes import PrecisionType
-from verl.utils.torch_functional import get_cosine_schedule_with_warmup, get_wsd_schedule_with_warmup
+from verl.utils.torch_functional import (get_cosine_schedule_with_warmup,
+                                         get_wsd_schedule_with_warmup)
 from verl.utils.tracking import Tracking
 from verl.utils.ulysses import (
     gather_outputs_and_unpad,
@@ -140,6 +133,9 @@ class FSDPSFTTrainer:
             print(self.config)
 
         self.device_name = self.config.trainer.device
+
+        # set up 'use_dft' flag (default to False)
+        self.use_dft = getattr(self.config, "use_dft", False)
 
     def _normalize_config_bsz(self):
         dp_size = self.device_mesh.size(0) if not self.ulysses_device_mesh else self.ulysses_device_mesh.size(0)
@@ -246,13 +242,15 @@ class FSDPSFTTrainer:
             )
 
             if self.use_remove_padding or self.config.ulysses_sequence_parallel_size > 1:
-                from verl.models.transformers.monkey_patch import apply_monkey_patch
+                from verl.models.transformers.monkey_patch import \
+                    apply_monkey_patch
 
                 apply_monkey_patch(model=self.model, ulysses_sp_size=self.config.ulysses_sequence_parallel_size)
 
             # Apply Liger kernel if use_liger is enabled
             if self.config.model.get("use_liger", False):
-                from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
+                from liger_kernel.transformers.monkey_patch import \
+                    _apply_liger_kernel_to_instance
 
                 _apply_liger_kernel_to_instance(model=self.model)
 
@@ -398,8 +396,27 @@ class FSDPSFTTrainer:
                 shift_labels = shift_labels.view(-1)
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
-                loss = loss_fct(shift_logits, shift_labels)
+
+                # If use DFT, stabilizing gradient updates for each token
+                # by dynamically rescaling the objective function with the probability of this token
+                if self.use_dft:
+                    # Modification for DFT
+                    probs = torch.softmax(shift_logits, dim=-1)
+                    predicted_probs = probs.gather(1, shift_labels.unsqueeze(-1)).squeeze(-1)
+                    if self.scale > 0:
+                        prob_coefficients = torch.clamp(predicted_probs, min=self.scale)
+                    else:
+                        prob_coefficients = predicted_probs
+
+                    loss = loss_fct(shift_logits, shift_labels)
+                    loss = loss * prob_coefficients.detach()
+
+                else:
+                    # loss computation for standard SFT
+                    loss = loss_fct(shift_logits, shift_labels)
+
                 loss = loss * loss_mask.to(loss.device)
+
             else:
                 # IMPORTANT: We have a big assumption here, so we can shard the SAME sequence across SP ranks
                 # i.e., each GPU has <1 sequence, and each SP group has 1 sequence
