@@ -51,17 +51,28 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     def __init__(
         self,
         config,
-        tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
-        processor=None,
         device_name=None,
     ):
-        # Store the tokenizer for text processing
-        self.tokenizer = tokenizer
-        self.processor = processor
         self.config = config
+
+        # Load tokenizer/processor locally in remote actor to avoid serialization issues
+        # with trust_remote_code models (transformers_modules not available in remote env)
+        from verl.utils import hf_processor, hf_tokenizer
+        from verl.utils.fs import copy_to_local
+
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+        )
+        trust_remote_code = config.actor_rollout_ref.model.get(
+            "trust_remote_code", config.data.get("trust_remote_code", False)
+        )
+
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
 
         assert not self.hybrid_engine
@@ -98,8 +109,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, self.tokenizer, self.processor)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, self.tokenizer, self.processor)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         self._validate_config()
