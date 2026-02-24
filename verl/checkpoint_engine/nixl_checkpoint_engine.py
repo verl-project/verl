@@ -18,6 +18,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from functools import reduce
 from typing import AsyncGenerator, Generator
 from unittest.mock import patch
 
@@ -385,8 +386,80 @@ class NIXLCheckpointEngine(CheckpointEngine):
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         for name, weight in weights:
+            weight_size = weight.nbytes
+            # Check if the weight needs to be sliced into chunks
+            # (e.g., large embedding layer that exceeds bucket_size)
+            if weight_size > self.bucket_size:
+                # Slice the weight along the first dimension into chunks
+                dtype_size = weight.element_size()
+                numel_per_chunk = self.bucket_size // dtype_size
+
+                # Calculate chunk size along the first dimension
+                first_dim_size = weight.shape[0]
+                elements_per_row = reduce(lambda x, y: x * y, weight.shape[1:], 1)
+                # An empty tensor would have weight_size=0 and not enter this block,
+                # so we can assume elements_per_row > 0.
+                chunk_dim_size = numel_per_chunk // elements_per_row
+                if chunk_dim_size == 0:
+                    raise ValueError(
+                        f"Weight '{name}' with shape {weight.shape} is too large to be chunked. A single slice "
+                        f"along the first dimension is larger than the bucket size ({self.bucket_size} bytes). "
+                        f"Please increase `checkpoint_engine.update_weights_bucket_megabytes`."
+                    )
+
+                num_chunks = (first_dim_size + chunk_dim_size - 1) // chunk_dim_size
+                logger.info(
+                    f"Slicing weight {name} ({weight.shape}, {weight.dtype}, {weight_size} bytes) "
+                    f"into {num_chunks} chunks"
+                )
+
+                start_idx = 0
+                for chunk_idx in range(num_chunks):
+                    end_idx = min(start_idx + chunk_dim_size, first_dim_size)
+
+                    # Extract chunk along first dimension
+                    chunk = weight[start_idx:end_idx]
+                    chunk_size = chunk.nbytes
+
+                    # Fill bucket with chunk
+                    if offset + chunk_size > self.bucket_size:
+                        torch.cuda.synchronize()
+
+                        # wait previous bucket to be received
+                        if readable_op is not None:
+                            await readable_op.wait_for_complete()
+
+                        # send bucket meta to next agent
+                        readable_op = ReadableOperation(
+                            self.agent,
+                            self.next_agent,
+                            send_descs,
+                            {"bucket_meta": bucket_meta, "is_last": False},
+                        )
+
+                        # swap send and recv buf
+                        send_buf, recv_buf = recv_buf, send_buf
+                        send_descs, recv_descs = recv_descs, send_descs
+                        bucket_meta = {}
+                        offset = 0
+
+                    bucket_meta[f"{name}_chunk_{chunk_idx}"] = {
+                        "name": name,
+                        "shape": chunk.shape,
+                        "dtype": chunk.dtype,
+                        "offset": offset,
+                        "chunk_idx": chunk_idx,
+                        "total_chunks": num_chunks,
+                    }
+                    send_buf[offset : offset + chunk_size].copy_(chunk.view(-1).view(torch.uint8), non_blocking=True)
+                    offset += chunk_size
+
+                    start_idx = end_idx
+
+                continue
+
             # fill the tensor bucket
-            if offset + weight.nbytes > self.bucket_size:
+            if offset + weight_size > self.bucket_size:
                 torch.cuda.synchronize()
 
                 # wait previous bucket to be received
@@ -407,18 +480,14 @@ class NIXLCheckpointEngine(CheckpointEngine):
                 bucket_meta = {}
                 offset = 0
 
-            assert offset + weight.nbytes <= self.bucket_size, (
-                f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-            )
-
             bucket_meta[name] = {
                 "name": name,
                 "shape": weight.shape,
                 "dtype": weight.dtype,
                 "offset": offset,
             }
-            send_buf[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
-            offset += weight.nbytes
+            send_buf[offset : offset + weight_size].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
+            offset += weight_size
 
         # send last bucket meta to next agent
         torch.cuda.synchronize()
@@ -431,6 +500,47 @@ class NIXLCheckpointEngine(CheckpointEngine):
         await readable_op.wait_for_complete()
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
 
+    def _yield_tensors_from_buffer(
+        self,
+        buffer: torch.Tensor,
+        bucket_meta: dict,
+        pending_chunks: dict,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Yield tensors from buffer, handling chunk merging for large weights.
+
+        Args:
+            buffer: The buffer containing the tensor data.
+            bucket_meta: The metadata of the bucket.
+            pending_chunks: Dictionary to collect chunks for weights that were sliced.
+
+        Yields:
+            A tuple of the name of the weight tensor and the tensor itself.
+        """
+        for name, meta in bucket_meta.items():
+            dtype, shape = meta["dtype"], meta["shape"]
+            size = dtype.itemsize * shape.numel()
+            tensor = buffer[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
+
+            # Check if this is a chunk of a sliced weight
+            if "chunk_idx" in meta and "total_chunks" in meta:
+                # This is a chunk, store it for later merging
+                original_name = meta["name"]
+                chunk_idx = meta["chunk_idx"]
+                if original_name not in pending_chunks:
+                    pending_chunks[original_name] = {}
+                pending_chunks[original_name][chunk_idx] = tensor
+
+                # Check if we have all chunks for this weight
+                if len(pending_chunks[original_name]) == meta["total_chunks"]:
+                    # Merge all chunks back into one tensor
+                    chunks_dict = pending_chunks[original_name]
+                    sorted_chunks = [chunks_dict[i] for i in range(meta["total_chunks"])]
+                    merged_tensor = torch.cat(sorted_chunks, dim=0)
+                    yield original_name, merged_tensor
+                    del pending_chunks[original_name]
+            else:
+                yield name, tensor
+
     @torch.no_grad()
     async def receive_weights(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
         """Receive the weights of the model.
@@ -442,6 +552,9 @@ class NIXLCheckpointEngine(CheckpointEngine):
         send_buf, recv_buf = self.send_buf, self.recv_buf
         send_descs, recv_descs = self.send_descs, self.recv_descs
         total_bytes, total_params = 0, 0
+
+        # Buffer to collect chunks for weights that were sliced
+        pending_chunks = {}  # name -> {chunk_idx: tensor, ...}
 
         # receive first bucket from previous agent
         start_time = time.time()
@@ -472,11 +585,8 @@ class NIXLCheckpointEngine(CheckpointEngine):
             read_op.begin_read()
 
             # 3. yield tensor from send_buf
-            for name, meta in metadata["bucket_meta"].items():
-                dtype, shape = meta["dtype"], meta["shape"]
-                size = dtype.itemsize * shape.numel()
-                tensor = send_buf[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
-                yield name, tensor
+            for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+                yield tensor_tuple
 
             # 4. wait for next agent read complete and read from previous agent complete
             if readable_op is not None:
@@ -502,15 +612,18 @@ class NIXLCheckpointEngine(CheckpointEngine):
             )
 
         # yield tensor from send_buf
-        for name, meta in metadata["bucket_meta"].items():
-            dtype, shape = meta["dtype"], meta["shape"]
-            size = dtype.itemsize * shape.numel()
-            tensor = send_buf[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
-            yield name, tensor
+        for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+            yield tensor_tuple
 
         # wait for next agent read complete
         if readable_op is not None:
             await readable_op.wait_for_complete()
+
+        # Check if there are any remaining chunks that weren't processed
+        if pending_chunks:
+            raise RuntimeError(
+                f"Received chunks for weights {list(pending_chunks.keys())} but did not receive all chunks for them."
+            )
         time_cost = time.time() - start_time
         bandwidth = total_bytes / time_cost / (1024 * 1024 * 1024)
         logger.info(
