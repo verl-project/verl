@@ -114,7 +114,7 @@ def create_data_samples(num_device: int, model_config: DiffusersModelConfig) -> 
     seq_len = 64
     img_size = 512
     latent_dim = 64
-    encoder_latent_dim = 3584
+    encoder_latent_dim = 32
     inference_steps = 40
     vocab_size = 99
     vae_scale_factor = 8
@@ -164,7 +164,7 @@ def test_diffusers_fsdp_engine(strategy):
         model_type="diffusion_model",
         strategy=strategy,
         device_count=device_count,
-        model="~/models/Qwen/Qwen-Image",
+        model="~/models/tiny-random/Qwen-Image",
     )
     # init model
     ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=training_config)

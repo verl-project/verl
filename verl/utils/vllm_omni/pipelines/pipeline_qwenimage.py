@@ -15,22 +15,61 @@ import os
 from typing import Any, Literal
 
 import torch
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
+from transformers import Qwen2_5_VLForConditionalGeneration
 from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 from verl.utils.diffusers.schedulers import FlowMatchSDEDiscreteScheduler
 from verl.utils.vllm_omni.data import DiffusionOutput
+from verl.utils.vllm_omni.pipelines.qwen_image.qwen_image_transformer import QwenImageTransformer2DModelFixed
 
 
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
-        super().__init__(od_config=od_config, prefix=prefix)
+        super(QwenImagePipeline, self).__init__()
+        self.od_config = od_config
+        self.parallel_config = od_config.parallel_config
+        self.weights_sources = [
+            DiffusersPipelineLoader.ComponentSource(
+                model_or_path=od_config.model,
+                subfolder="transformer",
+                revision=None,
+                prefix="transformer.",
+                fall_back_to_pt=True,
+            )
+        ]
+
+        self.device = get_local_device()
         model = od_config.model
+        # Check if model is a local path
         local_files_only = os.path.exists(model)
+
         self.scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
             model, subfolder="scheduler", local_files_only=local_files_only
         )
+        self.text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model, subfolder="text_encoder", local_files_only=local_files_only
+        )
+        self.vae = AutoencoderKLQwenImage.from_pretrained(model, subfolder="vae", local_files_only=local_files_only).to(
+            self.device
+        )
+        self.transformer = QwenImageTransformer2DModelFixed(od_config=od_config)
+
+        self.stage = None
+
+        self.vae_scale_factor = 2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
+        # QwenImage latents are turned into 2x2 patches and packed.
+        # This means the latent width and height has to be divisible
+        # by the patch size. So the vae scale factor is multiplied by the patch size to account for this
+        # self.image_processor = VaeImageProcessor(
+        #     vae_scale_factor=self.vae_scale_factor * 2
+        # )
+        self.prompt_template_encode_start_idx = 34
+        self.default_sample_size = 128
 
     def _get_qwen_prompt_embeds(
         self,

@@ -201,17 +201,12 @@ actor_rollout_ref:
     entropy_from_logits_with_chunking: false
     entropy_checkpointing: false
   rollout:
-    _target_: verl.workers.config.RolloutConfig
+    _target_: verl.workers.config.DiffusionRolloutConfig
     name: ???
     mode: async
-    temperature: 1.0
-    top_k: -1
-    top_p: 1
     prompt_length: ${oc.select:data.max_prompt_length,512}
-    response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
     gpu_memory_utilization: 0.5
-    ignore_eos: false
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
@@ -234,8 +229,6 @@ actor_rollout_ref:
     disable_log_stats: true
     do_sample: true
     'n': 1
-    over_sample_rate: 0
-    multi_stage_wake_up: false
     image_height: 512
     image_width: 512
     num_inference_steps: 10
@@ -245,15 +238,9 @@ actor_rollout_ref:
     sde_window_size: null
     sde_window_range: null
     engine_kwargs:
-      vllm: {}
       vllm_omni: {}
-      sglang: {}
-      trtllm: {}
     val_kwargs:
-      _target_: verl.workers.config.SamplingConfig
-      top_k: -1
-      top_p: 1.0
-      temperature: 0
+      _target_: verl.workers.config.DiffusionSamplingConfig
       'n': 1
       do_sample: false
       num_inference_steps: 40
@@ -273,7 +260,6 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: strict
       format: hermes
       num_repeat_rollouts: null
-    calculate_log_probs: false
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -288,14 +274,6 @@ actor_rollout_ref:
       backend: naive
       update_weights_bucket_megabytes: 2048
       engine_kwargs: {}
-    trace:
-      _target_: verl.workers.config.TraceConfig
-      backend: null
-      token2text: false
-      max_samples_per_step_per_worker: null
-    skip_rollout: false
-    skip_dump_dir: /tmp/rollout_dump
-    skip_tokenizer_init: true
     enable_rollout_routing_replay: false
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -323,8 +301,6 @@ actor_rollout_ref:
       served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
     quantization: null
     quantization_config_file: null
-    mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.qat,null}
     layered_summon: false
   model:
     _target_: verl.workers.config.DiffusersModelConfig

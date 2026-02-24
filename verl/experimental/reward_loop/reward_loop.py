@@ -317,7 +317,7 @@ class RewardLoopManager:
             self.reward_router_address = self.reward_model_manager.get_router_address()
         else:
             self.reward_model_manager = None
-            self.reward_router_address = None
+            self.reward_router_address = self.config.reward.reward_model.get("reward_router_address", None)
 
         self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self._init_reward_loop_workers()
