@@ -163,6 +163,8 @@ class RolloutConfig(BaseConfig):
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
     pipeline_model_parallel_size: int = 1
+    moe_tp_size: Optional[int] = None
+    moe_ep_size: Optional[int] = None
     max_num_batched_tokens: int = 8192
     logprobs_mode: Optional[str] = "processed_logprobs"
     scheduling_policy: Optional[str] = "fcfs"
@@ -259,6 +261,13 @@ class RolloutConfig(BaseConfig):
         if self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"
+            )
+
+        if self.moe_tp_size is not None and self.moe_ep_size is not None:
+            assert self.moe_tp_size * self.moe_ep_size == self.tensor_model_parallel_size, (
+                f"moe_tp_size * moe_ep_size must equal tensor_model_parallel_size "
+                f"(got {self.moe_tp_size} * {self.moe_ep_size} = {self.moe_tp_size * self.moe_ep_size}, "
+                f"tensor_model_parallel_size={self.tensor_model_parallel_size})"
             )
 
         if self.pipeline_model_parallel_size > 1:

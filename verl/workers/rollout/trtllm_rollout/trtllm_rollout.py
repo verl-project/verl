@@ -71,8 +71,9 @@ _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
 
 
-def get_device_uuid(id: int) -> str:
+def get_device_uuid(id: str | int) -> str:
     """Get the UUID of a CUDA device using NVML."""
+    id = int(id)  # pynvml expects int; ray.get_gpu_ids() may return str
     global _NVML_INITIALIZED
     with _NVML_LOCK:
         if not _NVML_INITIALIZED:
@@ -410,6 +411,7 @@ class ServerAdapter(BaseRollout):
             from verl.utils.trtllm.trtllm_fp8_utils import quant_weights_by_name
 
             logger.warning("Convert bf16 weights to fp8 format before loading")
+
             weights = quant_weights_by_name(
                 weights,
                 self.model_config.hf_config.quantization_config,
@@ -456,6 +458,7 @@ class ServerAdapter(BaseRollout):
             await self._adapter.update_weights(None)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
+        del weights
         gc.collect()
         get_torch_device().empty_cache()
 
