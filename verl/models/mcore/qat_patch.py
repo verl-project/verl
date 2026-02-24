@@ -36,11 +36,30 @@ versions of megatron-core / megatron-bridge when running QAT workflows:
    patch adds fallback support for the SequentialMLP pattern
    (``local_experts.<N>``).
 
-4. **build_conversion_tasks patch** (``apply_build_conversion_tasks_patch``)
+4. **_megatron_local_name_to_global patch**
+   (``apply_local_name_to_global_patch``)
+   The original ``_megatron_local_name_to_global`` only converts local
+   expert numbers to global for the TEGroupedMLP pattern
+   (``mlp.experts.linear_fc`` + ``weight<N>``/``bias<N>``).  The patch
+   adds support for the SequentialMLP pattern
+   (``mlp.experts.local_experts.<N>``).  Without this, expert numbers
+   remain local (e.g. 0-15 for 128 experts with EP=8) instead of being
+   mapped to global indices (0-127).
+
+5. **build_conversion_tasks patch** (``apply_build_conversion_tasks_patch``)
    The original ``MegatronModelBridge.build_conversion_tasks`` may return
    ``None`` entries in the task list (for PP ranks that don't own certain
    parameters and have no mapping).  The patch filters out ``None`` entries
    before returning so that callers never need to guard against them.
+
+6. **AutoMapping._detect_parallelism_type patch**
+   (``apply_detect_parallelism_type_patch``)
+   The original ``_detect_parallelism_type`` only matches
+   ``module_type == "TELayerNormColumnParallelLinear"`` exactly.  ModelOpt
+   quantised wrappers produce class names like
+   ``QuantTELayerNormColumnParallelLinear`` that contain the substring but
+   don't match exactly.  The patch broadens the check to
+   ``"LayerNormColumnParallelLinear" in module_type``.
 
 Convenience entry-point::
 
@@ -295,11 +314,14 @@ def apply_extract_sort_key_patch():
     Idempotent – safe to call multiple times.
     """
     import megatron.bridge.models.conversion.utils as utils_module
+    import megatron.bridge.models.conversion.model_bridge as bridge_module
 
     if getattr(utils_module, "_sort_key_patched", False):
         return
     utils_module._sort_key_patched = True
+    bridge_module._sort_key_patched = True
     utils_module._original_extract_sort_key = utils_module.extract_sort_key
+    bridge_module._original_extract_sort_key = bridge_module.extract_sort_key
 
     def _patched_extract_sort_key(param_name: str):
         """Extract sorting key based on layer and expert numbers."""
@@ -334,6 +356,7 @@ def apply_extract_sort_key_patch():
         return numbers, param_name
 
     utils_module.extract_sort_key = _patched_extract_sort_key
+    bridge_module.extract_sort_key = _patched_extract_sort_key
     logger.info(
         "Applied QAT patch: extract_sort_key now supports SequentialMLP pattern."
     )
@@ -342,16 +365,88 @@ def apply_extract_sort_key_patch():
 def revert_extract_sort_key_patch():
     """Revert :func:`apply_extract_sort_key_patch`."""
     import megatron.bridge.models.conversion.utils as utils_module
+    import megatron.bridge.models.conversion.model_bridge as bridge_module
+    
 
     if not getattr(utils_module, "_sort_key_patched", False):
         return
     utils_module.extract_sort_key = utils_module._original_extract_sort_key
+    bridge_module.extract_sort_key = bridge_module._original_extract_sort_key
     utils_module._sort_key_patched = False
+    bridge_module._sort_key_patched = False
     logger.info("Reverted QAT patch: extract_sort_key.")
 
 
 # ======================================================================
-# 4. build_conversion_tasks patch
+# 4. _megatron_local_name_to_global patch
+# ======================================================================
+
+
+def apply_local_name_to_global_patch():
+    """Patch ``_megatron_local_name_to_global`` in megatron-bridge
+    to support the SequentialMLP naming pattern (``local_experts.<N>``)
+    for local-to-global expert number conversion under EP > 1.
+
+    The original function only handles the TEGroupedMLP pattern
+    (``mlp.experts.linear_fc`` with ``weight<N>``/``bias<N>``).  The
+    patch adds an ``elif`` branch for SequentialMLP parameters whose
+    names contain ``mlp.experts.local_experts.<N>``.
+
+    Idempotent – safe to call multiple times.
+    """
+    import megatron.bridge.models.conversion.model_bridge as bridge_module
+    from megatron.core import parallel_state
+    from megatron.core.utils import get_pg_size
+
+    if getattr(bridge_module, "_local_name_to_global_patched", False):
+        return
+    bridge_module._local_name_to_global_patched = True
+    bridge_module._original_megatron_local_name_to_global = bridge_module._megatron_local_name_to_global
+
+    _orig_fn = bridge_module._megatron_local_name_to_global
+
+    def _patched_megatron_local_name_to_global(models, config, param_name, vp_stage=None):
+        param_name = _orig_fn(models, config, param_name, vp_stage)
+
+        ep_group = parallel_state.get_expert_model_parallel_group()
+        if (
+            ".mlp.experts.local_experts." in param_name
+            and get_pg_size(ep_group) > 1
+            and ".adapter." not in param_name
+        ):
+            num_experts = config.num_moe_experts
+            num_experts_per_rank = num_experts // ep_group.size()
+            local_experts_match = re.search(r"\.local_experts\.(\d+)\.", param_name)
+            if local_experts_match:
+                local_expert_number = int(local_experts_match.group(1))
+                global_expert_number = num_experts_per_rank * ep_group.rank() + local_expert_number
+                param_name = param_name.replace(
+                    f".local_experts.{local_expert_number}.",
+                    f".local_experts.{global_expert_number}.",
+                )
+
+        return param_name
+
+    bridge_module._megatron_local_name_to_global = _patched_megatron_local_name_to_global
+    logger.info(
+        "Applied QAT patch: _megatron_local_name_to_global "
+        "now supports SequentialMLP pattern."
+    )
+
+
+def revert_local_name_to_global_patch():
+    """Revert :func:`apply_local_name_to_global_patch`."""
+    import megatron.bridge.models.conversion.model_bridge as bridge_module
+
+    if not getattr(bridge_module, "_local_name_to_global_patched", False):
+        return
+    bridge_module._megatron_local_name_to_global = bridge_module._original_megatron_local_name_to_global
+    bridge_module._local_name_to_global_patched = False
+    logger.info("Reverted QAT patch: _megatron_local_name_to_global.")
+
+
+# ======================================================================
+# 5. build_conversion_tasks patch
 # ======================================================================
 
 
@@ -368,10 +463,10 @@ def apply_build_conversion_tasks_patch():
     """
     import itertools
 
+    import megatron.bridge.models.conversion.model_bridge as bridge_module
     from megatron.bridge.models.conversion.model_bridge import (
         MegatronModelBridge,
         WeightConversionTask,
-        _megatron_local_name_to_global,
     )
     from megatron.bridge.models.conversion.utils import (
         get_module_and_param_from_name,
@@ -429,7 +524,7 @@ def apply_build_conversion_tasks_patch():
                     continue
 
                 local_name = self._unwrap_name(local_name)
-                global_name = _megatron_local_name_to_global(
+                global_name = bridge_module._megatron_local_name_to_global(
                     megatron_model, model_config, local_name, vp_stage
                 )
                 if global_name not in global_names_index_dict:
@@ -521,6 +616,60 @@ def revert_build_conversion_tasks_patch():
 
 
 # ======================================================================
+# 5. AutoMapping._detect_parallelism_type patch
+# ======================================================================
+
+
+def apply_detect_parallelism_type_patch():
+    """Patch ``AutoMapping._detect_parallelism_type`` to recognise quantised
+    ``LayerNormColumnParallelLinear`` variants (e.g.
+    ``QuantTELayerNormColumnParallelLinear``).
+
+    The original code only checks
+    ``module_type == "TELayerNormColumnParallelLinear"``.  ModelOpt wraps this
+    into classes whose names still *contain* ``LayerNormColumnParallelLinear``
+    but do not match exactly.  The patch broadens the check to
+    ``"LayerNormColumnParallelLinear" in module_type``.
+
+    Idempotent – safe to call multiple times.
+    """
+    from megatron.bridge.models.conversion.param_mapping import AutoMapping
+
+    if getattr(AutoMapping, "_detect_parallelism_patched", False):
+        return
+    AutoMapping._detect_parallelism_patched = True
+    AutoMapping._original_detect_parallelism_type = AutoMapping._detect_parallelism_type
+
+    def _patched_detect_parallelism_type(self, module):
+        module_type = type(module).__name__
+        if "LayerNormColumnParallelLinear" in module_type:
+            if self.megatron_param and (
+                self.megatron_param.endswith("layer_norm_weight")
+                or self.megatron_param.endswith("layer_norm_bias")
+            ):
+                return "replicated"
+            return "column"
+        return AutoMapping._original_detect_parallelism_type(self, module)
+
+    AutoMapping._detect_parallelism_type = _patched_detect_parallelism_type
+    logger.info(
+        "Applied QAT patch: AutoMapping._detect_parallelism_type "
+        "now supports quantised LayerNormColumnParallelLinear variants."
+    )
+
+
+def revert_detect_parallelism_type_patch():
+    """Revert :func:`apply_detect_parallelism_type_patch`."""
+    from megatron.bridge.models.conversion.param_mapping import AutoMapping
+
+    if not getattr(AutoMapping, "_detect_parallelism_patched", False):
+        return
+    AutoMapping._detect_parallelism_type = AutoMapping._original_detect_parallelism_type
+    AutoMapping._detect_parallelism_patched = False
+    logger.info("Reverted QAT patch: AutoMapping._detect_parallelism_type.")
+
+
+# ======================================================================
 # Convenience: apply / revert all QAT patches at once
 # ======================================================================
 
@@ -530,7 +679,9 @@ def apply_qat_patch():
     apply_swiglu_sharded_factory_patch()
     apply_ep_gather_patch()
     apply_extract_sort_key_patch()
+    apply_local_name_to_global_patch()
     apply_build_conversion_tasks_patch()
+    apply_detect_parallelism_type_patch()
 
 
 def revert_qat_patch():
@@ -538,4 +689,6 @@ def revert_qat_patch():
     revert_swiglu_sharded_factory_patch()
     revert_ep_gather_patch()
     revert_extract_sort_key_patch()
+    revert_local_name_to_global_patch()
     revert_build_conversion_tasks_patch()
+    revert_detect_parallelism_type_patch()
