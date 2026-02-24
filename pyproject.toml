@@ -112,3 +112,8 @@ verl = [
   "trainer/config/*/*.yaml",
   "experimental/*/config/*.yaml",
 ]
+
+[tool.pyright]
+# The `vllm` source code is located in `/vllm` in the official verl image.
+# c.f. https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.vllm
+extraPaths = ["/vllm"]

@@ -32,6 +32,7 @@ RUN pip install torch==2.9.1 torchvision torchaudio --index-url https://download
 RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1+cu129.dist-info/METADATA
 RUN pip install --no-deps --force-reinstall nvidia-cudnn-cu12==9.16.0.29
 
+# NOTE: This installs the `vllm` source code in `/vllm`. If changed, set `tool.pyright.extraPaths` in `pyproject.toml` accordingly.
 RUN git clone --depth 1 -b v0.12.0 https://github.com/vllm-project/vllm.git && \
     cd vllm && \
     find requirements -name "*.txt" -print0 | xargs -0 sed -i '/torch/d' && \
