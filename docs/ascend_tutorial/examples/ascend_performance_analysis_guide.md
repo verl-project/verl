@@ -52,7 +52,7 @@
 
 #### 性能分析
 
-- **操作：**可通过 MindStudio Insight Windows 或 Linux 版本加载 Profiling 数据
+- **操作**：可通过 MindStudio Insight Windows 或 Linux 版本加载 Profiling 数据
 
 - **价值**：MindStudio Insight 支持分析任务调度效率、算子执行性能、计算资源利用率、集合通信性能等。其 Timeline 视图具备任务拆解与 Overlap 分析功能（**为 MindStudio 独有核心特性，在 NV 及其他竞品中不具备，是 AI 调优的必备工具**），并支持鼠标交互式分析。
 
