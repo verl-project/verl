@@ -209,7 +209,16 @@ class ServerAdapter(BaseRollout):
 
                 # Calculate chunk size along the first dimension
                 first_dim_size = weight.shape[0]
-                chunk_dim_size = numel_per_chunk // reduce(lambda x, y: x * y, weight.shape[1:], 1)
+                elements_per_row = reduce(lambda x, y: x * y, weight.shape[1:], 1)
+                # An empty tensor would have weight_size=0 and not enter this block,
+                # so we can assume elements_per_row > 0.
+                chunk_dim_size = numel_per_chunk // elements_per_row
+                if chunk_dim_size == 0:
+                    raise ValueError(
+                        f"Weight '{name}' with shape {weight.shape} is too large to be chunked. A single slice "
+                        f"along the first dimension is larger than the bucket size ({bucket_size_mb}MB). "
+                        f"Please increase `rollout.checkpoint_engine.update_weights_bucket_megabytes`."
+                    )
 
                 num_chunks = (first_dim_size + chunk_dim_size - 1) // chunk_dim_size
                 logger.info(
