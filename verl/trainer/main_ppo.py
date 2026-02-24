@@ -289,7 +289,6 @@ class TaskRunner:
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
 
-
     def run(self, config):
         """Execute the main PPO training workflow.
 

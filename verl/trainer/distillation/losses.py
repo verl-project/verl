@@ -44,22 +44,20 @@ class DistillationLossSettings(BaseConfig):
         names (str | list[str]): Name(s) to register the distillation loss function under.
         use_topk (bool): Whether the loss function uses top-k log probabilities.
         use_estimator (bool): Whether the loss function uses single-sample KL estimators.
-        use_full (bool): Whether the loss function uses full log probabilities.
     """
 
     names: str | list[str] = field(default_factory=list)
     use_topk: bool = False
     use_estimator: bool = False
-    use_full: bool = False
 
     _mutable_fields = {"names"}
 
     def __post_init__(self):
         self.names = [self.names] if isinstance(self.names, str) else self.names
-        if sum([self.use_full, self.use_topk, self.use_estimator]) > 1:
+        if sum([self.use_topk, self.use_estimator]) > 1:
             raise ValueError(
-                f"Expected only one of use_full, use_estimator, use_topk, but got "
-                f"{self.use_full=}, {self.use_estimator=}, {self.use_topk=}."
+                f"Expected only one of use_estimator, use_topk, but got "
+                f"{self.use_estimator=}, {self.use_topk=}."
             )
 
 
