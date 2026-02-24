@@ -18,9 +18,8 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
-from typing import Generator, Dict
 from dataclasses import asdict
-from peft import LoraConfig
+from typing import Generator
 
 import ray
 import sglang.srt.entrypoints.engine
@@ -29,16 +28,14 @@ from peft import LoraConfig
 from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
+    MultiprocessingSerializer,
     assert_pkg_version,
     is_cuda,
     set_prometheus_multiproc_dir,
     set_ulimit,
-    MultiprocessingSerializer,
 )
-from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights, \
-    _preprocess_tensor_for_update_weights
-from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
-
+from sglang.srt.weight_sync.utils import _preprocess_tensor_for_update_weights
+from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from verl.utils.net_utils import is_valid_ipv6_address
@@ -46,8 +43,8 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import (
-    get_named_tensor_buckets,
     SGLANG_LORA_NAME,
+    get_named_tensor_buckets,
 )
 
 logger = logging.getLogger(__file__)
