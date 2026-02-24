@@ -9,7 +9,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 reward_path=tests/experimental/reward_loop/reward_fn.py
-reward_model_name=$HOME/models/Qwen/Qwen2.5-VL-3B-Instruct
+reward_model_name=$HOME/models/Qwen/Qwen3-VL-8B-Instruct
 
 
 python3 -m verl.trainer.main_ppo --config-path=config \
@@ -42,6 +42,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.guidance_scale=4.0 \
     actor_rollout_ref.rollout.agent.default_agent_loop=diffusion_single_turn_agent \
+    actor_rollout_ref.rollout.agent.num_workers=4 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.max_model_len=1058 \
@@ -51,10 +52,12 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.val_kwargs.num_inference_steps=50 \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.custom_pipeline=verl.utils.vllm_omni.pipelines.QwenImagePipelineWithLogProb \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
+    reward.num_workers=4 \
     reward.reward_manager.name=image \
-    reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.enable=True \
+    reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
+    reward.reward_model.rollout.enforce_eager=False \
     reward.custom_reward_function.path=$reward_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.use_legacy_worker_impl=disable \

@@ -51,6 +51,7 @@ class ImageRewardManager(RewardManagerBase):
             {
                 "reward_router_address": self.reward_router_address,
                 "reward_model_tokenizer": self.reward_model_tokenizer,
+                "model_name": self.config.reward.reward_model.model_path,
             }
             if self.reward_router_address is not None
             else {}
