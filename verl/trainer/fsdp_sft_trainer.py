@@ -24,6 +24,7 @@ os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 import logging
+import json
 import re
 import time
 from contextlib import nullcontext
@@ -563,6 +564,16 @@ class FSDPSFTTrainer:
         if self.device_mesh.get_rank() == 0:
             local_mkdir_safe(local_global_step_folder)
             dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
+
+            if self.lora:
+                lora_meta = {
+                    "r": int(getattr(self.config.model, "lora_rank", 0) or 0),
+                    "lora_alpha": int(getattr(self.config.model, "lora_alpha", 0) or 0),
+                }
+                lora_meta_path = os.path.join(local_global_step_folder, "lora_train_meta.json")
+                with open(lora_meta_path, "w", encoding="utf-8") as f:
+                    json.dump(lora_meta, f, ensure_ascii=False, indent=4)
+                print(f"Saved LoRA rank/alpha metadata to: {lora_meta_path}")
 
             # Use StatefulDataLoader's built-in state dict functionality
             dataloader_state_dict = self.train_dataloader.state_dict()
