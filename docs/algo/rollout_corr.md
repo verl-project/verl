@@ -97,7 +97,7 @@ This critical implementation mistake that leads to RL training collapse was iden
 - **Bypass mode**: Two policies (π_rollout = π_old, π_θ) using actual rollout policy as PPO anchor
 - **Bypass + Policy Gradient mode**: Two policies (π_rollout, π_θ) with IS/RS correction and no PPO clipping
 
-See [Mathematical Formulations](rollout_corr_math.md#38-common-implementation-mistake) for detailed explanation.
+See [Mathematical Formulations](rollout_corr_math.md#37-common-implementation-mistake) for detailed explanation.
 
 ### Key Design Principle: Separation of IS Weights and Rejection Sampling
 
@@ -275,8 +275,8 @@ Rejection sampling aggregation modes. Supply a comma-separated string (spaces op
 Threshold specification for rejection sampling.
 
 - Provide **one entry per option**, separated by commas. A single entry is broadcast to every option.
-- **Ratio modes (`*k1`)**: Use `"lower_upper"` strings (e.g. `"0.7_1.3"`). Supplying a float implies only the upper bound; the lower bound defaults to its reciprocal.
-- **Divergence modes (`*k2`/`*k3`)**: Supply positive upper bounds (float or numeric string).
+- **K1 KL modes (`*k1`)**: Use `"lower_upper"` strings (e.g. `"0.7_1.3"`). Supplying a float implies only the upper bound; the lower bound defaults to its reciprocal.
+- **K2/K3 KL modes (`*k2`/`*k3`)**: Supply positive upper bounds (float or numeric string).
 - Set to `null` to disable thresholds entirely (only valid when `rollout_rs` is null).
 
 ## Understanding the Framework: Components and Combinations
@@ -314,22 +314,22 @@ This section provides detailed guidance on choosing and using the verified prese
 | Preset Method                                                                  | Estimator        | Mode               | IS Level | RS Level | Properties                              |
 | ------------------------------------------------------------------------------ | ---------------- | ------------------ | -------- | -------- | --------------------------------------- |
 | **Decoupled PPO Mode** (3 policies: π_rollout, π_old, π_θ)                     |
-| `decoupled_token_is()`                                                         | Token-TIS        | Decoupled          | token    | -        | Per-token IS weights                    |
+| `decoupled_token_is()`                                                         | Token-TIS        | Decoupled          | token    | -        | Token-level IS weights                    |
 | `decoupled_seq_is()`                                                           | Seq-TIS          | Decoupled          | sequence | -        | Sequence-level IS weights               |
-| `decoupled_seq_is_rs()`                                                        | Seq-MIS          | Decoupled          | sequence | sequence | Sequence IS + sequence RS               |
-| `decoupled_geo_rs()`                                                           | Geo-RS           | Decoupled          | -        | sequence | Geometric RS (ratio mode)               |
-| `decoupled_geo_rs_token_tis()`                                                 | Geo-RS-Token-TIS | Decoupled          | token    | sequence | Geometric filter + token clipped weight |
+| `decoupled_seq_is_rs()`                                                        | Seq-MIS          | Decoupled          | sequence | sequence | Sequence IS + seq_sum_k1 RS               |
+| `decoupled_geo_rs()`                                                           | Geo-RS           | Decoupled          | -        | sequence | Geometric RS (seq_mean_k1)               |
+| `decoupled_geo_rs_token_tis()`                                                 | Geo-RS-Token-TIS | Decoupled          | token    | sequence | Geometric RS + token IS |
 | **K3 KL Estimator** (more stable for small KL values)                          |
-| `decoupled_k3_rs()`                                                            | K3-RS            | Decoupled          | -        | sequence       | K3 rejection, no IS weights             |
-| `decoupled_k3_rs_token_tis()`                                                  | K3-RS-Token-TIS  | Decoupled          | token    | sequence       | K3 filter + token clipped weight        |
+| `decoupled_k3_rs()`                                                            | K3-RS            | Decoupled          | -        | sequence       | seq_mean_k3 RS             |
+| `decoupled_k3_rs_token_tis()`                                                  | K3-RS-Token-TIS  | Decoupled          | token    | sequence       | seq_mean_k3 RS  + token IS        |
 | **Bypass Mode (PPO-clip)** (2 policies; ratio handles IS, RS masks outliers)   |
 | `bypass_ppo_clip()`                                                            | -                | Bypass (PPO-clip)  | -        | -        | PPO-clip only                           |
-| `bypass_ppo_clip_geo_rs()`                                                     | Geo-RS           | Bypass (PPO-clip)  | -        | sequence | PPO-clip + Geo-RS (ratio)               |
-| `bypass_ppo_clip_k3_rs()`                                                      | K3-RS            | Bypass (PPO-clip)  | -        | sequence       | PPO-clip + K3-RS                        |
+| `bypass_ppo_clip_geo_rs()`                                                     | Geo-RS           | Bypass (PPO-clip)  | -        | sequence | PPO-clip + Geo-RS                       |
+| `bypass_ppo_clip_k3_rs()`                                                      | K3-RS            | Bypass (PPO-clip)  | -        | sequence       | PPO-clip + K3-RS                       |
 | **Bypass Mode (REINFORCE)** (2 policies; explicit IS weights, no PPO clipping) |
 | `bypass_pg_is()`                                                               | Seq-TIS          | Bypass (REINFORCE) | sequence | -        | REINFORCE with explicit IS              |
-| `bypass_pg_geo_rs()`                                                           | Geo-RS           | Bypass (REINFORCE) | -        | sequence | REINFORCE with Geo-RS (ratio)           |
-| `bypass_pg_geo_rs_token_tis()`                                                 | Geo-RS-Token-TIS | Bypass (REINFORCE) | token    | sequence | REINFORCE + Geo filter + token IS       |
+| `bypass_pg_geo_rs()`                                                           | Geo-RS           | Bypass (REINFORCE) | -        | sequence | REINFORCE with Geo-RS                   |
+| `bypass_pg_geo_rs_token_tis()`                                                 | Geo-RS-Token-TIS | Bypass (REINFORCE) | token    | sequence | REINFORCE + Geo-RS + token IS       |
 | **Other**                                                                      |
 | `disabled()`                                                                   | -                | -                  | -        | -        | Metrics only, no correction             |
 
@@ -337,7 +337,7 @@ This section provides detailed guidance on choosing and using the verified prese
 
 - **Bypass mode** sets π_old = π_rollout and uses `loss_type` to select the loss function:
   - `"ppo_clip"` (default): PPO clipped objective where ratio = π_θ/π_rollout already handles IS
-  - `"reinforce"`: REINFORCE with explicit IS weights as π_θ / π_rollout
+  - `"reinforce"`: REINFORCE with explicit IS weights as π_θ/π_rollout
 - Both loss types benefit from rejection sampling (RS) which masks out-of-distribution samples.
 - All estimators (Token-TIS, Seq-TIS, Seq-MIS, Geo-RS, ...) are compatible with Decoupled and Bypass modes.
 
@@ -474,7 +474,7 @@ algorithm:
 - **Seq-TIS (clipping only)**: Maximizes information efficiency; extracts signal from all samples. Use when data is clean and mismatch is moderate.
 - **Seq-MIS (rejection)**: Maximizes safety; acts as a hard trust region filter. Use when mismatch is severe or when high-weight samples are likely garbage rather than signal.
 
-**Theory:** See [rollout_corr_math.md §3.4](rollout_corr_math.md#34-rejection-sampling-rs)
+**Theory:** See [rollout_corr_math.md §3.5](rollout_corr_math.md#35-rejection-sampling-rs)
 
 ---
 
@@ -496,12 +496,11 @@ config = RolloutCorrectionConfig.bypass_ppo_clip()
 **Equivalent YAML:**
 
 ```yaml
-algorithm:
-  rollout_correction:
-    rollout_is: null
-    rollout_rs: null
-    bypass_mode: true
-    loss_type: ppo_clip
+rollout_correction:
+  rollout_is: null
+  rollout_rs: null
+  bypass_mode: true
+  loss_type: ppo_clip
 ```
 
 **Properties:**
@@ -543,13 +542,12 @@ config = RolloutCorrectionConfig.bypass_pg_is(threshold=2.0)
 **Equivalent YAML:**
 
 ```yaml
-algorithm:
-  rollout_correction:
-    rollout_is: sequence
-    rollout_is_threshold: 2.0
-    rollout_rs: null
-    bypass_mode: true
-    loss_type: reinforce # REINFORCE with explicit IS weights
+rollout_correction:
+  rollout_is: sequence
+  rollout_is_threshold: 2.0
+  rollout_rs: null
+  bypass_mode: true
+  loss_type: reinforce # REINFORCE with explicit IS weights
 ```
 
 **Properties:**
@@ -732,12 +730,11 @@ This workflow uses bypass mode for efficiency.
 1. **Start with metrics only** to understand the off-policy gap:
 
    ```yaml
-    algorithm:
-     rollout_correction:
-       rollout_is: null
-       rollout_rs: null
-       bypass_mode: true # Bypass mode (recommended)
-       loss_type: ppo_clip # Default: PPO clipped objective
+    rollout_correction:
+      rollout_is: null
+      rollout_rs: null
+      bypass_mode: true # Bypass mode (recommended)
+      loss_type: ppo_clip # Default: PPO clipped objective
    ```
 
    Monitor `rollout_corr/kl`, `rollout_corr/log_ppl_abs_diff`, `rollout_corr/chi2_token` to assess off-policy gap.
@@ -745,27 +742,25 @@ This workflow uses bypass mode for efficiency.
 2. **Enable rejection sampling** if you see high outlier fractions:
 
    ```yaml
-   algorithm:
-     rollout_correction:
-       rollout_is: null
-       rollout_rs: sequence # or "geometric" for higher sensitivity
-       rollout_rs_threshold: 2.0
-       bypass_mode: true # Bypass mode
-       loss_type: ppo_clip # or "reinforce" for explicit IS weights
+    rollout_correction:
+      rollout_is: null
+      rollout_rs: sequence # or "geometric" for higher sensitivity
+      rollout_rs_threshold: 2.0
+      bypass_mode: true # Bypass mode
+      loss_type: ppo_clip # or "reinforce" for explicit IS weights
    ```
 
    This excludes outliers from training without modifying gradients.
 
 3. **Enable full IS correction** (with REINFORCE loss) once comfortable with metrics:
    ```yaml
-   algorithm:
-     rollout_correction:
-       rollout_is: sequence # Recommended: unbiased, suitable for most cases
-       rollout_is_threshold: 2.0
-       rollout_rs: sequence # or "geometric" for more aggressive filtering
-       rollout_rs_threshold: 2.0
-       bypass_mode: true # Bypass mode
-       loss_type: reinforce # REINFORCE with explicit IS weights
+    rollout_correction:
+      rollout_is: sequence # Recommended: unbiased, suitable for most cases
+      rollout_is_threshold: 2.0
+      rollout_rs: sequence # or "geometric" for more aggressive filtering
+      rollout_rs_threshold: 2.0
+      bypass_mode: true # Bypass mode
+      loss_type: reinforce # REINFORCE with explicit IS weights
    ```
 
 **Benefits of bypass mode:**
@@ -791,6 +786,12 @@ actor_rollout_ref:
   rollout:
     calculate_log_probs: true # Required!
 ```
+
+### Additional Configurations for Bypass Mode
+
+- Set `actor_rollout_ref.actor.use_rollout_log_probs: true`
+- Set `actor_rollout_ref.actor.policy_loss.loss_mode: bypass_mode`
+- Set rollout correction config via `actor_rollout_ref.actor.policy_loss.rollout_correction`
 
 ### Metrics
 
@@ -1146,13 +1147,12 @@ algorithm:
 ### Example 6: Bypass Mode with REINFORCE
 
 ```yaml
-algorithm:
-  rollout_correction:
-    rollout_is: sequence # Explicit IS correction in loss
-    rollout_is_threshold: 2.0
-    rollout_rs: null # Optional: can add rejection sampling
-    bypass_mode: true
-    loss_type: reinforce # REINFORCE with explicit IS weights
+rollout_correction:
+  rollout_is: sequence # Explicit IS correction in loss
+  rollout_is_threshold: 2.0
+  rollout_rs: null # Optional: can add rejection sampling
+  bypass_mode: true
+  loss_type: reinforce # REINFORCE with explicit IS weights
 ```
 
 **No PPO clipping, pure policy gradient with IS correction**
@@ -1160,14 +1160,13 @@ algorithm:
 ### Example 7: Bypass Mode with PPO-clip + Rejection Sampling
 
 ```yaml
-algorithm:
-  rollout_correction:
-    rollout_is: sequence # Computed for metrics
-    rollout_is_threshold: 2.0
-    rollout_rs: seq_max_k2 # Sequence max χ²/2 guard
-    rollout_rs_threshold: 2.5
-    bypass_mode: true
-    loss_type: ppo_clip # PPO clipped objective (IS handled by ratio)
+rollout_correction:
+  rollout_is: sequence # Computed for metrics
+  rollout_is_threshold: 2.0
+  rollout_rs: seq_max_k2 # Sequence max χ²/2 guard
+  rollout_rs_threshold: 2.5
+  bypass_mode: true
+  loss_type: ppo_clip # PPO clipped objective (IS handled by ratio)
 ```
 
 **PPO clipping with rejection sampling. IS handled by PPO ratio (no explicit IS weights).**
@@ -1322,5 +1321,4 @@ Rollout Correction provides a unified framework for handling general off-policy 
 ## References
 
 - **[Mathematical Formulations](rollout_corr_math.md)** - Detailed mathematical theory and derivations for all rollout correction methods
-- [When Speed Kills Stability: Demystifying RL Collapse from the Training-Inference Mismatch](https://richardli.xyz/rl-collapse) (see Blog Series above for parts 1-3)
 - [Your Efficient RL Framework Secretly Brings You Off-Policy RL Training](https://fengyao.notion.site/off-policy-rl)
