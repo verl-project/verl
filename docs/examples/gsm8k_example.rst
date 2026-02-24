@@ -85,7 +85,7 @@ We also provide various training scripts for SFT on GSM8K dataset in `gsm8k sft 
 
    set -x
 
-   torchrun -m verl.trainer.fsdp_sft_trainer \
+   torchrun -m verl.trainer.sft_trainer \
        data.train_files=$HOME/data/gsm8k/train.parquet \
        data.val_files=$HOME/data/gsm8k/test.parquet \
        data.prompt_key=question \
