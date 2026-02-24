@@ -31,6 +31,7 @@ except ImportError:
     MoEAlltoAllTokenDispatcher = None
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.training import get_args
 
 # https://github.com/THUDM/slime/blob/main/slime/utils/routing_replay.py
 
@@ -240,8 +241,9 @@ def _patched_topk_routing_with_score_function(
     return routing_probs, routing_map
 
 def _get_aux_loss_coeff(_self, aux_loss_type: str) -> float:
-    """获取给定辅助损失类型的系数。"""
-    # 逻辑保持不变
+    """Return the aux loss coeff for the given auxiliary loss type.
+    If the auxiliary loss type is not found, return 0.0.
+    """
     if isinstance(_self.routing_type, str):
         if _self.routing_type == aux_loss_type:
             return _self.config.moe_aux_loss_coeff
@@ -254,9 +256,8 @@ def _get_aux_loss_coeff(_self, aux_loss_type: str) -> float:
     return 0.0
 
 def _is_aux_loss_enabled(_self) -> bool:
-    """检查是否启用了任何辅助损失。"""
+    """Check if the auxiliary loss is enabled."""
     for aux_loss_type in ["aux_loss", "seq_aux_loss", "global_aux_loss"]:
-        # 注意这里调用的是同在模块级别的另一个辅助函数
         if _get_aux_loss_coeff(_self, aux_loss_type) > 0:
             return True
     return False

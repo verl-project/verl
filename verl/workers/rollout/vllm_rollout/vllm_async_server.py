@@ -507,7 +507,12 @@ class vLLMHttpServer:
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
             # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length
+            if self.config.enable_rollout_routing_replay:
+                # When routing replay is enabled, we strictly use the configured response length
+                max_tokens = self.config.response_length
+            else:
+                # Otherwise, use a dynamic calculation based on prompt length
+                max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
