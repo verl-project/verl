@@ -411,12 +411,14 @@ def apply_monkey_patch(
             try:
                 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 
-                original_vision_forward = Qwen2VisionTransformerPretrainedModel.forward
-                Qwen2VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original_vision_forward)
-                print(
-                    f"Monkey patch Qwen2VisionTransformerPretrainedModel.forward"
-                    f" for Vision DP (dp_size={ulysses_sp_size})"
-                )
+                if not getattr(Qwen2VisionTransformerPretrainedModel, "_vision_dp_patched", False):
+                    original_vision_forward = Qwen2VisionTransformerPretrainedModel.forward
+                    Qwen2VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original_vision_forward)
+                    Qwen2VisionTransformerPretrainedModel._vision_dp_patched = True
+                    print(
+                        f"Monkey patch Qwen2VisionTransformerPretrainedModel.forward"
+                        f" for Vision DP (dp_size={ulysses_sp_size})"
+                    )
             except ImportError as e:
                 print(f"Warning: Could not patch Qwen2VisionTransformer for Vision DP: {e}")
 
@@ -426,12 +428,16 @@ def apply_monkey_patch(
                     Qwen2_5_VisionTransformerPretrainedModel,
                 )
 
-                original_vision_forward_25 = Qwen2_5_VisionTransformerPretrainedModel.forward
-                Qwen2_5_VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original_vision_forward_25)
-                print(
-                    f"Monkey patch Qwen2_5_VisionTransformerPretrainedModel.forward"
-                    f" for Vision DP (dp_size={ulysses_sp_size})"
-                )
+                if not getattr(Qwen2_5_VisionTransformerPretrainedModel, "_vision_dp_patched", False):
+                    original_vision_forward_25 = Qwen2_5_VisionTransformerPretrainedModel.forward
+                    Qwen2_5_VisionTransformerPretrainedModel.forward = create_dp_vision_forward(
+                        original_vision_forward_25
+                    )
+                    Qwen2_5_VisionTransformerPretrainedModel._vision_dp_patched = True
+                    print(
+                        f"Monkey patch Qwen2_5_VisionTransformerPretrainedModel.forward"
+                        f" for Vision DP (dp_size={ulysses_sp_size})"
+                    )
             except ImportError as e:
                 print(f"Warning: Could not patch Qwen2_5VisionTransformer for Vision DP: {e}")
 
@@ -477,9 +483,11 @@ def apply_monkey_patch(
             try:
                 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
-                original_vision_forward_q3 = Qwen3VLVisionModel.forward
-                Qwen3VLVisionModel.forward = create_dp_vision_forward(original_vision_forward_q3)
-                print(f"Monkey patch Qwen3VLVisionModel.forward for Vision DP (dp_size={ulysses_sp_size})")
+                if not getattr(Qwen3VLVisionModel, "_vision_dp_patched", False):
+                    original_vision_forward_q3 = Qwen3VLVisionModel.forward
+                    Qwen3VLVisionModel.forward = create_dp_vision_forward(original_vision_forward_q3)
+                    Qwen3VLVisionModel._vision_dp_patched = True
+                    print(f"Monkey patch Qwen3VLVisionModel.forward for Vision DP (dp_size={ulysses_sp_size})")
             except ImportError as e:
                 print(f"Warning: Could not patch Qwen3VLVisionModel for Vision DP: {e}")
 
@@ -487,9 +495,11 @@ def apply_monkey_patch(
             try:
                 from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeVisionModel
 
-                original_vision_forward_q3moe = Qwen3VLMoeVisionModel.forward
-                Qwen3VLMoeVisionModel.forward = create_dp_vision_forward(original_vision_forward_q3moe)
-                print(f"Monkey patch Qwen3VLMoeVisionModel.forward for Vision DP (dp_size={ulysses_sp_size})")
+                if not getattr(Qwen3VLMoeVisionModel, "_vision_dp_patched", False):
+                    original_vision_forward_q3moe = Qwen3VLMoeVisionModel.forward
+                    Qwen3VLMoeVisionModel.forward = create_dp_vision_forward(original_vision_forward_q3moe)
+                    Qwen3VLMoeVisionModel._vision_dp_patched = True
+                    print(f"Monkey patch Qwen3VLMoeVisionModel.forward for Vision DP (dp_size={ulysses_sp_size})")
             except ImportError as e:
                 print(f"Warning: Could not patch Qwen3VLMoeVisionModel for Vision DP: {e}")
 
