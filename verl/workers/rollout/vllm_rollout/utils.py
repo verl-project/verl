@@ -236,6 +236,8 @@ class vLLMColocateWorkerExtension:
             patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
         # receive bucket and update weights
+        # Buffer to collect chunks for weights that were sliced
+        pending_chunks = {}  # name -> {chunk_idx: tensor, ...}
         while True:
             metadata = socket.recv_pyobj()
             weights, tensor = [], None
@@ -250,13 +252,39 @@ class vLLMColocateWorkerExtension:
                     tensor = tensor.clone()
                 else:
                     tensor = tensor.to(self.device)
-                weights.append((name, tensor))
+
+                # Check if this is a chunk of a sliced weight
+                if "chunk_idx" in meta and "total_chunks" in meta:
+                    # This is a chunk, store it for later merging
+                    original_name = meta["name"]
+                    chunk_idx = meta["chunk_idx"]
+                    if original_name not in pending_chunks:
+                        pending_chunks[original_name] = {}
+                    pending_chunks[original_name][chunk_idx] = tensor
+
+                    # Check if we have all chunks for this weight
+                    if len(pending_chunks[original_name]) == meta["total_chunks"]:
+                        # Merge all chunks back into one tensor
+                        chunks_dict = pending_chunks[original_name]
+                        sorted_chunks = [chunks_dict[i] for i in range(meta["total_chunks"])]
+                        merged_tensor = torch.cat(sorted_chunks, dim=0)
+                        weights.append((original_name, merged_tensor))
+                        del pending_chunks[original_name]
+                else:
+                    weights.append((name, tensor))
+
             get_torch_device().synchronize()
             socket.send(b"")
             self._update_weights(weights, peft_config=peft_config, base_sync_done=base_sync_done)
             del weights, tensor
             if metadata["is_last"]:
                 break
+
+        # Check if there are any remaining chunks that weren't processed
+        if pending_chunks:
+            raise RuntimeError(
+                f"Received chunks for weights {list(pending_chunks.keys())} but did not receive all chunks for them."
+            )
 
         if self._is_qat_model:
             # QAT: call process_weights_after_loading AFTER all buckets are received

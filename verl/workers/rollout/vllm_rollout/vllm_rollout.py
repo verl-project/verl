@@ -30,6 +30,7 @@ import gc
 import logging
 import os
 import time
+from functools import reduce
 from typing import Any, Generator, Optional
 
 import ray
@@ -198,27 +199,71 @@ class ServerAdapter(BaseRollout):
             # transfer volume.
             # weight = weight.to(dtype, non_blocking=True)
 
+            # Check if the weight needs to be sliced into chunks
+            # (e.g., large embedding layer that exceeds bucket_size)
+            weight_size = weight.nbytes
+            if weight_size > bucket_size:
+                # Slice the weight along the first dimension into chunks
+                dtype_size = weight.element_size()
+                numel_per_chunk = bucket_size // dtype_size
+
+                # Calculate chunk size along the first dimension
+                first_dim_size = weight.shape[0]
+                chunk_dim_size = numel_per_chunk // reduce(lambda x, y: x * y, weight.shape[1:], 1)
+
+                num_chunks = (first_dim_size + chunk_dim_size - 1) // chunk_dim_size
+                logger.info(
+                    f"Slicing weight {name} ({weight.shape}, {weight.dtype}, {weight_size} bytes) "
+                    f"into {num_chunks} chunks"
+                )
+
+                start_idx = 0
+                for chunk_idx in range(num_chunks):
+                    end_idx = min(start_idx + chunk_dim_size, first_dim_size)
+
+                    # Extract chunk along first dimension
+                    chunk = weight[start_idx:end_idx]
+                    chunk_size = chunk.nbytes
+
+                    # Fill bucket with chunk
+                    if offset + chunk_size > bucket_size:
+                        get_torch_device().synchronize()
+                        s.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+                        s.recv()
+                        bucket_meta = {}
+                        offset = 0
+
+                    bucket_meta[f"{name}_chunk_{chunk_idx}"] = {
+                        "name": name,
+                        "shape": chunk.shape,
+                        "dtype": chunk.dtype,
+                        "offset": offset,
+                        "chunk_idx": chunk_idx,
+                        "total_chunks": num_chunks,
+                    }
+                    buffer[offset : offset + chunk_size].copy_(chunk.view(-1).view(torch.uint8), non_blocking=True)
+                    offset += chunk_size
+
+                    start_idx = end_idx
+
+                continue
+
             # fill the tensor bucket
-            if offset + weight.nbytes > bucket_size:
+            if offset + weight_size > bucket_size:
                 get_torch_device().synchronize()
                 s.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
                 s.recv()
                 bucket_meta = {}
                 offset = 0
 
-            # TODO: slice embedding layer weight into chunks
-            assert offset + weight.nbytes <= bucket_size, (
-                f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-                f"Please increase rollout.update_weights_bucket_megabytes({bucket_size_mb} MB)."
-            )
             bucket_meta[name] = {
                 "name": name,
                 "shape": weight.shape,
                 "dtype": weight.dtype,
                 "offset": offset,
             }
-            buffer[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
-            offset += weight.nbytes
+            buffer[offset : offset + weight_size].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
+            offset += weight_size
 
         # send the last bucket
         get_torch_device().synchronize()
