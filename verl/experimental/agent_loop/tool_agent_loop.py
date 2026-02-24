@@ -88,6 +88,8 @@ class AgentData:
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
 
+        self.routed_experts = None
+
         # Extra fields for dynamic addition, e.g., tool session data
         self.extra_fields: dict[str, Any] = {}
 
@@ -193,19 +195,17 @@ class ToolAgentLoop(AgentLoopBase):
             multi_modal_data["images"] = agent_data.image_data
         if agent_data.video_data is not None:
             multi_modal_data["videos"] = agent_data.video_data
-
-        routed_experts = getattr(agent_data, "routed_experts", None)
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
             response_mask=agent_data.response_mask[: self.response_length],
             multi_modal_data=multi_modal_data,
-            routed_experts=routed_experts,
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
             else None,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
+            routed_experts=agent_data.routed_experts,
             extra_fields={},
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
