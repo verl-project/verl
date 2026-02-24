@@ -1,6 +1,12 @@
 # Target class for this configuration
 _target_: verl.workers.config.TorchtitanEngineConfig
 
+# Whether to offload model parameters to CPU
+param_offload: False
+
+# Whether to offload optimizer state to CPU
+optimizer_offload: False
+
 # policy for wrapping the model
 wrap_policy:
   # Minimum number of parameters to trigger wrapping a layer with FSDP
