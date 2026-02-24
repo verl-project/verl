@@ -127,6 +127,46 @@ class NCCLCheckpointEngine(CollectiveCheckpointEngine):
         if self.is_master:
             self._start_zmq_server()
 
+    @property
+    def bucket_size(self) -> int:
+        """Return the bucket size in bytes."""
+        return self._bucket_size
+
+    @bucket_size.setter
+    def bucket_size(self, value: int):
+        """Set the bucket size in bytes."""
+        self._bucket_size = value
+
+    @property
+    def rank(self) -> int:
+        """Return the rank of the current process."""
+        return self._rank
+
+    @rank.setter
+    def rank(self, value: int):
+        """Set the rank of the current process."""
+        self._rank = value
+
+    @property
+    def send_buf(self):
+        """Return the send buffer."""
+        return self._send_buf
+
+    @send_buf.setter
+    def send_buf(self, value):
+        """Set the send buffer."""
+        self._send_buf = value
+
+    @property
+    def recv_buf(self):
+        """Return the receive buffer."""
+        return self._recv_buf
+
+    @recv_buf.setter
+    def recv_buf(self, value):
+        """Set the receive buffer."""
+        self._recv_buf = value
+
     def prepare(self) -> MasterMetadata:
         # For master process, use cupy instead of torch to avoid memory register error
         # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
