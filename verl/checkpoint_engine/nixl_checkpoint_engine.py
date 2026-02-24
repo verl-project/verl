@@ -500,47 +500,6 @@ class NIXLCheckpointEngine(CheckpointEngine):
         await readable_op.wait_for_complete()
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
 
-    def _yield_tensors_from_buffer(
-        self,
-        buffer: torch.Tensor,
-        bucket_meta: dict,
-        pending_chunks: dict,
-    ) -> Generator[tuple[str, torch.Tensor], None, None]:
-        """Yield tensors from buffer, handling chunk merging for large weights.
-
-        Args:
-            buffer: The buffer containing the tensor data.
-            bucket_meta: The metadata of the bucket.
-            pending_chunks: Dictionary to collect chunks for weights that were sliced.
-
-        Yields:
-            A tuple of the name of the weight tensor and the tensor itself.
-        """
-        for name, meta in bucket_meta.items():
-            dtype, shape = meta["dtype"], meta["shape"]
-            size = dtype.itemsize * shape.numel()
-            tensor = buffer[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
-
-            # Check if this is a chunk of a sliced weight
-            if "chunk_idx" in meta and "total_chunks" in meta:
-                # This is a chunk, store it for later merging
-                original_name = meta["name"]
-                chunk_idx = meta["chunk_idx"]
-                if original_name not in pending_chunks:
-                    pending_chunks[original_name] = {}
-                pending_chunks[original_name][chunk_idx] = tensor
-
-                # Check if we have all chunks for this weight
-                if len(pending_chunks[original_name]) == meta["total_chunks"]:
-                    # Merge all chunks back into one tensor
-                    chunks_dict = pending_chunks[original_name]
-                    sorted_chunks = [chunks_dict[i] for i in range(meta["total_chunks"])]
-                    merged_tensor = torch.cat(sorted_chunks, dim=0)
-                    yield original_name, merged_tensor
-                    del pending_chunks[original_name]
-            else:
-                yield name, tensor
-
     @torch.no_grad()
     async def receive_weights(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
         """Receive the weights of the model.
