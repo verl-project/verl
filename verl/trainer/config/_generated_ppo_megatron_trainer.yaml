@@ -248,17 +248,8 @@ actor_rollout_ref:
     'n': 1
     over_sample_rate: 0
     multi_stage_wake_up: false
-    image_height: 512
-    image_width: 512
-    num_inference_steps: 10
-    noise_level: 0.7
-    guidance_scale: 4.5
-    sde_type: sde
-    sde_window_size: null
-    sde_window_range: null
     engine_kwargs:
       vllm: {}
-      vllm_omni: {}
       sglang: {}
       trtllm: {}
     val_kwargs:
@@ -268,9 +259,6 @@ actor_rollout_ref:
       temperature: 0
       'n': 1
       do_sample: false
-      num_inference_steps: 40
-      noise_level: 0.0
-      seed: 42
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false

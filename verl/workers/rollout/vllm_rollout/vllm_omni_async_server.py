@@ -196,12 +196,7 @@ class vLLMOmniHttpServer:
         quantization = self.config.quantization
         hf_overrides = {}
 
-        # Handle QAT (Quantization-Aware Training) configuration
-        qat_config_dict = getattr(self.config, "qat", {}) or {}
-        if qat_config_dict.get("enable", False):
-            raise NotImplementedError("vLLM-Omni server does not support QAT (Quantization-Aware Training) yet.")
-        elif quantization is not None:
-            # Handle other quantization methods (fp8, torchao)
+        if quantization is not None:
             raise NotImplementedError("vLLM-Omni server does not support quantization yet.")
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
@@ -223,7 +218,6 @@ class vLLMOmniHttpServer:
         args = {
             "dtype": self.config.dtype,
             "load_format": self.config.load_format,
-            "skip_tokenizer_init": False,
             "distributed_executor_backend": "mp",
             "worker_extension_cls": "verl.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension",
             "trust_remote_code": self.model_config.trust_remote_code,

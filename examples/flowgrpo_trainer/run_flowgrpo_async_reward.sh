@@ -1,6 +1,5 @@
 # Qwen-Image lora, vllm_omni rollout
 set -x
-export TOKENIZERS_PARALLELISM="false"
 
 ocr_train_path=$HOME/data/ocr/train.parquet
 ocr_test_path=$HOME/data/ocr/test.parquet
@@ -44,7 +43,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo --config-path=conf
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
-    actor_rollout_ref.rollout.guidance_scale=4.0 \
+    actor_rollout_ref.rollout.guidance_scale=1.0 \
     actor_rollout_ref.rollout.agent.default_agent_loop=diffusion_single_turn_agent \
     actor_rollout_ref.rollout.agent.num_workers=4 \
     actor_rollout_ref.rollout.load_format=safetensors \

@@ -29,7 +29,7 @@ def init_config() -> DictConfig:
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
         config = compose(config_name="ppo_diffusion_trainer")
 
-    model_path = os.path.expanduser("~/models/Qwen/Qwen-Image")
+    model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.model.tokenizer_path = os.path.join(model_path, "tokenizer")
     config.actor_rollout_ref.rollout.name = "vllm_omni"
@@ -39,7 +39,6 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.num_inference_steps = 10
     config.actor_rollout_ref.rollout.guidance_scale = 4.0
     config.actor_rollout_ref.rollout.agent.num_workers = 2
-    config.actor_rollout_ref.rollout.skip_tokenizer_init = True
     config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
     config.actor_rollout_ref.rollout.noise_level = 1.0
     config.actor_rollout_ref.rollout.sde_window_size = 2

@@ -26,7 +26,7 @@ from verl.utils import hf_tokenizer
 
 
 def create_data_samples(tokenizer) -> DataProto:
-    images = ["assets/ocr.jpg"]
+    images = ["tests/experimental/reward_loop/assets/ocr.jpg"]
     prompts = ['a photo of displaying "OCR"']
     pil_images = [np.array(Image.open(img).convert("RGB").resize((512, 512))) for img in images]
     responses = [torch.tensor(img).permute(2, 0, 1) / 255.0 for img in pil_images]

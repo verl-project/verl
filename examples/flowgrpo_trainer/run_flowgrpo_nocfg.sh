@@ -1,6 +1,5 @@
 # Qwen-Image lora, vllm_omni rollout
 set -x
-export TOKENIZERS_PARALLELISM="false"
 
 ocr_train_path=$HOME/data/ocr/train.parquet
 ocr_test_path=$HOME/data/ocr/test.parquet
