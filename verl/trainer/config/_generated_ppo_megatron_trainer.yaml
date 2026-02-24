@@ -324,6 +324,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
+    qat: ${oc.select:actor_rollout_ref.actor.qat,null}
     layer_name_map:
       qkv_layer_name: qkv
       gate_proj_layer_name: gate_up
@@ -585,6 +586,10 @@ reward_model:
   reward_loop_source: null
   reward_loop_module_path: null
   reward_loop_class_name: null
+  model:
+    path: null
+    external_lib: null
+    trust_remote_code: null
   rollout:
     name: null
     dtype: null
