@@ -132,11 +132,14 @@ class TRTLLMHttpServer:
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
                 }
-                engine_kwargs["model_kwargs"] = { "quantization_config": FP8_BLOCK_QUANT_KWARGS }
+                engine_kwargs["model_kwargs"] = {"quantization_config": FP8_BLOCK_QUANT_KWARGS}
                 if self.config.load_format != "dummy":
                     raise ValueError("FP8 quantization is only supported for dummy load format")
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+
+        moe_ep = getattr(self.config, "moe_ep_size", None) or self.config.expert_parallel_size
+        moe_tp = getattr(self.config, "moe_tp_size", None)
 
         llm_kwargs = {
             "model": self.model_config.local_path,
@@ -152,7 +155,8 @@ class TRTLLMHttpServer:
             "max_num_tokens": self.config.max_num_batched_tokens,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "pipeline_parallel_size": self.config.pipeline_model_parallel_size,
-            "moe_expert_parallel_size": self.config.expert_parallel_size,
+            "moe_expert_parallel_size": moe_ep,
+            "moe_tensor_parallel_size": moe_tp,
             "load_format": self.config.load_format,
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
@@ -188,7 +192,7 @@ class TRTLLMHttpServer:
         self.llm = await AsyncLLM(**llm_kwargs)
 
         trtllm_server = OpenAIServer(
-            generator=self.llm,
+            llm=self.llm,
             model=self.model_config.local_path,
             tool_parser=None,
             server_role=None,
