@@ -2,7 +2,7 @@
 
 **Author:** `https://github.com/meituan-search`
 
-Last updated: 11/02/2026.
+Last updated: 24/02/2026.
 
 Monitor the rollout computation process using Prometheus and Grafana when using verl to enhance system observability and facilitate further performance optimization.
 
@@ -184,6 +184,11 @@ After task execution, log in to Grafana to view and customize monitoring dashboa
 - [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/query_statistics.json)
 - [SGLang Grafana Dashboard](https://github.com/sgl-project/sglang/blob/main/examples/monitoring/grafana/dashboards/json/sglang-dashboard.json)
 
+**Available Metrics:**
+
+- [vLLM Metrics Overview](https://docs.vllm.ai/en/stable/design/metrics/#metrics-overview) and [Production Metrics](https://docs.vllm.ai/en/stable/usage/metrics/)
+- [SGLang Produciton Metrics](https://github.com/sgl-project/sgl-docs/blob/main/docs/references/production_metrics.mdx)
+
 ## Logging Prometheus Metrics to Experiment Tracking
 
 You can automatically log Prometheus metrics to your experiment tracking backends (WandB, TensorBoard, MLflow, etc.) during training:
@@ -197,7 +202,7 @@ actor_rollout_ref:
         - "vllm:generation_tokens_total"
 ```
 
-Metrics are queried every training step and logged with the `rollout/` prefix (e.g., `rollout/generation_tokens_total`).
+Metrics are queried every training step and logged with the `prometheus/` prefix (e.g., `prometheus/vllm/generation_tokens_total`).
 
 ## Additional Resources
 
