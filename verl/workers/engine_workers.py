@@ -24,6 +24,8 @@ from omegaconf import DictConfig, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
+from verl.workers.config.engine import McoreEngineConfig
+
 try:
     from verl.workers.engine.mindspeed.transformer_impl import repatch
 except ImportError:
@@ -98,9 +100,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 self.model_config, self.device_name
             )
 
-        # we use the one defined in model
-        # TODO: this is not elegant and should refactor later
-        self.engine_config.use_remove_padding = self.model_config.use_remove_padding
+        # For Megatron engine, model.use_remove_padding (data pipeline) and
+        # engine.use_remove_padding (compute format: thd vs bshd) may differ
+        # (e.g. Qwen3.5 GDN requires bshd but still uses NestedTensor in data).
+        # For other engines, keep the original behavior of syncing them.
+        if not isinstance(self.engine_config, McoreEngineConfig):
+            self.engine_config.use_remove_padding = self.model_config.use_remove_padding
         self.engine_config.use_fused_kernels = self.model_config.use_fused_kernels
 
         if repatch is not None:

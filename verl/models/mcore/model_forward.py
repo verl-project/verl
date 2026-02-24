@@ -258,7 +258,7 @@ def gptmodel_forward_no_padding(
         output_orig = model(
             input_ids=input_ids_bshd,
             attention_mask=attention_mask_bshd,
-            position_ids=position_ids_bshd,
+            position_ids=None if vision_model else position_ids_bshd,
             **model_kwargs,
         )
         if post_process and logits_processor is not None:

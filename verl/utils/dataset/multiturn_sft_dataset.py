@@ -22,6 +22,7 @@ import re
 from functools import wraps
 from typing import Any, Optional
 
+import jinja2
 import numpy as np
 import pandas as pd
 import torch
@@ -215,20 +216,52 @@ class MultiTurnSFTDataset(Dataset):
         Returns:
             Tuple of (input_ids, loss_mask, attention_mask, dict[str, torch.Tensor])
         """
-        processor = self.processor if self.processor is not None else self.tokenizer
+        has_visual_content = isinstance(message.get("content"), list) and any(
+            isinstance(c, dict) and c.get("type") in ("image", "video") for c in message["content"]
+        )
+        processor = self.processor if self.processor is not None and has_visual_content else self.tokenizer
         apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
 
-        inputs = processor.apply_chat_template(
-            [message],
-            tools=tools,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            **apply_chat_template_kwargs,
-        )
+        try:
+            inputs = processor.apply_chat_template(
+                [message],
+                tools=tools,
+                add_generation_prompt=False,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                **apply_chat_template_kwargs,
+            )
+        except (jinja2.exceptions.TemplateError, Exception) as e:
+            if "No user query" not in str(e):
+                raise
+            # Chat templates that require a user message (e.g. Qwen3.5) fail
+            # when tokenising a single non-user message. Fallback: tokenise the
+            # conversation up to this turn and subtract the prefix.
+            inputs_full = processor.apply_chat_template(
+                full_message[: index + 1],
+                tools=tools,
+                add_generation_prompt=False,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                **apply_chat_template_kwargs,
+            )
+            prefix_len = 0
+            if index > 0:
+                inputs_prev = processor.apply_chat_template(
+                    full_message[:index],
+                    tools=tools if index == 1 else None,
+                    add_generation_prompt=False,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                    **apply_chat_template_kwargs,
+                )
+                prefix_len = inputs_prev["input_ids"].shape[-1]
+            inputs = {k: v[..., prefix_len:] for k, v in inputs_full.items()}
 
         inputs = dict(inputs)
         input_ids = inputs.pop("input_ids")[0]
@@ -266,13 +299,15 @@ class MultiTurnSFTDataset(Dataset):
 
         image_offset, video_offset = 0, 0
         for message in messages:
-            if self.image_key not in example and self.video_key not in example:
-                continue
-            assert self.processor is not None, "processor is needed to process image and video"
-
             content = message["content"]
             if not isinstance(content, str):
                 continue
+
+            if self.image_key not in example and self.video_key not in example:
+                if self.processor is not None:
+                    message["content"] = [{"type": "text", "text": content}]
+                continue
+            assert self.processor is not None, "processor is needed to process image and video"
 
             content_list = []
             segments = re.split("(<image>|<video>)", content)
