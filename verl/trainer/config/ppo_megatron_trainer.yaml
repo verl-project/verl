@@ -15,6 +15,8 @@ defaults:
   - model@actor_rollout_ref.model: hf_model
   # Critic model config.
   - critic@critic: megatron_critic
+  # legacy reward impl config, for backward compatibility
+  - legacy_reward_impl
   # Reward model config.
   - reward@reward: reward
   # Rollout correction config.
