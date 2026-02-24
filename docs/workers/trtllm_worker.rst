@@ -36,9 +36,6 @@ Install verl with TensorRT-LLM:
             unset "$v"
         done
 
-        # Required for IPC UUID detection
-        export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
-
 Using TensorRT-LLM as the Rollout Engine for GRPO
 -------------------------------------------------
 

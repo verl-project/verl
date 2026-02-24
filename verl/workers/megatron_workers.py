@@ -79,7 +79,6 @@ from verl.utils.torch_functional import use_original_torch_compile
 from verl.workers.actor.megatron_actor import MegatronPPOActor
 from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
-from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
 from verl.workers.rollout import get_rollout_class
 
 logger = logging.getLogger(__file__)
@@ -120,8 +119,7 @@ class MegatronWorker(Worker):
         from transformers import AutoConfig
 
         from verl.models.mcore import hf_to_mcore_config
-        from verl.utils import hf_processor, hf_tokenizer
-        from verl.utils.fs import copy_to_local
+        from verl.utils import hf_processor
         from verl.utils.model import update_model_config
 
         # Step 1: initialize the tokenizer
@@ -201,6 +199,10 @@ class MegatronWorker(Worker):
 
                 # In case of invalid overrides, we need to make sure some critical params are set correctly
                 provider.params_dtype = dtype
+
+                # Ensure dtype settings propagate to Megatron-Bridge/TE
+                provider.fp16 = fp16
+                provider.bf16 = bf16
 
                 # Pass distributed info
                 provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
@@ -543,6 +545,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             get_device_name(), mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
         )
 
+        self.rollout_device_mesh = rollout_device_mesh
+
         is_collect = (
             rollout_device_mesh["infer_tp"].get_local_rank() == 0
             and rollout_device_mesh["infer_pp"].get_local_rank() == 0
@@ -550,13 +554,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         self._register_dispatch_collect_info(
             "rollout", dp_rank=rollout_device_mesh["dp"].get_local_rank(), is_collect=is_collect
         )
-
-        # 3. init trainer and rollout random states
-        self.torch_random_states = get_torch_device().get_rng_state()
-        gen_dp_rank = rollout_device_mesh["dp"].get_local_rank()
-        get_torch_device().manual_seed(gen_dp_rank + 1000)  # make sure all tp ranks have the same random states
-        self.gen_random_states = get_torch_device().get_rng_state()
-        get_torch_device().set_rng_state(self.torch_random_states)
 
         # 4. build rollout model
         log_gpu_memory_usage(f"Before building {self.config.rollout.name} rollout", logger=logger)
@@ -719,7 +716,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             # main memory can trade sync time to avoid OOM
             self.rollout.sleep_level = 1
 
-            do_lora_base_sync = not self.base_sync_done or self.rollout.sleep_level != 1
+            do_lora_base_sync = (not self.base_sync_done) or (
+                self.rollout.sleep_level != 1 and self.config.rollout.free_cache_engine
+            )
 
         if self.bridge is not None:
             if self.vanilla_bridge:
@@ -769,31 +768,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["kv_cache"])
 
-        # important: need to manually set the random states of each tp to be identical.
-        self.torch_random_states = get_torch_device().get_rng_state()
-        get_torch_device().set_rng_state(self.gen_random_states)
-
-    async def trainer_mode(self):
-        """Context switch hybridengine to trainer mode."""
-        if self.config.rollout.free_cache_engine:
-            log_gpu_memory_usage("Before rollout offload", logger=logger)
-            await self.rollout.release()
-            log_gpu_memory_usage("After rollout offload", logger=logger)
-
-        for model in self.actor.actor_module:
-            model.train()
-        # add empty cache after each compute
-        aggressive_empty_cache(force_sync=True)
-
-        # FIXME(@wuxibin): megatron+sglang failed with `expandable_segments:True` in ci,
-        # can't reproduce it in dev environment, temporary disable it.
-        # https://github.com/volcengine/verl/actions/runs/17382936845/job/49344264323?pr=3285
-        if os.environ.get("MEGATRON_CI_DISABLE_EXPANDABLE_SEGMENTS", "0") == "0":
-            set_expandable_segments(True)
-
-        # restore random states
-        self.gen_random_states = get_torch_device().get_rng_state()
-        get_torch_device().set_rng_state(self.torch_random_states)
+        set_expandable_segments(True)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @GPUMemoryLogger(role="update_actor", logger=logger)
@@ -1037,14 +1012,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
 
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
-    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
-    async def wake_up(self):
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def update_weights(self):
         await self.rollout_mode()
-        return True
-
-    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
-    async def sleep(self):
-        await self.trainer_mode()
         return True
 
 
@@ -1342,185 +1312,3 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
         )
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
-
-
-class RewardModelWorker(MegatronWorker, DistProfilerExtension):
-    """
-    Note that we only implement the reward model that is subclass of AutoModelForSequenceClassification.
-    """
-
-    def __init__(self, config):
-        Worker.__init__(self)
-
-        profiler_config = omega_conf_to_dataclass(config.get("profiler", {}), dataclass_type=ProfilerConfig)
-        omega_profiler_config = config.get("profiler", {})
-        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
-            tool_config = omega_conf_to_dataclass(
-                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
-            )
-        else:
-            tool_config = None
-        DistProfilerExtension.__init__(
-            self,
-            DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config),
-        )
-        self.config = config
-
-        # NOTE(sgm): We utilize colocate WorkerGroup by default.
-        # As a result, Workers for different model share the same process.
-        # Therefore, we only require one distribute initialization.
-        # To utilize different parallel strategy in different models:
-        # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
-        # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
-        if not torch.distributed.is_initialized():
-            set_numa_affinity()
-            rank = int(os.environ["LOCAL_RANK"])
-            torch.distributed.init_process_group(
-                backend=get_nccl_backend(),
-                timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
-                init_method=os.environ.get("DIST_INIT_METHOD", None),
-            )
-            get_torch_device().set_device(rank)
-
-            mpu.initialize_model_parallel(
-                tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-                pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-                virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-                use_sharp=False,
-                context_parallel_size=self.config.megatron.context_parallel_size,
-                expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-                expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-                nccl_communicator_config_path=None,
-            )
-
-        is_collect = (
-            mpu.get_tensor_model_parallel_rank() == 0
-            and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
-            and mpu.get_context_parallel_rank() == 0
-        )
-        self._register_dispatch_collect_info(
-            mesh_name="reward", dp_rank=mpu.get_data_parallel_rank(), is_collect=is_collect
-        )
-
-        set_random_seed(seed=self.config.megatron.seed)
-
-        # normalize config
-        if self.config.micro_batch_size is not None:
-            self.config.micro_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.micro_batch_size_per_gpu = self.config.micro_batch_size
-
-    def _build_rm_model(self, model_path, tokenizer, override_model_config, override_transformer_config):
-        from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
-
-        self._init_hf_config_and_tf_config(
-            model_path,
-            tokenizer,
-            self.dtype,
-            override_model_config,
-            override_transformer_config,
-            self.config.model.get("trust_remote_code", False),
-            self.config.megatron,
-        )
-
-        wrap_config = McoreModuleWrapperConfig(
-            is_value_model=True,  # reward model is value model
-            share_embeddings_and_output_weights=False,
-            wrap_with_ddp=False,
-            use_distributed_optimizer=self.config.megatron.use_distributed_optimizer,
-        )
-        reward_model, updated_tf_config = make_megatron_module(
-            wrap_config=wrap_config,
-            tf_config=self.tf_config,
-            hf_config=self.hf_config,
-            bridge=self.bridge,
-            provider=self.provider,
-            override_model_config=override_model_config,
-        )
-        self.tf_config = updated_tf_config
-
-        if self.config.load_weight:
-            if self.config.megatron.use_dist_checkpointing:
-                load_mcore_dist_weights(
-                    reward_model,
-                    self.config.megatron.dist_checkpointing_path,
-                    is_value_model=True,
-                    prefix=self.config.megatron.dist_checkpointing_prefix,
-                )
-            else:
-                if self.bridge is not None:
-                    local_model_path = get_hf_model_path(self.config)
-                    if self.vanilla_bridge:
-                        self.bridge.load_weights(reward_model, local_model_path)
-                    else:
-                        self.bridge.load_hf_weights(
-                            reward_model, local_model_path, allowed_mismatched_params=["output_layer.weight"]
-                        )
-                else:
-                    load_megatron_gptmodel_weights(
-                        self.config, self.hf_config, reward_model, params_dtype=self.dtype, is_value_model=True
-                    )
-
-        get_torch_device().empty_cache()
-        return reward_model, self.hf_config
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
-        # create critic
-
-        from verl.utils.torch_dtypes import PrecisionType
-
-        if self.config.model.get("external_lib", None) is not None:
-            # This is used to import external_lib into the huggingface systems
-            import importlib
-
-            importlib.import_module(self.config.model.external_lib)
-        override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
-        override_transformer_config = OmegaConf.to_container(
-            OmegaConf.create(self.config.megatron.get("override_transformer_config", {}))
-        )
-
-        use_shm = self.config.model.get("use_shm", False)
-        sft_tokenizer_local_path = copy_to_local(self.config.model.input_tokenizer, use_shm=use_shm)
-        sft_tokenizer = hf_tokenizer(sft_tokenizer_local_path)
-        rm_tokenizer_path = self.config.model.get("rm_tokenizer", None)
-        rm_tokenizer = None
-        if rm_tokenizer_path is not None:
-            rm_tokenizer_local_path = copy_to_local(rm_tokenizer_path, use_shm=use_shm)
-            rm_tokenizer = hf_tokenizer(
-                rm_tokenizer_local_path, trust_remote_code=self.config.model.get("trust_remote_code", False)
-            )
-
-        self.param_dtype = PrecisionType.to_dtype(self.config.megatron.dtype)
-        self.dtype = PrecisionType.to_dtype(self.param_dtype)
-
-        reward_model_module, reward_model_config = self._build_rm_model(
-            model_path=self.config.model.path,
-            tokenizer=rm_tokenizer,
-            override_model_config=override_model_config,
-            override_transformer_config=override_transformer_config,
-        )
-        # FIXME(sgm): reward model param offload is implemented in MegatronRewardModel
-        # should be implemented in workers
-        self.rm = MegatronRewardModel(
-            config=self.config,
-            reward_model_module=reward_model_module,
-            model_config=reward_model_config,
-            hf_config=self.hf_config,
-            tf_config=self.tf_config,
-            sft_tokenizer=sft_tokenizer,
-            rm_tokenizer=rm_tokenizer,
-        )
-
-    # TODO: reward model use itself tokenizer instead of sft tokenizer
-    # the input_ids, responses, attention_mask and position_ids may be different!
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
-    @DistProfiler.annotate(color="brown", role="compute_rm_score")
-    def compute_rm_score(self, data: DataProto):
-        data.meta_info["micro_batch_size"] = self.config.micro_batch_size_per_gpu
-        data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.use_dynamic_bsz
-        data = data.to(get_device_id())
-        output = self.rm.compute_reward(data)
-        output = output.to("cpu")
-        return output

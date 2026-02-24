@@ -48,7 +48,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
 
 
-def compute_response_mask(data: DataProto) -> torch.Tensor:
+def compute_response_mask(config, data: DataProto) -> torch.Tensor:
     """Compute the attention mask for the response part of the sequence.
 
     This function extracts the portion of the attention mask that corresponds to the model's response,
@@ -78,7 +78,7 @@ def compute_response_mask(data: DataProto) -> torch.Tensor:
     mask_traj = step_indices <= final_first_true_idx.unsqueeze(1)
 
     mask = mask_traj.view(complete.shape)  # shape: [batch_size, num_steps, chunk_size]
-    mask = mask.repeat_interleave(7, dim=-1)  # eapand to action dim
+    mask = mask.repeat_interleave(config.env.actor.model.action_dim, dim=-1)  # eapand to action dim
     return mask
 
 
@@ -333,7 +333,7 @@ class RobRayPPOTrainer(RayPPOTrainer):
                     batch = gen_batch_output
 
                     if "response_mask" not in batch.batch.keys():
-                        batch.batch["response_mask"] = compute_response_mask(batch)
+                        batch.batch["response_mask"] = compute_response_mask(self.config, batch)
 
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
@@ -600,13 +600,10 @@ class RobRayPPOTrainer(RayPPOTrainer):
             # pad to be divisible by dp_size
             size_divisor = self.config.env.train.num_envs * self.config.env.rollout.pipeline_stage_num
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-            else:
-                reset_future = self._reset_envs(test_gen_batch_padded)
-                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(
-                    test_gen_batch_padded, reset_future
-                )
+            reset_future = self._reset_envs(test_gen_batch_padded)
+            test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(
+                test_gen_batch_padded, reset_future
+            )
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)

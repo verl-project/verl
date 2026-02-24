@@ -32,7 +32,7 @@ from verl.experimental.agent_loop.agent_loop import (
 )
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.protocol import DataProto
-from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
+from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
@@ -51,6 +51,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
     ) -> tuple[list[Any], list[Any], Any] | tuple[Sequence[int], list[float], bool]:
         """Generate tokens from prompt ids, used for async partial.
 
@@ -71,6 +72,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
             image_data=image_data,
+            video_data=video_data,
         )
         return output
 
@@ -78,10 +80,13 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
 @ray.remote
 class FullyAsyncAgentLoopWorker(AgentLoopWorker):
     def __init__(
-        self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], reward_router_address: str = None
+        self,
+        config: DictConfig,
+        server_handles: list[ray.actor.ActorHandle],
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
-        super().__init__(config, server_handles, reward_router_address)
+        super().__init__(config, server_handles, reward_loop_worker_handles)
         # A shared cancellation event for all agent loops running on this worker.
         self.cancellation_event = asyncio.Event()
 
@@ -186,7 +191,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
                     tokenizer=self.tokenizer,
                     processor=self.processor,
                     dataset_cls=self.dataset_cls,
-                    dataset_config=self.config.data,
+                    dataset_config=DictConfigWrap(config=self.config.data),
                 )
                 output: AgentLoopOutput = await agent_loop.run(
                     sampling_params, cancellation_event=self.cancellation_event, **kwargs
@@ -211,12 +216,14 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
     def __init__(
-        self, config: DictConfig, worker_group: RayWorkerGroup = None, rm_resource_pool: RayResourcePool = None
+        self,
+        config: DictConfig,
+        worker_group: RayWorkerGroup = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
         self.worker_group = worker_group
-        self.reward_model_manager = None
-        self.reward_router_address = None
+        self.reward_loop_worker_handles = reward_loop_worker_handles
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
 
         # Select rollout replica class based on rollout name
@@ -234,7 +241,6 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         else:
             raise ValueError(f"Unsupported rollout name: {rollout_name}. Supported values are 'sglang' and 'vllm'.")
 
-        self.rm_resource_pool = rm_resource_pool
         self.rollout_replicas = None
         self.server_handles = None
         self.server_addresses = None
@@ -242,19 +248,16 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
     @classmethod
     async def create(
-        cls, config: DictConfig, worker_group: RayWorkerGroup = None, rm_resource_pool: RayResourcePool = None
+        cls,
+        config: DictConfig,
+        worker_group: RayWorkerGroup = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        instance = cls(config, worker_group, rm_resource_pool)
+        instance = cls(config, worker_group, reward_loop_worker_handles)
         await instance._async_init()
         return instance
 
     async def _async_init(self):
-        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-            from verl.experimental.reward_loop import RewardModelManager
-
-            self.reward_model_manager = RewardModelManager(self.config.reward_model, self.rm_resource_pool)
-            self.reward_router_address = self.reward_model_manager.get_router_address()
-
         await self._initialize_llm_servers_async()
         self._init_agent_loop_workers()
 
@@ -343,28 +346,6 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
     async def sleep(self):
         await asyncio.gather(*[replica.sleep() for replica in self.rollout_replicas])
-
-    async def reset_prefix_cache(self):
-        print("[FullyAsyncAgentLoopManager] Reset prefix cache ...")
-        # await asyncio.gather(*[replica.reset_prefix_cache() for replica in self.rollout_replicas])
-        # Note: debug
-        timeout = 5.0
-
-        async def reset_one(idx, replica):
-            print(f"[reset_prefix_cache] start replica={idx}")
-            try:
-                await asyncio.wait_for(replica.reset_prefix_cache(), timeout=timeout)
-            except asyncio.TimeoutError:
-                print(f"[reset_prefix_cache] TIMEOUT replica={idx} after {timeout}s")
-                return
-            except Exception as e:
-                print(f"[reset_prefix_cache] ERROR replica={idx}: {e!r}")
-                return
-            print(f"[reset_prefix_cache] done  replica={idx}")
-
-        tasks = [reset_one(i, replica) for i, replica in enumerate(self.rollout_replicas)]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        print("[FullyAsyncAgentLoopManager] Reset prefix cache finished")
 
     async def clear_kv_cache(self):
         await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])

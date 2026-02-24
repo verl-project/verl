@@ -388,7 +388,7 @@ def rearrange_micro_batches(
     if min_num_micro_batch is not None:
         # used to support pp
         num_micro_batches = max(min_num_micro_batch, num_micro_batches)
-    if dist.is_initialized() and same_micro_num_in_dp:
+    if dist.is_initialized() and same_micro_num_in_dp and dp_group is not None:
         num_micro_batches = torch.tensor([num_micro_batches], device=get_device_name())
         dist.all_reduce(num_micro_batches, op=dist.ReduceOp.MAX, group=dp_group)
         num_micro_batches = num_micro_batches.cpu().item()
@@ -397,6 +397,8 @@ def rearrange_micro_batches(
 
     assert num_micro_batches <= len(seq_len_effective)
 
+    # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
+    seq_len_effective = seq_len_effective.long()
     # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
     workloads = calculate_workload(seq_len_effective).cpu().tolist()
     micro_bsz_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)

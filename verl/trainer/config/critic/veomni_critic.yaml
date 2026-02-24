@@ -1,0 +1,29 @@
+# defaults specify the default config from each component
+defaults:
+
+  # veomni optimizer config
+  - ../optim@optim: veomni
+
+  # veomni engine config
+  - ../engine@veomni: veomni
+
+  # critic config, inheriting from trainer/config/critic/critic.yaml
+  - critic
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.VeOmniCriticConfig
+
+strategy: veomni
+
+# model config for the critic
+model:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.trainer.config.BaseModelConfig
+
+# seed for data loader
+data_loader_seed: ${oc.select:actor_rollout_ref.actor.data_loader_seed,null}
+

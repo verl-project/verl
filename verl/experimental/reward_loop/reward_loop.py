@@ -20,39 +20,93 @@ import aiohttp
 import numpy as np
 import ray
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
-from verl.trainer.ppo.reward import get_custom_reward_fn
+from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 
-from .reward_manager import get_reward_manager_cls
 from .reward_model import RewardModelManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-@ray.remote
+def migrate_legacy_reward_impl(config):
+    """
+    Migrate the legacy reward model implementation to the new one.
+    """
+    # 1. reward workers migration
+    # config.reward_model.num_workers -> config.reward.num_workers
+    if config.reward_model.num_workers is not None:
+        config.reward.num_workers = config.reward_model.num_workers
+
+    # 2.reward manager migration
+    # config.reward_model.reward_manager -> config.reward.reward_manager
+    if config.reward_model.reward_manager is not None:
+        config.reward.reward_manager.name = config.reward_model.reward_manager
+    if config.reward_model.reward_loop_source is not None:
+        config.reward.reward_manager.source = config.reward_model.reward_loop_source
+        config.reward.reward_manager.module.path = config.reward_model.reward_loop_module_path
+        config.reward.reward_manager.module.name = config.reward_model.reward_loop_class_name
+
+    # 3. custom reward function migration
+    # config.custom_reward_function -> config.reward.custom_reward_function
+    if not all(v is None for v in config.custom_reward_function.values()):
+        config.reward.custom_reward_function = config.custom_reward_function
+
+    # 4. reward model migration
+    # config.reward_model -> config.reward.reward_model
+    for key in ["enable", "enable_resource_pool", "n_gpus_per_node", "nnodes"]:
+        if config.reward_model.get(key) is not None:
+            config.reward.reward_model[key] = config.reward_model[key]
+    if config.reward_model.model.path is not None:
+        config.reward.reward_model.model_path = config.reward_model.model.path
+    # config.reward_model.reward_kwargs -> config.reward.reward_kwargs (for dapo algo)
+    if config.reward_model.get("reward_kwargs") is not None:
+        with open_dict(config.reward):
+            config.reward["reward_kwargs"] = config.reward_model["reward_kwargs"]
+    # config.reward_model.rollout -> config.reward.reward_model.rollout
+    legacy_rollout = config.reward_model.rollout
+    for key in legacy_rollout.keys():
+        if legacy_rollout[key] is not None:
+            config.reward.reward_model.rollout[key] = legacy_rollout[key]
+
+    # 5. sandbox_fusion migration
+    # config.sandbox_fusion -> reward.sandbox_fusion
+    if not all(v is None for v in config.sandbox_fusion.values()):
+        config.reward.sandbox_fusion = config.sandbox_fusion
+
+    # 6. delete legacy config from configs
+    with open_dict(config):
+        del config.reward_model
+        del config.custom_reward_function
+        del config.sandbox_fusion
+
+    return config
+
+
 class RewardLoopWorker:
+    """
+    RewardLoopWork can tackle reward computation:
+    (1) rule-based reward computation
+    (2) reward model-based reward computation (both disrm and genrm)
+    (3) high-flexible user-customized reward function (can access rm by posting requests to reward_model_router)
+
+    Reward Computation Logic:
+    - if user-customized reward function is provided:
+        -> directly use user-customized reward function
+    - if user-customized reward function is not provided:
+        -> rm is not enabled: use default rule-based reward function
+        -> rm is disrm: compute reward score using disrm
+        -> rm is genrm: raise error (user-costomized reward func must be provided)
+    """
+
     def __init__(self, config: DictConfig, reward_router_address: str = None):
         """
-        RewardLoopWork can tackle reward computation:
-        (1) rule-based reward computation
-        (2) reward model-based reward computation (both disrm and genrm)
-        (3) high-flexible user-customized reward function (can access rm by posting requests to reward_model_router)
-
-        Reward Computation Logic:
-        - if user-customized reward function is provided:
-            -> directly use user-customized reward function
-        - if user-customized reward function is not provided:
-            -> rm is not enabled: use default rule-based reward function
-            -> rm is disrm: compute reward score using disrm
-            -> rm is genrm: raise error (user-costomized reward func must be provided)
-
         Args:
             config: DictConfig, the config for reward loop worker.
             reward_router_address: str, the address of reward router.
@@ -65,40 +119,15 @@ class RewardLoopWorker:
         input_tokenizer_local_path = copy_to_local(self.config.actor_rollout_ref.model.path)
         self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
         self.reward_model_tokenizer = None
-        if self.config.reward_model.enable:
-            reward_model_tokenizer_local_path = copy_to_local(self.config.reward_model.model.path)
+        if self.config.reward.reward_model.enable:
+            reward_model_tokenizer_local_path = copy_to_local(self.config.reward.reward_model.model_path)
             self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
-        self.reward_fn = get_custom_reward_fn(self.config)
 
-        # Load reward loop manager class
-        # Support both registry and importlib loading methods
-        reward_loop_source = self.config.reward_model.get("reward_loop_source", "register")
-
-        if reward_loop_source == "register":
-            # Load from registry (default behavior)
-            reward_manager_cls = get_reward_manager_cls(self.config.reward_model.reward_manager)
-        elif reward_loop_source == "importlib":
-            # Load from external module using importlib
-            from verl.utils.import_utils import load_extern_object
-
-            reward_loop_module_path = self.config.reward_model.get("reward_loop_module_path", None)
-            reward_loop_class_name = self.config.reward_model.get("reward_loop_class_name", None)
-
-            assert reward_loop_module_path is not None, (
-                "reward_loop_module_path must be set when reward_loop_source='importlib'"
-            )
-            assert reward_loop_class_name is not None, (
-                "reward_loop_class_name must be set when reward_loop_source='importlib'"
-            )
-
-            reward_manager_cls = load_extern_object(
-                module_path=reward_loop_module_path, object_name=reward_loop_class_name
-            )
-        else:
-            raise ValueError(f"Unknown reward_loop_source: {reward_loop_source}. Must be 'register' or 'importlib'")
-
-        self.reward_loop = reward_manager_cls(
-            self.config, self.input_tokenizer, self.reward_fn, self.reward_router_address, self.reward_model_tokenizer
+        self.reward_manager = load_reward_manager(
+            self.config,
+            self.input_tokenizer,
+            reward_router_address=self.reward_router_address,
+            reward_model_tokenizer=self.reward_model_tokenizer,
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
@@ -110,16 +139,16 @@ class RewardLoopWorker:
 
     async def compute_score(self, data: DataProto) -> dict:
         assert len(data) == 1, "RewardLoopWorker only support single data item"
-        if self.config.custom_reward_function.path is not None:
+        if self.config.reward.custom_reward_function.path is not None:
             # directly use user-customized reward function
-            return await self.reward_loop.run_single(data)
+            return await self.reward_manager.run_single(data)
         else:
-            if self.config.reward_model.enable:
+            if self.config.reward.reward_model.enable:
                 # we assume the rm is disrm
                 # genrm must set custom_reward_function
                 return await self.compute_score_disrm(data)
             else:
-                return await self.reward_loop.run_single(data)
+                return await self.reward_manager.run_single(data)
 
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 16):
         url = f"http://{self.reward_router_address}/{endpoint}"
@@ -199,15 +228,13 @@ class RewardLoopWorker:
 
     async def compute_score_disrm(self, data: DataProto) -> dict:
         disrm_prompt = await self._preprocess_reward_inputs(data)
-        engine_name = self.config.reward_model.rollout.name
-        model_name = self.config.reward_model.model.path
+        engine_name = self.config.reward.reward_model.rollout.name
+        model_name = self.config.reward.reward_model.model_path
         if engine_name == "vllm":
-            # TODO (dyy): the "activation" has been changed to "use_activation" in vllm 0.11.2
             payloads = {
                 "model": model_name,
                 "input": disrm_prompt,
-                "activation": False,
-                # "add_special_tokens": False,  # vllm >= 0.11.2
+                "use_activation": False,
             }
             output = await self._post_request(payloads, "classify")
             rm_score = output["data"][-1]["probs"][-1]
@@ -218,6 +245,23 @@ class RewardLoopWorker:
             }
             output = await self._post_request(payloads, "v1/embeddings")
             rm_score = output["data"][-1]["embedding"][-1]
+        elif engine_name == "trtllm":
+            # TODO: remove this once TRT-LLM switches to TorchSampler
+            raise ValueError("TensorRT-LLM backend does not support reward models currently.")
+
+            payloads = {
+                "model": model_name,
+                "prompt": disrm_prompt,
+                "return_context_logits": True,
+            }
+            output = await self._post_request(payloads, "v1/completions")
+            rm_score = output["choices"][0]["context_logits"]
+            assert isinstance(rm_score, list) and len(rm_score) > 0, (
+                "TensorRT-LLM OpenAI server response for reward score is not in the expected format."
+            )
+
+            rm_score = float(rm_score[0][0])
+            logger.debug(f"rm score: {rm_score}")
         else:
             raise NotImplementedError(f"RewardLoopManager does not support {engine_name}")
 
@@ -228,30 +272,30 @@ class RewardLoopManager:
     """
     RewardLoopManager run in single controller.
     This class will create reward loop workers and manage them.
-    RewardLoopManager will deprecate fsdp/megatron RewardModelWorker in the future.
     """
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
         self.config = config
-        if self.config.reward_model.enable:
-            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
+        if self.config.reward.reward_model.enable:
+            self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
         else:
             self.reward_model_manager = None
             self.reward_router_address = None
 
+        self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self._init_reward_loop_workers()
 
     def _init_reward_loop_workers(self):
         self.reward_loop_workers = []
-        num_workers = self.config.reward_model.num_workers
+        num_workers = self.config.reward.num_workers
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
             self.reward_loop_workers.append(
-                RewardLoopWorker.options(
+                self.reward_loop_workers_class.options(
                     name=f"reward_loop_worker_{i}",
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id,
@@ -260,7 +304,6 @@ class RewardLoopManager:
                 ).remote(self.config, self.reward_router_address)
             )
 
-    # this func is used to replace the legacy fsdp/megatron RewardModelWorker.compute_rm_score
     def compute_rm_score(self, data: DataProto) -> DataProto:
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()

@@ -31,7 +31,7 @@ from sglang.srt.utils import (
     set_ulimit,
 )
 from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
-from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
@@ -129,6 +129,21 @@ class ServerAdapter(BaseRollout):
         if self._engine is not None:
             return
 
+        # device_mesh is needed to gather cuda ipc handle to update weights
+        if self.device_mesh is None:
+            assert torch.distributed.is_initialized(), "torch distributed must be initialized"
+            infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+            infer_pp = self.config.pipeline_model_parallel_size
+            infer_world_size = infer_tp * infer_pp
+            dp = torch.distributed.get_world_size() // infer_world_size
+            self.device_mesh = init_device_mesh(
+                "cpu", mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+            )
+
+        # Only init http server adapter in tp rank 0
+        if self.device_mesh["infer_tp"].get_local_rank() != 0:
+            return
+
         # Lazy init http server adapter because http server is launched after hybrid engine.
         self.server_actor = ray.get_actor(f"sglang_server_{self.replica_rank}_{self.node_rank}")
         server_address, server_port = await self.server_actor.get_server_address.remote()
@@ -151,14 +166,14 @@ class ServerAdapter(BaseRollout):
         Args:
             tag: weights or kv_cache.
         """
+        await self._init_server_adapter()
         if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
-            await self._init_server_adapter()
             await self._engine.resume_memory_occupation(tags=tags)
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
+        await self._init_server_adapter()
         if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
-            await self._init_server_adapter()
             await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
 
     async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
@@ -174,10 +189,9 @@ class ServerAdapter(BaseRollout):
             - Main logic: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L452
             - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
         """
-        if self.device_mesh["infer_tp"].get_local_rank() == 0:
-            await self._init_server_adapter()
+        await self._init_server_adapter()
 
-        update_weights_bucket_bytes = int(self.config.update_weights_bucket_megabytes) << 20
+        update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
         if self.config.get("quantization", None) == "fp8":
             from verl.utils.sglang.sglang_fp8_utils import quant_weights_by_name
 
@@ -190,7 +204,7 @@ class ServerAdapter(BaseRollout):
         else:
             weights = weights
 
-        for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+        async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
             await sgl_update_weights(
                 engine=self._engine,
                 params_batch=params_batch,

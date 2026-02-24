@@ -653,7 +653,10 @@ def log_probs_from_logits_all_rmpad(input_ids_rmpad, logits_rmpad, indices, batc
         seqlen: int
         response_length: int
     """
-    from flash_attn.bert_padding import pad_input
+    if get_device_name() == "cuda":
+        from flash_attn.bert_padding import pad_input
+    elif get_device_name() == "npu":
+        from verl.utils.attention_utils import pad_input
 
     input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # transpose back to [total_nnz, 1]
     input_ids_rmpad = input_ids_rmpad.squeeze(-1)
@@ -707,6 +710,7 @@ def get_cosine_schedule_with_warmup(
     num_cycles: float = 0.5,
     last_epoch: int = -1,
     init_lr_ratio: float = None,
+    zero_indexed_step: bool = True,
 ):
     """
     Create a schedule with a learning rate that decreases following the values of the cosine function between the
@@ -728,6 +732,9 @@ def get_cosine_schedule_with_warmup(
             The index of the last epoch when resuming training.
         init_lr_ratio (:obj:`float`, `optional`, defaults to None):
             The initial lr ratio w.r.t the maximum.
+        zero_indexed_step (:obj:`bool`, `optional`, defaults to True):
+            Whether the LR schedule uses 0-indexed steps. If True (default), step counting starts at 0.
+            If False (used by torchtitan), step counting starts at 1.
     Return:
         :obj:`torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
     """
@@ -740,6 +747,8 @@ def get_cosine_schedule_with_warmup(
     assert init_lr_ratio >= 0 and init_lr_ratio <= 1.0
 
     def lr_lambda(current_step):
+        if not zero_indexed_step:
+            current_step += 1
         if current_step < num_warmup_steps:
             return init_lr_ratio + (1.0 - init_lr_ratio) * (float(current_step) / float(max(1, num_warmup_steps)))
         progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))

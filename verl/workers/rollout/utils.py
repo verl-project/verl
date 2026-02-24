@@ -56,3 +56,13 @@ async def run_unvicorn(app: FastAPI, server_args, server_address, max_retries=5)
 
     logger.info(f"HTTP server started on port {server_port}")
     return server_port, server_task
+
+
+async def ensure_async_iterator(iterable):
+    """Convert an iterable to an async iterator."""
+    if hasattr(iterable, "__aiter__"):
+        async for item in iterable:
+            yield item
+    else:
+        for item in iterable:
+            yield item

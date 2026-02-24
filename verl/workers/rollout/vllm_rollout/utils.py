@@ -19,8 +19,9 @@ import os
 import platform
 import signal
 import threading
+from multiprocessing import shared_memory
 from types import MethodType
-from typing import Any, Callable, TypedDict, get_args
+from typing import Any, Callable, Literal, TypedDict, get_args
 
 import torch
 import zmq
@@ -56,9 +57,12 @@ def get_device_uuid(device_id: int) -> str:
 
     # Convert torch.npu.current_device to its corresponding ASCEND_RT_VISIBLE_DEVICES.
     if is_npu_available:
-        npu_visible_devices = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-        assert device_id < len(npu_visible_devices), f"device_id {device_id} must less than {npu_visible_devices}"
-        return "NPU-" + npu_visible_devices[device_id]
+        if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None:
+            npu_visible_devices = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
+            assert device_id < len(npu_visible_devices), f"device_id {device_id} must less than {npu_visible_devices}"
+            return "NPU-" + npu_visible_devices[device_id]
+        else:
+            return f"NPU-{device_id}"
     else:
         return current_platform.get_device_uuid(device_id)
 
@@ -70,7 +74,11 @@ def get_vllm_max_lora_rank(lora_rank: int):
     """
     assert lora_rank > 0, f"lora_rank must be greater than 0, get {lora_rank}"
 
-    from vllm.config.lora import MaxLoRARanks
+    try:
+        from vllm.config.lora import MaxLoRARanks
+    except Exception:
+        # FIXME: migrate vllm version https://github.com/vllm-project/vllm/blob/main/vllm/config/lora.py#L25
+        MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 
     vllm_max_lora_ranks = sorted(get_args(MaxLoRARanks))
     if lora_rank > vllm_max_lora_ranks[-1]:
@@ -109,6 +117,23 @@ def rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) ->
     return buffer
 
 
+def create_shared_memory(size: int, name: str):
+    """Create shared memory for weight transfer. If already exists, attach to it."""
+    try:
+        shm = shared_memory.SharedMemory(name=name, create=True, size=size)
+    except FileExistsError:
+        shm = shared_memory.SharedMemory(name=name)
+    return shm
+
+
+def rebuild_shared_memory(name: str, size: int, dtype=torch.uint8):
+    """Rebuild tensor from shared memory."""
+    shm = shared_memory.SharedMemory(name=name)
+    tensor = torch.frombuffer(shm.buf[:size], dtype=dtype)
+
+    return tensor, shm
+
+
 class TensorMetadata(TypedDict):
     name: str
     shape: torch.Size
@@ -138,8 +163,15 @@ class vLLMColocateWorkerExtension:
         # 2. patch online fp8 quant
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1":
             apply_vllm_fp8_patches()
-        elif os.environ.get("VERL_VLLM_NVFP4_QUANT_ENABLED", "0") == "1":
-            apply_vllm_modelopt_patches()
+        # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
+        vllm_config = kwargs.get("vllm_config")
+        quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
+        _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
+        if _is_qat_model:
+            from verl.utils.qat import apply_qat_patches
+
+            apply_qat_patches()
+            logger.info("Applied QAT patches in vLLM worker subprocess")
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -149,7 +181,9 @@ class vLLMColocateWorkerExtension:
                 if k not in os.environ:
                     os.environ[k] = VLLM_ASCEND_REQUIRED_ENV_VARS[k]
 
-        return super().__new__(cls)
+        instance = super().__new__(cls)
+        instance._is_qat_model = _is_qat_model
+        return instance
 
     def monkey_patch_model(self, vocab_size: int):
         # patch compute_logits to avoid sampling OOV token
@@ -157,7 +191,7 @@ class vLLMColocateWorkerExtension:
         # patch weight loader to support MoE model
         patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False):
+    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
@@ -168,37 +202,83 @@ class vLLMColocateWorkerExtension:
         if peft_config and base_sync_done:
             self.remove_lora(VLLM_LORA_INT_ID)
 
-        # build cuda ipc buffer
+        # build communication buffer
         assert self.device is not None
         if not hasattr(self, "_zmq_ctx") or self._zmq_ctx is None:
             self._zmq_ctx = zmq.Context()
         socket = self._zmq_ctx.socket(zmq.REP)
         socket.connect(self._get_zmq_handle())
-        handle = socket.recv_pyobj()
-        buffer: torch.Tensor = rebuild_ipc(handle, self.device.index)
-        assert buffer.dtype == torch.uint8
+
+        comm_metadata = socket.recv_pyobj()
+        buffer, shm = None, None
+        if not use_shm:
+            handle = comm_metadata
+            buffer = rebuild_ipc(handle, self.device.index)
+            assert buffer.dtype == torch.uint8
+        else:
+            shm_name = comm_metadata["name"]
+            shm_size = comm_metadata["size"]
+            buffer, shm = rebuild_shared_memory(shm_name, shm_size, dtype=torch.uint8)
         socket.send(b"")
+
+        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
+            self.model_runner.vllm_config
+        )
+
+        if self._is_qat_model:
+            # QAT: Prepare for weight loading BEFORE receiving any buckets
+            from verl.utils.qat import prepare_qat_for_load_weights
+
+            prepare_qat_for_load_weights(self.model_runner.model, device=self.device)
+            logger.info("QAT: prepare_qat_for_load_weights completed")
+        elif use_standard_weight_load:
+            # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
+            patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
         # receive bucket and update weights
         while True:
             metadata = socket.recv_pyobj()
-            weights = []
+            weights, tensor = [], None
             for name, meta in metadata["bucket_meta"].items():
                 shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
                 size = dtype.itemsize * shape.numel()
                 # NOTE: we need to clone the tensor to release CUDA IPC memory
-                tensor = buffer[offset : offset + size].view(dtype=dtype).view(shape).clone()
+                # but for shared memory, it's not necessary and if we do clone,
+                # it will cause extra memory copy overhead and slow down the process.
+                tensor = buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                if not use_shm:
+                    tensor = tensor.clone()
+                else:
+                    tensor = tensor.to(self.device)
                 weights.append((name, tensor))
             get_torch_device().synchronize()
             socket.send(b"")
             self._update_weights(weights, peft_config=peft_config, base_sync_done=base_sync_done)
-            del weights
+            del weights, tensor
             if metadata["is_last"]:
                 break
+
+        if self._is_qat_model:
+            # QAT: call process_weights_after_loading AFTER all buckets are received
+            from verl.utils.qat import manual_process_weights_after_loading
+
+            manual_process_weights_after_loading(self.model_runner.model)
+            logger.info("QAT: process_weights_after_loading completed")
+        elif use_standard_weight_load:
+            # Some post-load transforms are non-idempotent; run once after all buckets.
+            from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+            model = self.model_runner.model
+            model_config = self.model_runner.vllm_config.model_config
+            process_weights_after_loading(model, model_config, self.device)
 
         # clean up
         socket.close()
         del buffer
+        if shm is not None:
+            shm.close()
+            del shm
+        get_torch_device().synchronize()
         gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()

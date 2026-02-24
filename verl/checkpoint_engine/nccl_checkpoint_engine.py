@@ -17,8 +17,11 @@ import os
 import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, Generator
+from unittest.mock import patch
 
-import cupy as cp
+with patch("importlib.metadata.distributions", return_value=[]):
+    import cupy as cp
+
 import ray
 import ray.util.collective as collective
 import torch
@@ -134,7 +137,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
 
-    def finish(self):
+    def finalize(self):
         """Destroy the NCCL process group if rebuild_group is True."""
         if self.rebuild_group:
             if self.rank >= 0:
@@ -144,6 +147,20 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         self.send_buf = None
         self.recv_buf = None
+
+    @classmethod
+    def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
+        trainer_kwargs = {
+            "rank": [0] + [-1] * (trainer_world_size - 1),
+            "world_size": [rollout_world_size + 1] * trainer_world_size,
+            "master_metadata": [metadata[0]] * trainer_world_size,
+        }
+        rollout_kwargs = {
+            "rank": list(range(1, rollout_world_size + 1)),
+            "world_size": [rollout_world_size + 1] * rollout_world_size,
+            "master_metadata": [metadata[0]] * rollout_world_size,
+        }
+        return trainer_kwargs, rollout_kwargs
 
     def _start_zmq_server(self):
         self.ip = ray.util.get_node_ip_address().strip("[]")
@@ -223,9 +240,6 @@ class NCCLCheckpointEngine(CheckpointEngine):
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         for name, weight in weights:
-            # model parameters are in fp32 full precsion
-            weight = weight.to(self.rollout_dtype)
-
             # fill the tensor bucket
             if offset + weight.nbytes > self.bucket_size:
                 torch.cuda.synchronize()

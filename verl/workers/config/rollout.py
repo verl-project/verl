@@ -30,6 +30,7 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
+    "CheckpointEngineConfig",
 ]
 
 
@@ -118,6 +119,20 @@ class PrometheusConfig(BaseConfig):
 
 
 @dataclass
+class CheckpointEngineConfig(BaseConfig):
+    """
+    Configuration for checkpoint engine to update weights from trainer to rollout
+    """
+
+    # Backend for checkpoint engine: naive, nccl, nixl, hccl
+    backend: Optional[str] = MISSING
+    # Bucket size in MB to transfer multiple weights at one time
+    update_weights_bucket_megabytes: int = 2048
+    # Additional keyword arguments for checkpoint engine
+    engine_kwargs: dict = field(default_factory=dict)
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {"max_model_len", "load_format"}
 
@@ -188,7 +203,8 @@ class RolloutConfig(BaseConfig):
     # Extension point for custom configurations
     custom: Optional[dict] = None
 
-    update_weights_bucket_megabytes: int = 512
+    # Checkpoint Engine config for update weights from trainer to rollout
+    checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
 
     skip_rollout: bool = False
 
@@ -221,6 +237,8 @@ class RolloutConfig(BaseConfig):
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
+
+    qat: Optional[dict] = None
 
     def __post_init__(self):
         """Validate the rollout config"""

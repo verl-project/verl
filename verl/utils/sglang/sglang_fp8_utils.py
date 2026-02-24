@@ -18,6 +18,8 @@ import os
 
 import torch
 
+from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -43,6 +45,7 @@ def should_quantize_param(param_name: str) -> bool:
         "norm",  # Various Norm layers
         "ln_",  # LayerNorm variants
         "embeddings",  # Embeddings
+        "mlp.gate.weight",  # MoE router
     ]
 
     # Check if matches exclude patterns
@@ -62,7 +65,6 @@ def should_quantize_param(param_name: str) -> bool:
         "down_proj",  # Down projection (for MLP)
         "fc1",  # Fully connected 1
         "fc2",  # Fully connected 2
-        "gate",  # Gate (for MoE)
         "mlp",  # MLP layers
     ]
 
@@ -77,73 +79,18 @@ def should_quantize_param(param_name: str) -> bool:
     return False
 
 
-def scaled_fp8_blockwise(
-    data_hp,
-    weight_block_size,
-):
-    # cast tensor from high precision to FP8 with 128*128 blockwise quantization.
-    assert len(data_hp.shape) == 2, "Only 2d input tensor is supported"
-
-    block_size1 = weight_block_size[1]
-    block_size0 = weight_block_size[0]
-    assert data_hp.shape[1] % block_size1 == 0, (
-        f"data_hp.shape[1] {data_hp.shape[1]}  must be a multiple of block_size1: {block_size1}."
-    )
-    assert data_hp.shape[0] % block_size0 == 0, (
-        f"data_hp.shape[0] {data_hp.shape[0]} must be a multiple of block_size0: {block_size0}."
-    )
-
-    # FP8
-    max_dtype = torch.finfo(torch.float8_e4m3fn).max
-
-    original_shape = data_hp.shape
-    blk_m, blk_n = data_hp.shape[0] // block_size0, data_hp.shape[1] // block_size1
-
-    assert block_size1 == block_size0
-    data_hp = data_hp.reshape(blk_m, block_size0, blk_n, block_size1)
-
-    # Permute to (BLK_M, BLK_N, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    data_hp = data_hp.permute(0, 2, 1, 3)
-    # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N)
-    data_hp = data_hp.to(torch.float32).contiguous().flatten(start_dim=2)
-
-    # Calculate max absolute value per block
-    max_abs = torch.amax(torch.abs(data_hp), dim=-1, keepdim=True)
-
-    # Use FP32 scale
-    scale_fp = max_dtype / max_abs
-    scale_fp = torch.where(max_abs == 0, 1.0, scale_fp)
-    # preserve the behavior for 0 amax case
-    scale_fp = torch.where(max_abs == torch.inf, 1.0, scale_fp)
-
-    descale_fp = torch.reciprocal(scale_fp)
-
-    # Scale and saturate cast the data elements to max of target dtype
-    data_lp = torch.clamp(data_hp * scale_fp, min=-1 * max_dtype, max=max_dtype)
-
-    fp_data = data_lp.to(torch.float8_e4m3fn)
-
-    # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
-    fp_data = fp_data.reshape(blk_m, blk_n, block_size0, block_size1).permute(0, 2, 1, 3).reshape(original_shape)
-
-    # Convert to target format, but still in original precision container
-    return fp_data, descale_fp
-
-
 def quant_weights_by_name(weights, quant_config, dtype=torch.bfloat16):
-    """FP8 quantization based on parameter name
+    """FP8 quantization based on parameter name using a memory-efficient generator.
+
 
     Args:
-        weights: Generator of (name, tensor) pairs
+        weights: Generator or iterable of (name, tensor) pairs
         quant_config: Quantization configuration
         dtype: Data type for intermediate computation
 
-    Returns:
-        List of (name, tensor) pairs with quantized weights
+    Yields:
+        Tuples of (name, tensor) for each weight and its scale
     """
-
-    weights_quantized = []
-
     if isinstance(quant_config, dict):
         weight_block_size = quant_config.get("weight_block_size")
     else:
@@ -155,28 +102,28 @@ def quant_weights_by_name(weights, quant_config, dtype=torch.bfloat16):
     for k, v in weights:
         # Check if quantization is needed
         if not should_quantize_param(k):
-            weights_quantized.append((k, v))
+            yield (k, v)
             continue
 
         # Quantize to FP8
         try:
-            if weight_block_size is not None:
-                if torch.distributed.get_rank() == 0:
-                    logger.debug(f"  Quantizing to FP8 blockwise: {k}")
-                param_lp, param_scale = scaled_fp8_blockwise(
-                    v.to(dtype),
-                    weight_block_size=weight_block_size,
-                )
-                param_scale = param_scale.squeeze(-1)
-                weights_quantized.append([k, param_lp])
-                weights_quantized.append([k + "_scale_inv", param_scale])
-            else:
-                raise ValueError(
-                    "Only blockwise quantization is supported. Please set weight_block_size in quant_config"
-                )
+            if torch.distributed.get_rank() == 0:
+                logger.debug(f"Quantizing to FP8 blockwise: {k}")
+
+            param_lp, param_scale = scaled_fp8_blockwise(
+                v.to(dtype),
+                weight_block_size=weight_block_size,
+            )
+            param_scale = param_scale.squeeze(-1)
+
+            # Yield the quantized weight and scale
+            yield (k, param_lp)
+            yield (k + "_scale_inv", param_scale)
+
+            # Explicitly delete to help GC
+            del param_lp, param_scale
+
         except Exception as e:
             logger.error(f"Failed to quantize {k}: {e}")
             # If quantization fails, use original weights
-            weights_quantized.append((k, v))
-
-    return weights_quantized
+            yield (k, v)

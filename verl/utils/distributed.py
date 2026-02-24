@@ -73,18 +73,18 @@ def destroy_global_process_group():
         torch.distributed.destroy_process_group()
 
 
-def initialize_global_process_group_ray(timeout_second=None):
+def initialize_global_process_group_ray(timeout_second=None, backend=None):
     # in current ray environment, LOCAL_RANK is always zero.
 
     import torch.distributed
 
     timeout = timedelta(seconds=timeout_second) if timeout_second is not None else None
-
+    backend = backend or f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
     if not torch.distributed.is_initialized():
         rank = int(os.environ.get("RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))
         torch.distributed.init_process_group(
-            backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}",
+            backend=backend,
             rank=rank,
             world_size=world_size,
             timeout=timeout,

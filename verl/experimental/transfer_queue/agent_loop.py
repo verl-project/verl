@@ -31,11 +31,6 @@ class AgentLoopManager(agent_loop.AgentLoopManager):
             BatchMeta: Output batch metadata.
         """
 
-        if self.config.actor_rollout_ref.rollout.free_cache_engine:
-            self.wake_up()
-        if self.reward_model_manager and self.config.reward_model.rollout.free_cache_engine:
-            self.reward_model_manager.wake_up()
-
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = ray.get(
             [
@@ -44,10 +39,6 @@ class AgentLoopManager(agent_loop.AgentLoopManager):
             ]
         )
         output = BatchMeta.concat(outputs)
-        if self.config.actor_rollout_ref.rollout.free_cache_engine:
-            self.sleep()
-        if self.reward_model_manager and self.config.reward_model.rollout.free_cache_engine:
-            self.reward_model_manager.sleep()
 
         # calculate performance metrics
         metrics = [output.extra_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]

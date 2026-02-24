@@ -1,0 +1,145 @@
+# # Tests layout
+
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts
+# - `special_npu`: tests for NPUs
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of test that are designed to run in dedicated environments
+
+# Accelerators for tests
+# - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
+# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+
+# # Workflow layout
+
+# All CI tests are configured by yaml files in `.github/workflows/`. Here's an overview of all test configs:
+# 1. A list of always triggered CPU sanity tests: `check-pr-title.yml`, `secrets_scan.yml`, `check-pr-title,yml`, `pre-commit.yml`, `doc.yml`
+# 2. Some heavy multi-GPU unit tests, such as `model.yml`, `vllm.yml`, `sgl.yml`
+# 3. End-to-end tests: `e2e_*.yml`
+# 4. Unit tests
+#   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
+#   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
+#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
+#     - new workflow yaml is added to `.github/workflows`
+#     - new tests are added to workflow mentioned in 2.
+
+name: e2e_sft_llm_ascend
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+      - v0.*
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      # Other entrypoints
+      - "!examples/**"
+      - "!tests/**"
+      - "!verl/trainer/main_*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+
+      # Megatron
+      - "!verl/workers/**/megatron_*.py"
+      # Entrypoints
+      - ".github/workflows/e2e_sft_llm_ascend.yml"
+      - "examples/data_preprocess/gsm8k.py"
+      - "tests/special_e2e/sft"
+      - "verl/trainer/fsdp_sft_trainer.py"
+      - "verl/trainer/config/sft_trainer.yaml"
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions: 
+  contents: read
+
+jobs:
+  e2e_sft_llm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2-8
+    timeout-minutes: 90 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install -r requirements-npu.txt
+          pip install -e .
+          pip install git+https://github.com/ByteDance-Seed/VeOmni.git@v0.1.4
+          pip install pandas==2.3.3
+          pip uninstall -y mbridge
+          pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare gsm8k dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running GSM8K E2E training tests on 8 NPUs with rmpad using function rm
+        run: |
+          ray stop --force
+          bash tests/special_e2e/sft/run_sft.sh
+      - name: Running GSM8K E2E training tests on 8 NPUs w/o rmpad using function rm
+        run: |
+          ray stop --force
+          RM_PAD=False bash tests/special_e2e/sft/run_sft.sh
+      - name: Running GSM8K E2E training tests on 8 NPUs with sequence parallism
+        run: |
+          ray stop --force
+          SP_SIZE=2 bash tests/special_e2e/sft/run_sft.sh
+      - name: Check loss difference between sequence parallel vs. default implementation
+        run: |
+          ray stop --force
+          ENTRYPOINT="tests/special_e2e/sft/test_sp_loss_match.py" SP_SIZE=2 bash tests/special_e2e/sft/run_sft.sh
+      - name: Running GSM8K E2E training tests with LoRA
+        run: |
+          ray stop --force
+          LORA_RANK=32 bash tests/special_e2e/sft/run_sft.sh
+      - name: Run GSM8K E2E training and resume tests resuming from the checkpoint manager
+        run: |
+          ray stop --force
+          LORA_RANK=32 RESUME_MODE=auto TOTAL_TRAIN_STEP=2 bash tests/special_e2e/sft/run_sft.sh
+      # TODO: multiturn
+      - name: Prepare gsm8k dataset
+        run: |
+          ray stop --force
+          python3 examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running GSM8K E2E training tests with multiturn and various configs and compare results
+        run: |
+          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
+          VPP_SIZE=null bash tests/special_e2e/sft/test_sft_engine_all.sh

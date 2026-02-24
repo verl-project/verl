@@ -31,7 +31,7 @@ hf download \
 # If you still wish to perform SFT from scratch, follow the steps below:
 
 # Step 1: Download the SFT dataset
-#huggingface-cli download JoeYing/ReTool-SFT --repo-type dataset --local-dir ./ReTool-SFT
+#hf download JoeYing/ReTool-SFT --repo-type dataset --local-dir ./ReTool-SFT
 
 # Step 2: Preprocess the data for SFT
 #python3 recipe/retool/retool_sft_preprocess.py
@@ -56,8 +56,8 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.custom_cls.path=$PROJECT_DIR/recipe/retool/retool.py \
     data.custom_cls.name=CustomRLHFDataset \
-    custom_reward_function.path=$PROJECT_DIR/recipe/retool/retool.py \
-    custom_reward_function.name=compute_score \
+    reward.custom_reward_function.path=$PROJECT_DIR/recipe/retool/retool.py \
+    reward.custom_reward_function.name=compute_score \
     actor_rollout_ref.model.path=font-info/qwen3-4b-sft-SGLang-RL \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \

@@ -65,7 +65,7 @@ max_num_batched_tokens: 8192
 max_model_len: null
 
 # max length of sequences
-max_num_seqs: 256
+max_num_seqs: 1024
 
 # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
 enable_chunked_prefill: True
@@ -241,19 +241,31 @@ agent:
     # Class name of the custom async server class (e.g. AsyncvLLMServer)
     name: null
 
-# Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
-# This parameter controls the maximum payload size for a single weight update request.
-# Reference: https://github.com/volcengine/verl/pull/2418
-# Currently only supported in SGLang rollout implementations
-# Larger values may improve throughput but increase memory overhead
-# Detailed performance comparison:
-# https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/169#issuecomment-3070686720
-# Default value (512MB) is optimized for typical GPU memory configurations
-# For the best performance of `rebuild_cuda_tensor`, it is recommended to:
-# 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
-# 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
-# when using Tensor Parallelism (TP) >= 8.
-update_weights_bucket_megabytes: 2048
+# Checkpoint Engine config for update weights from trainer to rollout
+checkpoint_engine:
+
+  # Target class for checkpoint engine config
+  _target_: verl.workers.config.CheckpointEngineConfig
+
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  backend: naive
+
+  # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
+  # This parameter controls the maximum payload size for a single weight update request.
+  # Reference: https://github.com/volcengine/verl/pull/2418
+  # Currently only supported in SGLang rollout implementations
+  # Larger values may improve throughput but increase memory overhead
+  # Detailed performance comparison:
+  # https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/169#issuecomment-3070686720
+  # Default value (512MB) is optimized for typical GPU memory configurations
+  # For the best performance of `rebuild_cuda_tensor`, it is recommended to:
+  # 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
+  # 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+  # when using Tensor Parallelism (TP) >= 8.
+  update_weights_bucket_megabytes: 2048
+
+  # Additional keyword arguments to pass to the checkpoint engine constructor
+  engine_kwargs: {}
 
 # trace rollout data
 trace:
@@ -298,10 +310,10 @@ profiler:
   _target_: verl.utils.profiler.ProfilerConfig
 
   # profiler tool, default same as profiler.tool in global config
-  # choices: nsys, npu, torch
+  # choices: npu, torch
   tool: ${oc.select:global_profiler.tool,null}
 
-  # whether enable profile on ref
+  # whether enable profile on rollout
   enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
 
   # Whether to profile all ranks.
@@ -314,7 +326,39 @@ profiler:
   save_path: ${oc.select:global_profiler.save_path,null}
 
   # specific tool config
-  tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
+  tool_config:
+
+    # npu config
+    npu:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NPUToolConfig
+
+      # Contents to profile, can be empty
+      # options: npu, cpu, memory, shapes, module, stack
+      contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+
+      # Collection level, optional values: level_none, level0, level1, level2.
+      level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+
+      # Whether to automatically parse the data.
+      analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+
+    # torch profiler config
+    torch:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
 
 # prometheus configuration for vllm/sglang server mode
 prometheus:
@@ -342,3 +386,6 @@ quantization_config_file: null
 
 # MTP configuration, reuse model configuration
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
+
+# QAT configuration (inherited from actor.qat)
+qat: ${oc.select:actor_rollout_ref.actor.qat,null}

@@ -19,8 +19,11 @@ import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import AsyncGenerator, Generator
+from unittest.mock import patch
 
-import cupy as cp
+with patch("importlib.metadata.distributions", return_value=[]):
+    import cupy as cp
+
 import nixl._api as nixl_api
 import nixl._bindings as nixl_bindings
 import ray
@@ -245,11 +248,13 @@ class NIXLCheckpointEngine(CheckpointEngine):
         bucket_size: int,
         device: str = "cuda",
         rollout_dtype: torch.dtype = torch.bfloat16,
+        is_master: bool = False,
     ):
         self.bucket_size = bucket_size
         self.device = device
         self.rollout_dtype = rollout_dtype
         self.agent = NixlAgent()
+        self.is_master = is_master
 
     def prepare(self) -> NixlAgentMetadata:
         """Prepare send and recv bucket.
@@ -273,6 +278,25 @@ class NIXLCheckpointEngine(CheckpointEngine):
         self.recv_descs = self.agent.get_xfer_descs(self.recv_buf)
 
         return self.agent.get_agent_metadata()
+
+    @classmethod
+    def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
+        trainer_kwargs = {
+            "method": ["init_process_group"] * trainer_world_size,
+            "rank": [0] + [-1] * (trainer_world_size - 1),
+            "world_size": [rollout_world_size + 1] * trainer_world_size,
+            "prev_agent_metadata": [None] * trainer_world_size,
+            "next_agent_metadata": [metadata[-rollout_world_size]] + [None] * (trainer_world_size - 1),
+        }
+
+        rollout_kwargs = {
+            "method": ["init_process_group"] * rollout_world_size,
+            "rank": list(range(1, rollout_world_size + 1)),
+            "world_size": [rollout_world_size + 1] * rollout_world_size,
+            "prev_agent_metadata": [metadata[0]] + metadata[-rollout_world_size:-1],
+            "next_agent_metadata": metadata[-rollout_world_size + 1 :] + [None],
+        }
+        return trainer_kwargs, rollout_kwargs
 
     def init_process_group(
         self, rank: int, world_size: int, prev_agent_metadata: NixlAgentMetadata, next_agent_metadata: NixlAgentMetadata
@@ -316,7 +340,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
             f"prev_agent: {self.prev_agent}, next_agent: {self.next_agent}"
         )
 
-    def finish(self):
+    def finalize(self):
         """Cleanup communication with the previous and next agent, and deregister the memory."""
         if self.prev_agent:
             self.agent.remove_remote_agent(self.prev_agent)
@@ -361,9 +385,6 @@ class NIXLCheckpointEngine(CheckpointEngine):
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         for name, weight in weights:
-            # model parameters are in fp32 full precision
-            weight = weight.to(self.rollout_dtype)
-
             # fill the tensor bucket
             if offset + weight.nbytes > self.bucket_size:
                 torch.cuda.synchronize()
