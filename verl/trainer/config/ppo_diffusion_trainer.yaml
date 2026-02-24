@@ -21,7 +21,7 @@ defaults:
   - ref@actor_rollout_ref.ref: ${model_engine}_ref
 
   # Rollout model config.
-  - rollout@actor_rollout_ref.rollout: rollout
+  - rollout@actor_rollout_ref.rollout: diffusion_rollout
 
   # Model config.
   - model@actor_rollout_ref.model: diffusion_model

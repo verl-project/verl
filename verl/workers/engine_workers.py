@@ -42,7 +42,14 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, DiffusersModelConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import (
+    ActorConfig,
+    DiffusersModelConfig,
+    DiffusionRolloutConfig,
+    HFModelConfig,
+    RolloutConfig,
+    TrainingWorkerConfig,
+)
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -555,7 +562,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 3. build rollout engine
         if "rollout" in self.role:
-            rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
+            rollout_config: RolloutConfig | DiffusionRolloutConfig = omega_conf_to_dataclass(self.config.rollout)
 
             # TODO: move rollout_device_mesh into ServerAdapter
             # 3.1 build rollout device mesh (sglang need only)

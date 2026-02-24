@@ -1,28 +1,15 @@
 # Target class for this configuration
-_target_: verl.workers.config.RolloutConfig
+_target_: verl.workers.config.DiffusionRolloutConfig
 
-# actor_rollout_ref.rollout.name: hf/vllm/sglang/trtllm. The default value will be removed in the future
+# actor_rollout_ref.rollout.name: vllm_omni/hf/vllm/sglang/trtllm. The default value will be removed in the future
 name: ???
 
 # sync: LLM, async: AsyncLLM
 mode: async
 
-# Sampling temperature for rollout.
-temperature: 1.0
-
-# Top-k sampling parameter. -1 for vLLM rollout, 0 for HF rollout.
-top_k: -1
-
-# Top-p sampling parameter. Default 1.0.
-top_p: 1
-
 # typically the same as data max prompt length
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}
-
-# typically the same as data max response length
-# same as data.max_response_length if it exists
-response_length: ${oc.select:data.max_response_length,512}
 
 # for vllm rollout
 # Rollout model parameters type. Align with actor model's FSDP/Megatron type.
@@ -30,9 +17,6 @@ dtype: bfloat16
 
 # Fraction of GPU memory used by vLLM/SGLang/TRTLLM for KV cache.
 gpu_memory_utilization: 0.5
-
-# Whether to ignore EOS and continue generating after EOS is hit.
-ignore_eos: False
 
 # Whether to disable CUDA graph. Default False to best performance.
 enforce_eager: False
@@ -107,42 +91,50 @@ do_sample: True
 # number of responses (i.e. num sample times). > 1 for grpo
 n: 1
 
-# The over_sample_rate parameter controls the early termination threshold for training rollouts,
-# where the system will abort remaining requests when (1 - over_sample_rate) * total_requests completions are reached.
-over_sample_rate: 0
+# image height for diffusion model rollout
+image_height: 512
 
-# Whether to wake up inference engine in multi-stage for SGLang
-# to reduce peak memory during training-rollout transition.
-# This is only effective for SGLang rollout.
-multi_stage_wake_up: false
+# image width for diffusion model rollout
+image_width: 512
+
+# number of inference steps for diffusion model rollout
+num_inference_steps: 10
+
+# noise level for diffusion model rollout
+noise_level: 0.7
+
+# guidance scale for classifier-free guidance
+guidance_scale: 4.5
+
+# SDE type during rollout
+sde_type: "sde"
+
+# SDE window size
+sde_window_size: null
+
+# SDE window range
+sde_window_range: null
 
 # Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail
 engine_kwargs:
 
   # vllm engine config
-  vllm: {}
+  # vllm: {}
+
+  # vllm-omni engine config
+  vllm_omni: {}
 
   # sglang engine config
-  sglang: {}
+  # sglang: {}
 
   # trtllm engine config
-  trtllm: {}
+  # trtllm: {}
 
 # Sampling parameters used during validation.
 val_kwargs:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.SamplingConfig
-
-  # sampling parameters for validation
-  # Top-k sampling parameter. -1 for vLLM rollout, 0 for HF rollout.
-  top_k: -1
-
-  # Top-p sampling parameter. Default 1.0.
-  top_p: 1.0
-
-  # Sampling temperature for rollout.
-  temperature: 0
+  _target_: verl.workers.config.DiffusionSamplingConfig
 
   # whether to repeat n times for validation
   n: 1
@@ -210,9 +202,6 @@ multi_turn:
   # Number of repeat rollouts for each interaction
   num_repeat_rollouts: null
 
-# support logging rollout prob for debugging purpose
-# "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
-calculate_log_probs: False
 
 # [Experimental] agent loop based rollout configs
 agent:
@@ -277,35 +266,22 @@ checkpoint_engine:
   engine_kwargs: {}
 
 # trace rollout data
-trace:
+# trace:
 
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.TraceConfig
+#   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+#   _target_: verl.workers.config.TraceConfig
 
-  # trace backend, support mlflow, weave
-  backend: null
+#   # trace backend, support mlflow, weave
+#   backend: null
 
-  # whether translate token id to text in output
-  token2text: False
+#   # whether translate token id to text in output
+#   token2text: False
 
-  # Maximum number of unique samples to trace per agent worker per training step.
-  # If null, all samples are traced. If set to N, each agent loop worker will randomly
-  # select N unique samples to trace (including all their rollouts for GRPO).
-  # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
-  max_samples_per_step_per_worker: null
-
-# When enabled (True), the trainer will attempt to load previously generated rollout data from the specified directory instead of computing new rollouts.
-# If no cached data is found or loading fails, new rollouts will be generated and automatically saved.
-# This feature is useful for debugging or when you want to reuse computation results across multiple runs.
-skip_rollout: False
-
-# Specifies the filesystem path where rollout data should be cached when skip_rollout is enabled.
-# Note: Giving path under /tmp/ray/session* is not recommended as these are temporary Ray cluster directories.
-skip_dump_dir: /tmp/rollout_dump
-
-# Whether to skip tokenizer initialization for rollout engine
-# When enabled (True), the rollout assume token in token out for generation
-skip_tokenizer_init: True
+#   # Maximum number of unique samples to trace per agent worker per training step.
+#   # If null, all samples are traced. If set to N, each agent loop worker will randomly
+#   # select N unique samples to trace (including all their rollouts for GRPO).
+#   # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
+#   max_samples_per_step_per_worker: null
 
 # Whether to enable rollout routing replay for MoE models
 # When enabled (True), the rollout will record the routing decisions.
@@ -393,8 +369,3 @@ quantization: null
 # extra quantization information serialized in a config file, e.g. torchao_config.json
 quantization_config_file: null
 
-# MTP configuration, reuse model configuration
-mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-
-# QAT configuration (inherited from actor.qat)
-qat: ${oc.select:actor_rollout_ref.actor.qat,null}
