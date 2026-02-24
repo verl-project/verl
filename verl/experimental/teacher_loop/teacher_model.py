@@ -17,47 +17,50 @@ import logging
 import os
 
 from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
-from verl.workers.config import HFModelConfig, RewardModelConfig
+from verl.workers.config import HFModelConfig, DistillationTeacherModelConfig
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class RewardModelManager:
-    """Reward model manager."""
+class TeacherModelManager:
+    """Teacher model manager."""
 
     def __init__(
         self,
-        config: RewardModelConfig,
+        config: DistillationTeacherModelConfig,
         resource_pool: RayResourcePool = None,
     ):
         """
-        Initialize the reward model manager.
+        Initialize the teacher model manager.
 
         Args:
-            config (RewardModelConfig): Reward model configuration.
+            config (TeacherModelConfig): Teacher model configuration.
             resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
+
+        TODO: create ABC for distillation/reward manager after distillation manager has been extended to support multiple teachers (MOPD)
         """
         self.config = config
         self.resource_pool = resource_pool
         self._initialize_llm_servers()
         self._initialize_router()
-        assert self.config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
-        if self.config.rollout.free_cache_engine:
-            self.sleep()
+
+        # TODO
+        # if self.config.rollout.free_cache_engine:
+        #     self.sleep()
 
     def _initialize_llm_servers(self):
-        rollout_world_size = self.config.rollout.tensor_model_parallel_size
+        teacher_world_size = self.config.inference.tensor_model_parallel_size
         world_size = (
             self.resource_pool.world_size
             if self.resource_pool  # colocate mode
             else self.config.n_gpus_per_node * self.config.nnodes  # standalone mode
         )
-        num_replicas = world_size // rollout_world_size
+        num_replicas = world_size // teacher_world_size
 
-        rollout_replica_class = get_rollout_replica_class(self.config.rollout.name)
-        rollout_config = self.config.rollout
+        rollout_replica_class = get_rollout_replica_class(self.config.inference.name)
+        rollout_config = self.config.inference
         model_config = HFModelConfig(path=self.config.model_path)
         self.tokenizer = model_config.get_processor()
         self.rollout_replicas = [
@@ -66,12 +69,12 @@ class RewardModelManager:
                 config=rollout_config,
                 model_config=model_config,
                 gpus_per_node=self.config.n_gpus_per_node,
-                is_reward_model=True,
+                is_teacher_model=True,
             )
             for replica_rank in range(num_replicas)
         ]
         if self.resource_pool:
-            split_resource_pools = split_resource_pool(self.resource_pool, split_size=rollout_world_size)
+            split_resource_pools = split_resource_pool(self.resource_pool, split_size=teacher_world_size)
             assert len(split_resource_pools) == len(self.rollout_replicas)
             self._run_all(
                 [
@@ -87,14 +90,7 @@ class RewardModelManager:
     def _initialize_router(self):
         worker_urls = [f"http://{server_address}" for server_address in self.server_addresses]
 
-        # TODO (dyy): sglang router is not ready yet.
-        # if self.config.rollout.name == "sglang":
-        #     from .router.inner_sglang_router import launch_router_process
-        # else:
-        #     from .router.naive_router import launch_router_process
-
-        from .router.naive_router import launch_router_process
-
+        from ..reward_loop.router.naive_router import launch_router_process
         self.router_address, _ = launch_router_process(worker_urls=worker_urls)
 
     def get_router_address(self):
