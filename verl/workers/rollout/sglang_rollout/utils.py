@@ -26,14 +26,6 @@ from verl.workers.rollout.utils import ensure_async_iterator
 SGLANG_LORA_NAME = "verl_actor_lora_name"
 
 
-def get_max_lora_rank(lora_rank: int):
-    """
-    same with vllm, allowed values are (8, 16, 32, 64, 128, 256, 320, 512)
-    """
-    import verl.workers.rollout.vllm_rollout.utils as lora_utils
-
-    return lora_utils.get_vllm_max_lora_rank(lora_rank)
-
 def broadcast_pyobj(
     data: list[Any],
     rank: int,

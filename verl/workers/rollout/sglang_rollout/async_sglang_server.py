@@ -47,8 +47,8 @@ from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import ServerAdapter, _set_envs_and_config
+from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME
 from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
-from verl.workers.rollout.sglang_rollout.utils import get_max_lora_rank, SGLANG_LORA_NAME
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -208,7 +208,7 @@ class SGLangHttpServer:
             args.update(
                 {
                     "enable_lora": True,
-                    "max_lora_rank": get_max_lora_rank(self.model_config.lora_rank),
+                    "max_lora_rank": self.model_config.lora_rank,
                     "lora_target_modules": self.model_config.target_modules,
                 }
             )
