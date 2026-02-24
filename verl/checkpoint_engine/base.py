@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import os
 from abc import ABC, abstractmethod
 from typing import Any, Generator, TypedDict
 
@@ -22,7 +21,6 @@ import torch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-from verl.utils.device import get_torch_device, get_visible_devices_keyword
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
@@ -260,30 +258,20 @@ class CheckpointEngineWorker(Worker):
         *args,
         **kwargs,
     ) -> None:
+        super().__init__()
         self.rollout_config = rollout_config
         self.model_config = model_config
 
         self.server_adapter: BaseRollout = server_adapter
-        self.checkpoint_engine: CheckpointEngine = None
+        backend = self.rollout_config.checkpoint_engine.backend
+        bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
+        engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
+        self.checkpoint_engine: CheckpointEngine = CheckpointEngineRegistry.new(
+            backend, bucket_size=bucket_size, **engine_kwargs
+        )
         self.init_flag = False
         self.extra_rollout_args = args
         self.extra_rollout_kwargs = kwargs
-
-    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
-    def init_component(self, rank: int, world_size: str, master_addr: str, master_port: str):
-        if self.init_flag:
-            return
-
-        if not os.environ.get(get_visible_devices_keyword(), None):
-            gpus_per_node = get_torch_device().device_count()
-            local_rank = rank % gpus_per_node
-            get_torch_device().set_device(local_rank)
-
-        os.environ["RANK"] = str(rank)
-        os.environ["WORLD_SIZE"] = str(world_size)
-        os.environ["MASTER_ADDR"], os.environ["MASTER_PORT"] = master_addr, master_port
-        # sglang and trt-llm need device_mesh for internal communication
-        initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
         if self.server_adapter is None:
             self.server_adapter = get_rollout_class(self.rollout_config.name, self.rollout_config.mode)(
                 *self.extra_rollout_args,
@@ -292,11 +280,8 @@ class CheckpointEngineWorker(Worker):
                 device_mesh=None,
                 **self.extra_rollout_kwargs,
             )
-        backend = self.rollout_config.checkpoint_engine.backend
-        bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
-        engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
-        self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
-        self.init_flag = True
+        # sglang and trt-llm need device_mesh for internal communication
+        initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):
@@ -422,15 +407,6 @@ class CheckpointEngineManager:
             workers.extend(replica.workers)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
         trainer = self.trainer
-        world_size = len(workers)
-        ranks = list(range(world_size))
-        master_addr = ray.get(rollout.workers[0]._get_node_ip.remote()).strip("[]")
-        master_port = str(ray.get(rollout.workers[0]._get_free_port.remote()))
-        ray.get(
-            rollout.init_component(
-                ranks, [world_size] * world_size, [master_addr] * world_size, [master_port] * world_size
-            )
-        )
 
         # 3. build process group
         self.build_process_group(rollout)
