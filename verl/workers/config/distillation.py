@@ -112,3 +112,31 @@ class DistillationConfig(BaseConfig):
     num_workers: int = 8
     teacher_model: DistillationTeacherModelConfig = field(default_factory=DistillationTeacherModelConfig)
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
+
+    # Store global batch info for loss aggregation:
+    # dp_size: data parallel size
+    # batch_num_tokens: number of valid tokens in global batch
+    # global_batch_size: global batch size
+    global_batch_info: dict = field(default_factory=dict)
+
+
+    def __post_init__(self):
+        engine_name = self.teacher_model.inference.name
+        engine_kwargs = self.teacher_model.inference.engine_kwargs
+        if self.distillation_loss.topk is None or not self.enabled:
+            return
+        match engine_name:
+            case "vllm":
+                vllm_engine_kwargs = dict(engine_kwargs.get("vllm", {}))
+                max_logprobs = vllm_engine_kwargs.get("max_logprobs")
+                if max_logprobs is None:
+                    vllm_engine_kwargs["max_logprobs"] = self.distillation_loss.topk
+                    max_logprobs = self.distillation_loss.topk
+                if max_logprobs < self.distillation_loss.topk:
+                    raise ValueError(
+                        f"VLLM max_logprobs ({max_logprobs}) must be >= distillation_loss topk "
+                        f"({self.distillation_loss.topk}) to enable distillation loss computation."
+                    )
+                engine_kwargs["vllm"] = vllm_engine_kwargs
+            case _:
+                raise NotImplementedError(f"DistillationTeacherModelConfig does not support inference engine {engine_name}")
