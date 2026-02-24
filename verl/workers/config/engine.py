@@ -388,6 +388,9 @@ class AutomodelEngineConfig(EngineConfig):
         activation_checkpointing (bool): Whether to enable activation checkpointing.
         enable_fp8 (bool): Whether to enable FP8 training.
         enable_compile (bool): Whether to enable torch.compile for the model.
+        model_dtype (str): Model data type for loading weights. "fp32" loads in float32
+            (matching FSDP golden), "auto" uses the dtype from the model config.
+        attn_implementation (str): Attention implementation to use ("sdpa", "flash_attention_2", "eager").
         entropy_from_logits_with_chunking (bool): Whether to use chunked entropy computation.
         use_torch_compile (bool): Whether to use torch.compile for entropy computation.
         entropy_checkpointing (bool): Whether to use checkpointing for entropy computation.
@@ -402,6 +405,8 @@ class AutomodelEngineConfig(EngineConfig):
     activation_checkpointing: bool = False
     enable_fp8: bool = False
     enable_compile: bool = False
+    model_dtype: str = "fp32"
+    attn_implementation: str = "sdpa"
     entropy_from_logits_with_chunking: bool = False
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False

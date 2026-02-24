@@ -28,6 +28,12 @@ enable_fp8: false
 # Whether to enable torch.compile for the model
 enable_compile: false
 
+# Model data type for loading weights ("fp32", "bf16", "fp16")
+model_dtype: fp32
+
+# Attention implementation ("sdpa", "flash_attention_2", "eager")
+attn_implementation: sdpa
+
 # Random seed for reproducibility
 seed: 42
 

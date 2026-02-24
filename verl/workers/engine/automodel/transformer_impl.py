@@ -259,18 +259,24 @@ class AutomodelEngine(BaseEngine):
         return lr
 
     def get_data_parallel_rank(self):
-        # "dp" is a flattened submesh of ("dp_replicate", "dp_shard") created by FSDP2Manager
-        return self.device_mesh.get_local_rank("dp")
+        if self.device_mesh is not None:
+            return self.device_mesh.get_local_rank("dp")
+        return torch.distributed.get_rank()
 
     def get_data_parallel_size(self):
-        return self.device_mesh["dp"].size()
+        if self.device_mesh is not None:
+            return self.device_mesh["dp"].size()
+        return torch.distributed.get_world_size()
 
     def get_data_parallel_group(self):
-        return self.device_mesh.get_group(mesh_dim="dp")
+        if self.device_mesh is not None:
+            return self.device_mesh.get_group(mesh_dim="dp")
+        return torch.distributed.group.WORLD
 
     def is_mp_src_rank_with_outputs(self):
-        if "tp" in self.device_mesh.mesh_dim_names and self.device_mesh["tp"].size() > 1:
-            return self.device_mesh.get_local_rank("tp") == 0
+        if self.device_mesh is not None and "tp" in self.device_mesh.mesh_dim_names:
+            if self.device_mesh["tp"].size() > 1:
+                return self.device_mesh.get_local_rank("tp") == 0
         return True
 
     def train_mode(self, **kwargs):

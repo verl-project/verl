@@ -77,7 +77,15 @@ def build_model_wrapper_from_engine_config(engine_config, world_size):
     strategy = engine_config.distributed_strategy
 
     if strategy == "fsdp2":
+        from torch.distributed.fsdp import MixedPrecisionPolicy
         from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
+
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            output_dtype=torch.bfloat16,
+            cast_forward_inputs=True,
+        )
 
         wrapper = FSDP2Manager(
             tp_size=engine_config.tp_size,
@@ -86,6 +94,7 @@ def build_model_wrapper_from_engine_config(engine_config, world_size):
             ep_size=engine_config.ep_size,
             activation_checkpointing=engine_config.activation_checkpointing,
             world_size=world_size,
+            mp_policy=mp_policy,
         )
 
     elif strategy == "megatron_fsdp":
@@ -149,6 +158,11 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
     # Pass TP/CP sizes so from_pretrained() can apply internal overrides.
     kwargs["tp_size"] = engine_config.tp_size
     kwargs["cp_size"] = engine_config.cp_size
+
+    kwargs["attn_implementation"] = engine_config.attn_implementation
+
+    from verl.utils.torch_dtypes import PrecisionType
+    kwargs["torch_dtype"] = PrecisionType.to_dtype(engine_config.model_dtype)
 
     model = NeMoAutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_config.path,
