@@ -18,7 +18,6 @@ import time
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from functools import reduce
 from typing import AsyncGenerator, Generator
 from unittest.mock import patch
 
@@ -388,37 +387,11 @@ class NIXLCheckpointEngine(CheckpointEngine):
         for name, weight in weights:
             weight_size = weight.nbytes
             # Check if the weight needs to be sliced into chunks
-            # (e.g., large embedding layer that exceeds bucket_size)
             if weight_size > self.bucket_size:
-                # Slice the weight along the first dimension into chunks
-                dtype_size = weight.element_size()
-                numel_per_chunk = self.bucket_size // dtype_size
+                # Use base class method to slice weight into chunks
+                chunks = self._slice_weight_into_chunks(name, weight)
 
-                # Calculate chunk size along the first dimension
-                first_dim_size = weight.shape[0]
-                elements_per_row = reduce(lambda x, y: x * y, weight.shape[1:], 1)
-                # An empty tensor would have weight_size=0 and not enter this block,
-                # so we can assume elements_per_row > 0.
-                chunk_dim_size = numel_per_chunk // elements_per_row
-                if chunk_dim_size == 0:
-                    raise ValueError(
-                        f"Weight '{name}' with shape {weight.shape} is too large to be chunked. A single slice "
-                        f"along the first dimension is larger than the bucket size ({self.bucket_size} bytes). "
-                        f"Please increase `checkpoint_engine.update_weights_bucket_megabytes`."
-                    )
-
-                num_chunks = (first_dim_size + chunk_dim_size - 1) // chunk_dim_size
-                logger.info(
-                    f"Slicing weight {name} ({weight.shape}, {weight.dtype}, {weight_size} bytes) "
-                    f"into {num_chunks} chunks"
-                )
-
-                start_idx = 0
-                for chunk_idx in range(num_chunks):
-                    end_idx = min(start_idx + chunk_dim_size, first_dim_size)
-
-                    # Extract chunk along first dimension
-                    chunk = weight[start_idx:end_idx]
+                for chunk, chunk_meta in chunks:
                     chunk_size = chunk.nbytes
 
                     # Fill bucket with chunk
@@ -443,18 +416,18 @@ class NIXLCheckpointEngine(CheckpointEngine):
                         bucket_meta = {}
                         offset = 0
 
-                    bucket_meta[f"{name}_chunk_{chunk_idx}"] = {
-                        "name": name,
-                        "shape": chunk.shape,
-                        "dtype": chunk.dtype,
+                    # Update offset in meta (for key, we use indexed key)
+                    indexed_key = f"{name}_chunk_{chunk_meta['chunk_idx']}"
+                    bucket_meta[indexed_key] = {
+                        "name": chunk_meta["name"],
+                        "shape": chunk_meta["shape"],
+                        "dtype": chunk_meta["dtype"],
                         "offset": offset,
-                        "chunk_idx": chunk_idx,
-                        "total_chunks": num_chunks,
+                        "chunk_idx": chunk_meta["chunk_idx"],
+                        "total_chunks": chunk_meta["total_chunks"],
                     }
                     send_buf[offset : offset + chunk_size].copy_(chunk.view(-1).view(torch.uint8), non_blocking=True)
                     offset += chunk_size
-
-                    start_idx = end_idx
 
                 continue
 

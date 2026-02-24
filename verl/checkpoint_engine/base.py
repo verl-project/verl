@@ -164,142 +164,10 @@ class CheckpointEngine(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
-        """Send the weights of the model.
-
-        Args:
-            weights: A generator that yields the name of the weight tensor and the tensor itself.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    async def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
-        """Receive the weights of the model.
-
-        Yields:
-            A tuple of the name of the weight tensor and the tensor itself.
-        """
-        raise NotImplementedError
-
-    def _yield_tensors_from_buffer(
-        self,
-        buffer: torch.Tensor,
-        bucket_meta: dict,
-        pending_chunks: dict,
-    ) -> Generator[tuple[str, torch.Tensor], None, None]:
-        """Yield tensors from buffer, handling chunk merging for large weights.
-
-        Args:
-            buffer: The buffer containing the tensor data.
-            bucket_meta: The metadata of the bucket.
-            pending_chunks: Dictionary to collect chunks for weights that were sliced.
-
-        Yields:
-            A tuple of the name of the weight tensor and the tensor itself.
-        """
-        for name, meta in bucket_meta.items():
-            dtype, shape = meta["dtype"], meta["shape"]
-            size = dtype.itemsize * shape.numel()
-            tensor = buffer[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
-
-            # Check if this is a chunk of a sliced weight
-            if "chunk_idx" in meta and "total_chunks" in meta:
-                # This is a chunk, store it for later merging
-                original_name = meta["name"]
-                chunk_idx = meta["chunk_idx"]
-                if original_name not in pending_chunks:
-                    pending_chunks[original_name] = {}
-                pending_chunks[original_name][chunk_idx] = tensor
-
-                # Check if we have all chunks for this weight
-                if len(pending_chunks[original_name]) == meta["total_chunks"]:
-                    # Merge all chunks back into one tensor
-                    chunks_dict = pending_chunks[original_name]
-                    sorted_chunks = [chunks_dict[i] for i in range(meta["total_chunks"])]
-                    merged_tensor = torch.cat(sorted_chunks, dim=0)
-                    yield original_name, merged_tensor
-                    del pending_chunks[original_name]
-            else:
-                yield name, tensor
-
-
-class CollectiveCheckpointEngine(CheckpointEngine):
-    """Base class for collective communication checkpoint engines (NCCL, HCCL).
-
-    This class provides common send_weights and receive_weights logic for collective
-    communication backends like NCCL and HCCL.
-
-    Subclasses must implement:
-        - _synchronize(): Synchronize device operations
-        - _create_broadcast_send_op(bucket, metadata): Create broadcast operation for sending
-        - _create_broadcast_recv_op(bucket): Create broadcast operation for receiving
-        - _copy_to_buffer(buffer, tensor, offset): Copy tensor to buffer
-    """
-
-    @property
-    @abstractmethod
-    def rank(self) -> int:
-        """Return the rank of the current process."""
-        raise NotImplementedError
-
     @property
     @abstractmethod
     def bucket_size(self) -> int:
         """Return the bucket size in bytes."""
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def send_buf(self):
-        """Return the send buffer."""
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def recv_buf(self):
-        """Return the receive buffer."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def _synchronize(self):
-        """Synchronize device operations."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def _create_broadcast_send_op(self, bucket, metadata) -> Any:
-        """Create broadcast operation for sending weights.
-
-        Args:
-            bucket: The bucket tensor to broadcast.
-            metadata: The metadata to send with the bucket.
-
-        Returns:
-            A broadcast operation object with wait_for_complete method.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def _create_broadcast_recv_op(self, bucket) -> Any:
-        """Create broadcast operation for receiving weights.
-
-        Args:
-            bucket: The bucket tensor to receive data into.
-
-        Returns:
-            A broadcast operation object with wait_for_complete method that returns metadata.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def _copy_to_buffer(self, buffer, tensor, offset):
-        """Copy tensor to buffer at given offset.
-
-        Args:
-            buffer: The buffer to copy to.
-            tensor: The tensor to copy.
-            offset: The offset in the buffer.
-        """
         raise NotImplementedError
 
     def _slice_weight_into_chunks(self, name: str, weight: torch.Tensor) -> list[tuple[torch.Tensor, dict]]:
@@ -373,6 +241,141 @@ class CollectiveCheckpointEngine(CheckpointEngine):
             start_idx = end_idx
 
         return chunks
+
+    @abstractmethod
+    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+        """Send the weights of the model.
+
+        Args:
+            weights: A generator that yields the name of the weight tensor and the tensor itself.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Receive the weights of the model.
+
+        Yields:
+            A tuple of the name of the weight tensor and the tensor itself.
+        """
+        raise NotImplementedError
+
+    def _yield_tensors_from_buffer(
+        self,
+        buffer: torch.Tensor,
+        bucket_meta: dict,
+        pending_chunks: dict,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Yield tensors from buffer, handling chunk merging for large weights.
+
+        Args:
+            buffer: The buffer containing the tensor data.
+            bucket_meta: The metadata of the bucket.
+            pending_chunks: Dictionary to collect chunks for weights that were sliced.
+
+        Yields:
+            A tuple of the name of the weight tensor and the tensor itself.
+        """
+        for name, meta in bucket_meta.items():
+            dtype, shape = meta["dtype"], meta["shape"]
+            size = dtype.itemsize * shape.numel()
+            tensor = buffer[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
+
+            # Check if this is a chunk of a sliced weight
+            if "chunk_idx" in meta and "total_chunks" in meta:
+                # This is a chunk, store it for later merging
+                original_name = meta["name"]
+                chunk_idx = meta["chunk_idx"]
+                if original_name not in pending_chunks:
+                    pending_chunks[original_name] = {}
+                pending_chunks[original_name][chunk_idx] = tensor
+
+                # Check if we have all chunks for this weight
+                if len(pending_chunks[original_name]) == meta["total_chunks"]:
+                    # Merge all chunks back into one tensor
+                    chunks_dict = pending_chunks[original_name]
+                    sorted_chunks = [chunks_dict[i] for i in range(meta["total_chunks"])]
+                    merged_tensor = torch.cat(sorted_chunks, dim=0)
+                    yield original_name, merged_tensor
+                    del pending_chunks[original_name]
+            else:
+                yield name, tensor
+
+
+class CollectiveCheckpointEngine(CheckpointEngine):
+    """Base class for collective communication checkpoint engines (NCCL, HCCL).
+
+    This class provides common send_weights and receive_weights logic for collective
+    communication backends like NCCL and HCCL.
+
+    Subclasses must implement:
+        - rank: Rank of the current process
+        - send_buf: Send buffer
+        - recv_buf: Receive buffer
+        - _synchronize(): Synchronize device operations
+        - _create_broadcast_send_op(bucket, metadata): Create broadcast operation for sending
+        - _create_broadcast_recv_op(bucket): Create broadcast operation for receiving
+        - _copy_to_buffer(buffer, tensor, offset): Copy tensor to buffer
+    """
+
+    @property
+    @abstractmethod
+    def rank(self) -> int:
+        """Return the rank of the current process."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def send_buf(self):
+        """Return the send buffer."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def recv_buf(self):
+        """Return the receive buffer."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _synchronize(self):
+        """Synchronize device operations."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _create_broadcast_send_op(self, bucket, metadata) -> Any:
+        """Create broadcast operation for sending weights.
+
+        Args:
+            bucket: The bucket tensor to broadcast.
+            metadata: The metadata to send with the bucket.
+
+        Returns:
+            A broadcast operation object with wait_for_complete method.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _create_broadcast_recv_op(self, bucket) -> Any:
+        """Create broadcast operation for receiving weights.
+
+        Args:
+            bucket: The bucket tensor to receive data into.
+
+        Returns:
+            A broadcast operation object with wait_for_complete method that returns metadata.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _copy_to_buffer(self, buffer, tensor, offset):
+        """Copy tensor to buffer at given offset.
+
+        Args:
+            buffer: The buffer to copy to.
+            tensor: The tensor to copy.
+            offset: The offset in the buffer.
+        """
+        raise NotImplementedError
 
     @torch.no_grad()
     async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
