@@ -21,4 +21,3 @@ class Stage(Enum):
     OLD_LOG_PROB = "old_log_prob"
     REF_LOG_PROB = "ref_log_prob"
     ACTOR_UPDATE = "actor_update"
-    ACQUIRE_TEACHER_KNOWLEDGE = "acquire_teacher_knowledge"
