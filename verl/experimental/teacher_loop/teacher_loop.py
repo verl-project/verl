@@ -20,6 +20,7 @@ import aiohttp
 import numpy as np
 import ray
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig, open_dict
 from tensordict import TensorDict
 
@@ -28,130 +29,52 @@ from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
+from verl.utils.config import omega_conf_to_dataclass
 
-from .reward_model import RewardModelManager
+from .teacher_model import TeacherModelManager
+from verl.workers.config import DistillationConfig, DistillationLossConfig
+
+from verl.trainer.distillation.losses import get_distillation_loss_settings, DistillationLossSettings
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def migrate_legacy_reward_impl(config):
+class TeacherLoopWorker:
     """
-    Migrate the legacy reward model implementation to the new one.
-    """
-    # 1. reward workers migration
-    # config.reward_model.num_workers -> config.reward.num_workers
-    if config.reward_model.num_workers is not None:
-        config.reward.num_workers = config.reward_model.num_workers
-
-    # 2.reward manager migration
-    # config.reward_model.reward_manager -> config.reward.reward_manager
-    if config.reward_model.reward_manager is not None:
-        config.reward.reward_manager.name = config.reward_model.reward_manager
-    if config.reward_model.reward_loop_source is not None:
-        config.reward.reward_manager.source = config.reward_model.reward_loop_source
-        config.reward.reward_manager.module.path = config.reward_model.reward_loop_module_path
-        config.reward.reward_manager.module.name = config.reward_model.reward_loop_class_name
-
-    # 3. custom reward function migration
-    # config.custom_reward_function -> config.reward.custom_reward_function
-    if not all(v is None for v in config.custom_reward_function.values()):
-        config.reward.custom_reward_function = config.custom_reward_function
-
-    # 4. reward model migration
-    # config.reward_model -> config.reward.reward_model
-    for key in ["enable", "enable_resource_pool", "n_gpus_per_node", "nnodes"]:
-        if config.reward_model.get(key) is not None:
-            config.reward.reward_model[key] = config.reward_model[key]
-    if config.reward_model.model.path is not None:
-        config.reward.reward_model.model_path = config.reward_model.model.path
-    # config.reward_model.reward_kwargs -> config.reward.reward_kwargs (for dapo algo)
-    if config.reward_model.get("reward_kwargs") is not None:
-        with open_dict(config.reward):
-            config.reward["reward_kwargs"] = config.reward_model["reward_kwargs"]
-    # config.reward_model.rollout -> config.reward.reward_model.rollout
-    legacy_rollout = config.reward_model.rollout
-    for key in legacy_rollout.keys():
-        if legacy_rollout[key] is not None:
-            config.reward.reward_model.rollout[key] = legacy_rollout[key]
-
-    # 5. sandbox_fusion migration
-    # config.sandbox_fusion -> reward.sandbox_fusion
-    if not all(v is None for v in config.sandbox_fusion.values()):
-        config.reward.sandbox_fusion = config.sandbox_fusion
-
-    # 6. delete legacy config from configs
-    with open_dict(config):
-        del config.reward_model
-        del config.custom_reward_function
-        del config.sandbox_fusion
-
-    return config
-
-
-class RewardLoopWorker:
-    """
-    RewardLoopWork can tackle reward computation:
-    (1) rule-based reward computation
-    (2) reward model-based reward computation (both disrm and genrm)
-    (3) high-flexible user-customized reward function (can access rm by posting requests to reward_model_router)
-
-    Reward Computation Logic:
-    - if user-customized reward function is provided:
-        -> directly use user-customized reward function
-    - if user-customized reward function is not provided:
-        -> rm is not enabled: use default rule-based reward function
-        -> rm is disrm: compute reward score using disrm
-        -> rm is genrm: raise error (user-costomized reward func must be provided)
+    TeacherLoopWorker: TODO
     """
 
-    def __init__(self, config: DictConfig, reward_router_address: str = None):
+    def __init__(self, config: DictConfig, teacher_router_address: str = None):
         """
         Args:
             config: DictConfig, the config for reward loop worker.
-            reward_router_address: str, the address of reward router.
+            teacher_router_address: str, the address of teacher router.
         """
         self.config = config
-        self.reward_router_address = reward_router_address
-        self._init_reward_fn()
+        self.distillation_config: DistillationConfig = self.config.distillation
+        self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+        self.distillation_loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.distillation_loss_config.loss_mode)
+        self.teacher_router_address = teacher_router_address
+        # # Serialize teacher requests per actor to reduce pressure on the teacher vLLM router/backend.
+        # self._request_semaphore = asyncio.Semaphore(1)
 
-    def _init_reward_fn(self):
-        input_tokenizer_local_path = copy_to_local(self.config.actor_rollout_ref.model.path)
-        self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
-        self.reward_model_tokenizer = None
-        if self.config.reward.reward_model.enable:
-            reward_model_tokenizer_local_path = copy_to_local(self.config.reward.reward_model.model_path)
-            self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
-
-        self.reward_manager = load_reward_manager(
-            self.config,
-            self.input_tokenizer,
-            reward_router_address=self.reward_router_address,
-            reward_model_tokenizer=self.reward_model_tokenizer,
-        )
-
-    async def compute_score_batch(self, data: DataProto) -> list[dict]:
+    async def compute_logprobs_batch(self, data: DataProto) -> list[dict]:
+        raise NotImplementedError("TODO:RM")
         tasks = []
         for i in range(len(data)):
             tasks.append(asyncio.create_task(self.compute_score(data[i : i + 1])))
         outputs = await asyncio.gather(*tasks)
         return outputs
 
-    async def compute_score(self, data: DataProto) -> dict:
-        assert len(data) == 1, "RewardLoopWorker only support single data item"
-        if self.config.reward.custom_reward_function.path is not None:
-            # directly use user-customized reward function
-            return await self.reward_manager.run_single(data)
-        else:
-            if self.config.reward.reward_model.enable:
-                # we assume the rm is disrm
-                # genrm must set custom_reward_function
-                return await self.compute_score_disrm(data)
-            else:
-                return await self.reward_manager.run_single(data)
+    async def compute_logprobs(self, data: DataProto) -> dict:
+        assert len(data) == 1, "TeacherLoopWorker only supports single data item"
+        # async with self._request_semaphore:
+        #     return await self._compute_logprobs(data)
+        return await self._compute_logprobs(data)
 
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 16):
-        url = f"http://{self.reward_router_address}/{endpoint}"
+        url = f"http://{self.teacher_router_address}/{endpoint}"
         last_exception = None
         for attempt in range(max_retries):
             try:
@@ -190,55 +113,72 @@ class RewardLoopWorker:
         if last_exception:
             raise last_exception
 
-    async def _preprocess_reward_inputs(self, data: DataProto) -> str:
-        assert len(data) == 1, "RewardLoopWorker only support single data item"
-        data_item = data[0]
-        assert "raw_prompt" in data_item.non_tensor_batch
-
-        # extract raw prompt
-        chat: list = list(data_item.non_tensor_batch["raw_prompt"])
-
-        # extract response
-        response_ids = data_item.batch["responses"]
-        response_length = response_ids.shape[-1]
-        valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
-        valid_response_ids = response_ids[:valid_response_length]
-
-        # decode
-        rollout_response = self.input_tokenizer.decode(valid_response_ids)
-        # remove bos and eos
-        rollout_response = rollout_response.replace(self.input_tokenizer.eos_token, "")
-
-        chat.append({"role": "assistant", "content": rollout_response})
-
-        rm_prompt = self.reward_model_tokenizer.apply_chat_template(
-            chat,
-            add_generation_prompt=False,
-            tokenize=False,
-        )
-
-        # llama tokenizer will add bos token by default
-        # will be removed in vllm >= 0.11.2, where we can add "add_special_tokens" = False
-        if self.reward_model_tokenizer.bos_token is not None and rm_prompt.startswith(
-            self.reward_model_tokenizer.bos_token
-        ):
-            rm_prompt = rm_prompt[len(self.reward_model_tokenizer.bos_token) :]
-
-        return rm_prompt
-
-    async def compute_score_disrm(self, data: DataProto) -> dict:
-        disrm_prompt = await self._preprocess_reward_inputs(data)
-        engine_name = self.config.reward.reward_model.rollout.name
-        model_name = self.config.reward.reward_model.model_path
+    async def _compute_logprobs(self, data: DataProto) -> dict:
+        prompt_ids = data.batch['prompt_ids']
+        response_ids = data.batch['response_ids']
+        input_ids = torch.cat([prompt_ids, response_ids], dim=1).squeeze(0).tolist()
+        engine_name = self.config.distillation.teacher_model.inference.name
+        model_name = self.config.distillation.teacher_model.model_path
         if engine_name == "vllm":
+            if self.distillation_loss_settings.use_topk:
+                num_logprobs = topk = self.distillation_loss_config.topk
+            else:
+                num_logprobs = 0 # only the sampled logprob    
             payloads = {
                 "model": model_name,
-                "input": disrm_prompt,
-                "use_activation": False,
+                "prompt": input_ids,
+                "max_tokens": 1,
+                "prompt_logprobs": num_logprobs,
             }
-            output = await self._post_request(payloads, "classify")
-            rm_score = output["data"][-1]["probs"][-1]
+            output = await self._post_request(payloads, "v1/completions")
+
+            # Extract logprobs from vllm output
+            choices = output["choices"]
+            assert len(choices) == 1, f"Expected exactly one choice from teacher model, but got {len(choices)}"
+            logprobs = output["choices"][0]["prompt_logprobs"]
+            assert logprobs[0] is None, f"The first token's logprobs should be None due to right shifting: {logprobs[0]}"
+            logprobs.pop(0)  # Remove the first token's logprobs since it's None
+            logprobs.append(logprobs[-1])  # Last token's logprobs were right-shifted away; add random values for padding
+            logprobs_ls, token_ids_ls = [], []
+            for logprobs_dict in logprobs[1:]: # skip the first token -- due to right shifting, it is None
+                if num_logprobs == 0:                    
+                    token_id = list(logprobs_dict.keys())[0]
+                    logprob = logprobs_dict[token_id]['logprob']
+                    logprobs_ls.append([logprob])
+                    token_ids_ls.append([int(token_id)])
+                else:
+                    token_ids = [None] * topk
+                    token_logprobs = [None] * topk
+                    # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
+                    assert len(logprobs_dict) in [topk, topk + 1], len(logprobs_dict)
+                    for token_id_str, token_dict in logprobs_dict.items():
+                        if token_dict['rank'] > topk:
+                            continue
+                        token_id = int(token_id_str)
+                        rank = token_dict['rank']
+                        logprob = token_dict['logprob']
+                        token_ids[rank - 1] = token_id
+                        token_logprobs[rank - 1] = logprob
+                    logprobs_ls.append(token_logprobs)
+                    token_ids_ls.append(token_ids)
+            logprobs_dtype = torch.bfloat16 if self.distillation_config.teacher_model.inference.dtype == "bfloat16" else torch.float32
+            logprobs = torch.tensor(logprobs_ls, dtype=logprobs_dtype).unsqueeze(0)
+            token_ids = torch.tensor(token_ids_ls, dtype=torch.long).unsqueeze(0)
+
+            response_length = response_ids.shape[1]
+            response_logprobs = logprobs[:, -response_length:]
+            assert response_logprobs.shape[1] == response_length, f"Response logprobs length {response_logprobs.shape[1]} does not match response length {response_length}"
+            response_ids = token_ids[:, -response_length:]
+            assert response_ids.shape[1] == response_length, f"Response ids length {response_ids.shape[1]} does not match response length {response_length}"
+            
+            prompt_length = prompt_ids.shape[1]
+            prompt_logprobs = logprobs[:, :prompt_length]
+            assert prompt_logprobs.shape[1] == prompt_length, f"Prompt logprobs length {prompt_logprobs.shape[1]} does not match prompt length {prompt_length}"
+            prompt_ids = token_ids[:, :prompt_length]
+            assert prompt_ids.shape[1] == prompt_length, f"Prompt ids length {prompt_ids.shape[1]} does not match prompt length {prompt_length}"
+            
         elif engine_name == "sglang":
+            raise ValueError("SGLang backend does not support distillation currently.")
             payloads = {
                 "model": model_name,
                 "input": disrm_prompt,
@@ -247,7 +187,7 @@ class RewardLoopWorker:
             rm_score = output["data"][-1]["embedding"][-1]
         elif engine_name == "trtllm":
             # TODO: remove this once TRT-LLM switches to TorchSampler
-            raise ValueError("TensorRT-LLM backend does not support reward models currently.")
+            raise ValueError("TensorRT-LLM backend does not support distillation currently.")
 
             payloads = {
                 "model": model_name,
@@ -265,59 +205,59 @@ class RewardLoopWorker:
         else:
             raise NotImplementedError(f"RewardLoopManager does not support {engine_name}")
 
-        return {"reward_score": rm_score}
+        return {"response_logprobs": response_logprobs, "response_ids": response_ids, "prompt_logprobs": prompt_logprobs, "prompt_ids": prompt_ids}
 
 
-class RewardLoopManager:
+class TeacherLoopManager:
     """
-    RewardLoopManager run in single controller.
-    This class will create reward loop workers and manage them.
+    TeacherLoopManager run in single controller.
+    This class will create teacher loop workers and manage them.
     """
 
-    def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
+    def __init__(self, config: DictConfig, teacher_resource_pool: RayResourcePool = None):
         self.config = config
-        if self.config.reward.reward_model.enable:
-            self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
-            self.reward_router_address = self.reward_model_manager.get_router_address()
-        else:
-            self.reward_model_manager = None
-            self.reward_router_address = None
+        self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation) # to dataclass for the post init to handle top-k and engine kwargs
+        self.teacher_model_manager = TeacherModelManager(self.distillation_config.teacher_model, teacher_resource_pool)
+        self.teacher_router_address = self.teacher_model_manager.get_router_address()
 
-        self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
-        self._init_reward_loop_workers()
+        self.teacher_loop_workers_class = ray.remote(TeacherLoopWorker)
+        self._init_teacher_loop_workers()
 
-    def _init_reward_loop_workers(self):
-        self.reward_loop_workers = []
-        num_workers = self.config.reward.num_workers
+    def _init_teacher_loop_workers(self):
+        self.teacher_loop_workers = []
+        num_workers = self.distillation_config.num_workers
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
-            self.reward_loop_workers.append(
-                self.reward_loop_workers_class.options(
-                    name=f"reward_loop_worker_{i}",
+            self.teacher_loop_workers.append(
+                self.teacher_loop_workers_class.options(
+                    name=f"teacher_loop_worker_{i}",
+                    max_concurrency=1,
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id,
                         soft=True,
                     ),
-                ).remote(self.config, self.reward_router_address)
+                ).remote(self.config, self.teacher_router_address)
             )
 
-    def compute_rm_score(self, data: DataProto) -> DataProto:
-        if self.reward_model_manager is not None:
-            self.reward_model_manager.wake_up()
+    def compute_teacher_logprobs(self, data: DataProto) -> DataProto:
+        raise NotImplementedError("TODO:RM")
+        if self.teacher_model_manager is not None:
+            self.teacher_model_manager.wake_up()
 
-        chunks = data.chunk(len(self.reward_loop_workers))
+        chunks = data.chunk(len(self.teacher_loop_workers))
         outputs = ray.get(
             [
                 worker.compute_score_batch.remote(chunk)
-                for worker, chunk in zip(self.reward_loop_workers, chunks, strict=True)
+                for worker, chunk in zip(self.teacher_loop_workers, chunks, strict=True)
             ]
         )
         outputs_flat = [item for sublist in outputs for item in sublist]
 
-        # compute rm score
+        # compute teacher logprobs
+        raise NotImplementedError
         scores = [item["reward_score"] for item in outputs_flat]
         prompt_length = data.batch["prompts"].size(1)
         valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
@@ -341,6 +281,7 @@ class RewardLoopManager:
         )
 
     def _run_all(self, tasks: list[asyncio.Task]):
+        raise NotImplementedError("TODO:RM")
         async def run_all():
             return await asyncio.gather(*tasks)
 

@@ -23,6 +23,7 @@ import hydra
 import numpy as np
 import ray
 import torch
+import torch.nn.functional as F
 from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
@@ -218,6 +219,10 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded attention mask."""
     response_logprobs: Optional[torch.Tensor] = None
     """Padded log probabilities for the response tokens."""
+    teacher_logprobs: Optional[torch.Tensor] = None
+    """Padded log probabilities from teacher model for prompt/response tokens."""
+    teacher_ids: Optional[torch.Tensor] = None
+    """Padded token ids corresponding to the teacher log probabilities."""
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
@@ -395,7 +400,9 @@ class AgentLoopWorker:
     Args:
         config (DictConfig): whole config for main entrypoint.
         servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
+        load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+        teacher_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming teacher computation.
     """
 
     def __init__(
@@ -404,6 +411,7 @@ class AgentLoopWorker:
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
         Args:
@@ -411,6 +419,7 @@ class AgentLoopWorker:
             servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
             reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+            teacher_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming teacher computation.
         """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
@@ -427,6 +436,8 @@ class AgentLoopWorker:
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self.teacher_loop_worker_handles = teacher_loop_worker_handles
+        self.distillation_enabled = self.teacher_loop_worker_handles is not None
 
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
@@ -528,8 +539,7 @@ class AgentLoopWorker:
             )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
-
+        output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch, validate=batch.meta_info.get("validate", False))
         return output
 
     async def _run_agent_loop(
@@ -672,7 +682,13 @@ class AgentLoopWorker:
             position_ids=position_ids,
             kwargs=kwargs,
         )
-
+        teacher_result = await self._compute_teacher_logprobs(
+            output,
+            prompt_ids=output.prompt_ids,
+            response_ids=output.response_ids,
+            validate=kwargs.get("validate", False),
+        )
+        teacher_logprobs, teacher_ids = teacher_result.get("logprobs"), teacher_result.get("token_ids")
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
             response_ids=response_output["input_ids"],
@@ -684,6 +700,8 @@ class AgentLoopWorker:
             routed_experts=routed_experts,
             multi_modal_inputs=multi_modal_inputs,
             multi_modal_data=output.multi_modal_data,
+            teacher_logprobs=teacher_logprobs,
+            teacher_ids=teacher_ids,
             reward_score=output.reward_score,
             num_turns=output.num_turns,
             metrics=output.metrics,
@@ -786,10 +804,36 @@ class AgentLoopWorker:
             output.reward_score = result["reward_score"]
             output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
+    async def _compute_teacher_logprobs(self, output, prompt_ids, response_ids, validate):
+        """Compute teacher logprobs for single sample."""
+        if self.distillation_enabled and not validate:
+            data = DataProto(batch=TensorDict({"prompt_ids": torch.tensor([prompt_ids]), "response_ids": torch.tensor([response_ids])}, batch_size=1))
+            selected_teacher_loop_worker_handle = random.choice(self.teacher_loop_worker_handles)
+            result = await selected_teacher_loop_worker_handle.compute_logprobs.remote(data)
+            prompt_logprobs, response_logprobs = result["prompt_logprobs"], result["response_logprobs"]
+            prompt_ids, response_ids = result["prompt_ids"], result["response_ids"]
+
+            def _apply_padding(token_ids, logprobs, max_length):
+                pad_size = max_length - token_ids.shape[1]
+                padding = (0, 0, 0, pad_size)  # pad the sequence dimension
+                token_ids_padded = F.pad(token_ids, padding, value=self.tokenizer.pad_token_id)
+                logprobs_padded = F.pad(logprobs, padding, value=0.0)
+                return token_ids_padded, logprobs_padded
+
+            prompt_ids_padded, prompt_logprobs_padded = _apply_padding(prompt_ids, prompt_logprobs, self.config.actor_rollout_ref.rollout.prompt_length)
+            response_ids_padded, response_logprobs_padded = _apply_padding(response_ids, response_logprobs, self.config.actor_rollout_ref.rollout.response_length)
+            ids_padded = torch.cat([prompt_ids_padded, response_ids_padded], dim=1)
+            print(f"{prompt_ids_padded.shape=}, {response_ids_padded.shape=}, {ids_padded.shape=}")
+            logprobs_padded = torch.cat([prompt_logprobs_padded, response_logprobs_padded], dim=1)
+            return {"token_ids": ids_padded, "logprobs": logprobs_padded}
+        else:
+            return None, None
+
     def _postprocess(
         self,
         inputs: list[_InternalAgentLoopOutput],
         input_non_tensor_batch: dict | None = None,
+        validate: bool = False,
     ) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
         # Convert lists back to tensors and stack them to create a batch.
@@ -804,7 +848,9 @@ class AgentLoopWorker:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
         if inputs[0].routed_experts is not None:
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
-
+        if self.distillation_enabled and not validate:
+            optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
+            optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
@@ -918,12 +964,23 @@ class AgentLoopManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
+        """Initialize agent loop manager.
+
+        Args:
+            config (DictConfig): trainer config.
+            worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
+            rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
+            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+            teacher_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming teacher computation.
+        """
         self.config = config
         self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self.teacher_loop_worker_handles = teacher_loop_worker_handles
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -1017,6 +1074,7 @@ class AgentLoopManager:
                     servers,
                     load_balancer_handle,
                     self.reward_loop_worker_handles,
+                    self.teacher_loop_worker_handles,
                 )
             )
 
