@@ -249,7 +249,7 @@ class PrometheusClient:
 
         return None
 
-    def query_all_metrics(self, prefix: str = "rollout/") -> dict[str, float]:
+    def query_all_metrics(self, prefix: str = "prometheus/") -> dict[str, float]:
         """Query all configured metrics from Prometheus.
 
         Returns:
@@ -259,8 +259,8 @@ class PrometheusClient:
 
         Example:
             {
-                "rollout/vllm_gpu_cache_usage_perc": 85.3,
-                "rollout/vllm_avg_generation_throughput_toks_per_s": 1247.5
+                "rollout/vllm/gpu_cache_usage_perc": 85.3,
+                "rollout/vllm/avg_generation_throughput_toks_per_s": 1247.5
             }
         """
         if not self.metrics_to_log:
@@ -271,7 +271,7 @@ class PrometheusClient:
             try:
                 value = self._query_metric(metric_name)
                 if value is not None:
-                    safe_name = metric_name.replace(":", "_")
+                    safe_name = metric_name.replace(":", "/")
                     metrics[f"{prefix}{safe_name}"] = value
             except Exception as e:
                 logger.warning(f"Unexpected error while querying metric '{metric_name}': {e}", exc_info=True)

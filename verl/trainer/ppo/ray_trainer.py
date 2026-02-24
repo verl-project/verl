@@ -1585,7 +1585,7 @@ class RayPPOTrainer:
 
                 # Query Prometheus metrics if enabled
                 if self.prometheus_client is not None:
-                    prometheus_metrics = self.prometheus_client.query_all_metrics(prefix="rollout/")
+                    prometheus_metrics = self.prometheus_client.query_all_metrics(prefix="prometheus/")
                     metrics.update(prometheus_metrics)
 
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
