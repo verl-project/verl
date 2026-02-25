@@ -1,6 +1,10 @@
+# Divergence Proximal Policy Optimization (DPPO)
+
+
 <div align="center">
 
-# Rethinking the Trust Region in LLM Reinforcement Learning
+## Rethinking the Trust Region in LLM Reinforcement Learning
+
 [![Paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white )](https://arxiv.org/pdf/2602.04879)
 [![Github](https://img.shields.io/badge/Stable_RL-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/sail-sg/Stable-RL)
 [![Twitter](https://img.shields.io/badge/Twitter-%23000000.svg?style=for-the-badge&logo=twitter&logoColor=white)](https://x.com/QPHutu/status/2019435642539897303)
