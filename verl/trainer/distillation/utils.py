@@ -20,51 +20,15 @@ from typing import Optional
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.distillation.fsdp import utils as fsdp_utils
-from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
+from verl.trainer.distillation.losses import DistillationLossSettings
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.utils.stages import Stage
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
-# Estimator distillation key
-TEACHER_LOG_PROBS_KEY = "teacher_log_probs"
-
-# Top-k distillation keys
-TEACHER_TOPK_LOG_PROBS_KEY = "teacher_topk_log_probs"
-TEACHER_TOPK_INDICES_KEY = "teacher_topk_indices"
-
-
+TEACHER_LOGPROBS_KEY = "teacher_logprobs"
+TEACHER_IDS_KEY = "teacher_ids"
 STUDENT_LOGITS_KEY = "student_logits"
-
-
-def compute_topk_distillation_inputs(
-    logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: DistillationConfig
-) -> dict[str, torch.Tensor]:
-    """Compute distillation inputs using top-k log probabilities of teacher."""
-    # Gather inputs for top-k distillation losses.
-    stage = batch["stage"]
-
-    match stage:
-        case Stage.OLD_LOG_PROB | Stage.REF_LOG_PROB:
-            return {}
-        case Stage.ACQUIRE_TEACHER_KNOWLEDGE:
-            # Teacher model
-            match config.strategy:
-                case "fsdp":
-                    compute_topk_log_probs = fsdp_utils.compute_topk_log_probs
-                case _:
-                    raise ValueError(f"Unsupported strategy: {config.strategy}")
-            teacher_topk_log_probs, teacher_topk_indices = compute_topk_log_probs(logits=logits, config=config)
-            nested_log_probs = torch.nested.nested_tensor_from_jagged(teacher_topk_log_probs, cu_seqlens)
-            nested_indices = torch.nested.nested_tensor_from_jagged(teacher_topk_indices, cu_seqlens)
-            return {TEACHER_TOPK_LOG_PROBS_KEY: nested_log_probs, TEACHER_TOPK_INDICES_KEY: nested_indices}
-        case Stage.ACTOR_UPDATE:
-            # Student model
-            nested_log_probs = torch.nested.nested_tensor_from_jagged(logits, cu_seqlens)
-            return {STUDENT_LOGITS_KEY: nested_log_probs}
-        case _:
-            raise ValueError(f"Unexpected stage: {stage}")
 
 
 def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
@@ -74,19 +38,14 @@ def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
     return config.enabled
 
 
-def distillation_requires_logits(config: DistillationConfig) -> bool:
-    """Check if distillation loss requires logits based on the provided configuration."""
-    loss_config: DistillationLossConfig = config.distillation_loss
-    distillation_settings: DistillationLossSettings = loss_config.loss_settings
-    return distillation_settings.use_topk or distillation_settings.use_full
-
-
-def compute_distillation_inputs(
+def prepare_student_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: Optional[DistillationConfig]
 ) -> dict[str, torch.Tensor]:
-    """Compute the distillation inputs for a given stage of training."""
-    if not is_distillation_enabled(config):
+    """Prepare student distillation inputs."""
+    stage = batch["stage"]
+    if not is_distillation_enabled(config) or stage in {Stage.OLD_LOG_PROB, Stage.REF_LOG_PROB}:
         return {}
+    assert stage == Stage.ACTOR_UPDATE, f"Unexpected stage: {stage}"
     loss_config: DistillationLossConfig = config.distillation_loss
     distillation_settings: DistillationLossSettings = loss_config.loss_settings
     if distillation_settings.use_estimator:
@@ -98,12 +57,9 @@ def compute_distillation_inputs(
             raise ValueError("cu_seqlens must be provided if logits is not a nested tensor.")
         cu_seqlens = logits.offsets()
         logits = logits.values()
-    if distillation_settings.use_full:
-        return NotImplementedError  # TODO: JacobHelwig
-    elif distillation_settings.use_estimator:
-        return {}
-    elif distillation_settings.use_topk:
-        return compute_topk_distillation_inputs(logits=logits, batch=batch, cu_seqlens=cu_seqlens, config=config)
+    if distillation_settings.use_topk:
+        nested_logits = torch.nested.nested_tensor_from_jagged(logits, cu_seqlens)
+        return {STUDENT_LOGITS_KEY: nested_logits}
     else:
         raise ValueError
 
@@ -114,20 +70,16 @@ def prepare_distillation_inputs(
     """Prepare distillation loss inputs for loss computation. Called in ppo_loss before computing distillation loss."""
     loss_config: DistillationLossConfig = config.distillation_loss
     distillation_settings: DistillationLossSettings = loss_config.loss_settings
-    if distillation_settings.use_full:
-        raise NotImplementedError(
-            "Full log probs are not currently supported for distillation loss. Please use top-k log probs instead."
-        )
-    elif distillation_settings.use_estimator:
-        return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data[TEACHER_LOG_PROBS_KEY])
+    if distillation_settings.use_estimator:
+        return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data[TEACHER_LOGPROBS_KEY])
     elif distillation_settings.use_topk:
-        teacher_topk_log_probs = no_padding_2_padding(data[TEACHER_TOPK_LOG_PROBS_KEY], data)
-        teacher_topk_indices = no_padding_2_padding(data[TEACHER_TOPK_INDICES_KEY], data)
+        teacher_topk_log_probs = data[TEACHER_LOGPROBS_KEY]
+        teacher_topk_ids = data[TEACHER_IDS_KEY]
         student_logits = no_padding_2_padding(model_output[STUDENT_LOGITS_KEY], data)
         return DistillationLossInputs(
             student_logits=student_logits,
             teacher_topk_log_probs=teacher_topk_log_probs,
-            teacher_topk_indices=teacher_topk_indices,
+            teacher_topk_ids=teacher_topk_ids,
         )
     else:
         raise ValueError
