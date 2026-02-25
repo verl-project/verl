@@ -16,7 +16,7 @@
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.distillation import compute_distillation_loss, prepare_distillation_inputs
+from verl.trainer.distillation import distillation_loss, prepare_distillation_inputs
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
@@ -146,23 +146,20 @@ def ppo_loss(
 
     # distillation loss
     if distillation_enabled:
-        distillation_config.global_batch_info["dp_size"] = data["dp_size"]
-        distillation_config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
-        distillation_config.global_batch_info["global_batch_size"] = data["global_batch_size"]
-        distillation_config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
         distillation_inputs = prepare_distillation_inputs(
             log_prob=log_prob, data=data, model_output=model_output, config=distillation_config
         )
-        distillation_loss, distillation_metrics = compute_distillation_loss(
+        dist_loss, distillation_metrics = distillation_loss(
             inputs=distillation_inputs,
             response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
-            config=distillation_config,
+            config=config,
+            distillation_config=distillation_config,
         )
         metrics.update(distillation_metrics)
         distillation_loss_coef = loss_config.distillation_loss_coef if loss_config.use_policy_loss else 1.0
-        policy_loss += distillation_loss * distillation_loss_coef
-        metrics["distillation/loss"] = Metric(value=distillation_loss, aggregation=metric_aggregation)
+        policy_loss += dist_loss * distillation_loss_coef
+        metrics["distillation/loss"] = Metric(value=dist_loss, aggregation=metric_aggregation)
 
     return policy_loss, metrics
 

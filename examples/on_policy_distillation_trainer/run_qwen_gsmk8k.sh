@@ -4,7 +4,7 @@ conda activate verl
 export PATH=$CONDA_PREFIX/bin:$PATH
 export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=5,6,7,8
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
 export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
@@ -17,7 +17,7 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
-TEACHER_MODEL=Qwen2.5-7B-Instruct
+TEACHER_MODEL=Qwen2.5-3B-Instruct
 
 DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="forward_kl_topk"
@@ -33,12 +33,14 @@ MAX_RESPONSE_LENGTH=512
 TRAIN_PROMPT_BSZ=128
 STUDENT_MICRO_BATCH_SIZE_PER_GPU=2
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
-TEACHER_MICRO_BATCH_SIZE_PER_GPU=2
-TEACHER_MAX_TOKEN_LEN_PER_GPU=$(( TEACHER_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 USE_DYNAMIC_BSZ=False
 
-WORLD_SIZE=2
-SP_SIZE=1
+STUDENT_WORLD_SIZE=2
+
+TEACHER_RESOURCE_POOL=True
+TEACHER_WORLD_SIZE=2
+
+ENFORCE_EAGER=False # true for faster debugging
 
 ############################ Paths ############################
 
@@ -65,20 +67,31 @@ MODEL=(
     actor_rollout_ref.model.path="${FAMILY}/${STUDENT_MODEL}"
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.actor.use_torch_compile=True
+    actor_rollout_ref.rollout.enforce_eager=$ENFORCE_EAGER
 )
 
 DISTILLATION=(
     distillation.enabled=True
+    distillation.num_workers=8
+    distillation.teacher_model.enable_resource_pool=$TEACHER_RESOURCE_POOL
+    distillation.teacher_model.n_gpus_per_node=$TEACHER_WORLD_SIZE
+    distillation.teacher_model.nnodes=1
+    distillation.teacher_model.model_path="${FAMILY}/${TEACHER_MODEL}"
+    distillation.teacher_model.inference.tensor_model_parallel_size=1
+    distillation.teacher_model.inference.name=$ROLLOUT_NAME
+    distillation.teacher_model.inference.gpu_memory_utilization=0.3
+    distillation.teacher_model.inference.enforce_eager=$ENFORCE_EAGER
     distillation.distillation_loss.loss_mode=$DISTILLATION_LOSS_MODE
     distillation.distillation_loss.jsd_beta=0.5
     distillation.distillation_loss.topk=64
     distillation.distillation_loss.use_policy_loss=False
     distillation.distillation_loss.loss_max_clamp=$DISTILLATION_LOSS_MAX_CLAMP
     distillation.distillation_loss.log_prob_min_clamp=$DISTILLATION_LOG_PROB_MIN_CLAMP
-    distillation.teacher_model.model_path="${FAMILY}/${TEACHER_MODEL}"
+    # +distillation.teacher_model.inference.engine_kwargs.vllm.max_logprobs=64 # TODO
 )
 
-ACTOR=(
+STUDENT=(
     actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.actor.ppo_mini_batch_size=$TRAIN_PROMPT_BSZ
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$STUDENT_MICRO_BATCH_SIZE_PER_GPU
@@ -86,7 +99,7 @@ ACTOR=(
     actor_rollout_ref.actor.use_dynamic_bsz=$USE_DYNAMIC_BSZ
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP_SIZE
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=1
 )
 
 ROLLOUT=(
@@ -96,6 +109,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=1
     actor_rollout_ref.rollout.name=$ROLLOUT_NAME
     actor_rollout_ref.rollout.gpu_memory_utilization=0.3
+    actor_rollout_ref.rollout.calculate_log_probs=False
     actor_rollout_ref.rollout.n=1
 )
 
@@ -108,12 +122,12 @@ TRAINER=(
     trainer.logger='["console"]'
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXP_NAME
-    trainer.n_gpus_per_node=$WORLD_SIZE
+    trainer.n_gpus_per_node=$STUDENT_WORLD_SIZE
     trainer.nnodes=1
     trainer.save_freq=200
     trainer.test_freq=5
     trainer.total_epochs=15
-    trainer.val_before_train=True
+    trainer.val_before_train=False
     trainer.use_legacy_worker_impl=disable
     trainer.resume_mode=disable
 )
@@ -130,6 +144,6 @@ python3 -m verl.trainer.main_ppo \
     "${MODEL[@]}" \
     "${DISTILLATION[@]}" \
     "${ROLLOUT[@]}" \
-    "${ACTOR[@]}" \
+    "${STUDENT[@]}" \
     "${TRAINER[@]}" \
     "$@"

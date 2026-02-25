@@ -113,12 +113,6 @@ class DistillationConfig(BaseConfig):
     teacher_model: DistillationTeacherModelConfig = field(default_factory=DistillationTeacherModelConfig)
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
-    # Store global batch info for loss aggregation:
-    # dp_size: data parallel size
-    # batch_num_tokens: number of valid tokens in global batch
-    # global_batch_size: global batch size
-    global_batch_info: dict = field(default_factory=dict)
-
 
     def __post_init__(self):
         engine_name = self.teacher_model.inference.name
