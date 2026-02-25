@@ -17,7 +17,7 @@ import logging
 import os
 
 from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
-from verl.workers.config import HFModelConfig, DistillationTeacherModelConfig
+from verl.workers.config import DistillationTeacherModelConfig, HFModelConfig
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
@@ -91,6 +91,7 @@ class TeacherModelManager:
         worker_urls = [f"http://{server_address}" for server_address in self.server_addresses]
 
         from ..reward_loop.router.naive_router import launch_router_process
+
         self.router_address, _ = launch_router_process(worker_urls=worker_urls)
 
     def get_router_address(self):

@@ -22,7 +22,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.metric import AggregationType, Metric
-from verl.workers.config import DistillationConfig, DistillationLossConfig, ActorConfig
+from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 
 DistillationLossFn = Callable[
     [
@@ -56,8 +56,7 @@ class DistillationLossSettings(BaseConfig):
         self.names = [self.names] if isinstance(self.names, str) else self.names
         if sum([self.use_topk, self.use_estimator]) > 1:
             raise ValueError(
-                f"Expected only one of use_estimator, use_topk, but got "
-                f"{self.use_estimator=}, {self.use_topk=}."
+                f"Expected only one of use_estimator, use_topk, but got {self.use_estimator=}, {self.use_topk=}."
             )
 
 
@@ -206,7 +205,11 @@ def compute_forward_kl_topk(
         teacher_topk_ids=teacher_topk_ids,
         config=distillation_config,
     )
-    distillation_losses, student_mass, teacher_mass = outputs["distillation_losses"], outputs["student_mass"], outputs["teacher_mass"]
+    distillation_losses, student_mass, teacher_mass = (
+        outputs["distillation_losses"],
+        outputs["student_mass"],
+        outputs["teacher_mass"],
+    )
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
     student_mass = student_mass[response_mask]

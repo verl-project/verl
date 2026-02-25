@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from verl.base_config import BaseConfig
-from verl.trainer.config.config import ModuleConfig
 
 from .rollout import RolloutConfig
 
@@ -26,6 +25,7 @@ __all__ = ["DistillationLossConfig", "DistillationTeacherModelConfig", "Distilla
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
 
 @dataclass
 class DistillationLossConfig(BaseConfig):
@@ -66,7 +66,7 @@ class DistillationLossConfig(BaseConfig):
 @dataclass
 class DistillationTeacherModelConfig(BaseConfig):
     """Configuration for on-policy distillation teacher.
-    
+
     enable_resource_pool (bool):
         Whether to enable separate resource pool for teacher model(s).
     n_gpus_per_node (int):
@@ -78,6 +78,7 @@ class DistillationTeacherModelConfig(BaseConfig):
     inference (RolloutConfig):
         Rollout configuration for the teacher model inference during distillation.
     """
+
     _mutable_fields = BaseConfig._mutable_fields
 
     enable_resource_pool: bool = False
@@ -85,7 +86,6 @@ class DistillationTeacherModelConfig(BaseConfig):
     nnodes: int = 0
     model_path: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
-
 
 
 @dataclass
@@ -109,7 +109,6 @@ class DistillationConfig(BaseConfig):
     teacher_model: DistillationTeacherModelConfig = field(default_factory=DistillationTeacherModelConfig)
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
-
     def __post_init__(self):
         engine_name = self.teacher_model.inference.name
         engine_kwargs = self.teacher_model.inference.engine_kwargs
@@ -129,4 +128,6 @@ class DistillationConfig(BaseConfig):
                     )
                 engine_kwargs["vllm"] = vllm_engine_kwargs
             case _:
-                raise NotImplementedError(f"DistillationTeacherModelConfig does not support inference engine {engine_name}")
+                raise NotImplementedError(
+                    f"DistillationTeacherModelConfig does not support inference engine {engine_name}"
+                )
