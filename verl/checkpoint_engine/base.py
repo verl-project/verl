@@ -257,11 +257,12 @@ class CheckpointEngine(ABC):
         Returns:
             List of (chunk, metadata) tuples.
         """
-        from functools import reduce
+        from verl.utils.tensor_utils import compute_weight_chunks
 
-        weight_size = weight.nbytes
-        if weight_size <= self.bucket_size:
-            # No slicing needed
+        chunk_infos = compute_weight_chunks(name, weight, self.bucket_size)
+
+        # Check if no slicing needed (single chunk covering entire tensor)
+        if len(chunk_infos) == 1 and chunk_infos[0].chunk_idx == 0 and chunk_infos[0].total_chunks == 1:
             meta = {
                 "name": name,
                 "shape": weight.shape,
@@ -269,53 +270,19 @@ class CheckpointEngine(ABC):
                 "offset": 0,
             }
             return [(weight, meta)]
-
-        # Slice the weight along the first dimension into chunks
-        dtype_size = weight.element_size()
-        numel_per_chunk = self.bucket_size // dtype_size
-
-        # Calculate chunk size along the first dimension
-        first_dim_size = weight.shape[0]
-        elements_per_row = reduce(lambda x, y: x * y, weight.shape[1:], 1)
-        if elements_per_row == 0:
-            # Empty tensor, return as is
-            meta = {
-                "name": name,
-                "shape": weight.shape,
-                "dtype": weight.dtype,
-                "offset": 0,
-            }
-            return [(weight, meta)]
-
-        chunk_dim_size = numel_per_chunk // elements_per_row
-        if chunk_dim_size == 0:
-            raise ValueError(
-                f"Weight '{name}' with shape {weight.shape} is too large to be chunked. A single slice "
-                f"along the first dimension is larger than the bucket size ({self.bucket_size} bytes). "
-                f"Please increase `checkpoint_engine.update_weights_bucket_megabytes`."
-            )
-
-        num_chunks = (first_dim_size + chunk_dim_size - 1) // chunk_dim_size
-        logger.info(
-            f"Slicing weight {name} ({weight.shape}, {weight.dtype}, {weight_size} bytes) into {num_chunks} chunks"
-        )
 
         chunks = []
-        start_idx = 0
-        for chunk_idx in range(num_chunks):
-            end_idx = min(start_idx + chunk_dim_size, first_dim_size)
-            chunk = weight[start_idx:end_idx]
-
+        for info in chunk_infos:
+            chunk = weight[info.start_idx : info.end_idx]
             meta = {
                 "name": name,
                 "shape": chunk.shape,
                 "dtype": chunk.dtype,
                 "offset": 0,  # Will be set when filling bucket
-                "chunk_idx": chunk_idx,
-                "total_chunks": num_chunks,
+                "chunk_idx": info.chunk_idx,
+                "total_chunks": info.total_chunks,
             }
             chunks.append((chunk, meta))
-            start_idx = end_idx
 
         return chunks
 

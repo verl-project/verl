@@ -30,7 +30,6 @@ import gc
 import logging
 import os
 import time
-from functools import reduce
 from typing import Any, Generator, Optional
 
 import ray
@@ -43,6 +42,7 @@ from torch.multiprocessing.reductions import reduce_tensor
 from verl import DataProto
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
 from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
+from verl.utils.tensor_utils import compute_weight_chunks
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.utils import ensure_async_iterator
@@ -203,35 +203,12 @@ class ServerAdapter(BaseRollout):
             # (e.g., large embedding layer that exceeds bucket_size)
             weight_size = weight.nbytes
             if weight_size > bucket_size:
-                # Slice the weight along the first dimension into chunks
-                dtype_size = weight.element_size()
-                numel_per_chunk = bucket_size // dtype_size
+                # Use shared utility to compute chunk info
+                chunk_infos = compute_weight_chunks(name, weight, bucket_size)
 
-                # Calculate chunk size along the first dimension
-                first_dim_size = weight.shape[0]
-                elements_per_row = reduce(lambda x, y: x * y, weight.shape[1:], 1)
-                # An empty tensor would have weight_size=0 and not enter this block,
-                # so we can assume elements_per_row > 0.
-                chunk_dim_size = numel_per_chunk // elements_per_row
-                if chunk_dim_size == 0:
-                    raise ValueError(
-                        f"Weight '{name}' with shape {weight.shape} is too large to be chunked. A single slice "
-                        f"along the first dimension is larger than the bucket size ({bucket_size_mb}MB). "
-                        f"Please increase `rollout.checkpoint_engine.update_weights_bucket_megabytes`."
-                    )
-
-                num_chunks = (first_dim_size + chunk_dim_size - 1) // chunk_dim_size
-                logger.info(
-                    f"Slicing weight {name} ({weight.shape}, {weight.dtype}, {weight_size} bytes) "
-                    f"into {num_chunks} chunks"
-                )
-
-                start_idx = 0
-                for chunk_idx in range(num_chunks):
-                    end_idx = min(start_idx + chunk_dim_size, first_dim_size)
-
+                for info in chunk_infos:
                     # Extract chunk along first dimension
-                    chunk = weight[start_idx:end_idx]
+                    chunk = weight[info.start_idx : info.end_idx]
                     chunk_size = chunk.nbytes
 
                     # Fill bucket with chunk
@@ -242,18 +219,16 @@ class ServerAdapter(BaseRollout):
                         bucket_meta = {}
                         offset = 0
 
-                    bucket_meta[f"{name}_chunk_{chunk_idx}"] = {
+                    bucket_meta[f"{name}_chunk_{info.chunk_idx}"] = {
                         "name": name,
                         "shape": chunk.shape,
                         "dtype": chunk.dtype,
                         "offset": offset,
-                        "chunk_idx": chunk_idx,
-                        "total_chunks": num_chunks,
+                        "chunk_idx": info.chunk_idx,
+                        "total_chunks": info.total_chunks,
                     }
                     buffer[offset : offset + chunk_size].copy_(chunk.view(-1).view(torch.uint8), non_blocking=True)
                     offset += chunk_size
-
-                    start_idx = end_idx
 
                 continue
 
