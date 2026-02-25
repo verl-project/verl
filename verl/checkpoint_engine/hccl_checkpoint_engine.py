@@ -165,7 +165,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
 
     def _start_zmq_server(self):
         self.ip = ray.util.get_node_ip_address().strip("[]")
-        self.zmq_port, self.listen_sock = get_free_port(self.ip)
+        self.zmq_port, _ = get_free_port(self.ip)
 
         context = zmq.Context()
         self.socket = context.socket(zmq.PUB)

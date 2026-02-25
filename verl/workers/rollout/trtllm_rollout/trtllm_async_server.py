@@ -29,7 +29,7 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
-from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -179,7 +179,7 @@ class TRTLLMHttpServer:
             metadata_server_cfg=None,
         )
         app = trtllm_server.app
-        self._server_port, self._server_task = await run_unvicorn(app, None, self._server_address)
+        self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
 
     async def generate(
         self,
