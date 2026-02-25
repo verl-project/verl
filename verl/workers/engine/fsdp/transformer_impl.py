@@ -917,7 +917,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 if self.distillation_enabled:
                     raise NotImplementedError(
                         "Distillation with fused kernels is not supported yet"
-                    )  # TODO: JacobHelwig
+                    )
                 log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
             else:

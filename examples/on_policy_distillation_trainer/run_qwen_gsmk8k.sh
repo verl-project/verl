@@ -83,7 +83,6 @@ DISTILLATION=(
     distillation.teacher_model.inference.gpu_memory_utilization=0.3
     distillation.teacher_model.inference.enforce_eager=$ENFORCE_EAGER
     distillation.distillation_loss.loss_mode=$DISTILLATION_LOSS_MODE
-    distillation.distillation_loss.jsd_beta=0.5
     distillation.distillation_loss.topk=64
     distillation.distillation_loss.use_policy_loss=False
     distillation.distillation_loss.loss_max_clamp=$DISTILLATION_LOSS_MAX_CLAMP
@@ -127,7 +126,7 @@ TRAINER=(
     trainer.save_freq=200
     trainer.test_freq=5
     trainer.total_epochs=15
-    trainer.val_before_train=False
+    trainer.val_before_train=True
     trainer.use_legacy_worker_impl=disable
     trainer.resume_mode=disable
 )

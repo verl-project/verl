@@ -35,7 +35,6 @@ __all__ = [
     "VeOmniActorConfig",
     "QATConfig",
     "TorchTitanActorConfig",
-    "QATConfig",
 ]
 
 

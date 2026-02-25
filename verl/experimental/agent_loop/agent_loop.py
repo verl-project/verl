@@ -527,9 +527,9 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-            return await self._agent_loop_postprocess(output, **kwargs)
+            return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
-    async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
+    async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
@@ -636,7 +636,7 @@ class AgentLoopWorker:
             output,
             prompt_ids=output.prompt_ids,
             response_ids=output.response_ids,
-            validate=kwargs.get("validate", False),
+            validate=validate,
         )
         teacher_logprobs, teacher_ids = teacher_result.get("response_logprobs"), teacher_result.get("response_ids")
         return _InternalAgentLoopOutput(
@@ -761,7 +761,7 @@ class AgentLoopWorker:
             response_logprobs_padded = F.pad(response_logprobs, padding, value=0.0)
             return {"response_ids": response_ids_padded, "response_logprobs": response_logprobs_padded}
         else:
-            return None, None
+            return {}
 
     def _postprocess(
         self,

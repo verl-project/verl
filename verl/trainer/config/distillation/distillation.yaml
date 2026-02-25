@@ -37,9 +37,6 @@ distillation_loss:
   # The coef of the distillation loss when use_policy_loss is true
   distillation_loss_coef: 1.0
 
-  # Jensen-Shannon Divergence beta for jsd loss mode.
-  jsd_beta: 0.5
-
   # Optional max clamp value for distillation loss. If null, no clamping is applied.
   loss_max_clamp: null
 

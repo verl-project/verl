@@ -39,9 +39,6 @@ class DistillationLossConfig(BaseConfig):
         Whether to include policy gradient loss alongside distillation loss.
     distillation_loss_coef (float):
         Coefficient for distillation loss when combined with policy loss.
-    jsd_beta (float):
-        Interpolation weight for JSD loss. When beta=0, behaves like forward KL.
-        When beta=1, behaves like reverse KL.
     loss_max_clamp (float, optional):
         Maximum value to clamp distillation loss. If None, no clamping is applied.
     log_prob_min_clamp (float, optional):
@@ -55,7 +52,6 @@ class DistillationLossConfig(BaseConfig):
     topk: Optional[int] = 128
     use_policy_loss: bool = True
     distillation_loss_coef: float = 1.0
-    jsd_beta: float = 0.5
     loss_max_clamp: Optional[float] = 10.0
     log_prob_min_clamp: Optional[float] = -10.0
 
