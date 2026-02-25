@@ -20,21 +20,16 @@ import aiohttp
 import numpy as np
 import ray
 import torch
-import torch.nn.functional as F
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
-from verl.trainer.ppo.reward import load_reward_manager
-from verl.utils import hf_tokenizer
-from verl.utils.fs import copy_to_local
+from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 from verl.utils.config import omega_conf_to_dataclass
-
-from .teacher_model import TeacherModelManager
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
-from verl.trainer.distillation.losses import get_distillation_loss_settings, DistillationLossSettings
+from .teacher_model import TeacherModelManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -52,7 +47,9 @@ class TeacherLoopWorker:
         self.config = config
         self.distillation_config: DistillationConfig = self.config.distillation
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
-        self.distillation_loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.distillation_loss_config.loss_mode)
+        self.distillation_loss_settings: DistillationLossSettings = get_distillation_loss_settings(
+            self.distillation_loss_config.loss_mode
+        )
         self.teacher_router_address = teacher_router_address
         # # Serialize teacher requests per actor to reduce pressure on the teacher vLLM router/backend.
         # self._request_semaphore = asyncio.Semaphore(1)
@@ -112,8 +109,8 @@ class TeacherLoopWorker:
             raise last_exception
 
     async def _compute_logprobs(self, data: DataProto) -> dict:
-        prompt_ids = data.batch['prompt_ids']
-        response_ids = data.batch['response_ids']
+        prompt_ids = data.batch["prompt_ids"]
+        response_ids = data.batch["response_ids"]
         input_ids = torch.cat([prompt_ids, response_ids], dim=1).squeeze(0).tolist()
         engine_name = self.config.distillation.teacher_model.inference.name
         model_name = self.config.distillation.teacher_model.model_path
@@ -121,7 +118,7 @@ class TeacherLoopWorker:
             if self.distillation_loss_settings.use_topk:
                 num_logprobs = topk = self.distillation_loss_config.topk
             else:
-                num_logprobs = 0 # only the sampled logprob    
+                num_logprobs = 0  # only the sampled logprob
             payloads = {
                 "model": model_name,
                 "prompt": input_ids,
@@ -140,7 +137,7 @@ class TeacherLoopWorker:
             for logprobs_dict in response_logprob_dicts:
                 if num_logprobs == 0:
                     token_id_str = list(logprobs_dict.keys())[0]
-                    logprob = logprobs_dict[token_id_str]['logprob']
+                    logprob = logprobs_dict[token_id_str]["logprob"]
                     response_logprobs_ls.append([logprob])
                     response_ids_ls.append([int(token_id_str)])
                 else:
@@ -149,18 +146,22 @@ class TeacherLoopWorker:
                     # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
                     assert len(logprobs_dict) in [topk, topk + 1], len(logprobs_dict)
                     for token_id_str, token_dict in logprobs_dict.items():
-                        if token_dict['rank'] > topk:
-                            continue # the sampled token is not in the top-k
-                        rank = token_dict['rank']
-                        logprob = token_dict['logprob']
+                        if token_dict["rank"] > topk:
+                            continue  # the sampled token is not in the top-k
+                        rank = token_dict["rank"]
+                        logprob = token_dict["logprob"]
                         response_ids[rank - 1] = int(token_id_str)
                         response_logprobs[rank - 1] = logprob
                     response_logprobs_ls.append(response_logprobs)
                     response_ids_ls.append(response_ids)
-            logprobs_dtype = torch.bfloat16 if self.distillation_config.teacher_model.inference.dtype == "bfloat16" else torch.float32
+            logprobs_dtype = (
+                torch.bfloat16
+                if self.distillation_config.teacher_model.inference.dtype == "bfloat16"
+                else torch.float32
+            )
             response_logprobs = torch.tensor(response_logprobs_ls, dtype=logprobs_dtype).unsqueeze(0)
             response_ids = torch.tensor(response_ids_ls, dtype=torch.long).unsqueeze(0)
-            
+
         elif engine_name == "sglang":
             raise ValueError("SGLang backend does not support distillation currently.")
             payloads = {
@@ -200,7 +201,9 @@ class TeacherLoopManager:
 
     def __init__(self, config: DictConfig, teacher_resource_pool: RayResourcePool = None):
         self.config = config
-        self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation) # to dataclass for the post init to handle top-k and engine kwargs
+        self.distillation_config: DistillationConfig = omega_conf_to_dataclass(
+            self.config.distillation
+        )  # to dataclass for the post init to handle top-k and engine kwargs
         self.teacher_model_manager = TeacherModelManager(self.distillation_config.teacher_model, teacher_resource_pool)
         self.teacher_router_address = self.teacher_model_manager.get_router_address()
 
@@ -266,6 +269,7 @@ class TeacherLoopManager:
 
     def _run_all(self, tasks: list[asyncio.Task]):
         raise NotImplementedError("TODO:RM")
+
         async def run_all():
             return await asyncio.gather(*tasks)
 

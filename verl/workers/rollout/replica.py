@@ -170,7 +170,7 @@ class RolloutReplica(ABC):
             name_prefix = f"rollout_reward_colocate_{self.replica_rank}"
         elif self.is_teacher_model:
             name_prefix = f"rollout_teacher_colocate_{self.replica_rank}"
-        else:            
+        else:
             name_prefix = f"rollout_colocate_{self.replica_rank}"
 
         worker_group = RayWorkerGroup(
