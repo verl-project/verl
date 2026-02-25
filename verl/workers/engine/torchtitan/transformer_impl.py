@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed
 from tensordict import TensorDict
+from torch.distributed.checkpoint.state_dict import get_model_state_dict
 from torch.distributed.tensor import DTensor
 from torchtitan.config.job_config import (
     Checkpoint,
@@ -168,10 +169,13 @@ class TorchTitanEngine(BaseEngine):
             initial_load_path=model_config.path,
         )
         compile = Compile(enable=self.engine_config.use_torch_compile)
+        training_kwargs = {}
+        if self.engine_config.max_seq_len is not None:
+            training_kwargs["seq_len"] = self.engine_config.max_seq_len
         if self.engine_config.offload_policy or self.engine_config.forward_only:
-            training = Training(enable_cpu_offload=True)
+            training = Training(enable_cpu_offload=True, **training_kwargs)
         else:
-            training = Training()
+            training = Training(**training_kwargs)
 
         # Construct Torchtitan's JobConfig
         self.config = JobConfig(
@@ -300,7 +304,15 @@ class TorchTitanEngine(BaseEngine):
 
     def get_data_parallel_group(self):
         mesh = self._get_data_parallel_mesh()
-        return mesh.get_group() if mesh is not None else None
+        if mesh is not None:
+            return mesh.get_group()
+        # If world_size == dp_size (e.g. single GPU, or all ranks are DP),
+        # return WORLD so that collective ops in _postprocess_output
+        # (allgather_dict_into_dict, all_reduce) still run and produce the
+        # correct metric aggregation format.
+        if torch.distributed.get_world_size() == self.get_data_parallel_size():
+            return torch.distributed.group.WORLD
+        return None
 
     def _get_data_parallel_mesh(self):
         """Get the data parallel mesh, handling hybrid/fully/replicate shard modes."""
@@ -480,6 +492,46 @@ class TorchTitanEngine(BaseEngine):
 
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
+
+    def get_per_tensor_param(self, **kwargs):
+        for module in self.module:
+            load_fsdp_model_to_gpu(module)
+
+        # Collect state dicts from all model parts
+        params = {}
+        for module in self.module:
+            module_params = get_model_state_dict(module)
+            params.update(module_params)
+
+        if self._is_offload_param:
+            for module in self.module:
+                offload_fsdp_model_to_cpu(module)
+
+        # Convert TorchTitan key names to HuggingFace key names (expected by vLLM)
+        sd_adapter = self.checkpointer.sd_adapter
+        if sd_adapter is not None:
+            params = sd_adapter.to_hf(params)
+
+        # When weight tying is enabled, the sd_adapter skips lm_head.weight during
+        # to_hf() conversion (since it's the same tensor as embed_tokens.weight in
+        # the torchtitan model). But vLLM needs lm_head.weight explicitly, so we
+        # add it back as a reference to embed_tokens.weight.
+        if "model.embed_tokens.weight" in params and "lm_head.weight" not in params:
+            params["lm_head.weight"] = params["model.embed_tokens.weight"]
+
+        device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+        # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
+        per_tensor_param = (
+            (
+                name,
+                param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                if isinstance(param, DTensor)
+                else param,
+            )
+            for name, param in params.items()
+        )
+        # TODO: support Torchtitan PEFT
+        return per_tensor_param, None
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

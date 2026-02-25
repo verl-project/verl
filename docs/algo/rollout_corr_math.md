@@ -23,6 +23,14 @@
   month = sep,
   url = {https://richardli.xyz/rl-collapse}
 }
+
+
+@article{li2025trust,
+  title={Trust Region Masking for Long-Horizon LLM Reinforcement Learning},
+  author={Li, Yingru and Liu, Jiacai and Xu, Jiawei and Tong, Yuxuan and Li, Ziniu and Liu, Qian and Wang, Baoxiang},
+  journal={arXiv preprint arXiv:2512.23075},
+  year={2025}
+}
 ```
 
 ### Blog Series
@@ -31,6 +39,7 @@
 - [Part 1: Why Mismatch Breaks LLM-RL](https://richardli.xyz/rl-collapse-1) (analytical framework using TV distance for bias and χ²-divergence for variance)
 - [Part 2: The Gradient Estimator Trials](https://richardli.xyz/rl-collapse-2) (token-level vs sequence-level correction bias-variance tradeoff)
 - [Part 3: When Math Meets Reality—Toxic Tails and Length Traps](https://richardli.xyz/rl-collapse-3) (why rejection over clipping, and geometric-level RS)
+- Latest Paper: https://arxiv.org/abs/2512.23075
 
 ## Abstract
 
@@ -400,7 +409,7 @@ rollout_rs = "token_k1"  # Optional: rejection sampling (ratio bounds)
 - Lower variance than sequence-level (product of ratios bounded individually)
 - **Bias-variance tradeoff**: Token-level correction has $O(T^2 \Delta_{\max})$ bias where $T$ is sequence length and $\Delta_{\max}$ is maximum per-token policy divergence. This bias becomes significant when the rollout policy deviates substantially from the training policy. Sequence-level correction is unbiased but has higher variance.
 - Typical threshold: 1.5 - 5.0
-- Optional batch normalization (§3.6): Normalizes over all token weights to ensure $\mathbb{E}[\tilde{w}_t] = 1$ (reduces variance)
+- Optional batch normalization [§3.4](rollout_corr_math.md#34-batch-normalization): Normalizes over all token weights to ensure $\mathbb{E}[\tilde{w}_t] = 1$ (reduces variance)
 - **When to use**: Token-level works well when rollout policy stays within the trust region of training policy. When mismatch is significant, the bias becomes intolerable and sequence-level correction is preferred.
 
 **Loss function (REINFORCE + Token IS):**
@@ -429,7 +438,7 @@ rollout_rs = "seq_sum_k1"  # Optional: rejection sampling
 - Multiplicative aggregation across sequence
 - More sensitive to outliers than token-level
 - Typical threshold: 2.0 - 10.0
-- Optional batch normalization (§3.6): Normalizes over sequence means (one weight per sequence)
+- Optional batch normalization [§3.4](rollout_corr_math.md#34-batch-normalization): Normalizes over sequence means (one weight per sequence)
 
 **Terminology Note:**
 - **Seq-TIS (Sequence-Level Truncated IS)**: Clips the sequence ratio $\rho(\tau) \to \min(\rho(\tau), C)$. Maximizes information efficiency by extracting signal from all samples. Best for clean data with moderate mismatch.
@@ -590,7 +599,7 @@ $$
 \hat{g}_{\text{k3-rs-token-tis}}(y) = \underbrace{\mathbb{I}\left( K3_{\text{seq}} \le C_{\text{k3}} \right)}_{\text{K3 Filter}} \cdot \prod_t \min(\rho_t, C) \cdot f(y)
 $$
 
-This is implemented by combining `rollout_rs="k3"` with `rollout_is="token"`.
+This is implemented by combining `rollout_rs="seq_mean_k3"` with `rollout_is="token"`.
 
 
 ---
@@ -692,7 +701,7 @@ rollout_rs_threshold = 0.01
 | `decoupled_token_is()` | Token-TIS | Decoupled PPO | Per-token IS weights |
 | `decoupled_seq_is()` | Seq-TIS | Decoupled PPO | Sequence-level IS weights |
 | `decoupled_seq_is_rs()` | Seq-MIS | Decoupled PPO | Sequence IS + sequence RS |
-| `decoupled_geo_rs()` | Geo-RS | Decoupled PPO | Geometric RS + seq\_max\_k2 guard |
+| `decoupled_geo_rs()` | Geo-RS | Decoupled PPO | Geometric RS |
 | `decoupled_geo_rs_token_tis()` | Geo-RS-Token-TIS | Decoupled PPO | Geometric filter + token IS |
 | **K3 KL Estimator** (more stable for small KL values) |
 | `decoupled_k3_rs()` | K3-RS | Decoupled PPO | K3 rejection, no IS weights |
@@ -950,5 +959,3 @@ These estimators define **how IS weights and rejection masks are computed**. The
 - **Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O. (2017).** "Proximal policy optimization algorithms." *arXiv preprint arXiv:1707.06347.* https://arxiv.org/abs/1707.06347
 - **Hilton, J., Cobbe, K., & Schulman, J. (2021).** "Batch size-invariance for policy optimization." *arXiv preprint arXiv:2110.00641.* https://arxiv.org/abs/2110.00641
   - Introduced decoupled PPO: separating proximal policy (for controlling policy update size) from behavior policy (for off-policy correction) to achieve batch size invariance
-- **Liu, J., Li, Y., et al. (2025).** "When Speed Kills Stability: Demystifying RL Collapse from the Training-Inference Mismatch"
-  - Blog post: https://richardli.xyz/rl-collapse (see Blog Series above for parts 1-3)
