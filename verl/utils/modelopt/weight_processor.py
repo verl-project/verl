@@ -15,13 +15,10 @@
 
 
 import re
-from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
 import torch
-import torch.nn as nn
 
-import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import (
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
@@ -32,77 +29,7 @@ from modelopt.torch.export.quant_utils import (
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 from verl.utils.megatron_utils import unwrap_model
-
-# ---------------------------------------------------------------------------
-# NVFP4 quantization config
-# ---------------------------------------------------------------------------
-
-NVFP4_WEIGHT_ONLY_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {"enable": False},
-        "nn.BatchNorm1d": {"*": {"enable": False}},
-        "nn.BatchNorm2d": {"*": {"enable": False}},
-        "nn.BatchNorm3d": {"*": {"enable": False}},
-        "nn.LeakyReLU": {"*": {"enable": False}},
-        "*lm_head*": {"enable": False},
-        "*proj_out.*": {"enable": False},  # Whisper: lm_head has key name proj_out
-        "*block_sparse_moe.gate*": {"enable": False},  # Skip MOE router
-        "*router*": {"enable": False},  # Skip MOE router
-        "*mlp.gate.*": {"enable": False},  # Skip MOE router
-        "*mlp.shared_expert_gate.*": {"enable": False},  # Skip MOE router
-        "*linear_attn.conv1d*": {"enable": False},
-        "*mixer.conv1d*": {"enable": False},
-        "*output_layer*": {"enable": False},
-        "output.*": {"enable": False},
-        "default": {"enable": False},
-    },
-    "algorithm": "max",
-}
-
-# ---------------------------------------------------------------------------
-# QAT application
-# ---------------------------------------------------------------------------
-
-
-def apply_qat(model: nn.Module, quant_method: str):
-    """Apply Quantization-Aware Training to the model.
-
-    Args:
-        model: The Megatron model to apply QAT to.
-        quant_method: Quantization method (currently only ``"nvfp4"`` is supported).
-
-    Returns:
-        The quantized model.
-    """
-    if quant_method != "nvfp4":
-        raise ValueError(f"Only 'nvfp4' is supported, got: {quant_method}")
-
-    mtq.quantize(model, NVFP4_WEIGHT_ONLY_CFG)
-    return model
-
-
-@dataclass
-class QuantizationMetadata:
-    """Metadata for a quantized module."""
-
-    qformat: str
-    weight_quantizer: Any
-    input_quantizer: Any
-    module: torch.nn.Module
-    vpp_idx: int
-    block_size: int = 16  # Default NVFP4 block size
-    # Fields for EP synchronization - store amax values for non-local experts
-    weight_amax: Optional[torch.Tensor] = None
-    input_amax: Optional[torch.Tensor] = None
-    is_local: bool = True  # Whether this expert is local to current EP rank
-    global_expert_idx: Optional[int] = None  # Global expert index for MoE experts
-    local_expert_idx: Optional[int] = None  # Local expert index on this EP rank
+from verl.utils.modelopt.qat import QuantizationMetadata
 
 
 class QATWeightPostProcessor:
@@ -131,7 +58,7 @@ class QATWeightPostProcessor:
     def __init__(
         self,
         actor_module: list,
-        quantization_method: str = "nvfp4",
+        qat_mode: str = "w4a16",
         dtype: torch.dtype = torch.bfloat16,
         use_calibrated_scale_2: bool = False,
     ):
@@ -140,14 +67,14 @@ class QATWeightPostProcessor:
 
         Args:
             actor_module: List of QAT trained model chunks (vpp chunks)
-            quantization_method: Quantization method (nvfp4, fp8, etc.)
+            qat_mode: QAT mode, e.g. "w4a16" or "w4a4".
             dtype: Original data type (bf16)
             use_calibrated_scale_2: If True, use QAT calibrated amax for weight_scale_2.
                 If False, recompute weight_scale_2 from merged weights. Recommended to set
                 False when using TP to ensure consistent global scale.
         """
         self.actor_module = actor_module
-        self.quantization_method = quantization_method
+        self.qat_mode = qat_mode
         self.dtype = dtype
         self.use_calibrated_scale_2 = use_calibrated_scale_2
         self.quant_metadata: dict[str, QuantizationMetadata] = {}
@@ -399,7 +326,7 @@ class QATWeightPostProcessor:
         global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
         print(
-            f"[QAT PostProcessor][Rank {global_rank}] Initialized with quantization method: {self.quantization_method}"
+            f"[QAT PostProcessor][Rank {global_rank}] Initialized with qat_mode: {self.qat_mode}"
         )
         print(f"[QAT PostProcessor][Rank {global_rank}] Found {len(self.quant_metadata)} quantized parameters")
         if self.ep_size > 1:
@@ -997,17 +924,6 @@ class QATWeightPostProcessor:
             if pattern in self.quant_metadata:
                 return self.quant_metadata[pattern]
 
-        # # If no exact match, try to find any metadata from the same layer
-        # # This handles cases where the exact name might be slightly different
-        # for mcore_name, metadata in self.quant_metadata.items():
-        #     if f"layers.{layer_num}." in mcore_name:
-        #         # Found a quantized module in the same layer
-        #         # Skip router metadata - router should not be used for other layers
-        #         if ".router." in mcore_name:
-        #             continue
-        #         # For QAT, if any module in the layer is quantized, all Linear layers should be
-        #         if ".weight" in mcore_name:
-        #             return metadata
 
         return None
 

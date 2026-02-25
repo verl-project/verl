@@ -79,12 +79,6 @@ override_transformer_config:
   # Attention backend to use (flash,fused,unfused,local,auto). Defaults to auto in mcore, flash in verl
   attention_backend: flash
 
-# # Quantization method. None for no quantization, "nvfp4" for NVFP4 quantization
-quantization: null
-
-# Whether to enable Quantization-Aware Training (QAT). Default False.
-enable_qat: False
-
 override_mcore_model_config: {}
 
 # oc.select: default val for ref.megatron.use_mbridge

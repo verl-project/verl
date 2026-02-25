@@ -73,7 +73,7 @@ from verl.utils.profiler import (
     simple_timer,
 )
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
-from verl.utils.modelopt_qat_utils import apply_qat
+from verl.utils.modelopt import apply_qat
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.torch_functional import use_original_torch_compile
 from verl.workers.actor.megatron_actor import MegatronPPOActor
@@ -221,13 +221,11 @@ class MegatronWorker(Worker):
                 provider.moe_token_dispatcher_type = "alltoall"
                 provider.moe_router_load_balancing_type = "none"
 
-                enable_qat = self.config.actor.megatron.get("enable_qat", False)
-                if enable_qat:
+                qat_enabled = self.config.actor.get("qat", {}).get("enable", False)
+                if qat_enabled:
                     from megatron.bridge.models.gpt_provider import quantization_layer_spec
                     provider.transformer_layer_spec = quantization_layer_spec
 
-                    # Patch megatron-core MLP to support singleton_local_shards
-                    # in SwiGLU sharded state dict (required for QAT checkpointing)
                     from verl.models.mcore.qat_patch import apply_qat_patch
                     apply_qat_patch()
 
@@ -459,11 +457,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self.rank == 0:
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
-            quantization = self.config.actor.megatron.get("quantization", None)
-            enable_qat = self.config.actor.megatron.get("enable_qat", False)
-            if quantization is not None and enable_qat:
+            qat_config = self.config.actor.get("qat", {})
+            if qat_config.get("enable", False):
+                qat_mode = qat_config.get("mode", "w4a16")
                 for i in range(len(actor_module)):
-                    actor_module[i] = apply_qat(actor_module[i], quantization)
+                    actor_module[i] = apply_qat(actor_module[i], qat_mode)
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model
@@ -736,11 +734,13 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.tf_config,
                 self.layer_name_mapping,
             )
-        if self.config.actor.megatron.get("enable_qat", False):
-            from verl.utils.modelopt_qat_utils import QATWeightPostProcessor
+        qat_config = self.config.actor.get("qat", {})
+        if qat_config.get("enable", False):
+            from verl.utils.modelopt import QATWeightPostProcessor
 
+            qat_mode = qat_config.get("mode", "w4a16")
             qat_weight_post_processor = QATWeightPostProcessor(
-                self.actor.actor_module, "nvfp4"
+                self.actor.actor_module, qat_mode
             )
             per_tensor_param = qat_weight_post_processor.process_weights_iterator(per_tensor_param)
 

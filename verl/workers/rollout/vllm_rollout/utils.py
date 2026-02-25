@@ -30,7 +30,7 @@ from verl.utils.device import get_torch_device, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
-from verl.utils.modelopt_vllm_utils import apply_vllm_modelopt_patches
+from verl.utils.modelopt import apply_vllm_modelopt_patches
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -167,11 +167,16 @@ class vLLMColocateWorkerExtension:
         vllm_config = kwargs.get("vllm_config")
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
         _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
+        _is_modelopt_qat = type(quant_config).__name__ == "ModelOptNvFp4Config"
+        print(f"type(quant_config).__name__: {type(quant_config).__name__} _is_modelopt_qat: {_is_modelopt_qat}")
         if _is_qat_model:
             from verl.utils.qat import apply_qat_patches
 
             apply_qat_patches()
-            logger.info("Applied QAT patches in vLLM worker subprocess")
+            logger.info("Applied QAT (compressed-tensors) patches in vLLM worker subprocess")
+        elif _is_modelopt_qat:
+            apply_vllm_modelopt_patches()
+            logger.info("Applied QAT (modelopt) patches in vLLM worker subprocess")
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -183,6 +188,7 @@ class vLLMColocateWorkerExtension:
 
         instance = super().__new__(cls)
         instance._is_qat_model = _is_qat_model
+        instance._is_modelopt_qat = _is_modelopt_qat
         return instance
 
     def monkey_patch_model(self, vocab_size: int):
@@ -259,11 +265,18 @@ class vLLMColocateWorkerExtension:
                 break
 
         if self._is_qat_model:
-            # QAT: call process_weights_after_loading AFTER all buckets are received
+            # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
             from verl.utils.qat import manual_process_weights_after_loading
 
             manual_process_weights_after_loading(self.model_runner.model)
             logger.info("QAT: process_weights_after_loading completed")
+        elif self._is_modelopt_qat:
+            from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+            model = self.model_runner.model
+            model_config = self.model_runner.vllm_config.model_config
+            process_weights_after_loading(model, model_config, self.device)
+            logger.info("ModelOpt QAT: process_weights_after_loading completed")
         elif use_standard_weight_load:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -307,11 +320,14 @@ class vLLMColocateWorkerExtension:
                 logger.info("Loading standard weights (non-FP8, async)")
                 self.model_runner.model.load_weights(weights)
 
-                from vllm.model_executor.model_loader.utils import process_weights_after_loading
-                model_config = self.model_runner.vllm_config.model_config
-                device = next(self.model_runner.model.parameters()).device
-                process_weights_after_loading(self.model_runner.model, model_config, device)
-                # from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4LinearMethod
+                if not getattr(self, '_is_modelopt_qat', False):
+                    # Skip per-bucket process_weights_after_loading for modelopt QAT
+                    # because the patched version is not idempotent (swizzle, etc.).
+                    # It will be called once after all buckets in update_weights_from_ipc.
+                    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+                    model_config = self.model_runner.vllm_config.model_config
+                    device = next(self.model_runner.model.parameters()).device
+                    process_weights_after_loading(self.model_runner.model, model_config, device)
     
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""

@@ -179,6 +179,7 @@ class ActorConfig(BaseConfig):
     # batch_num_tokens: number of valid tokens in global batch
     # global_batch_size: global batch size
     global_batch_info: dict = field(default_factory=dict)
+    qat: QATConfig = field(default_factory=QATConfig)
 
     def __post_init__(self):
         """Validate actor configuration parameters."""
@@ -296,7 +297,6 @@ class FSDPActorConfig(ActorConfig):
     use_rollout_log_probs: bool = False
     calculate_sum_pi_squared: bool = False
     sum_pi_squared_checkpointing: bool = False
-    qat: QATConfig = field(default_factory=QATConfig)
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
