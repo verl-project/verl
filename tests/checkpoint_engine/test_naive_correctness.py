@@ -43,7 +43,7 @@ def init_config() -> DictConfig:
     config.trainer.nnodes = 1
     config.actor_rollout_ref.actor.use_dynamic_bsz = True
     config.actor_rollout_ref.model.path = os.path.expanduser("~/models/Qwen/Qwen3-VL-2B-Instruct")
-    config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
+    config.actor_rollout_ref.rollout.name = os.environ.get("ROLLOUT_NAME", "vllm")
     config.actor_rollout_ref.rollout.skip_tokenizer_init = False
     config.actor_rollout_ref.rollout.max_num_seqs = 256
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.8
