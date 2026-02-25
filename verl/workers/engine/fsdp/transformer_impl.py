@@ -31,10 +31,7 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
-from verl.models.transformers.monkey_patch import (
-    apply_monkey_patch, 
-    apply_monkey_patch_before_from_pretrained
-)
+from verl.models.transformers.monkey_patch import apply_monkey_patch, apply_monkey_patch_before_from_pretrained
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
