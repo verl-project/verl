@@ -16,10 +16,12 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Generator, TypedDict
+from dataclasses import dataclass
+from typing import Any, Callable, Generator
 
 import ray
 import torch
+import zmq
 
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
@@ -33,11 +35,86 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
-class TensorMeta(TypedDict):
+@dataclass
+class TensorMeta:
+    """Metadata for a tensor in the checkpoint bucket."""
+
     name: str
     shape: torch.Size
     dtype: torch.dtype
     offset: int
+    chunk_idx: int | None = None
+    total_chunks: int | None = None
+
+
+@dataclass
+class MasterMetadata:
+    """Metadata for master process communication.
+
+    Args:
+        zmq_ip: IP address for ZMQ communication.
+        zmq_port: Port for ZMQ communication.
+        dist_ip: IP address for distributed communication (HCCL only).
+        dist_port: Port for distributed communication (HCCL only).
+    """
+
+    zmq_ip: str
+    zmq_port: int
+    dist_ip: str | None = None
+    dist_port: int | None = None
+
+
+class BroadcastOperation:
+    """Async broadcast operation in separate thread.
+
+    Args:
+        rank: The rank of the current process.
+        bucket: The tensor to broadcast.
+        metadata: The metadata of the tensor.
+        socket: The zeromq socket to communicate with master.
+        topic: The topic to subscribe.
+        broadcast_fn: The function to broadcast tensor.
+    """
+
+    def __init__(
+        self,
+        rank: int,
+        bucket: torch.Tensor,
+        metadata: dict[str, TensorMeta] | None,
+        socket: zmq.Socket,
+        topic: str,
+        broadcast_fn: Callable[[torch.Tensor, int], None],
+    ) -> None:
+        self.rank = rank
+        self.bucket = bucket
+        self.metadata = metadata
+        self.socket = socket
+        self.topic = topic
+        self._broadcast_fn = broadcast_fn
+
+        loop = asyncio.get_running_loop()
+        self._task = loop.run_in_executor(None, self._run)
+
+    def _run(self):
+        # broadcast tensor meta via zeromq PUB/SUB
+        if self.rank == 0:
+            self.socket.send_string(self.topic, flags=zmq.SNDMORE)
+            self.socket.send_pyobj(self.metadata)
+        else:
+            self.socket.recv_string()
+            self.metadata = self.socket.recv_pyobj()
+
+        # broadcast tensor via backend-specific function
+        self._broadcast_fn(self.bucket, src_rank=0)
+
+    async def wait_for_complete(self) -> dict[str, TensorMeta]:
+        """Wait for the broadcast operation to complete.
+
+        Returns:
+            dict[str, TensorMeta]: The bucket meta after broadcast.
+        """
+        await self._task
+        return self.metadata
 
 
 class CheckpointEngineRegistry:
@@ -307,65 +384,140 @@ class CheckpointEngine(ABC):
 class CollectiveCheckpointEngine(CheckpointEngine):
     """Base class for collective communication checkpoint engines (NCCL, HCCL).
 
-    This class provides common send_weights and receive_weights logic for collective
-    communication backends like NCCL and HCCL.
+    This class provides common logic for collective communication backends like NCCL and HCCL.
+    It implements send_weights and receive_weights with bucket-based double-buffering and
+    chunked weight handling for large tensors.
 
     Subclasses must implement:
-        - rank: Rank of the current process
-        - send_buf: Send buffer
-        - recv_buf: Receive buffer
-        - _synchronize(): Synchronize device operations
-        - _create_broadcast_send_op(bucket, metadata): Create broadcast operation for sending
-        - _create_broadcast_recv_op(bucket): Create broadcast operation for receiving
-        - _copy_to_buffer(buffer, tensor, offset): Copy tensor to buffer
+        - _broadcast(bucket, src_rank): Broadcast tensor using backend-specific collective operation
+        - _synchronize(): Synchronize device operations (e.g., torch.cuda.synchronize)
+        - _copy_to_buffer(buffer, tensor, offset): Copy tensor to buffer at given offset
+        - prepare(): Allocate send/receive buffers and return MasterMetadata if master
+        - finalize(): Free buffers and optionally destroy process group
+        - init_process_group(rank, world_size, master_metadata): Initialize the process group
+
+    Args:
+        bucket_size: Bucket size in bytes to transfer multiple weights at one time.
+        group_name: The name of the process group.
+        rebuild_group: Whether to rebuild the process group in each update.
+        is_master: Whether the current process is the master process.
+        rollout_dtype: The dtype of the weights received from rollout workers.
     """
 
+    def __init__(
+        self,
+        bucket_size: int,
+        group_name: str = "default",
+        rebuild_group: bool = False,
+        is_master: bool = False,
+        rollout_dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        self._bucket_size = bucket_size
+        self._rank: int | None = None
+        self._send_buf = None
+        self._recv_buf = None
+        self._world_size: int | None = None
+        self.group_name = group_name
+        self.rebuild_group = rebuild_group
+        self.rollout_dtype = rollout_dtype
+        self.is_master = is_master
+        self.topic = "bucket_metadata"
+
+        if self.is_master:
+            self._start_zmq_server()
+
     @property
-    @abstractmethod
+    def bucket_size(self) -> int:
+        """Return the bucket size in bytes."""
+        return self._bucket_size
+
+    @property
     def rank(self) -> int:
         """Return the rank of the current process."""
-        raise NotImplementedError
+        return self._rank
 
     @property
-    @abstractmethod
     def send_buf(self):
         """Return the send buffer."""
-        raise NotImplementedError
+        return self._send_buf
 
     @property
-    @abstractmethod
     def recv_buf(self):
         """Return the receive buffer."""
+        return self._recv_buf
+
+    def _start_zmq_server(self):
+        """Start zeromq server for broadcasting bucket tensor metadata."""
+        from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+
+        self._ip = ray.util.get_node_ip_address().strip("[]")
+        self._zmq_port, self._listen_sock = get_free_port(self._ip)
+
+        context = zmq.Context()
+        self._socket = context.socket(zmq.PUB)
+        if is_valid_ipv6_address(self._ip):
+            address = f"tcp://[{self._ip}]:{self._zmq_port}"
+            self._socket.setsockopt(zmq.IPV6, 1)
+        else:
+            address = f"tcp://{self._ip}:{self._zmq_port}"
+        self._socket.bind(address)
+
+    def _connect_zmq_client(self, metadata: MasterMetadata):
+        """Connect to zeromq server for receiving bucket tensor metadata."""
+        from verl.utils.net_utils import is_valid_ipv6_address
+
+        assert not self.is_master, "Master process should not connect to other processes."
+        context = zmq.Context()
+        self._socket = context.socket(zmq.SUB)
+        if is_valid_ipv6_address(metadata.zmq_ip):
+            address = f"tcp://[{metadata.zmq_ip}]:{metadata.zmq_port}"
+            self._socket.setsockopt(zmq.IPV6, 1)
+        else:
+            address = f"tcp://{metadata.zmq_ip}:{metadata.zmq_port}"
+        self._socket.connect(address)
+        self._socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
+
+    @classmethod
+    def build_topology(
+        cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]
+    ) -> tuple[dict[str, list[Any]], dict[str, list[Any]]]:
+        """Build communication topology between all workers.
+
+        Args:
+            trainer_world_size: The world size of the trainer worker group.
+            rollout_world_size: The world size of the rollout replica.
+            metadata: A list of metadata `prepare` from all workers.
+
+        Returns:
+            A tuple of two dictionaries for trainer and rollout worker group.
+        """
+        trainer_kwargs = {
+            "rank": [0] + [-1] * (trainer_world_size - 1),
+            "world_size": [rollout_world_size + 1] * trainer_world_size,
+            "master_metadata": [metadata[0]] * trainer_world_size,
+        }
+        rollout_kwargs = {
+            "rank": list(range(1, rollout_world_size + 1)),
+            "world_size": [rollout_world_size + 1] * rollout_world_size,
+            "master_metadata": [metadata[0]] * rollout_world_size,
+        }
+        return trainer_kwargs, rollout_kwargs
+
+    # ========== Abstract methods to be implemented by subclasses ==========
+
+    @abstractmethod
+    def _broadcast(self, bucket, src_rank: int):
+        """Broadcast tensor using backend-specific collective operation.
+
+        Args:
+            bucket: The tensor to broadcast.
+            src_rank: The source rank to broadcast from.
+        """
         raise NotImplementedError
 
     @abstractmethod
     def _synchronize(self):
         """Synchronize device operations."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def _create_broadcast_send_op(self, bucket, metadata) -> Any:
-        """Create broadcast operation for sending weights.
-
-        Args:
-            bucket: The bucket tensor to broadcast.
-            metadata: The metadata to send with the bucket.
-
-        Returns:
-            A broadcast operation object with wait_for_complete method.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def _create_broadcast_recv_op(self, bucket) -> Any:
-        """Create broadcast operation for receiving weights.
-
-        Args:
-            bucket: The bucket tensor to receive data into.
-
-        Returns:
-            A broadcast operation object with wait_for_complete method that returns metadata.
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -378,6 +530,49 @@ class CollectiveCheckpointEngine(CheckpointEngine):
             offset: The offset in the buffer.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    def prepare(self) -> MasterMetadata | None:
+        """Prepare checkpoint engine before each step send_weights/receive_weights."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def finalize(self):
+        """Finalize checkpoint engine after each step send_weights/receive_weights."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata):
+        """Initialize the process group.
+
+        Args:
+            rank: The rank of the current process.
+            world_size: The total number of processes.
+            master_metadata: The metadata from the master process.
+        """
+        raise NotImplementedError
+
+    def _create_broadcast_send_op(self, bucket, metadata) -> BroadcastOperation:
+        """Create broadcast operation for sending weights."""
+        return BroadcastOperation(
+            rank=self._rank,
+            bucket=bucket,
+            metadata=metadata,
+            socket=self._socket,
+            topic=self.topic,
+            broadcast_fn=self._broadcast,
+        )
+
+    def _create_broadcast_recv_op(self, bucket) -> BroadcastOperation:
+        """Create broadcast operation for receiving weights."""
+        return BroadcastOperation(
+            rank=self._rank,
+            bucket=bucket,
+            metadata=None,
+            socket=self._socket,
+            topic=self.topic,
+            broadcast_fn=self._broadcast,
+        )
 
     @torch.no_grad()
     async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):

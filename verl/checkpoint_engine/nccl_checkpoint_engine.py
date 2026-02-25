@@ -11,88 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import logging
 import os
-from dataclasses import dataclass
 from unittest.mock import patch
 
 with patch("importlib.metadata.distributions", return_value=[]):
     import cupy as cp
 
-import ray
 import ray.util.collective as collective
 import torch
-import zmq
 
 from verl.checkpoint_engine.base import (
     CheckpointEngineRegistry,
     CollectiveCheckpointEngine,
-    TensorMeta,
+    MasterMetadata,
 )
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
-@dataclass
-class MasterMetadata:
-    zmq_ip: str
-    zmq_port: int
-
-
-class BroadcastOperation:
-    """Async broadcast operation with NCCL in separate thread.
-
-    Args:
-        rank (int): The rank of the current process.
-        group_name (str): The name of the NCCL process group.
-        bucket (cp.ndarray | torch.Tensor): The tensor to broadcast.
-        metadata (dict[str, TensorMeta]): The metadata of the tensor.
-        socket (zmq.Socket): The zeromq socket to communicate with master.
-        topic (str): The topic to subscribe.
-    """
-
-    def __init__(
-        self,
-        rank: int,
-        group_name: str,
-        bucket: cp.ndarray | torch.Tensor,
-        metadata: dict[str, TensorMeta],
-        socket: zmq.Socket,
-        topic: str,
-    ) -> None:
-        self.rank = rank
-        self.group_name = group_name
-        self.bucket = bucket
-        self.metadata = metadata
-        self.socket = socket
-        self.topic = topic
-
-        loop = asyncio.get_running_loop()
-        self._task = loop.run_in_executor(None, self._run)
-
-    def _run(self):
-        # broadcast tensor meta via zeromq PUB/SUB
-        if self.rank == 0:
-            self.socket.send_string(self.topic, flags=zmq.SNDMORE)
-            self.socket.send_pyobj(self.metadata)
-        else:
-            self.socket.recv_string()
-            self.metadata = self.socket.recv_pyobj()
-
-        # broadcast tensor via NCCL
-        collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
-
-    async def wait_for_complete(self) -> dict[str, TensorMeta]:
-        """Wait for the broadcast operation to complete.
-
-        Returns:
-            dict[str, TensorMeta]: The bucket meta after broadcast.
-        """
-        await self._task
-        return self.metadata
 
 
 @CheckpointEngineRegistry.register("nccl")
@@ -116,176 +52,78 @@ class NCCLCheckpointEngine(CollectiveCheckpointEngine):
         is_master: bool = False,
         rollout_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
-        self.bucket_size = bucket_size
-        self.group_name = group_name
-        self.rebuild_group = rebuild_group
-        self.rollout_dtype = rollout_dtype
+        super().__init__(
+            bucket_size=bucket_size,
+            group_name=group_name,
+            rebuild_group=rebuild_group,
+            is_master=is_master,
+            rollout_dtype=rollout_dtype,
+        )
 
-        # start zeromq server for broadcasting bucket tensor metadata
-        self.is_master = is_master
-        self.topic = "bucket_metadata"
-        if self.is_master:
-            self._start_zmq_server()
-
-    @property
-    def bucket_size(self) -> int:
-        """Return the bucket size in bytes."""
-        return self._bucket_size
-
-    @bucket_size.setter
-    def bucket_size(self, value: int):
-        """Set the bucket size in bytes."""
-        self._bucket_size = value
-
-    @property
-    def rank(self) -> int:
-        """Return the rank of the current process."""
-        return self._rank
-
-    @rank.setter
-    def rank(self, value: int):
-        """Set the rank of the current process."""
-        self._rank = value
-
-    @property
-    def send_buf(self):
-        """Return the send buffer."""
-        return self._send_buf
-
-    @send_buf.setter
-    def send_buf(self, value):
-        """Set the send buffer."""
-        self._send_buf = value
-
-    @property
-    def recv_buf(self):
-        """Return the receive buffer."""
-        return self._recv_buf
-
-    @recv_buf.setter
-    def recv_buf(self, value):
-        """Set the receive buffer."""
-        self._recv_buf = value
-
-    def prepare(self) -> MasterMetadata:
+    def prepare(self) -> MasterMetadata | None:
+        """Prepare checkpoint engine before each step send_weights/receive_weights."""
         # For master process, use cupy instead of torch to avoid memory register error
         # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
         if self.is_master:
-            self.send_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
-            self.recv_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
+            self._send_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
+            self._recv_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
         else:
-            self.send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
-            self.recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
+            self._send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
+            self._recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
 
-        return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
+        if self.is_master:
+            return MasterMetadata(zmq_ip=self._ip, zmq_port=self._zmq_port)
+        return None
 
     def finalize(self):
-        """Destroy the NCCL process group if rebuild_group is True."""
+        """Finalize checkpoint engine after each step send_weights/receive_weights."""
         if self.rebuild_group:
-            if self.rank >= 0:
+            if self._rank is not None and self._rank >= 0:
                 collective.destroy_collective_group(self.group_name)
-            self.rank = None
-            self.world_size = None
+            self._rank = None
+            self._world_size = None
 
-        self.send_buf = None
-        self.recv_buf = None
-
-    @classmethod
-    def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
-        trainer_kwargs = {
-            "rank": [0] + [-1] * (trainer_world_size - 1),
-            "world_size": [rollout_world_size + 1] * trainer_world_size,
-            "master_metadata": [metadata[0]] * trainer_world_size,
-        }
-        rollout_kwargs = {
-            "rank": list(range(1, rollout_world_size + 1)),
-            "world_size": [rollout_world_size + 1] * rollout_world_size,
-            "master_metadata": [metadata[0]] * rollout_world_size,
-        }
-        return trainer_kwargs, rollout_kwargs
-
-    def _start_zmq_server(self):
-        self.ip = ray.util.get_node_ip_address().strip("[]")
-        self.listen_port, _ = get_free_port(self.ip)
-
-        context = zmq.Context()
-        self.socket = context.socket(zmq.PUB)
-        if is_valid_ipv6_address(self.ip):
-            address = f"tcp://[{self.ip}]:{self.listen_port}"
-            self.socket.setsockopt(zmq.IPV6, 1)
-        else:
-            address = f"tcp://{self.ip}:{self.listen_port}"
-
-        self.socket.bind(address)
-
-    def _connect_zmq_client(self, metadata: MasterMetadata):
-        assert not self.is_master, "Master process should not connect to other processes."
-        context = zmq.Context()
-        self.socket = context.socket(zmq.SUB)
-        if is_valid_ipv6_address(metadata.zmq_ip):
-            address = f"tcp://[{metadata.zmq_ip}]:{metadata.zmq_port}"
-            self.socket.setsockopt(zmq.IPV6, 1)
-        else:
-            address = f"tcp://{metadata.zmq_ip}:{metadata.zmq_port}"
-
-        self.socket.connect(address)
-        self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
+        self._send_buf = None
+        self._recv_buf = None
 
     def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata):
         """Initialize the NCCL process group.
 
         Args:
-            rank (int): The rank of the current process.
-            world_size (int): The total number of processes.
+            rank: The rank of the current process.
+            world_size: The total number of processes.
+            master_metadata: The metadata from the master process.
         """
         # For trainer workers other than rank 0, their rank should be -1.
         if rank < 0:
-            self.rank = rank
-            self.world_size = world_size
+            self._rank = rank
+            self._world_size = world_size
             return
 
         if self.rebuild_group or not collective.is_group_initialized(self.group_name):
             collective.init_collective_group(world_size, rank, "nccl", self.group_name)
-            self.rank = rank
-            self.world_size = world_size
+            self._rank = rank
+            self._world_size = world_size
         else:
-            assert self.rank == rank, f"rank {rank} is not equal to self.rank {self.rank}"
-            assert self.world_size == world_size, (
-                f"world_size {world_size} is not equal to self.world_size {self.world_size}"
+            assert self._rank == rank, f"rank {rank} is not equal to self.rank {self._rank}"
+            assert self._world_size == world_size, (
+                f"world_size {world_size} is not equal to self.world_size {self._world_size}"
             )
 
-        if self.rank > 0:
+        if self._rank > 0:
             self._connect_zmq_client(master_metadata)
         collective.barrier(self.group_name)
 
-        logger.info(f"init_process_group rank: {self.rank}, world_size: {self.world_size}")
+        logger.info(f"init_process_group rank: {self._rank}, world_size: {self._world_size}")
+
+    def _broadcast(self, bucket, src_rank: int):
+        """Broadcast tensor using NCCL."""
+        collective.broadcast(bucket, src_rank=src_rank, group_name=self.group_name)
 
     def _synchronize(self):
         """Synchronize CUDA operations."""
         torch.cuda.synchronize()
 
-    def _create_broadcast_send_op(self, bucket, metadata):
-        """Create broadcast operation for sending weights."""
-        return BroadcastOperation(
-            rank=self.rank,
-            group_name=self.group_name,
-            bucket=bucket,
-            metadata=metadata,
-            socket=self.socket,
-            topic=self.topic,
-        )
-
-    def _create_broadcast_recv_op(self, bucket):
-        """Create broadcast operation for receiving weights."""
-        return BroadcastOperation(
-            rank=self.rank,
-            group_name=self.group_name,
-            bucket=bucket,
-            metadata=None,
-            socket=self.socket,
-            topic=self.topic,
-        )
-
     def _copy_to_buffer(self, buffer, tensor, offset):
-        """Copy tensor to buffer."""
+        """Copy tensor to buffer using cupy."""
         buffer[offset : offset + tensor.nbytes] = cp.asarray(tensor.view(-1).view(torch.uint8))
