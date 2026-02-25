@@ -1,0 +1,21 @@
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 5
+enable_async_loading: true
+
+# P2P configurations
+enable_p2p: true
+p2p_host: "localhost"
+p2p_init_ports: [9960, 9961, 9962, 9963, 9964, 9965, 9966, 9967]
+p2p_lookup_ports: [9968, 9969, 9970, 9971, 9972, 9973, 9974, 9975]
+transfer_channel: "hccl"
+
+# Controller configurations
+enable_controller: True
+lmcache_instance_id: "lmcache_instance_1"
+controller_pull_url: "localhost:8300"
+controller_reply_url: "localhost:8400"
+lmcache_worker_ports: [9950, 9951, 9952, 9953, 9954, 9955, 9956, 9957]
+
+extra_config:
+  lookup_backoff_time: 0.001

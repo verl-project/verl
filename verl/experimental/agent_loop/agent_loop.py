@@ -75,11 +75,24 @@ class AsyncLLMServerManager:
         # Least requests load balancing
         self.weighted_serveres = [[0, idx, server] for idx, server in enumerate(self.server_handles)]
         heapq.heapify(self.weighted_serveres)
+        # Mirror of current_requests so we can update after generate
+        self._inflight = {server: 0 for server in self.server_handles}
 
         # LRU cache to map request_id to server
         self.request_id_to_server = LRUCache(maxsize=max_cache_size)
 
     def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
+        if self.config.actor_rollout_ref.rollout.kv_transfer_config:
+            # Pop least‑loaded server
+            cur_reqs, idx, server = heapq.heappop(self.weighted_serveres)
+            # Update counts before generate
+            cur_reqs += 1
+            self._inflight[server] = cur_reqs
+            # Push back with updated load
+            heapq.heappush(self.weighted_serveres, [cur_reqs, idx, server])
+            self.request_id_to_server[request_id] = server
+            return server
+
         # TODO: implement server pressure awareness load balancing
         if request_id in self.request_id_to_server:
             return self.request_id_to_server[request_id]
@@ -89,6 +102,20 @@ class AsyncLLMServerManager:
         heapq.heapreplace(self.weighted_serveres, self.weighted_serveres[0])
         self.request_id_to_server[request_id] = server
         return server
+
+    def _release_server(self, request_id: str):
+        server = self.request_id_to_server[request_id]
+        # Decrement request count and fix heap entry
+        new_reqs = max(0, self._inflight[server] - 1)
+        self._inflight[server] = new_reqs
+
+        # Find and update the heap entry for this idx
+        for i, (cnt, j, srv) in enumerate(self.weighted_serveres):
+            if srv == server:
+                self.weighted_serveres[i][0] = new_reqs
+                break
+        # Re‑heapify after mutating an internal element
+        heapq.heapify(self.weighted_serveres)
 
     @rollout_trace_op
     async def generate(
@@ -118,6 +145,7 @@ class AsyncLLMServerManager:
             image_data=image_data,
             video_data=video_data,
         )
+        self._release_server(request_id)
         return output
 
 

@@ -389,3 +389,6 @@ mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 
 # QAT configuration (inherited from actor.qat)
 qat: ${oc.select:actor_rollout_ref.actor.qat,null}
+
+# Configuration for distributed KV cache transfer
+kv_transfer_config: null
