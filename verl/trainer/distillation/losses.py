@@ -22,14 +22,14 @@ from verl.base_config import BaseConfig
 from verl.trainer.distillation.types import DistillationLossInputs
 from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.metric import AggregationType, Metric
-from verl.workers.config import DistillationConfig, DistillationLossConfig
+from verl.workers.config import DistillationConfig, DistillationLossConfig, ActorConfig
 
 DistillationLossFn = Callable[
     [
         DistillationLossInputs,  # inputs
         torch.Tensor,  # response_mask
-        DistillationConfig,  # config
-        str,  # loss_agg_mode
+        ActorConfig,  # actor_config
+        DistillationConfig,  # distillation_config
     ],
     tuple[torch.Tensor, dict[str, Any]],
 ]
@@ -110,10 +110,11 @@ def compute_distillation_loss_range(
     }
 
 
-def compute_distillation_loss(
+def distillation_loss(
     inputs: DistillationLossInputs,
     response_mask: torch.Tensor,
-    config: DistillationConfig,
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
     loss_agg_mode: str = "token-mean",
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
@@ -124,7 +125,9 @@ def compute_distillation_loss(
             Inputs containing probabilities from teacher and student policies.
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
-        config (DistillationConfig):
+        config (ActorConfig):
+            Actor configuration.
+        distillation_config (DistillationConfig):
             Distillation configuration.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`.
@@ -134,14 +137,14 @@ def compute_distillation_loss(
             - distillation_loss: Aggregated distillation loss scalar.
             - distillation_metrics: Dictionary of metrics.
     """
-    assert config is not None
-    loss_config: DistillationLossConfig = config.distillation_loss
+    assert distillation_config is not None
+    loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_loss_fn = get_distillation_loss_fn(loss_config.loss_mode)
     distillation_losses, distillation_metrics = distillation_loss_fn(
         inputs=inputs,
         response_mask=response_mask,
         config=config,
-        loss_agg_mode=loss_agg_mode,
+        distillation_config=distillation_config,
     )
 
     distillation_metrics.update(
@@ -161,8 +164,8 @@ def compute_distillation_loss(
 def compute_forward_kl_topk(
     inputs: DistillationLossInputs,
     response_mask: torch.Tensor,
-    config: DistillationConfig,
-    loss_agg_mode: str = "token-mean",
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute forward KL distillation loss and related metrics using top-k log probabilities.
@@ -173,10 +176,10 @@ def compute_forward_kl_topk(
             top-k log probabilities for teacher policy and logits for the student policy.
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
-        config (DistillationConfig):
+        config (ActorConfig):
+            Actor configuration.
+        distillation_config (DistillationConfig):
             Distillation configuration.
-        loss_agg_mode (str, optional):
-            Aggregation mode for `agg_loss`.
 
     Returns:
         tuple[torch.Tensor, dict[str, Any]]: A tuple containing:
@@ -184,26 +187,26 @@ def compute_forward_kl_topk(
             - distillation_metrics: Dictionary of metrics.
     """
     teacher_topk_log_probs = inputs.teacher_topk_log_probs
-    teacher_topk_indices = inputs.teacher_topk_indices
+    teacher_topk_ids = inputs.teacher_topk_ids
     student_logits = inputs.student_logits
-    if teacher_topk_log_probs is None or teacher_topk_indices is None or student_logits is None:
+    if teacher_topk_log_probs is None or teacher_topk_ids is None or student_logits is None:
         raise ValueError(
             f"Expected teacher_topk_log_probs ({teacher_topk_log_probs is None}), "
-            f"teacher_topk_indices {(teacher_topk_indices is None)}, "
-            f"and student_logits {(student_logits is None)} to be provided in inputs."
+            f"teacher_topk_ids ({teacher_topk_ids is None}), "
+            f"and student_logits ({student_logits is None}) to be provided in inputs."
         )
-
     match config.strategy:
         case "fsdp":
             distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
-    distillation_losses, student_mass, teacher_mass = distillation_loss_fn(
+    outputs = distillation_loss_fn(
         student_logits=student_logits,
         teacher_topk_log_probs=teacher_topk_log_probs,
-        teacher_topk_indices=teacher_topk_indices,
-        config=config,
+        teacher_topk_ids=teacher_topk_ids,
+        config=distillation_config,
     )
+    distillation_losses, student_mass, teacher_mass = outputs["distillation_losses"], outputs["student_mass"], outputs["teacher_mass"]
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
     student_mass = student_mass[response_mask]
@@ -229,8 +232,8 @@ def compute_forward_kl_topk(
 def compute_distillation_loss_reverse_kl_estimator(
     inputs: DistillationLossInputs,
     response_mask: torch.Tensor,
-    config: DistillationConfig,
-    loss_agg_mode: str = "token-mean",
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics using single-sample KL estimators.
@@ -244,10 +247,10 @@ def compute_distillation_loss_reverse_kl_estimator(
             student policies, shape (batch_size, response_length).
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
-        config (DistillationConfig):
+        config (ActorConfig):
+            Actor configuration.
+        distillation_config (DistillationConfig):
             Distillation configuration containing loss_mode and loss_clamp.
-        loss_agg_mode (str, optional):
-            Aggregation mode for `agg_loss`.
 
     Returns:
         tuple[torch.Tensor, dict[str, Any]]: A tuple containing:
@@ -258,7 +261,7 @@ def compute_distillation_loss_reverse_kl_estimator(
     teacher_log_probs = inputs.teacher_log_probs
     if student_log_probs is None or teacher_log_probs is None:
         raise ValueError("Expected student_log_probs and teacher_log_probs to be provided in inputs.")
-    loss_config: DistillationLossConfig = config.distillation_loss
+    loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_losses = kl_penalty(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=loss_config.loss_mode
     )
