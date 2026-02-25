@@ -271,6 +271,8 @@ actor_rollout_ref:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
       enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
+      all_replicas: false
+      replicas: []
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
