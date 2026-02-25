@@ -26,10 +26,6 @@ from verl.utils.stages import Stage
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
-TEACHER_LOGPROBS_KEY = "teacher_logprobs"
-TEACHER_IDS_KEY = "teacher_ids"
-STUDENT_LOGITS_KEY = "student_logits"
-
 
 def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
     """Check if distillation is enabled based on the provided configuration."""
@@ -59,7 +55,7 @@ def prepare_student_distillation_inputs(
         logits = logits.values()
     if distillation_settings.use_topk:
         nested_logits = torch.nested.nested_tensor_from_jagged(logits, cu_seqlens)
-        return {STUDENT_LOGITS_KEY: nested_logits}
+        return {"student_logits": nested_logits}
     else:
         raise ValueError
 
@@ -71,11 +67,11 @@ def prepare_distillation_inputs(
     loss_config: DistillationLossConfig = config.distillation_loss
     distillation_settings: DistillationLossSettings = loss_config.loss_settings
     if distillation_settings.use_estimator:
-        return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data[TEACHER_LOGPROBS_KEY])
+        return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data["teacher_logprobs"])
     elif distillation_settings.use_topk:
-        teacher_topk_log_probs = data[TEACHER_LOGPROBS_KEY]
-        teacher_topk_ids = data[TEACHER_IDS_KEY]
-        student_logits = no_padding_2_padding(model_output[STUDENT_LOGITS_KEY], data)
+        teacher_topk_log_probs = data["teacher_logprobs"]
+        teacher_topk_ids = data["teacher_ids"]
+        student_logits = no_padding_2_padding(model_output["student_logits"], data)
         return DistillationLossInputs(
             student_logits=student_logits,
             teacher_topk_log_probs=teacher_topk_log_probs,
