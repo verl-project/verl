@@ -22,7 +22,12 @@ GEN_MOE_TP=${GEN_MOE_TP:-2}
 GEN_MOE_EP=${GEN_MOE_EP:-2}
 PROJECT_NAME=${PROJECT_NAME:-"Qwen3-30B-A3B-DAPO-GB200"}
 NNODES=${NNODES:-4}
-EXP_NAME=qwen3-30b-dapo-megatron-fp8-trtllm-n${NNODES}-tp${TP}-moe-tp${GEN_MOE_TP}-moe-ep${GEN_MOE_EP}-4gpus-fixes
+GPUS_PER_NODE=${GPUS_PER_NODE:-4}
+# MOE backend for TRTLLM when using FP8 quantization:
+#   - Blackwell: use DEEPGEMM
+#   - Hopper: use CUTLASS
+TRTLLM_MOE_BACKEND=${TRTLLM_MOE_BACKEND:-"DEEPGEMM"}
+EXP_NAME=qwen3-30b-dapo-megatron-fp8-trtllm-n${NNODES}-tp${TP}-moe-tp${GEN_MOE_TP}-moe-ep${GEN_MOE_EP}${EXP_NAME_SUFFIX:+"-"}${EXP_NAME_SUFFIX}
 
 if [ $TP -eq 4 ] || [ $TP -eq 2 ]; then
     MAX_NUM_SEQS=1024
@@ -35,10 +40,9 @@ fi
 # -----
 DATA_DIR=${DATA_DIR:-"$PWD"}
 
-
 DAPO_MATH_TRAIN=${DAPO_MATH_TRAIN:-"${DATA_DIR}/data/DAPO-Math-17k/data/dapo-math-17k.parquet"}
 AIME_VAL=${AIME_VAL:-"${DATA_DIR}/data/AIME-2024/data/aime-2024.parquet"}
-MODEL_PATH=${MODEL_PATH:-"${LLM_MODELS_ROOT}/Qwen3/Qwen3-30B-A3B"}
+MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-30B-A3B-Base"}
 
 # When PP=1, Megatron interleaved schedule is invalid; pass null so PP=1 works (e.g. 2-node)
 [ "${ACTOR_PP}" -gt 1 ] && ACTOR_VPP_OVERRIDE=${ACTOR_VPP} || ACTOR_VPP_OVERRIDE=null
@@ -124,7 +128,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
     +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 \
     +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5 \
-    +actor_rollout_ref.rollout.engine_kwargs.trtllm.moe_config.backend=DEEPGEMM \
+    +actor_rollout_ref.rollout.engine_kwargs.trtllm.moe_config.backend=${TRTLLM_MOE_BACKEND} \
     +actor_rollout_ref.rollout.moe_tp_size=${GEN_MOE_TP} \
     +actor_rollout_ref.rollout.moe_ep_size=${GEN_MOE_EP} \
     +actor_rollout_ref.rollout.quantization=fp8 \
@@ -140,7 +144,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name=${EXP_NAME} \
-    trainer.n_gpus_per_node=4 \
+    trainer.n_gpus_per_node=${GPUS_PER_NODE} \
     trainer.nnodes=${NNODES} \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \

@@ -410,15 +410,11 @@ class ServerAdapter(BaseRollout):
         if self.config.get("quantization", None) == "fp8":
             from verl.utils.trtllm.trtllm_fp8_utils import quant_weights_by_name
 
-            logger.warning("Convert bf16 weights to fp8 format before loading")
-
             weights = quant_weights_by_name(
                 weights,
                 self.model_config.hf_config.quantization_config,
                 dtype=self.model_config.hf_config.dtype,
             )
-        else:
-            weights = weights
 
         try:
             device_uuid = get_device_uuid(self.gpu_id)
