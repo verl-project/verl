@@ -81,7 +81,7 @@ NNODES=${NNODES:-2}
 # wandb
 backend=megatron # fsdp, fsdp2, megatron
 project_name=Qwen3-30B-A3B-Base-dapo-math-17k
-experiment_name=${backend}-${NNODES}nodes-${LOSS_MODE}-low${clip_ratio_low}-high${clip_ratio_high}
+experiment_name="${backend}-${NNODES}nodes-${LOSS_MODE}-low${clip_ratio_low}-high${clip_ratio_high}"
 
 # Paths
 DATA_ROOT=${DATA_ROOT:-"${HOME}/verl"}
@@ -156,7 +156,7 @@ ACTOR_CONFIG="
     actor_rollout_ref.actor.clip_ratio_c=$clip_ratio_c \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.calculate_entropy=True \
-    actor_rollout_ref.actor.policy_loss.loss_mode=${LOSS_MODE}
+    actor_rollout_ref.actor.policy_loss.loss_mode=${LOSS_MODE} \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=$ppo_mini_batch_size \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$actor_max_token_len_per_gpu"
@@ -209,9 +209,9 @@ ROLLOUT_CONFIG="
     actor_rollout_ref.rollout.gpu_memory_utilization=$gpu_memory_utilization \
     actor_rollout_ref.rollout.n=$n_resp_per_prompt \
     actor_rollout_ref.rollout.calculate_log_probs=True \
-    actor_rollout_ref.rollout.val_kwargs.top_p=1.0
-    actor_rollout_ref.rollout.val_kwargs.top_k=-1
-    actor_rollout_ref.rollout.val_kwargs.temperature=1.0
+    actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.n=$n_resp_per_prompt_val"
 
 # ===================================== Reward =====================================
