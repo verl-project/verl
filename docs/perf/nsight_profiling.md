@@ -41,7 +41,7 @@ In current config interface, `actor_rollout_ref.rollout.profiler` is a standalon
 `all_replicas=True` means all replicas are profiled, otherwise `replicas=[...]` are profiled.
 `all_ranks=True` means all ranks are profiled, otherwise `ranks=[...]` are profiled.
 Since a replica usually has one server, there is no control knobs for servers in a replica.
-
+An example is here `verl/examples/grpo_trainer/run_qwen2-7b_math_trtllm_nsys.sh`
 
 ### where to find the profiling data
 
