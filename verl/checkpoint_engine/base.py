@@ -269,7 +269,6 @@ class CheckpointEngineWorker(Worker):
         self.checkpoint_engine: CheckpointEngine = CheckpointEngineRegistry.new(
             backend, bucket_size=bucket_size, **engine_kwargs
         )
-        self.init_flag = False
         self.extra_rollout_args = args
         self.extra_rollout_kwargs = kwargs
         if self.server_adapter is None:

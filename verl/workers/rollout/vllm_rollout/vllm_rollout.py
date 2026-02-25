@@ -173,7 +173,7 @@ class ServerAdapter(BaseRollout):
 
         buffer, shm = None, None
         if not self.use_shm:
-            buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:0")
+            buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
             handle = reduce_tensor(buffer)
             s.send_pyobj(handle)
         else:
