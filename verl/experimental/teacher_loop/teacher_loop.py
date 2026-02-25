@@ -41,9 +41,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class TeacherLoopWorker:
-    """
-    TeacherLoopWorker: TODO
-    """
+    """TeacherLoopWorker: Computes logprobs for student completion."""
 
     def __init__(self, config: DictConfig, teacher_router_address: str = None):
         """
