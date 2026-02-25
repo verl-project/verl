@@ -17,11 +17,9 @@ import logging
 import os
 
 import aiohttp
-import numpy as np
 import ray
 import torch
 from omegaconf import DictConfig
-from tensordict import TensorDict
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
@@ -51,21 +49,9 @@ class TeacherLoopWorker:
             self.distillation_loss_config.loss_mode
         )
         self.teacher_router_address = teacher_router_address
-        # # Serialize teacher requests per actor to reduce pressure on the teacher vLLM router/backend.
-        # self._request_semaphore = asyncio.Semaphore(1)
-
-    async def compute_logprobs_batch(self, data: DataProto) -> list[dict]:
-        raise NotImplementedError("TODO:RM")
-        tasks = []
-        for i in range(len(data)):
-            tasks.append(asyncio.create_task(self.compute_score(data[i : i + 1])))
-        outputs = await asyncio.gather(*tasks)
-        return outputs
 
     async def compute_logprobs(self, data: DataProto) -> dict:
         assert len(data) == 1, "TeacherLoopWorker only supports single data item"
-        # async with self._request_semaphore:
-        #     return await self._compute_logprobs(data)
         return await self._compute_logprobs(data)
 
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 16):
@@ -114,81 +100,60 @@ class TeacherLoopWorker:
         input_ids = torch.cat([prompt_ids, response_ids], dim=1).squeeze(0).tolist()
         engine_name = self.config.distillation.teacher_model.inference.name
         model_name = self.config.distillation.teacher_model.model_path
-        if engine_name == "vllm":
-            if self.distillation_loss_settings.use_topk:
-                num_logprobs = topk = self.distillation_loss_config.topk
-            else:
-                num_logprobs = 0  # only the sampled logprob
-            payloads = {
-                "model": model_name,
-                "prompt": input_ids,
-                "max_tokens": 1,
-                "prompt_logprobs": num_logprobs,
-            }
-            output = await self._post_request(payloads, "v1/completions")
-
-            # Extract logprobs from vllm output
-            choices = output["choices"]
-            assert len(choices) == 1, f"Expected exactly one choice from teacher model, but got {len(choices)}"
-            response_logprobs = output["choices"][0]["prompt_logprobs"]
-            response_length = response_ids.shape[1]
-            response_logprob_dicts = response_logprobs[-response_length:]
-            response_logprobs_ls, response_ids_ls = [], []
-            for logprobs_dict in response_logprob_dicts:
-                if num_logprobs == 0:
-                    token_id_str = list(logprobs_dict.keys())[0]
-                    logprob = logprobs_dict[token_id_str]["logprob"]
-                    response_logprobs_ls.append([logprob])
-                    response_ids_ls.append([int(token_id_str)])
+        match engine_name:
+            case "vllm":
+                if self.distillation_loss_settings.use_topk:
+                    num_logprobs = topk = self.distillation_loss_config.topk
                 else:
-                    response_ids = [None] * topk
-                    response_logprobs = [None] * topk
-                    # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
-                    assert len(logprobs_dict) in [topk, topk + 1], len(logprobs_dict)
-                    for token_id_str, token_dict in logprobs_dict.items():
-                        if token_dict["rank"] > topk:
-                            continue  # the sampled token is not in the top-k
-                        rank = token_dict["rank"]
-                        logprob = token_dict["logprob"]
-                        response_ids[rank - 1] = int(token_id_str)
-                        response_logprobs[rank - 1] = logprob
-                    response_logprobs_ls.append(response_logprobs)
-                    response_ids_ls.append(response_ids)
-            logprobs_dtype = (
-                torch.bfloat16
-                if self.distillation_config.teacher_model.inference.dtype == "bfloat16"
-                else torch.float32
-            )
-            response_logprobs = torch.tensor(response_logprobs_ls, dtype=logprobs_dtype).unsqueeze(0)
-            response_ids = torch.tensor(response_ids_ls, dtype=torch.long).unsqueeze(0)
+                    num_logprobs = 0  # only the sampled logprob
+                payloads = {
+                    "model": model_name,
+                    "prompt": input_ids,
+                    "max_tokens": 1,
+                    "prompt_logprobs": num_logprobs,
+                }
+                output = await self._post_request(payloads, "v1/completions")
 
-        elif engine_name == "sglang":
-            raise ValueError("SGLang backend does not support distillation currently.")
-            payloads = {
-                "model": model_name,
-                "input": disrm_prompt,
-            }
-            output = await self._post_request(payloads, "v1/embeddings")
-            rm_score = output["data"][-1]["embedding"][-1]
-        elif engine_name == "trtllm":
-            # TODO: remove this once TRT-LLM switches to TorchSampler
-            raise ValueError("TensorRT-LLM backend does not support distillation currently.")
-
-            payloads = {
-                "model": model_name,
-                "prompt": disrm_prompt,
-                "return_context_logits": True,
-            }
-            output = await self._post_request(payloads, "v1/completions")
-            rm_score = output["choices"][0]["context_logits"]
-            assert isinstance(rm_score, list) and len(rm_score) > 0, (
-                "TensorRT-LLM OpenAI server response for reward score is not in the expected format."
-            )
-
-            rm_score = float(rm_score[0][0])
-            logger.debug(f"rm score: {rm_score}")
-        else:
-            raise NotImplementedError(f"RewardLoopManager does not support {engine_name}")
+                # Extract logprobs from vllm output
+                choices = output["choices"]
+                assert len(choices) == 1, f"Expected exactly one choice from teacher model, but got {len(choices)}"
+                response_logprobs = output["choices"][0]["prompt_logprobs"]
+                response_length = response_ids.shape[1]
+                response_logprob_dicts = response_logprobs[-response_length:]
+                response_logprobs_ls, response_ids_ls = [], []
+                for logprobs_dict in response_logprob_dicts:
+                    if num_logprobs == 0:
+                        token_id_str = list(logprobs_dict.keys())[0]
+                        logprob = logprobs_dict[token_id_str]["logprob"]
+                        response_logprobs_ls.append([logprob])
+                        response_ids_ls.append([int(token_id_str)])
+                    else:
+                        response_ids = [None] * topk
+                        response_logprobs = [None] * topk
+                        # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
+                        assert len(logprobs_dict) in [topk, topk + 1], len(logprobs_dict)
+                        for token_id_str, token_dict in logprobs_dict.items():
+                            if token_dict["rank"] > topk:
+                                continue  # the sampled token is not in the top-k
+                            rank = token_dict["rank"]
+                            logprob = token_dict["logprob"]
+                            response_ids[rank - 1] = int(token_id_str)
+                            response_logprobs[rank - 1] = logprob
+                        response_logprobs_ls.append(response_logprobs)
+                        response_ids_ls.append(response_ids)
+                logprobs_dtype = (
+                    torch.bfloat16
+                    if self.distillation_config.teacher_model.inference.dtype == "bfloat16"
+                    else torch.float32
+                )
+                response_logprobs = torch.tensor(response_logprobs_ls, dtype=logprobs_dtype).unsqueeze(0)
+                response_ids = torch.tensor(response_ids_ls, dtype=torch.long).unsqueeze(0)
+            case "sglang":
+                raise ValueError("SGLang backend does not support distillation currently.")
+            case "trtllm":
+                raise ValueError("TensorRT-LLM backend does not support distillation currently.")
+            case _:
+                raise NotImplementedError(f"TeacherLoopWorker does not support {engine_name}")
 
         return {"response_logprobs": response_logprobs, "response_ids": response_ids}
 
@@ -229,48 +194,10 @@ class TeacherLoopManager:
                 ).remote(self.config, self.teacher_router_address)
             )
 
-    def compute_teacher_logprobs(self, data: DataProto) -> DataProto:
-        raise NotImplementedError("TODO:RM")
-        if self.teacher_model_manager is not None:
-            self.teacher_model_manager.wake_up()
+    def wake_up(self):
+        """Wake up all rollout replica instances."""
+        self.teacher_model_manager.wake_up()
 
-        chunks = data.chunk(len(self.teacher_loop_workers))
-        outputs = ray.get(
-            [
-                worker.compute_score_batch.remote(chunk)
-                for worker, chunk in zip(self.teacher_loop_workers, chunks, strict=True)
-            ]
-        )
-        outputs_flat = [item for sublist in outputs for item in sublist]
-
-        # compute teacher logprobs
-        raise NotImplementedError
-        scores = [item["reward_score"] for item in outputs_flat]
-        prompt_length = data.batch["prompts"].size(1)
-        valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
-        rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        rm_scores[torch.arange(rm_scores.size(0)), valid_response_length - 1] = torch.tensor(
-            scores, dtype=torch.float32
-        )
-        batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
-
-        reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
-        non_tensor_batch = {}
-        for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
-
-        if self.reward_model_manager is not None:
-            self.reward_model_manager.sleep()
-
-        return DataProto(
-            batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"reward_extra_keys": reward_extra_keys}
-        )
-
-    def _run_all(self, tasks: list[asyncio.Task]):
-        raise NotImplementedError("TODO:RM")
-
-        async def run_all():
-            return await asyncio.gather(*tasks)
-
-        return asyncio.run(run_all())
+    def sleep(self):
+        """Sleep all rollout replica instances."""
+        self.teacher_model_manager.sleep()

@@ -34,6 +34,7 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
+from verl.experimental.teacher_loop import TeacherLoopManager
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils.chat_template import initialize_system_prompt
@@ -923,7 +924,7 @@ class AgentLoopManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_manager: TeacherLoopManager = None,
     ):
         """Initialize agent loop manager.
 
@@ -932,14 +933,16 @@ class AgentLoopManager:
             worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
             rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
             reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-            teacher_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming teacher computation.
+            teacher_loop_manager (TeacherLoopManager): Manager for streaming teacher computation.
         """
         self.config = config
         self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
         self.reward_loop_worker_handles = reward_loop_worker_handles
-        self.teacher_loop_worker_handles = teacher_loop_worker_handles
+
+        self.teacher_loop_manager = teacher_loop_manager
+        self.distillation_enabled = self.teacher_loop_manager is not None
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -1026,7 +1029,10 @@ class AgentLoopManager:
                         node_id=node_id, soft=True
                     ),
                 ).remote(
-                    self.config, self.server_handles, self.reward_loop_worker_handles, self.teacher_loop_worker_handles
+                    self.config,
+                    self.server_handles,
+                    self.reward_loop_worker_handles,
+                    self.teacher_loop_manager.teacher_loop_workers if self.distillation_enabled else None,
                 )
             )
 
@@ -1040,7 +1046,8 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
-
+        if self.distillation_enabled:  # TODO: need same for reward loop workers
+            self.teacher_loop_manager.wake_up()
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[
@@ -1048,6 +1055,8 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
+        if self.distillation_enabled:  # TODO: need same for reward loop workers
+            self.teacher_loop_manager.sleep()
         output = DataProto.concat(outputs)
 
         # calculate performance metrics

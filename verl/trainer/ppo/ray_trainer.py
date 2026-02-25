@@ -835,6 +835,8 @@ class RayPPOTrainer:
                 config=self.config,
                 teacher_resource_pool=teacher_resource_pool,
             )
+        else:
+            self.teacher_loop_manager = None
 
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
@@ -861,7 +863,7 @@ class RayPPOTrainer:
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
-            teacher_loop_worker_handles=teacher_loop_worker_handles,
+            teacher_loop_manager=self.teacher_loop_manager,
         )
 
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
