@@ -228,8 +228,8 @@ jobs:
           pip3 install --no-deps -e .
       - name: Prepare DAPO-Math-17k and AIME-2024 datasets (data_preprocess)
         run: |
-          python3 examples/data_preprocess/dapo_multiturn_w_tool.py --local_dataset_path ${HOME}/models/hf_data/dapo-math-17k --local_save_dir ${PWD}/data/dapo-math-17k
-          python3 examples/data_preprocess/aime2024_multiturn_w_tool.py --local_dataset_path ${HOME}/models/hf_data/aime-2024 --local_save_dir ${PWD}/data/aime-2024
+          python3 examples/data_preprocess/dapo_multiturn_w_tool.py --local_save_dir ${PWD}/data/dapo-math-17k
+          python3 examples/data_preprocess/aime2024_multiturn_w_tool.py --local_save_dir ${PWD}/data/aime-2024
       - name: Running DAPO E2E with FP8 TRT-LLM rollout (Qwen3-8B)
         run: |
           ray stop --force
