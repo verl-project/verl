@@ -242,7 +242,9 @@ class TaskRunner:
             if distillation_config.teacher_model.nnodes <= 0:
                 raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
 
-            teacher_pool = [distillation_config.teacher_model.n_gpus_per_node] * distillation_config.teacher_model.nnodes
+            teacher_pool = [
+                distillation_config.teacher_model.n_gpus_per_node
+            ] * distillation_config.teacher_model.nnodes
             resource_pool_spec["teacher_pool"] = teacher_pool
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -273,7 +275,6 @@ class TaskRunner:
                 self.mapping[Role.TeacherModel] = "teacher_pool"
             else:
                 self.mapping[Role.TeacherModel] = "global_pool"
-
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
