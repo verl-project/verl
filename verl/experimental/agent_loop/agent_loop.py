@@ -688,7 +688,7 @@ class AgentLoopWorker:
             response_ids=output.response_ids,
             validate=kwargs.get("validate", False),
         )
-        teacher_logprobs, teacher_ids = teacher_result.get("logprobs"), teacher_result.get("token_ids")
+        teacher_logprobs, teacher_ids = teacher_result.get("response_logprobs"), teacher_result.get("response_ids")
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
             response_ids=response_output["input_ids"],
@@ -810,22 +810,13 @@ class AgentLoopWorker:
             data = DataProto(batch=TensorDict({"prompt_ids": torch.tensor([prompt_ids]), "response_ids": torch.tensor([response_ids])}, batch_size=1))
             selected_teacher_loop_worker_handle = random.choice(self.teacher_loop_worker_handles)
             result = await selected_teacher_loop_worker_handle.compute_logprobs.remote(data)
-            prompt_logprobs, response_logprobs = result["prompt_logprobs"], result["response_logprobs"]
-            prompt_ids, response_ids = result["prompt_ids"], result["response_ids"]
+            response_ids, response_logprobs = result["response_ids"], result["response_logprobs"] # (1, S, K), S=sequence length, K=topk/1
 
-            def _apply_padding(token_ids, logprobs, max_length):
-                pad_size = max_length - token_ids.shape[1]
-                padding = (0, 0, 0, pad_size)  # pad the sequence dimension
-                token_ids_padded = F.pad(token_ids, padding, value=self.tokenizer.pad_token_id)
-                logprobs_padded = F.pad(logprobs, padding, value=0.0)
-                return token_ids_padded, logprobs_padded
-
-            prompt_ids_padded, prompt_logprobs_padded = _apply_padding(prompt_ids, prompt_logprobs, self.config.actor_rollout_ref.rollout.prompt_length)
-            response_ids_padded, response_logprobs_padded = _apply_padding(response_ids, response_logprobs, self.config.actor_rollout_ref.rollout.response_length)
-            ids_padded = torch.cat([prompt_ids_padded, response_ids_padded], dim=1)
-            print(f"{prompt_ids_padded.shape=}, {response_ids_padded.shape=}, {ids_padded.shape=}")
-            logprobs_padded = torch.cat([prompt_logprobs_padded, response_logprobs_padded], dim=1)
-            return {"token_ids": ids_padded, "logprobs": logprobs_padded}
+            pad_size = self.config.actor_rollout_ref.rollout.response_length - response_ids.shape[1]
+            padding = (0, 0, 0, pad_size)  # pad the sequence dimension
+            response_ids_padded = F.pad(response_ids, padding, value=self.tokenizer.pad_token_id)
+            response_logprobs_padded = F.pad(response_logprobs, padding, value=0.0)
+            return {"response_ids": response_ids_padded, "response_logprobs": response_logprobs_padded}
         else:
             return None, None
 

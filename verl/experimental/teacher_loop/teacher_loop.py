@@ -135,47 +135,33 @@ class TeacherLoopWorker:
             # Extract logprobs from vllm output
             choices = output["choices"]
             assert len(choices) == 1, f"Expected exactly one choice from teacher model, but got {len(choices)}"
-            logprobs = output["choices"][0]["prompt_logprobs"]
-            assert logprobs[0] is None, f"The first token's logprobs should be None due to right shifting: {logprobs[0]}"
-            logprobs.pop(0)  # Remove the first token's logprobs since it's None
-            logprobs.append(logprobs[-1])  # Last token's logprobs were right-shifted away; add random values for padding
-            logprobs_ls, token_ids_ls = [], []
-            for logprobs_dict in logprobs[1:]: # skip the first token -- due to right shifting, it is None
-                if num_logprobs == 0:                    
-                    token_id = list(logprobs_dict.keys())[0]
-                    logprob = logprobs_dict[token_id]['logprob']
-                    logprobs_ls.append([logprob])
-                    token_ids_ls.append([int(token_id)])
+            response_logprobs = output["choices"][0]["prompt_logprobs"]
+            response_length = response_ids.shape[1]
+            response_logprob_dicts = response_logprobs[-response_length:]
+            response_logprobs_ls, response_ids_ls = [], []
+            for logprobs_dict in response_logprob_dicts:
+                if num_logprobs == 0:
+                    token_id_str = list(logprobs_dict.keys())[0]
+                    logprob = logprobs_dict[token_id_str]['logprob']
+                    response_logprobs_ls.append([logprob])
+                    response_ids_ls.append([int(token_id_str)])
                 else:
-                    token_ids = [None] * topk
-                    token_logprobs = [None] * topk
+                    response_ids = [None] * topk
+                    response_logprobs = [None] * topk
                     # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
                     assert len(logprobs_dict) in [topk, topk + 1], len(logprobs_dict)
                     for token_id_str, token_dict in logprobs_dict.items():
                         if token_dict['rank'] > topk:
-                            continue
-                        token_id = int(token_id_str)
+                            continue # the sampled token is not in the top-k
                         rank = token_dict['rank']
                         logprob = token_dict['logprob']
-                        token_ids[rank - 1] = token_id
-                        token_logprobs[rank - 1] = logprob
-                    logprobs_ls.append(token_logprobs)
-                    token_ids_ls.append(token_ids)
+                        response_ids[rank - 1] = int(token_id_str)
+                        response_logprobs[rank - 1] = logprob
+                    response_logprobs_ls.append(response_logprobs)
+                    response_ids_ls.append(response_ids)
             logprobs_dtype = torch.bfloat16 if self.distillation_config.teacher_model.inference.dtype == "bfloat16" else torch.float32
-            logprobs = torch.tensor(logprobs_ls, dtype=logprobs_dtype).unsqueeze(0)
-            token_ids = torch.tensor(token_ids_ls, dtype=torch.long).unsqueeze(0)
-
-            response_length = response_ids.shape[1]
-            response_logprobs = logprobs[:, -response_length:]
-            assert response_logprobs.shape[1] == response_length, f"Response logprobs length {response_logprobs.shape[1]} does not match response length {response_length}"
-            response_ids = token_ids[:, -response_length:]
-            assert response_ids.shape[1] == response_length, f"Response ids length {response_ids.shape[1]} does not match response length {response_length}"
-            
-            prompt_length = prompt_ids.shape[1]
-            prompt_logprobs = logprobs[:, :prompt_length]
-            assert prompt_logprobs.shape[1] == prompt_length, f"Prompt logprobs length {prompt_logprobs.shape[1]} does not match prompt length {prompt_length}"
-            prompt_ids = token_ids[:, :prompt_length]
-            assert prompt_ids.shape[1] == prompt_length, f"Prompt ids length {prompt_ids.shape[1]} does not match prompt length {prompt_length}"
+            response_logprobs = torch.tensor(response_logprobs_ls, dtype=logprobs_dtype).unsqueeze(0)
+            response_ids = torch.tensor(response_ids_ls, dtype=torch.long).unsqueeze(0)
             
         elif engine_name == "sglang":
             raise ValueError("SGLang backend does not support distillation currently.")
@@ -205,7 +191,7 @@ class TeacherLoopWorker:
         else:
             raise NotImplementedError(f"RewardLoopManager does not support {engine_name}")
 
-        return {"response_logprobs": response_logprobs, "response_ids": response_ids, "prompt_logprobs": prompt_logprobs, "prompt_ids": prompt_ids}
+        return {"response_logprobs": response_logprobs, "response_ids": response_ids}
 
 
 class TeacherLoopManager:
