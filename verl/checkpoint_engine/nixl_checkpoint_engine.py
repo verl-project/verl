@@ -505,7 +505,6 @@ class NIXLCheckpointEngine(CheckpointEngine):
         read_op.begin_read()
         await read_op.wait_for_complete()
         total_bytes += self.bucket_size
-        total_params += len(metadata["bucket_meta"])
 
         # swap send and recv buf
         send_buf, recv_buf = recv_buf, send_buf
@@ -528,6 +527,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
             # 3. yield tensor from send_buf
             for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+                total_params += 1
                 yield tensor_tuple
 
             # 4. wait for next agent read complete and read from previous agent complete
@@ -535,7 +535,6 @@ class NIXLCheckpointEngine(CheckpointEngine):
                 await readable_op.wait_for_complete()
             await read_op.wait_for_complete()
             total_bytes += self.bucket_size
-            total_params += len(next_metadata["bucket_meta"])
 
             # 5. swap send and recv buf
             torch.cuda.synchronize()  # sync non-blocking copy
@@ -555,6 +554,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
         # yield tensor from send_buf
         for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+            total_params += 1
             yield tensor_tuple
 
         # wait for next agent read complete

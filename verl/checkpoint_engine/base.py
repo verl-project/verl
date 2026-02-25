@@ -691,7 +691,6 @@ class CollectiveCheckpointEngine(CheckpointEngine):
         broadcast_op = self._create_broadcast_recv_op(recv_buf)
         metadata = await broadcast_op.wait_for_complete()
         total_bytes += self.bucket_size
-        total_params += len(metadata["bucket_meta"])
 
         # swap send_buf and recv_buf
         send_buf, recv_buf = recv_buf, send_buf
@@ -702,12 +701,12 @@ class CollectiveCheckpointEngine(CheckpointEngine):
 
             # 2. yield tensor from send_buf
             for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+                total_params += 1
                 yield tensor_tuple
 
             # 3. wait for next bucket broadcast finish
             metadata = await broadcast_op.wait_for_complete()
             total_bytes += self.bucket_size
-            total_params += len(metadata["bucket_meta"])
 
             # 4. swap send_buf and recv_buf
             self._synchronize()
@@ -715,6 +714,7 @@ class CollectiveCheckpointEngine(CheckpointEngine):
 
         # yield tensor from send_buf
         for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+            total_params += 1
             yield tensor_tuple
 
         # Check if there are any remaining chunks that weren't processed
