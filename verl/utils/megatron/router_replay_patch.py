@@ -31,7 +31,6 @@ except ImportError:
     MoEAlltoAllTokenDispatcher = None
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.training import get_args
 
 # https://github.com/THUDM/slime/blob/main/slime/utils/routing_replay.py
 
@@ -338,6 +337,7 @@ def apply_router_replay_patch():
     RouterReplay.router_instances.clear()
     # Step 1: Patch TransformerConfig to include the feature flag
     try:
+        from megatron.training import get_args
         global_args = get_args()
     except Exception:
         global_args = None
@@ -346,7 +346,7 @@ def apply_router_replay_patch():
         sig = inspect.signature(TransformerConfig.__init__)
         native_params = sig.parameters
     except Exception:
-        native_params = []
+        native_params = {}
 
     ext_attrs = ["enable_routing_replay", "moe_router_fusion"]
 
