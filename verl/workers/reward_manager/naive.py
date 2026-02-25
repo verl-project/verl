@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Union, Any
 from collections import defaultdict
 from typing import Any
 
@@ -51,8 +52,8 @@ class NaiveRewardManager(AbstractRewardManager):
         if reward_from_rm_scores is not None:
             return reward_from_rm_scores
 
-        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        reward_extra_info = defaultdict(list)
+        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+        reward_entries = []
 
         already_print_data_sources = {}
 
@@ -82,22 +83,17 @@ class NaiveRewardManager(AbstractRewardManager):
             extra_info["num_turns"] = num_turns
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
-            score = self.compute_score(
+            score_result = self.compute_score(
                 data_source=data_source,
                 solution_str=response_str,
                 ground_truth=ground_truth,
                 extra_info=extra_info,
             )
 
-            if isinstance(score, dict):
-                reward = score["score"]
-                # Store the information including original reward
-                for key, value in score.items():
-                    reward_extra_info[key].append(value)
-            else:
-                reward = score
+            reward_value, reward_entry = self._process_score(score_result)
+            reward_entries.append(reward_entry)
 
-            reward_tensor[i, valid_response_length - 1] = reward
+            reward_tensor[i, valid_response_length - 1] = reward_value
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
@@ -107,16 +103,35 @@ class NaiveRewardManager(AbstractRewardManager):
                 print("[prompt]", prompt_str)
                 print("[response]", response_str)
                 print("[ground_truth]", ground_truth)
-                if isinstance(score, dict):
-                    for key, value in score.items():
-                        print(f"[{key}]", value)
-                else:
-                    print("[score]", score)
+                for key, value in reward_entry.items():
+                    print(f"[{key}]", value)
 
         if return_dict:
             return {
                 "reward_tensor": reward_tensor,
-                "reward_extra_info": reward_extra_info,
+                "reward_extra_info": self._consolidate_reward_info(reward_entries),
             }
         else:
             return reward_tensor
+
+    def _process_score(self, score_result: Union[dict[str, Any], float]) -> tuple[float, dict[str, Any]]:
+        if isinstance(score_result, dict):
+            if "score" not in score_result:
+                raise KeyError("If reward funtion return a dcit, it must contain a 'score' key")
+            return score_result["score"], score_result
+        return score_result, {"score": score_result}
+
+    def _consolidate_reward_info(self, reward_entries: list[dict[str, Any]]) -> dict[str, list[Any]]:
+        all_keys = set()
+        for entry in reward_entries:
+            all_keys.update(entry.keys())
+
+        reward_extra_info = defaultdict(list)
+        for entry in reward_entries:
+            for key in all_keys:
+                # If there are some key return by other reward function,
+                # and the current entry does not contain this key, we pad it with str 'unkown'.
+                # values with str type in reward_extra_info will be ignored when computting validation metrics.
+                reward_extra_info[key].append(entry.get(key, 'unkown'))
+
+        return reward_extra_info
