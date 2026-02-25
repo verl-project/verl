@@ -268,9 +268,8 @@ class TRTLLMReplica(RolloutReplica):
         model_config: DictConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
-        nsight_options: dict = None,
     ) -> None:
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, nsight_options)
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
 
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
@@ -363,6 +362,13 @@ class TRTLLMReplica(RolloutReplica):
             else f"trtllm_server_reward_{self.replica_rank}"
         )
 
+        if (
+            "nsys" in self.profiler_config.global_tool_config
+            and "worker_nsight_options" in self.profiler_config.global_tool_config["nsys"]
+        ):
+            nsight_options = self.profiler_config.global_tool_config["nsys"]["worker_nsight_options"]
+        else:
+            nsight_options = {}
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,
@@ -380,7 +386,7 @@ class TRTLLMReplica(RolloutReplica):
             max_colocate_count=self.resource_pool.max_colocate_count,
             pgs=pgs,
             bundle_indices=bundle_indices,
-            nsight_options=self.nsight_options,
+            nsight_options=nsight_options,
             profiling_ranks=(None if self.profiler_config.all_ranks else self.profiler_config.ranks),
         )
         self.servers.append(server)

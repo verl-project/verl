@@ -300,6 +300,7 @@ actor_rollout_ref:
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
+      global_tool_config: ${oc.select:global_profiler.global_tool_config,null}
       enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
       all_replicas: false
       replicas: []

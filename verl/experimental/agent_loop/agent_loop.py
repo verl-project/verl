@@ -854,7 +854,6 @@ class AgentLoopManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        nsight_options: dict = None,
     ):
         """Initialize agent loop manager.
 
@@ -867,19 +866,6 @@ class AgentLoopManager:
         self.config = config
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
-        self.nsight_options = nsight_options
-        profile_steps = OmegaConf.select(self.config.global_profiler, "steps")
-        if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
-            assert (
-                OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                is not None
-            ), "worker_nsight_options must be set when using nsys with profile_steps"
-            nsight_options = OmegaConf.to_container(
-                OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-            )
-            if nsight_options is not None and nsight_options["capture-range-end"] is None:
-                nsight_options["capture-range-end"] = f"repeat-shutdown:{6 * len(profile_steps)}"
-            self.nsight_options = nsight_options
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
             self.rollout_replica_class = get_rollout_replica_class(self.config.actor_rollout_ref.rollout.name)
@@ -910,7 +896,6 @@ class AgentLoopManager:
                 config=rollout_config,
                 model_config=model_config,
                 gpus_per_node=self.config.trainer.n_gpus_per_node,
-                nsight_options=self.nsight_options,
             )
             for replica_rank in range(num_replicas)
         ]
@@ -923,6 +908,7 @@ class AgentLoopManager:
             if profiling_replica_ranks
             else []
         )
+        print(f"david: profiling_replicas: {self.profiling_replicas}")
 
         if self.worker_group and rollout_config.name != "trtllm":
             self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])

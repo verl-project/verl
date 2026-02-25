@@ -90,7 +90,6 @@ class RolloutReplica(ABC):
         model_config: DictConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
-        nsight_options: dict = None,
     ) -> None:
         self.replica_rank = replica_rank
         self.config = omega_conf_to_dataclass(config)
@@ -108,7 +107,6 @@ class RolloutReplica(ABC):
         )
         self.nnodes = self.world_size // self.gpus_per_replica_node
         self.is_reward_model = is_reward_model
-        self.nsight_options = nsight_options
 
         self.rollout_mode: RolloutMode = None
         self.workers: list[ActorHandle] = []

@@ -289,6 +289,7 @@ actor_rollout_ref:
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
+      global_tool_config: ${oc.select:global_profiler.global_tool_config,null}
       enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
       all_replicas: false
       replicas: []
@@ -659,7 +660,7 @@ global_profiler:
         cuda-memory-usage: 'true'
         cuda-graph-trace: graph
         capture-range: cudaProfilerApi
-        capture-range-end: null
+        capture-range-end: repeat-shutdown:6
         kill: none
     torch_memory:
       trace_alloc_max_entries: 100000

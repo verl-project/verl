@@ -9,8 +9,7 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# distributed under the License is distributed on an "AS IS" BASIS,# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
@@ -834,7 +833,6 @@ class RayPPOTrainer:
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
-            nsight_options=wg_kwargs.get("worker_nsight_options"),
         )
 
         self.checkpoint_manager = CheckpointEngineManager(
