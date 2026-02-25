@@ -288,7 +288,9 @@ class CheckpointEngine(ABC):
                 chunk_idx = meta["chunk_idx"]
                 if original_name not in pending_chunks:
                     pending_chunks[original_name] = {}
-                pending_chunks[original_name][chunk_idx] = tensor
+                # NOTE: we need to clone the tensor here because the buffer will be
+                # reused for next bucket, which will overwrite the tensor data
+                pending_chunks[original_name][chunk_idx] = tensor.clone()
 
                 # Check if we have all chunks for this weight
                 if len(pending_chunks[original_name]) == meta["total_chunks"]:
