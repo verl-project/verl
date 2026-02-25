@@ -72,6 +72,11 @@ on:
       - ".github/workflows/e2e_ppo_grpo_trainer_trtllm"
       - "examples/data_preprocess/gsm8k.py"
       - "examples/data_preprocess/geo3k.py"
+      - "examples/data_preprocess/dapo_multiturn_w_tool.py"
+      - "examples/data_preprocess/aime2024_multiturn_w_tool.py"
+      - "examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh"
+      - "examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh"
+      - "examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh"
       # add back when ppo flow is ready
       # - "tests/special_e2e/run_ppo_trainer_megatron.sh"
       # - "verl/trainer/main_ppo.py"
@@ -203,9 +208,46 @@ jobs:
         run: |
           rm -rf checkpoints
 
+  e2e_dapo_trainer_megatron-qwen3:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 60
+    env:
+      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+      - name: Prepare DAPO-Math-17k and AIME-2024 datasets (data_preprocess)
+        run: |
+          python3 examples/data_preprocess/dapo_multiturn_w_tool.py --local_dataset_path ${HOME}/models/hf_data/dapo-math-17k --local_save_dir ${PWD}/data/dapo-math-17k
+          python3 examples/data_preprocess/aime2024_multiturn_w_tool.py --local_dataset_path ${HOME}/models/hf_data/aime-2024 --local_save_dir ${PWD}/data/aime-2024
+      - name: Running DAPO E2E with FP8 TRT-LLM rollout (Qwen3-8B)
+        run: |
+          ray stop --force
+          export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
+          export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=CUTLASS
+          export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/dapo-math-17k/train.parquet AIME_VAL=${PWD}/data/aime-2024/train.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
+          bash examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh \
+            actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=False \
+            actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=False \
+            trainer.total_training_steps=1 \
+            trainer.logger='["console"]'
+      - name: clean up
+        run: |
+          rm -rf checkpoints
+
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2]
+    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2, e2e_dapo_trainer_megatron-qwen3]
     if: always()
     steps:
       - id: destroy-runner
