@@ -33,7 +33,7 @@ from torch.distributed.tensor import DTensor
 import verl.utils.torch_functional as verl_F
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
-from verl.trainer.distillation import compute_distillation_inputs, is_distillation_enabled
+from verl.trainer.distillation import prepare_student_distillation_inputs, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -1081,7 +1081,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 if self.distillation_enabled:
                     raise NotImplementedError(
                         "Distillation with fused kernels is not supported yet"
-                    )  # TODO: JacobHelwig
+                    )
             else:
                 logits = output.logits  # (bsz, response_length, vocab_size)
                 temperature = output_args["temperature"]  # (bsz,)
@@ -1110,9 +1110,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
-
         model_output.update(
-            compute_distillation_inputs(
+            prepare_student_distillation_inputs(
                 logits=logits_rmpad, batch=micro_batch, cu_seqlens=cu_seqlens, config=self.distillation_config
             )
         )
