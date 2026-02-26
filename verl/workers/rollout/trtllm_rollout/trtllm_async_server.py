@@ -23,13 +23,13 @@ from ray.actor import ActorHandle
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
 
-from verl.single_controller.ray import RayClassWithInitArgs, SubRayResourcePool
+from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
-from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -110,7 +110,7 @@ class TRTLLMHttpServer:
 
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
-        from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig
+        from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
         from tensorrt_llm.serve import OpenAIServer
 
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
@@ -162,7 +162,10 @@ class TRTLLMHttpServer:
                         enable_padding=True,
                         batch_sizes=self.config.cudagraph_capture_sizes,
                         max_batch_size=0 if self.config.cudagraph_capture_sizes else self.config.max_num_seqs,
-                    )
+                    ),
+                    "scheduler_config": SchedulerConfig(
+                        capacity_scheduler_policy=CapacitySchedulerPolicy.MAX_UTILIZATION,
+                    ),
                 }
             )
 
@@ -176,7 +179,7 @@ class TRTLLMHttpServer:
             metadata_server_cfg=None,
         )
         app = trtllm_server.app
-        self._server_port, self._server_task = await run_unvicorn(app, None, self._server_address)
+        self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
 
     async def generate(
         self,
@@ -238,9 +241,6 @@ class TRTLLMHttpServer:
         )
 
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
-
-
 class TRTLLMReplica(RolloutReplica):
     def __init__(
         self,
@@ -252,17 +252,6 @@ class TRTLLMReplica(RolloutReplica):
     ) -> None:
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
-
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        """Get rollout worker actor class for colocated and standalone mode."""
-        worker_dict_cls = RayClassWithInitArgs(
-            cls=_rollout_worker_actor_cls,
-            config=self.config,
-            model_config=self.model_config,
-            device_mesh=None,
-            replica_rank=self.replica_rank,
-        )
-        return worker_dict_cls
 
     def rollout_worker_use_gpu(self) -> bool:
         return False

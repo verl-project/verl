@@ -763,7 +763,7 @@ def compute_optimal_token_baseline_advantage(
     old_log_probs: torch.Tensor,
     sum_pi_squared: torch.Tensor,
     rollout_is_weights: torch.Tensor = None,
-    handle_zero_tail: bool = False,
+    handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -791,7 +791,7 @@ def compute_optimal_token_baseline_advantage(
             None if not using IS
         handle_zero_tail: If True, zero baselines will be set in the portion of the longest trajectory
             that extends beyond the second-longest trajectory in the prompt group.
-            Default: False
+            Default: True
         epsilon: Small constant for numerical stability (default: 1e-8)
 
     Returns:
@@ -1054,12 +1054,16 @@ def agg_loss(
     """
     if loss_agg_mode == "token-mean":
         if batch_num_tokens is None:
+            if dp_size > 1:
+                raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
     elif loss_agg_mode == "seq-mean-token-sum":
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
+            if dp_size > 1:
+                raise ValueError("global_batch_size is required when dp_size > 1")
             global_batch_size = seq_mask.sum()
         loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
     elif loss_agg_mode == "seq-mean-token-mean":
@@ -1067,13 +1071,18 @@ def agg_loss(
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
         seq_mask = (seq_mask > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
+            if dp_size > 1:
+                raise ValueError("global_batch_size is required when dp_size > 1")
             global_batch_size = seq_mask.sum()
         loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
     elif loss_agg_mode == "seq-mean-token-sum-norm":
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
         if loss_scale_factor is None:
-            loss_scale_factor = loss_mask.shape[-1]
-        loss = torch.sum(seq_losses) / loss_scale_factor
+            raise ValueError(
+                f"{loss_agg_mode=} but {loss_scale_factor=}. "
+                'If not intented for custom scaling factor, try setting loss_agg_mode="seq-mean-token-sum".'
+            )
+        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
+        loss = torch.sum(seq_losses) / loss_scale_factor * dp_size
     else:
         raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 

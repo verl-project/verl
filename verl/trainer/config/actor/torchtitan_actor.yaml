@@ -1,0 +1,16 @@
+# torchtitan actor config, inheriting from trainer/config/actor/actor.yaml
+defaults:
+  # torchtitan optimizer config
+  - ../optim@optim: torchtitan
+
+  # torchtitan engine config
+  - ../engine@torchtitan: torchtitan
+
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.TorchTitanActorConfig
+
+strategy: torchtitan
