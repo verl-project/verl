@@ -76,7 +76,8 @@ Atlas 800T A3
     git clone https://github.com/volcengine/verl.git  
     # Make sure you have activated verl conda env
     # NPU_DEVICE=A3 or A2 depends on your device
-    NPU_DEVICE=A3 bash verl/scripts/install_sglang_mcore_npu.sh
+    # USE_MEGATRON=1 if you need to install megatron backend
+    NPU_DEVICE=A3 USE_MEGATRON=1 bash verl/scripts/install_sglang_mcore_npu.sh
 
 **4. 安装verl**
 
