@@ -270,7 +270,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         world_size = (
             self.worker_group.world_size
             if self.worker_group
-            else self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+            else self.config.rollout.n_gpus_per_node * self.config.rollout.nnodes
         )
         num_replicas = world_size // rollout_world_size
 
@@ -281,7 +281,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
                 replica_rank=replica_rank,
                 config=rollout_config,
                 model_config=model_config,
-                gpus_per_node=self.config.trainer.n_gpus_per_node,
+                gpus_per_node=self.config.rollout.n_gpus_per_node,
             )
             for replica_rank in range(num_replicas)
         ]

@@ -105,9 +105,6 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.trigger_parameter_sync_step`                     | Indicates how many local updates FullyAsyncTrainer performs before a parameter synchronization |
 | `async_training.staleness_threshold`                             | Freshness control                                                                              |
 | `async_training.partial_rollout`                                 | Whether to perform partial_rollout                                                             |
-| `async_training.checkpoint_engine.enable`                        | Whether to use checkpoint_engine for accelerating, default `True`                              |
-| `async_training.checkpoint_engine.overlap_broadcast_and_consume` | When use checkpoint_engine, whether to overlap broadcast and load_weights, default `False`     |
-| `async_training.checkpoint_engine.device_buffer_size_M`          | When use checkpoint_engine, the user-specific bucket size (MB), default `4096`                 |
 | `async_training.use_trainer_do_validate`                         | Whether use trainer node to do validate process, default `False`                               |
 
 **Further Explanation:**
@@ -180,27 +177,6 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
   Additionally, when `algorithm.rollout_correction.bypass_mode=False` and Rollout Importance Sampling are enabled under
   mode d
   (async stream pipeline with partial rollout), our implementation approximates `Areal's Decoupled PPO`.
-
-* `async_training.checkpoint_engine.enable`
-  
-  Enabling the checkpoint engine generally reduces synchronization time overhead by more than 60% compared to 
-  the original per-tensor parameter synchronization method. However, assembling buckets incurs additional 
-  temporary GPU memory overhead.
-
-* `async_training.checkpoint_engine.overlap_broadcast_and_consume`
-
-  Enabling pipeline between the broadcast and load_weights parameters will allocate additional GPU memory. 
-  Since the main time consumption for parameter synchronization is not in the broadcast and load_weights phases,
-  but in the parameter generation phase (by megatron or FSDP), this option is off by default.
-
-* `async_training.checkpoint_engine.device_buffer_size_M`
-  
-  It controls the size of the memory buffer used for synchronization when the checkpoint-engine is enabled. 
-  The actual `bucket_size` = `max(device_buffer_size_M, maximum parameter tensor size)`.
-  * When enable `overlap_broadcast_and_consume`, the additional device memory overhead of 
-    trainer rank is `3 * bucket_size`and rollout rank is `2 * bucket_size`。
-  * When disable `overlap_broadcast_and_consume`, the additional device memory overhead of 
-    trainer rank is `2 * bucket_size`and rollout rank is `1 * bucket_size`。
 
 * `async_training.use_trainer_do_validate`
 

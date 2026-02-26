@@ -144,7 +144,7 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install cupy-cuda12x pytest-asyncio
+          pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip3 install --upgrade "transformers<5.0"
