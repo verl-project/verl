@@ -480,7 +480,7 @@ class FSDPEngine(BaseEngine):
 
                         module = model
                         for part in module_path.split("."):
-                            module = getattr(module, part)
+                            module = module[int(part)] if part.isdigit() else getattr(module, part)
 
                         scale_val = f.get_tensor(key)
                         val = scale_val.item() if scale_val.numel() == 1 else scale_val.max().item()
