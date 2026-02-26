@@ -12,6 +12,9 @@ tp_size: 1
 pp_size: 1
 cp_size: 1
 ep_size: 1
+dp_replicate_size: 1
+sequence_parallel: false
+defer_fsdp_grad_sync: true
 
 # Whether to offload model parameters to CPU
 param_offload: false
@@ -31,8 +34,28 @@ enable_compile: false
 # Model data type for loading weights ("fp32", "bf16", "fp16")
 model_dtype: fp32
 
-# Attention implementation ("sdpa", "flash_attention_2", "eager")
+# Attention implementation ("sdpa", "flash_attention_2", "eager", "te")
 attn_implementation: sdpa
+
+# Backend settings (nemo_automodel BackendConfig)
+use_te_backend: false
+rope_fusion: true
+gate_precision: null
+enable_hf_state_dict_adapter: true
+enable_fsdp_optimizations: false
+
+# MoE / Expert Parallelism settings
+enable_deepep: false
+reshard_after_forward: false
+fake_balanced_gate: false
+ignore_router_for_ac: false
+lm_head_precision: null
+wrap_outer_model: true
+
+# Mixed precision policy (FSDP2 MixedPrecisionPolicy)
+mp_param_dtype: bf16
+mp_reduce_dtype: fp32
+mp_output_dtype: bf16
 
 # Random seed for reproducibility
 seed: 42

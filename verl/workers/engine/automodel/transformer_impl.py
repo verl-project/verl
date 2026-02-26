@@ -28,6 +28,7 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed
 from nemo_automodel.components.checkpoint.checkpointing import Checkpointer, CheckpointingConfig
+from transformers.utils import TRANSFORMERS_CACHE
 from nemo_automodel.components.optim.scheduler import OptimizerParamScheduler
 from nemo_automodel.components.training.utils import (
     prepare_for_final_backward,
@@ -313,7 +314,7 @@ class AutomodelEngine(BaseEngine):
             enabled=True,
             checkpoint_dir="checkpoints/",
             model_save_format="safetensors",
-            model_cache_dir=os.environ.get("TRANSFORMERS_CACHE", os.path.expanduser("~/.cache/huggingface/hub")),
+            model_cache_dir=TRANSFORMERS_CACHE,
             model_repo_id=self.model_config.path,
             save_consolidated=True,
             is_peft=False,
@@ -478,6 +479,14 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                 "position_ids": position_ids_rmpad,
             }
 
+            # For TE attention backend, pass cu_seqlens
+            if self.engine_config.attn_implementation == "te":
+                cu_seqlens = input_ids.offsets().to(torch.int32)
+                max_seqlen = cu_seqlens.diff().max().item()
+                model_inputs["qkv_format"] = "thd"
+                model_inputs["cu_seqlens"] = cu_seqlens.unsqueeze(0)
+                model_inputs["max_seqlen"] = max_seqlen
+
         else:
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids = micro_batch["input_ids"]
@@ -536,6 +545,11 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
+
+        if isinstance(output, torch.Tensor):
+            from types import SimpleNamespace
+
+            output = SimpleNamespace(logits=output)
 
         model_output = {}
         input_ids = micro_batch["input_ids"]

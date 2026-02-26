@@ -80,10 +80,12 @@ def build_model_wrapper_from_engine_config(engine_config, world_size):
         from torch.distributed.fsdp import MixedPrecisionPolicy
         from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
 
+        from verl.utils.torch_dtypes import PrecisionType
+
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32,
-            output_dtype=torch.bfloat16,
+            param_dtype=PrecisionType.to_dtype(engine_config.mp_param_dtype),
+            reduce_dtype=PrecisionType.to_dtype(engine_config.mp_reduce_dtype),
+            output_dtype=PrecisionType.to_dtype(engine_config.mp_output_dtype),
             cast_forward_inputs=True,
         )
 
@@ -92,6 +94,9 @@ def build_model_wrapper_from_engine_config(engine_config, world_size):
             pp_size=engine_config.pp_size,
             cp_size=engine_config.cp_size,
             ep_size=engine_config.ep_size,
+            dp_replicate_size=engine_config.dp_replicate_size,
+            sequence_parallel=engine_config.sequence_parallel,
+            defer_fsdp_grad_sync=engine_config.defer_fsdp_grad_sync,
             activation_checkpointing=engine_config.activation_checkpointing,
             world_size=world_size,
             mp_policy=mp_policy,
@@ -152,8 +157,40 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
         model_config.path, trust_remote_code=model_config.trust_remote_code
     )
     _arch = (getattr(_cfg, "architectures", None) or [""])[0].lower()
-    if "qwen" in _arch or "llama" in _arch:
+    if engine_config.ep_size <= 1 and ("qwen" in _arch or "llama" in _arch):
         kwargs["force_hf"] = True
+
+    # Create MoE BackendConfig
+    if engine_config.use_te_backend or engine_config.ep_size > 1:
+        from nemo_automodel.components.models.common import BackendConfig
+
+        backend_config = BackendConfig(
+            attn="te" if engine_config.use_te_backend else engine_config.attn_implementation,
+            linear="te" if engine_config.use_te_backend else "torch",
+            rms_norm="te" if engine_config.use_te_backend else "torch",
+            rope_fusion=engine_config.rope_fusion,
+            enable_deepep=engine_config.enable_deepep,
+            fake_balanced_gate=engine_config.fake_balanced_gate,
+            gate_precision=engine_config.gate_precision,
+            enable_hf_state_dict_adapter=engine_config.enable_hf_state_dict_adapter,
+            enable_fsdp_optimizations=engine_config.enable_fsdp_optimizations,
+        )
+        kwargs["backend"] = backend_config
+
+    # Create parallelize_fn for MoE EP sharding.
+    if engine_config.ep_size > 1:
+        from functools import partial
+        from nemo_automodel.components.moe.parallelizer import parallelize_model
+
+        parallelize_fn = partial(
+            parallelize_model,
+            activation_checkpointing=engine_config.activation_checkpointing,
+            ignore_router_for_ac=engine_config.ignore_router_for_ac,
+            reshard_after_forward=engine_config.reshard_after_forward,
+            lm_head_precision=engine_config.lm_head_precision,
+            wrap_outer_model=engine_config.wrap_outer_model,
+        )
+        kwargs["parallelize_fn"] = parallelize_fn
 
     # Pass TP/CP sizes so from_pretrained() can apply internal overrides.
     kwargs["tp_size"] = engine_config.tp_size
