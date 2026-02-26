@@ -159,7 +159,8 @@ def distillation_loss(
         compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
     )
     if loss_config.loss_max_clamp is not None:
-        distillation_losses = distillation_losses.clamp_max(loss_config.loss_max_clamp)
+        # clamping min is for k1 loss which can be negative
+        distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
 
     if loss_config.use_policy_gradient:
         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
@@ -298,4 +299,8 @@ def compute_distillation_loss_reverse_kl_estimator(
     distillation_losses = kl_penalty(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=loss_config.loss_mode
     )
-    return distillation_losses, {}
+    # Since k1 can be negative, log the mean absolute loss.
+    metrics = {
+        "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask].abs().mean()),
+    }
+    return distillation_losses, metrics
