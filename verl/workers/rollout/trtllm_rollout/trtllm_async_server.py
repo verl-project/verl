@@ -149,7 +149,8 @@ class TRTLLMHttpServer:
             "enable_sleep": self.config.enable_sleep_mode,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
-            "ray_worker_nsight_options": self.nsight_options,
+            # TODO: add nsight options back, mute it for CI
+            # "ray_worker_nsight_options": self.nsight_options,
             **engine_kwargs,
         }
 
@@ -242,7 +243,9 @@ class TRTLLMHttpServer:
         """Report GPU device UUIDs from TRT-LLM workers."""
         return await self.llm.collective_rpc(
             "report_device_id",
-            target_ranks=[0],
+            # TODO: mute target_ranks for CI
+            #target_ranks=[0],
+            unique_reply_rank=0,
         )
 
     async def start_profile(self, **kwargs):
