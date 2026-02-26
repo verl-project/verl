@@ -17,6 +17,7 @@ import os
 from contextlib import nullcontext
 from functools import partial
 from itertools import chain
+from typing import Optional
 
 import torch
 from codetiming import Timer
@@ -428,7 +429,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     NOTE: ActorRolloutRefWorker no longer support spmd mode and run native server mode.
     """
 
-    def __init__(self, config: DictConfig, role: str, distillation_config: DistillationConfig, **kwargs):
+    def __init__(
+        self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
+    ):
         Worker.__init__(self)
         self.config = config
         self.distillation_config = distillation_config
