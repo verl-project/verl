@@ -769,6 +769,7 @@ class vLLMHttpServer:
     async def shutdown(self):
         pass
 
+
 _rollout_worker_actor_cls = ray.remote(ServerAdapter)
 
 
