@@ -53,7 +53,7 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def _get_rollout_and_model_config(config: DictConfig) -> RolloutConfig:
+def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictConfig]:
     # TODO: backward compatibility, remove this once we switch to new trainer.
     if config.get("actor_rollout_ref"):
         return config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
