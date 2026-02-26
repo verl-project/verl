@@ -49,17 +49,7 @@ LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-cosine}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.35}
 UPDATE_WEIGHTS_BUCKET_MB=${UPDATE_WEIGHTS_BUCKET_MB:-4096}
 
-# FSDP optimizer uses `min_lr_ratio` (not `min_lr`) and `lr_scheduler_type` (not `lr_decay_style`).
-# Default to MIN_LR / ACTOR_LR when MIN_LR_RATIO is not explicitly provided.
-MIN_LR_RATIO=${MIN_LR_RATIO:-}
-if [[ -z "${MIN_LR_RATIO}" ]]; then
-    MIN_LR_RATIO=$(python3 - <<PY
-actor_lr = float("${ACTOR_LR}")
-min_lr = float("${MIN_LR}")
-print(min_lr / actor_lr if actor_lr > 0 else 0.0)
-PY
-)
-fi
+MIN_LR_RATIO=${MIN_LR_RATIO:-0.1}
 
 python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/config \
     --config-name='ppo_trainer.yaml' \
