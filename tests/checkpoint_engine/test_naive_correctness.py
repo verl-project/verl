@@ -27,8 +27,10 @@ from verl.single_controller.ray import (
     RayWorkerGroup,
 )
 from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name
 from verl.utils.tokenizer import hf_tokenizer
+from verl.workers.config import CheckpointEngineConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker
 
 
@@ -97,8 +99,11 @@ def test_server_adapter_colocated_weight_update(init_config):
     )
 
     # 2. create CheckpointEngineManager
+    checkpoint_engine_config: CheckpointEngineConfig = omega_conf_to_dataclass(
+        init_config.actor_rollout_ref.rollout.checkpoint_engine
+    )
     checkpoint_manager = CheckpointEngineManager(
-        backend=init_config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        config=checkpoint_engine_config,
         trainer=actor_rollout_wg,
         replicas=agent_loop_manager.rollout_replicas,
     )
