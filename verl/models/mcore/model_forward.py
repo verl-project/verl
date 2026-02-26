@@ -122,22 +122,33 @@ def model_forward_gen(vision_model: bool = False):
             When using the bshd format, we have to add paddings to the input_ids to meet the longest sequence length, 
             so it is recommended to disable dynamic batch size and set batch size to 1
             """
-            assert not vision_model, "vision model does not support bshd format"
             assert fp8 is None, "fp8 is not supported for bshd format yet"
 
             batch_size, sequence_length = attention_mask.shape[:2]
+            position_ids_for_preprocess = (
+                torch.arange(sequence_length, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+                if vision_model
+                else position_ids
+            )
+            pre_process_for_bshd = True if vision_model else pre_process
             new_input_ids, new_attention_mask, new_position_ids = preprocess_bshd(
-                input_ids, attention_mask, position_ids, sequence_parallel=sp, pre_process=pre_process
+                input_ids,
+                attention_mask,
+                position_ids_for_preprocess,
+                sequence_parallel=sp,
+                pre_process=pre_process_for_bshd,
             )
             output_orig = model(
                 input_ids=new_input_ids,
-                position_ids=new_position_ids,
+                position_ids=None if vision_model else new_position_ids,
                 attention_mask=new_attention_mask,
                 **model_kwargs,
             )
             if post_process and logits_processor is not None:
                 args = {
-                    k: preprocess_bshd(v, attention_mask, position_ids, sequence_parallel=sp, pre_process=True)[0]
+                    k: preprocess_bshd(
+                        v, attention_mask, position_ids_for_preprocess, sequence_parallel=sp, pre_process=True
+                    )[0]
                     for k, v in logits_processor_args.items()
                 }
                 output_dict = logits_processor(output_orig, **args)
