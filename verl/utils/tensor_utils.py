@@ -13,10 +13,15 @@
 # limitations under the License.
 """Utility functions for tensor operations."""
 
+import logging
+import os
 from dataclasses import dataclass
 from functools import reduce
 
 import torch
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @dataclass
@@ -58,9 +63,6 @@ def compute_weight_chunks(
     Raises:
         ValueError: If a single slice is larger than bucket_size.
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
 
     weight_size = weight.nbytes
     if weight_size <= bucket_size:
