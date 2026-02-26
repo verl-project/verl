@@ -63,7 +63,8 @@ def print_assembled_message(tokenizer, message_list, input_ids, loss_mask, attn_
     sep = "\n\n"
     str = f"tokenized entire message:\n{tokenized}"
     str += sep
-    str += f"tokenized seperately    :\n{tokenizer.decode(input_ids.tolist() if hasattr(input_ids, 'tolist') else input_ids)}"
+    decoded_ids = input_ids.tolist() if hasattr(input_ids, "tolist") else input_ids
+    str += f"tokenized seperately    :\n{tokenizer.decode(decoded_ids)}"
 
     logger.debug(str)
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,7 +28,6 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed
 from nemo_automodel.components.checkpoint.checkpointing import Checkpointer, CheckpointingConfig
-from transformers.utils import TRANSFORMERS_CACHE
 from nemo_automodel.components.optim.scheduler import OptimizerParamScheduler
 from nemo_automodel.components.training.utils import (
     prepare_for_final_backward,
@@ -37,6 +36,7 @@ from nemo_automodel.components.training.utils import (
 )
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from transformers.utils import TRANSFORMERS_CACHE
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig

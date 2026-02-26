@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -77,8 +77,8 @@ def build_model_wrapper_from_engine_config(engine_config, world_size):
     strategy = engine_config.distributed_strategy
 
     if strategy == "fsdp2":
-        from torch.distributed.fsdp import MixedPrecisionPolicy
         from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
+        from torch.distributed.fsdp import MixedPrecisionPolicy
 
         from verl.utils.torch_dtypes import PrecisionType
 
@@ -153,9 +153,8 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
 
     # Force use of HF model implementation for Qwen/Llama models.
     from transformers import AutoConfig
-    _cfg = AutoConfig.from_pretrained(
-        model_config.path, trust_remote_code=model_config.trust_remote_code
-    )
+
+    _cfg = AutoConfig.from_pretrained(model_config.path, trust_remote_code=model_config.trust_remote_code)
     _arch = (getattr(_cfg, "architectures", None) or [""])[0].lower()
     if engine_config.ep_size <= 1 and ("qwen" in _arch or "llama" in _arch):
         kwargs["force_hf"] = True
@@ -180,6 +179,7 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
     # Create parallelize_fn for MoE EP sharding.
     if engine_config.ep_size > 1:
         from functools import partial
+
         from nemo_automodel.components.moe.parallelizer import parallelize_model
 
         parallelize_fn = partial(
@@ -199,6 +199,7 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
     kwargs["attn_implementation"] = engine_config.attn_implementation
 
     from verl.utils.torch_dtypes import PrecisionType
+
     kwargs["torch_dtype"] = PrecisionType.to_dtype(engine_config.model_dtype)
 
     model = NeMoAutoModelForCausalLM.from_pretrained(
