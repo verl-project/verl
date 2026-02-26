@@ -244,7 +244,7 @@ class TRTLLMHttpServer:
         return await self.llm.collective_rpc(
             "report_device_id",
             # TODO: mute target_ranks for CI
-            #target_ranks=[0],
+            # target_ranks=[0],
             unique_reply_rank=0,
         )
 

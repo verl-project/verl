@@ -737,7 +737,7 @@ global_profiler:
         cuda-memory-usage: 'true'
         cuda-graph-trace: graph
         capture-range: cudaProfilerApi
-        capture-range-end: null
+        capture-range-end: repeat-shutdown:6
         kill: none
     torch_memory:
       trace_alloc_max_entries: 100000
