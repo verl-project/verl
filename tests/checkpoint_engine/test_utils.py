@@ -31,12 +31,13 @@ from verl.workers.rollout import BaseRollout, RolloutReplica
 class TrainingWorkerTest(TrainingWorker):
     def __init__(self, config: TrainingWorkerConfig, checkpoint_engine_config: CheckpointEngineConfig) -> None:
         super().__init__(config)
+
         backend = checkpoint_engine_config.backend
         bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
         engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
-        self.checkpoint_engine = CheckpointEngineRegistry.new(
-            backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
-        )
+        if torch.distributed.get_rank() == 0:
+            engine_kwargs["is_master"] = True
+        self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):
@@ -107,9 +108,11 @@ class MockReplica(RolloutReplica):
 
 
 class CheckpointEngineWorkerTest(CheckpointEngineWorker):
-    def __init__(self, rollout_config: RolloutConfig, model_config: HFModelConfig, check_allclose: bool = True) -> None:
+    def __init__(
+        self, rollout_config: RolloutConfig, model_config: HFModelConfig, check_allclose: bool = True, *args, **kwargs
+    ) -> None:
         server_adapter = MockServerAdapter(rollout_config, model_config, check_allclose)
-        super().__init__(rollout_config, model_config, server_adapter)
+        super().__init__(rollout_config, model_config, server_adapter, *args, **kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def check_weights(self):
