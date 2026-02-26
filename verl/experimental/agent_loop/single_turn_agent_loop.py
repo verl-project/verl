@@ -30,10 +30,10 @@ class SingleTurnAgentLoop(AgentLoopBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
-        self.response_length = self.config.actor_rollout_ref.rollout.response_length
+        self.prompt_length = self.rollout_config.prompt_length
+        self.response_length = self.rollout_config.response_length
 
-        tool_config_path = self.config.data.tool_config_path
+        tool_config_path = self.rollout_config.multi_turn.tool_config_path
         tool_list = initialize_tools_from_config(tool_config_path) if tool_config_path else []
         self.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
 

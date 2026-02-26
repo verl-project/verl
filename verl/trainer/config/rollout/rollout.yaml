@@ -7,6 +7,12 @@ name: ???
 # sync: LLM, async: AsyncLLM
 mode: async
 
+# Number of nodes for standalone rollout server, must be > 0 in one-step-off/fully async training.
+nnodes: 0
+
+# Number of GPUs per node for rollout server.
+n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
+
 # Sampling temperature for rollout.
 temperature: 1.0
 
@@ -272,6 +278,12 @@ trace:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.TraceConfig
+
+  # Project name for experiment tracking (e.g., wandb)
+  project_name: ${oc.select:trainer.project_name,null}
+
+  # Experiment name for run identification in tracking tools
+  experiment_name: ${oc.select:trainer.experiment_name,null}
 
   # trace backend, support mlflow, weave
   backend: null

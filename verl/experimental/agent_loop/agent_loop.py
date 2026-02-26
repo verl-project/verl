@@ -35,10 +35,9 @@ from verl.experimental.agent_loop.prometheus_utils import update_prometheus_conf
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
-from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.chat_template import initialize_system_prompt
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
-from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.rollout_trace import (
@@ -47,6 +46,7 @@ from verl.utils.rollout_trace import (
     rollout_trace_op,
 )
 from verl.utils.transferqueue_utils import tqbridge
+from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
@@ -60,15 +60,17 @@ class AsyncLLMServerManager:
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
     """
 
-    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], max_cache_size: int = 10000):
+    def __init__(
+        self, rollout_config: RolloutConfig, server_handles: list[ray.actor.ActorHandle], max_cache_size: int = 10000
+    ):
         """Initialize the AsyncLLMServerManager.
 
         Args:
-            config (DictConfig): YAML config.
+            rollout_config (RolloutConfig): rollout config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
             max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.
         """
-        self.config = config
+        self.rollout_config = rollout_config
         self.server_handles = server_handles
         random.shuffle(self.server_handles)
 
@@ -190,35 +192,34 @@ class DictConfigWrap:
 
 class AgentLoopBase(ABC):
     """An agent loop takes an input message, chat with OpenAI compatible LLM server and interact with various
-    environments."""
+    environments.
+
+    Args:
+        rollout_config (RolloutConfig): rollout config.
+        server_manager (AsyncLLMServerManager): OpenAI compatible LLM server manager.
+        tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
+        processor (AutoProcessor): Processor for process messages.
+        dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
+        data_config (DictConfigWrap): Dataset config.
+    """
 
     def __init__(
         self,
-        trainer_config: DictConfigWrap,
+        rollout_config: DictConfigWrap,
         server_manager: AsyncLLMServerManager,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor,
         dataset_cls: type[RLHFDataset],
-        dataset_config: DictConfigWrap,
+        data_config: DictConfigWrap,
         **kwargs,
     ):
-        """Initialize agent loop, each sample will have its own loop instance.
-
-        Args:
-            trainer_config (DictConfigWrap): trainer config.
-            server_manager (AsyncLLMServerManager): OpenAI compatible LLM server manager.
-            tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
-            processor (AutoProcessor): Processor for process messages.
-            dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
-            dataset_config (DictConfigWrap): Dataset config.
-        """
-        self.config = trainer_config.config
+        self.rollout_config = rollout_config.config
         self.server_manager = server_manager
         self.tokenizer = tokenizer
         self.processor = processor
         self.dataset_cls = dataset_cls
-        self.dataset_config = dataset_config.config
-        self.apply_chat_template_kwargs = self.dataset_config.get("apply_chat_template_kwargs", {})
+        self.data_config = data_config.config
+        self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
         self.system_prompt = initialize_system_prompt(self.tokenizer, **self.apply_chat_template_kwargs)
         self.loop = get_event_loop()
 
@@ -234,7 +235,7 @@ class AgentLoopBase(ABC):
         multi_modal_data = {}
         if self.processor is not None:
             images, videos = await self.dataset_cls.process_vision_info(
-                messages, image_patch_size=self.processor.image_processor.patch_size, config=self.dataset_config
+                messages, image_patch_size=self.processor.image_processor.patch_size, config=self.data_config
             )
             if images is not None:
                 multi_modal_data["images"] = images
@@ -342,50 +343,53 @@ def register(agent_name: str):
 
 
 class AgentLoopWorker:
-    """Agent loop worker takes a batch of messages and run each message in an agent loop."""
+    """Agent loop worker takes a batch of messages and run each message in an agent loop.
+
+    Args:
+        rollout_config (RolloutConfig): rollout config.
+        model_config (HFModelConfig): model config.
+        data_config (DictConfig): data config.
+        server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
+        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+    """
 
     def __init__(
         self,
-        config: DictConfig,
+        rollout_config: RolloutConfig,
+        model_config: HFModelConfig,
+        data_config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        """Initialize agent loop manager.
-        Args:
-            config (DictConfig): YAML config.
-            server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-        """
-        self.config = config
+        self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
+        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
+        self.data_config = data_config
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(config, server_handles)
+            self.server_manager = AsyncLLMServerManager(self.rollout_config, server_handles)
 
-        self.dataset_cls = get_dataset_class(config.data)
+        self.dataset_cls = get_dataset_class(data_config)
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
-        model_path = config.actor_rollout_ref.model.path
-        self.model_name = "/".join(model_path.split("/")[-2:])
-        local_path = copy_to_local(config.actor_rollout_ref.model.path)
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
-        self.processor = hf_processor(local_path, trust_remote_code=True)
+        self.tokenizer = self.model_config.tokenizer
+        self.processor = self.model_config.processor
 
-        agent_loop_config_path = config.actor_rollout_ref.rollout.agent.agent_loop_config_path
+        agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
             agent_loop_configs = OmegaConf.load(resolved_path)
             for agent_loop_config in agent_loop_configs:
                 _agent_loop_registry[agent_loop_config.name] = agent_loop_config
-        if self.config.actor_rollout_ref.model.get("custom_chat_template", None) is not None:
-            if self.processor is not None:
-                self.processor.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
-            self.tokenizer.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
+        if self.model_config.get("custom_chat_template", None) is not None:
+            if self.model_config.processor is not None:
+                self.model_config.processor.chat_template = self.model_config.custom_chat_template
+            self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
 
-        trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
+        trace_config = self.rollout_config.trace
         RolloutTraceConfig.init(
-            self.config.trainer.project_name,
-            self.config.trainer.experiment_name,
+            self.rollout_config.trace.project_name,
+            self.rollout_config.trace.experiment_name,
             trace_config.get("backend"),
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
@@ -413,7 +417,7 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
-        config = self.config.actor_rollout_ref.rollout
+        config = self.rollout_config
         sampling_params = dict(
             temperature=config.temperature,
             top_p=config.top_p,
@@ -497,12 +501,12 @@ class AgentLoopWorker:
             agent_loop_config = _agent_loop_registry[agent_name]
             agent_loop = hydra.utils.instantiate(
                 config=agent_loop_config,
-                trainer_config=DictConfigWrap(config=self.config),
+                rollout_config=DictConfigWrap(self.rollout_config),
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 dataset_cls=self.dataset_cls,
-                dataset_config=DictConfigWrap(self.config.data),
+                data_config=DictConfigWrap(self.data_config),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, **kwargs)
@@ -536,7 +540,7 @@ class AgentLoopWorker:
         prompt_output = self.tokenizer.pad(
             {"input_ids": output.prompt_ids},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.prompt_length,
+            max_length=self.rollout_config.prompt_length,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -548,7 +552,7 @@ class AgentLoopWorker:
         response_output = self.tokenizer.pad(
             {"input_ids": output.response_ids},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.response_length,
+            max_length=self.rollout_config.response_length,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -559,7 +563,7 @@ class AgentLoopWorker:
         response_mask_output = self.tokenizer.pad(
             {"input_ids": output.response_mask},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.response_length,
+            max_length=self.rollout_config.response_length,
             return_tensors="pt",
             return_attention_mask=False,
         )
@@ -568,7 +572,7 @@ class AgentLoopWorker:
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.response_logprobs)
+            pad_size = self.rollout_config.response_length - len(output.response_logprobs)
             response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
@@ -846,67 +850,77 @@ async def get_trajectory_info(step, index, validate):
 
 
 class AgentLoopManager:
-    """Agent loop manager that manages a group of agent loop workers."""
+    """Agent loop manager that manages a group of agent loop workers.
+
+    - if worker_group is not None, rollout server is in hybrid mode, share GPUs with training engine.
+    - otherwise, rollout server is in standalone mode, use separate GPUs, e.g., one-step-off/fully async training.
+
+    Args:
+        rollout_config (RolloutConfig): rollout config.
+        model_config (HFModelConfig): model config.
+        data_config (DictConfig): data config.
+        worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
+        rollout_resource_pool (RayResourcePool): Resource pool for hybrid mode, only used by TensorRT-LLM.
+        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+    """
 
     def __init__(
         self,
-        config: DictConfig,
+        rollout_config: RolloutConfig,
+        model_config: HFModelConfig,
+        data_config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        """Initialize agent loop manager.
+        assert worker_group is not None or rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
-        Args:
-            config (DictConfig): trainer config.
-            worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
-            rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
-            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-        """
-        self.config = config
+        self.rollout_config = rollout_config
+        self.model_config = model_config
+        self.data_config = data_config
         self.worker_group = worker_group
+        self.rollout_resource_pool = rollout_resource_pool
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
-            self.rollout_replica_class = get_rollout_replica_class(self.config.actor_rollout_ref.rollout.name)
+            self.rollout_replica_class = get_rollout_replica_class(self.rollout_config.name)
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
-        self._initialize_llm_servers(rollout_resource_pool)
+        self._initialize_llm_servers()
         self._init_agent_loop_workers()
 
-    def _initialize_llm_servers(self, rollout_resource_pool: RayResourcePool):
+    def _initialize_llm_servers(self):
         rollout_world_size = (
-            self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-            * self.config.actor_rollout_ref.rollout.data_parallel_size
-            * self.config.actor_rollout_ref.rollout.pipeline_model_parallel_size
+            self.rollout_config.tensor_model_parallel_size
+            * self.rollout_config.data_parallel_size
+            * self.rollout_config.pipeline_model_parallel_size
         )
         world_size = (
             self.worker_group.world_size
             if self.worker_group
-            else self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+            else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
         )
         num_replicas = world_size // rollout_world_size
 
-        rollout_config = self.config.actor_rollout_ref.rollout
-        model_config = self.config.actor_rollout_ref.model
         self.rollout_replicas = [
             self.rollout_replica_class(
                 replica_rank=replica_rank,
-                config=rollout_config,
-                model_config=model_config,
-                gpus_per_node=self.config.trainer.n_gpus_per_node,
+                config=self.rollout_config,
+                model_config=self.model_config,
+                gpus_per_node=self.rollout_config.n_gpus_per_node,
             )
             for replica_rank in range(num_replicas)
         ]
 
-        if self.worker_group and rollout_config.name != "trtllm":
+        if self.worker_group and self.rollout_config.name != "trtllm":
             self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
-        elif self.worker_group and rollout_config.name == "trtllm":
+        # TODO: unify trtllm to init_hybrid
+        elif self.worker_group and self.rollout_config.name == "trtllm":
             self._run_all(
                 [
-                    server.init_hybrid_colocated(self.worker_group, rollout_resource_pool)
+                    server.init_hybrid_colocated(self.worker_group, self.rollout_resource_pool)
                     for server in self.rollout_replicas
                 ]
             )
@@ -919,14 +933,14 @@ class AgentLoopManager:
         print(f"AgentLoopManager: {self.server_addresses}")
 
         # Update Prometheus configuration with server addresses
-        if rollout_config.prometheus.enable:
-            if rollout_config.disable_log_stats:
+        if self.rollout_config.prometheus.enable:
+            if self.rollout_config.disable_log_stats:
                 raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
-            update_prometheus_config(rollout_config.prometheus, self.server_addresses, rollout_config.name)
+            update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
 
     def _init_agent_loop_workers(self):
         self.agent_loop_workers = []
-        num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+        num_workers = self.rollout_config.agent.num_workers
 
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         for i in range(num_workers):
@@ -938,7 +952,13 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
+                ).remote(
+                    self.rollout_config,
+                    self.model_config,
+                    self.data_config,
+                    self.server_handles,
+                    self.reward_loop_worker_handles,
+                )
             )
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
