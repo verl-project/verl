@@ -319,6 +319,8 @@ class MegatronEngine(BaseEngine):
         if self.engine_config.forward_only:
             self.optimizer = None
             self.lr_scheduler = None
+            self.to(device="cpu", model=self._is_offload_param, optimizer=False, grad=False)
+            log_gpu_memory_usage("After offload model during init (forward_only)", logger=logger)
             return
 
         self.optimizer = self._build_optimizer()
