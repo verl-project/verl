@@ -9,13 +9,6 @@ defaults:
 trainer:
   use_legacy_worker_impl: disable
 
-# config for the rollout (only for resource isolation)
-rollout:
-  # Number of nodes used in the rollout
-  nnodes: 1
-  # Number of GPUs per node
-  n_gpus_per_node: 8
-
 # To adapt to the current logic of AgentLoopManager
 actor_rollout_ref:
   rollout:

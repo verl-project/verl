@@ -61,5 +61,5 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \
     trainer.total_epochs=2 \
     trainer.nnodes="${NNODES}" \
     trainer.n_gpus_per_node="${n_gpus_training}" \
-    rollout.nnodes="${NNODES}" \
-    rollout.n_gpus_per_node="${n_gpus_rollout}" $@
+    actor_rollout_ref.rollout.nnodes="${NNODES}" \
+    actor_rollout_ref.rollout.n_gpus_per_node="${n_gpus_rollout}" $@

@@ -90,6 +90,8 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.nnodes=1
+    actor_rollout_ref.rollout.n_gpus_per_node=${n_gpus_rollout}
     actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
     reward.reward_manager.name=dapo
@@ -109,8 +111,6 @@ common_params=(
     trainer.resume_mode=disable
     trainer.nnodes=1
     trainer.n_gpus_per_node=${n_gpus_training}
-    rollout.nnodes=1
-    rollout.n_gpus_per_node=${n_gpus_rollout}
 
 )
 
