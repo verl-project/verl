@@ -30,8 +30,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-@register_cluster_parser("nvtx")
-class NVtxClusterParser(BaseClusterParser):
+@register_cluster_parser("torch")
+class TorchClusterParser(BaseClusterParser):
     def __init__(self, params) -> None:
         super().__init__(params)
 
@@ -43,7 +43,7 @@ class NVtxClusterParser(BaseClusterParser):
             data = json.load(f)
 
         if data is None or not data:
-            logger.warning(f"Role {role}: No NVtx events found in json.gz")
+            logger.warning(f"Role {role}: No events found in json.gz")
             return events
 
         process_id = None
@@ -111,8 +111,8 @@ class NVtxClusterParser(BaseClusterParser):
         for root, dirs, files in os.walk(input_path):
             for file_name in files:
                 if (
-                    file_name.endswith(Constant.NVTX_PROFILER_SUFFIX)
-                    and Constant.NVTX_PROFILER_ASYNC_LLM not in file_name
+                    file_name.endswith(Constant.TORCH_PROFILER_SUFFIX)
+                    and Constant.TORCH_PROFILER_ASYNC_LLM not in file_name
                 ):
                     path = os.path.join(root, file_name)
                     nv_files.append({"role": Path(path).parent.name, "path": path})
@@ -156,7 +156,7 @@ class NVtxClusterParser(BaseClusterParser):
 
             for profiler_data_path in file_list:
                 data_path_dict = {
-                    Constant.RANK_ID: -1,  # rank_id for nvtx will be loaded from json file.
+                    Constant.RANK_ID: -1,  # rank_id for torch will be loaded from json file.
                     Constant.ROLE: task_role,
                     Constant.PROFILER_DATA_PATH: "",
                 }

@@ -15,12 +15,12 @@
 import argparse
 
 import mstx_parser  # register built-in parsers via decorators
-import nvtx_parser
+import torch_parser
 from parser import get_cluster_parser_cls
 from schema import Constant
 from visualizer import get_cluster_visualizer_fn
 
-__all__ = ["nvtx_parser", "mstx_parser"]
+__all__ = ["torch_parser", "mstx_parser"]
 
 
 def main():
