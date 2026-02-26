@@ -13,11 +13,14 @@
 # limitations under the License.
 
 import asyncio
+import concurrent.futures
+import copy
 import importlib
 import logging
 import os
 import sys
 import threading
+import time
 from enum import Enum
 
 from omegaconf import OmegaConf
@@ -79,7 +82,7 @@ def get_tool_class(cls_name):
     return tool_cls
 
 
-def initialize_tools_from_config(tools_config_file):
+def initialize_tools_from_config(tools_config_file, mcp_init_timeout_s: float | None = None):
     """Initialize tools from config file.
 
     Supports both NATIVE and MCP tool types. For MCP tools, a temporary event loop
@@ -105,7 +108,13 @@ def initialize_tools_from_config(tools_config_file):
         """Run coroutine in the MCP event loop."""
         loop = get_mcp_event_loop()
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
-        return future.result()
+        try:
+            return future.result(timeout=mcp_init_timeout_s)
+        except concurrent.futures.TimeoutError as e:
+            future.cancel()
+            raise TimeoutError(
+                f"MCP tool initialization timed out after {mcp_init_timeout_s}s for config {tools_config_file}"
+            ) from e
 
     try:
         for tool_config in tools_config.tools:
@@ -140,3 +149,69 @@ def initialize_tools_from_config(tools_config_file):
             tmp_event_loop.close()
 
     return tool_list
+
+
+class ToolListCache:
+    """Process-local cache for initialized tools keyed by tool config path."""
+
+    _cache: dict[str, list] = {}
+    _lock = threading.Lock()
+
+    @classmethod
+    def _get_init_policy(cls) -> tuple[int, float, float, float]:
+        retries = int(os.getenv("VERL_TOOL_CACHE_INIT_RETRIES", "3"))
+        timeout_s = float(os.getenv("VERL_TOOL_CACHE_INIT_TIMEOUT_S", "30"))
+        backoff_base_s = float(os.getenv("VERL_TOOL_CACHE_INIT_BACKOFF_BASE_S", "1"))
+        backoff_max_s = float(os.getenv("VERL_TOOL_CACHE_INIT_BACKOFF_MAX_S", "30"))
+        return max(1, retries), max(0.1, timeout_s), max(0.0, backoff_base_s), max(0.0, backoff_max_s)
+
+    @classmethod
+    def get_tool_list(cls, tools_config_file: str | None) -> list:
+        if not tools_config_file:
+            return []
+
+        with cls._lock:
+            cached = cls._cache.get(tools_config_file)
+            if cached is None:
+                retries, timeout_s, backoff_base_s, backoff_max_s = cls._get_init_policy()
+                logger.debug(
+                    "[ToolListCache] cache miss for %s, initializing tools (retries=%s, timeout_s=%.2f)",
+                    tools_config_file,
+                    retries,
+                    timeout_s,
+                )
+                last_error = None
+                for attempt in range(1, retries + 1):
+                    try:
+                        cached = initialize_tools_from_config(tools_config_file, mcp_init_timeout_s=timeout_s)
+                        break
+                    except Exception as e:
+                        last_error = e
+                        if attempt >= retries:
+                            raise RuntimeError(
+                                f"[ToolListCache] failed to initialize tools for {tools_config_file} "
+                                f"after {retries} attempts"
+                            ) from e
+
+                        backoff_s = min(backoff_max_s, backoff_base_s * (2 ** (attempt - 1)))
+                        logger.warning(
+                            "[ToolListCache] init attempt %s/%s failed for %s: %s. Retrying in %.2fs",
+                            attempt,
+                            retries,
+                            tools_config_file,
+                            repr(e),
+                            backoff_s,
+                        )
+                        if backoff_s > 0:
+                            time.sleep(backoff_s)
+
+                if cached is None:
+                    # Defensive fallback: should be unreachable due to RuntimeError above.
+                    raise RuntimeError(
+                        f"[ToolListCache] initialization produced no tool list for {tools_config_file}"
+                    ) from last_error
+                cls._cache[tools_config_file] = cached
+            else:
+                logger.debug(f"[ToolListCache] cache hit for {tools_config_file}")
+
+            return copy.deepcopy(cached)
