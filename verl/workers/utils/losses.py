@@ -63,7 +63,7 @@ def ppo_loss(
     dp_group=None,
 ):
     distillation_enabled = distillation_config.enabled
-    loss_config: DistillationLossConfig = distillation_config.distillation_loss
+    distillation_loss_config: DistillationLossConfig = distillation_config.distillation_loss
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
@@ -92,12 +92,12 @@ def ppo_loss(
 
     response_mask = data["response_mask"].to(bool)
     loss_agg_mode = config.loss_agg_mode
+    old_log_prob = data["old_log_probs"]
+    rollout_is_weights = data.get("rollout_is_weights", None)
 
     # compute policy loss
-    if not distillation_enabled or loss_config.use_policy_loss:
-        old_log_prob = data["old_log_probs"]
+    if not distillation_enabled or distillation_loss_config.use_task_rewards:
         advantages = data["advantages"]
-        rollout_is_weights = data.get("rollout_is_weights", None)
 
         loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
@@ -123,7 +123,7 @@ def ppo_loss(
         policy_loss = 0
 
     # add entropy loss
-    if entropy is not None and (not distillation_enabled or loss_config.use_policy_loss):
+    if entropy is not None:
         entropy_loss = agg_loss(
             loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
         )
@@ -132,7 +132,7 @@ def ppo_loss(
         metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
 
     # add kl loss
-    if config.use_kl_loss and (not distillation_enabled or loss_config.use_policy_loss):
+    if config.use_kl_loss:
         ref_log_prob = data["ref_log_prob"]
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
@@ -151,13 +151,18 @@ def ppo_loss(
         )
         dist_loss, distillation_metrics = distillation_loss(
             inputs=distillation_inputs,
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
             response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
             config=config,
             distillation_config=distillation_config,
+            rollout_is_weights=rollout_is_weights,
         )
         metrics.update(distillation_metrics)
-        distillation_loss_coef = loss_config.distillation_loss_coef if loss_config.use_policy_loss else 1.0
+        distillation_loss_coef = (
+            distillation_loss_config.distillation_loss_coef if distillation_loss_config.use_task_rewards else 1.0
+        )
         policy_loss += dist_loss * distillation_loss_coef
         metrics["distillation/loss"] = Metric(value=dist_loss, aggregation=metric_aggregation)
 

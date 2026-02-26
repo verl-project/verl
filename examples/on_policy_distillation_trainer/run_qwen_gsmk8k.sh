@@ -19,14 +19,18 @@ FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
 TEACHER_MODEL=Qwen2.5-3B-Instruct
 
+USE_POLICY_GRADIENT=False
 DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="forward_kl_topk"
+
+DISTILLATION_LOSS_MODE="k1"
+USE_POLICY_GRADIENT=True
 
 DISTILLATION_LOSS_MAX_CLAMP=10.0
 DISTILLATION_LOG_PROB_MIN_CLAMP=null
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
-EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
+EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-pg-${USE_POLICY_GRADIENT}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
@@ -84,10 +88,10 @@ DISTILLATION=(
     distillation.teacher_model.inference.enforce_eager=$ENFORCE_EAGER
     distillation.distillation_loss.loss_mode=$DISTILLATION_LOSS_MODE
     distillation.distillation_loss.topk=64
-    distillation.distillation_loss.use_policy_loss=False
+    distillation.distillation_loss.use_task_rewards=False
+    distillation.distillation_loss.use_policy_gradient=$USE_POLICY_GRADIENT
     distillation.distillation_loss.loss_max_clamp=$DISTILLATION_LOSS_MAX_CLAMP
     distillation.distillation_loss.log_prob_min_clamp=$DISTILLATION_LOG_PROB_MIN_CLAMP
-    # +distillation.teacher_model.inference.engine_kwargs.vllm.max_logprobs=64 # TODO
 )
 
 STUDENT=(

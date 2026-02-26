@@ -32,7 +32,7 @@ except ImportError:
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
-from verl.trainer.distillation import get_distillation_loss_settings, is_distillation_enabled
+from verl.trainer.distillation import is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, set_expandable_segments
@@ -47,7 +47,6 @@ from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.workers.config import (
     ActorConfig,
     DistillationConfig,
-    DistillationLossConfig,
     HFModelConfig,
     RolloutConfig,
     TrainingWorkerConfig,
@@ -524,10 +523,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             distillation_config = self.distillation_config
             if is_distillation_enabled(distillation_config):
                 distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
-                loss_config: DistillationLossConfig = distillation_config.distillation_loss
-                distillation_config.distillation_loss.loss_settings = get_distillation_loss_settings(
-                    loss_config.loss_mode
-                )
 
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",

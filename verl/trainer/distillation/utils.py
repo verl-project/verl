@@ -67,7 +67,9 @@ def prepare_distillation_inputs(
     loss_config: DistillationLossConfig = config.distillation_loss
     distillation_settings: DistillationLossSettings = loss_config.loss_settings
     if distillation_settings.use_estimator:
-        return DistillationLossInputs(student_log_probs=log_prob, teacher_log_probs=data["teacher_logprobs"])
+        return DistillationLossInputs(
+            student_log_probs=log_prob, teacher_log_probs=data["teacher_logprobs"].squeeze(-1)
+        )
     elif distillation_settings.use_topk:
         teacher_topk_log_probs = data["teacher_logprobs"]
         teacher_topk_ids = data["teacher_ids"]
