@@ -199,6 +199,27 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        # GDPO: extract per-dimension reward components from non_tensor_batch
+        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
+            gdpo_reward_keys = config.get("gdpo_reward_keys", None) if config is not None else None
+            assert gdpo_reward_keys, (
+                "GDPO requires 'algorithm.gdpo_reward_keys' listing the individual reward "
+                "component keys returned by compute_score (e.g. ['format_reward', 'accuracy_reward'])."
+            )
+            device = data.batch["token_level_rewards"].device
+            components = []
+            for key in gdpo_reward_keys:
+                assert key in data.non_tensor_batch, (
+                    f"GDPO reward key '{key}' not found in non_tensor_batch. "
+                    f"Available keys: {list(data.non_tensor_batch.keys())}. "
+                    f"Make sure your compute_score returns a dict containing '{key}'."
+                )
+                comp = data.non_tensor_batch[key]
+                components.append(torch.tensor(np.asarray(comp, dtype=np.float32), device=device))
+            adv_kwargs["reward_components"] = torch.stack(components, dim=-1)  # (bs, N_rewards)
+            gdpo_weights = config.get("gdpo_reward_weights", None) if config is not None else None
+            if gdpo_weights is not None:
+                adv_kwargs["reward_weights"] = list(gdpo_weights)
         # Add sum_pi_squared for Optimal Token Baseline
         if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
             # Check if sum_pi_squared is available
@@ -302,8 +323,6 @@ class RayPPOTrainer:
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
-
-        self.checkpoint_manager = None
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -838,9 +857,8 @@ class RayPPOTrainer:
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
 
-        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
-            config=checkpoint_engine_config,
+            backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
             trainer=self.actor_rollout_wg,
             replicas=self.async_rollout_manager.rollout_replicas,
         )
@@ -1567,6 +1585,16 @@ class RayPPOTrainer:
                 )
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                # GDPO per-component reward metrics
+                gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
+                if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
+                    for key in gdpo_reward_keys:
+                        if key in batch.non_tensor_batch:
+                            vals = np.asarray(batch.non_tensor_batch[key], dtype=np.float32)
+                            metrics[f"gdpo/{key}/mean"] = float(np.mean(vals))
+                            metrics[f"gdpo/{key}/std"] = float(np.std(vals))
+                            metrics[f"gdpo/{key}/max"] = float(np.max(vals))
+                            metrics[f"gdpo/{key}/min"] = float(np.min(vals))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()

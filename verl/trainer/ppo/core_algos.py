@@ -107,6 +107,7 @@ class AdvantageEstimator(str, Enum):
     GRPO_VECTORIZED = "grpo_vectorized"
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
     TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
+    GDPO = "gdpo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -355,6 +356,88 @@ def compute_grpo_vectorized_outcome_advantage(
             scalars = scores - mean_g[g]
         advantages = scalars.unsqueeze(-1) * response_mask
         return advantages, advantages
+
+
+@register_adv_est(AdvantageEstimator.GDPO)  # or simply: @register_adv_est("gdpo")
+def compute_gdpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    reward_components: torch.Tensor,
+    reward_weights: Optional[list[float]] = None,
+    epsilon: float = 1e-8,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    GDPO: Group reward-Decoupled Normalization Policy Optimization.
+
+    Instead of summing all reward dimensions first (like GRPO), GDPO normalizes
+    each reward dimension independently within each group before aggregation.
+    This prevents a dominant reward signal from drowning out weaker ones.
+
+    Mathematical formulation:
+        Step 1 – Group-wise decoupled normalization:
+            For each reward dimension k, within each group g:
+            A_k = (r_k - μ_group(r_k)) / (σ_group(r_k) + ε)
+
+        Step 2 – Weighted aggregation:
+            A_sum = Σ_k  w_k · A_k
+
+        Step 3 – Batch-level normalization:
+            A_final = (A_sum - μ_batch(A_sum)) / (σ_batch(A_sum) + ε)
+
+    Args:
+        token_level_rewards: (bs, response_length) – standard token-level rewards (unused
+            for advantage computation but kept for interface compatibility).
+        response_mask: (bs, response_length)
+        index: (bs,) – group id per sample (from ``uid``).
+        reward_components: (bs, N_rewards) – per-sample scores for each reward dimension.
+        reward_weights: Optional per-dimension weights.  ``None`` → equal weights.
+        epsilon: Numerical stability constant.
+        config: Algorithm configuration (optional).
+
+    Returns:
+        advantages: (bs, response_length)
+        returns:    (bs, response_length) – same as advantages (outcome-only).
+    """
+    with torch.no_grad():
+        bs, n_rewards = reward_components.shape
+
+        if reward_weights is not None:
+            weights = torch.tensor(reward_weights, dtype=torch.float32, device=reward_components.device)
+        else:
+            weights = torch.ones(n_rewards, dtype=torch.float32, device=reward_components.device)
+
+        # Step 1: Group-wise decoupled Z-score normalization
+        normalized = torch.zeros_like(reward_components)
+
+        id2indices = defaultdict(list)
+        for i in range(bs):
+            id2indices[index[i]].append(i)
+
+        for group_id, indices in id2indices.items():
+            idx_tensor = torch.tensor(indices, device=reward_components.device)
+            if len(indices) == 1:
+                normalized[indices[0]] = 0.0
+            else:
+                group_rewards = reward_components[idx_tensor]  # (group_size, n_rewards)
+                group_mean = group_rewards.mean(dim=0)
+                group_std = group_rewards.std(dim=0)
+                normalized[idx_tensor] = (group_rewards - group_mean) / (group_std + epsilon)
+
+        # Step 2: Weighted aggregation across reward dimensions
+        a_sum = (normalized * weights.unsqueeze(0)).sum(dim=-1)  # (bs,)
+
+        # Step 3: Batch-level normalization
+        batch_mean = a_sum.mean()
+        batch_std = a_sum.std()
+        a_final = (a_sum - batch_mean) / (batch_std + epsilon)
+
+        # Broadcast scalar advantage to token level
+        advantages = a_final.unsqueeze(-1) * response_mask
+
+    return advantages, advantages
 
 
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
