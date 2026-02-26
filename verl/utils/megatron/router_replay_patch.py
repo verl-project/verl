@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import inspect
+import types
 import warnings
 from enum import Enum
+from functools import wraps
 
 import torch
-import types
-import inspect
-from functools import wraps
 
 try:
     from megatron.core.transformer.moe.moe_utils import (
@@ -239,6 +239,7 @@ def _patched_topk_routing_with_score_function(
 
     return routing_probs, routing_map
 
+
 def _get_aux_loss_coeff(_self, aux_loss_type: str) -> float:
     """Return the aux loss coeff for the given auxiliary loss type.
     If the auxiliary loss type is not found, return 0.0.
@@ -254,12 +255,15 @@ def _get_aux_loss_coeff(_self, aux_loss_type: str) -> float:
             return 0.0
     return 0.0
 
+
 def _is_aux_loss_enabled(_self) -> bool:
     """Check if the auxiliary loss is enabled."""
     for aux_loss_type in ["aux_loss", "seq_aux_loss", "global_aux_loss"]:
         if _get_aux_loss_coeff(_self, aux_loss_type) > 0:
             return True
     return False
+
+
 def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     """Top-k routing function
 

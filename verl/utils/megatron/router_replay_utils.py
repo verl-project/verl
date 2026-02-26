@@ -17,11 +17,11 @@ Router Replay Utilities
 Utilities for handling router replay functionality in Megatron models.
 """
 
+import inspect
 import warnings
 from typing import Optional
 
 import torch
-import inspect
 
 try:
     from megatron.core.pipeline_parallel.utils import is_vp_first_stage, is_vp_last_stage
@@ -334,7 +334,7 @@ def get_current_rank_layer_info(tf_config, vp_rank=None):
 
     sig = inspect.signature(get_transformer_layer_offset)
 
-    if 'vp_stage' in sig.parameters:
+    if "vp_stage" in sig.parameters:
         offset = get_transformer_layer_offset(tf_config, vp_stage=vp_rank)
     else:
         offset = get_transformer_layer_offset(tf_config)
