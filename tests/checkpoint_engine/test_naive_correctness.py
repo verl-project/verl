@@ -57,6 +57,7 @@ def init_config() -> DictConfig:
     return config
 
 
+@pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
 @pytest.mark.asyncio
 def test_server_adapter_colocated_weight_update(init_config):
     ray.init(
