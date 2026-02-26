@@ -854,9 +854,6 @@ class RayPPOTrainer:
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
         enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
-        # teacher reward loop: streaming teacher logprob computation
-        enable_teacher_loop = self.use_teacher_policy
-
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         # same for teacher loop and teacher policy workers
