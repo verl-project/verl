@@ -20,6 +20,12 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+
+# On ROCm, vLLM's platform (vllm/platforms/rocm.py) asserts at import time that
+# HIP_VISIBLE_DEVICES == CUDA_VISIBLE_DEVICES when both are set. Ray sets
+# CUDA_VISIBLE_DEVICES per worker; sync HIP to match before any vLLM import.
+if os.environ.get("CUDA_VISIBLE_DEVICES") is not None:
+    os.environ["HIP_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
 import uuid
 from collections import defaultdict
 from copy import deepcopy

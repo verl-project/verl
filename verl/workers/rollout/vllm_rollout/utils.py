@@ -60,8 +60,18 @@ def get_device_uuid(device_id: int) -> str:
             return "NPU-" + npu_visible_devices[device_id]
         else:
             return f"NPU-{device_id}"
-    else:
+    try:
         return current_platform.get_device_uuid(device_id)
+    except NotImplementedError:
+        # vLLM's ROCm platform does not implement get_device_uuid() (base class stub).
+        # Use HIP_VISIBLE_DEVICES when set (ROCm analog of CUDA_VISIBLE_DEVICES),
+        # otherwise a stable GPU-{id} for single-node.
+        hip_visible = os.getenv("HIP_VISIBLE_DEVICES")
+        if hip_visible is not None:
+            visible = hip_visible.split(",")
+            if device_id < len(visible):
+                return "GPU-" + visible[device_id].strip()
+        return f"GPU-{device_id}"
 
 
 def get_vllm_max_lora_rank(lora_rank: int):

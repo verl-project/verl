@@ -105,9 +105,16 @@ class vLLMHttpServer:
             node_rank (int): node rank.
             gpus_per_node (int): number of gpus per node.
             nnodes (int): number of nodes.
-            cuda_visible_devices (str): cuda visible devices.
+            cuda_visible_devices (str): cuda visible devices (or HIP visible devices on ROCm).
         """
-        os.environ[get_visible_devices_keyword()] = cuda_visible_devices
+        # On ROCm, set only HIP_VISIBLE_DEVICES so vLLM-spawned subprocesses don't trigger
+        # Ray's "Inconsistent values... use either HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES".
+        if os.environ.get("VERL_USE_HIP_VISIBLE_DEVICES"):
+            os.environ["HIP_VISIBLE_DEVICES"] = cuda_visible_devices
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
@@ -162,9 +169,10 @@ class vLLMHttpServer:
             self._dp_rpc_port = None
             self._dp_master_port = None
 
+        _visible_key = "HIP_VISIBLE_DEVICES" if os.environ.get("VERL_USE_HIP_VISIBLE_DEVICES") else "CUDA_VISIBLE_DEVICES"
         logger.info(
             f"vLLMHttpServer, replica_rank: {self.replica_rank}, node_rank: {self.node_rank}, "
-            f"{get_visible_devices_keyword()}: {cuda_visible_devices}, "
+            f"{_visible_key}: {cuda_visible_devices}, "
             f"master_address: {self._master_address}, master_port: {self._master_port}, "
             f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
         )
@@ -231,9 +239,12 @@ class vLLMHttpServer:
 
         logger.info(f"enable_sleep_mode: {self.config.enable_sleep_mode}")
         if not self.config.enable_sleep_mode:
-            from verl.utils.device import set_expandable_segments
+            from verl.utils.device import is_rocm_visible_devices, set_expandable_segments
 
-            set_expandable_segments(True)
+            # vLLM's CuMemAllocator (memory pool) requires expandable_segments=False.
+            # On ROCm, expandable segments are not supported and would trigger
+            # "Expandable segments are not compatible with memory pool" (pytorch#147851).
+            set_expandable_segments(not is_rocm_visible_devices())
 
         quantization = self.config.quantization
         hf_overrides = {}
@@ -830,17 +841,23 @@ class vLLMReplica(RolloutReplica):
                 if not self.is_reward_model
                 else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
             )
+            server_runtime_env = {"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}}
+            server_runtime_env["env_vars"]["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:False"
+            server_runtime_env["env_vars"]["PYTORCH_HIP_ALLOC_CONF"] = "expandable_segments:False"
+            server_runtime_env = {"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}}
+            if os.environ.get("VERL_USE_HIP_VISIBLE_DEVICES"):
+                server_runtime_env["env_vars"]["RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"] = "1"
+                server_runtime_env["env_vars"]["VERL_USE_HIP_VISIBLE_DEVICES"] = os.environ["VERL_USE_HIP_VISIBLE_DEVICES"]
+            # vLLM worker subprocesses (Worker_TP0, etc.) read allocator config from env at startup.
+            # CuMemAllocator requires expandable_segments=False; set both so children inherit.
+            server_runtime_env["env_vars"]["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:False"
+            server_runtime_env["env_vars"]["PYTORCH_HIP_ALLOC_CONF"] = "expandable_segments:False"
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                    }
-                },
+                runtime_env=server_runtime_env,
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(

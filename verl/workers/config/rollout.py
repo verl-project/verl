@@ -129,7 +129,7 @@ class CheckpointEngineConfig(BaseConfig):
     # Backend for checkpoint engine: naive, nccl, nixl, hccl
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
-    update_weights_bucket_megabytes: int = 2048
+    update_weights_bucket_megabytes: int = 4096
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
 

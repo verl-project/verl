@@ -29,7 +29,7 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
-from verl.utils.device import get_device_id, get_device_name
+from verl.utils.device import get_device_id, get_device_name, is_rocm_visible_devices
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
@@ -83,9 +83,10 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             entropy_from_logits = verl_F.entropy_from_logits
 
+        use_compile = self.config.get("use_torch_compile", True) and not is_rocm_visible_devices()
         self.compute_entropy_from_logits = (
             torch.compile(entropy_from_logits, dynamic=True)
-            if self.config.get("use_torch_compile", True)  # use torch compile by default
+            if use_compile  # skip on ROCm: Dynamo/Triton device check can raise IndexError
             else entropy_from_logits
         )
         self.device_name = get_device_name()
@@ -102,7 +103,7 @@ class DataParallelPPOActor(BasePPOActor):
         if self.config.get("calculate_sum_pi_squared", False):
             self.calculate_sum_pi_squared_from_logits = (
                 torch.compile(verl_F.calculate_sum_pi_squared_from_logits, dynamic=True)
-                if self.config.get("use_torch_compile", True)
+                if use_compile
                 else verl_F.calculate_sum_pi_squared_from_logits
             )
             assert not (self.use_fused_kernels or self.use_prefix_grouper), (

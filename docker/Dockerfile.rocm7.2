@@ -1,0 +1,60 @@
+# default base image
+ARG REMOTE_VLLM="1"
+ARG COMMON_WORKDIR=/app
+ARG BASE_IMAGE=rocm/vllm-dev:preview_releases_rocm_v0.16.0_20260211
+
+FROM ${BASE_IMAGE} AS base
+
+ARG ARG_PYTORCH_ROCM_ARCH
+ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
+
+# Install some basic utilities
+RUN apt-get update -q -y && apt-get install -q -y \
+    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
+    apt-transport-https ca-certificates wget curl rsync
+# Remove sccache
+RUN python3 -m pip install --upgrade pip
+RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
+ARG COMMON_WORKDIR
+WORKDIR ${COMMON_WORKDIR}
+
+
+# -----------------------
+# Install verl
+ARG VERL_REPO=https://github.com/volcengine/verl.git
+ARG VERL_BRANCH=main
+RUN pip install "tensordict==0.6.2" --no-deps && \
+    pip install accelerate \
+    codetiming \
+    datasets \
+    dill \
+    hydra-core \
+    liger-kernel \
+    numpy \
+    pandas \
+    peft \
+    "pyarrow>=15.0.0" \
+    pylatexenc \
+    torchdata \
+    wandb \
+    orjson \
+    pybind11
+
+WORKDIR /workspace/
+RUN git clone ${VERL_REPO} && \
+    cd verl && \
+    git checkout ${VERL_BRANCH} && \
+    pip install -e .
+
+# -----------------------------------------------------------------------------
+# Ray in Docker: avoid "MetricsHead failed to start" timeout
+# - Without dashboard (recommended if you don't need the UI):
+#     ray start --head --include-dashboard=false
+# - With dashboard: use the run flags below and:
+#     ray start --head --dashboard-host=0.0.0.0
+#
+# Example run (set shm-size and optionally network/ipc so dashboard can start):
+#   docker run --ipc=host --gpus all --network=host --shm-size=16g -it <image>
+# -----------------------------------------------------------------------------
+
+CMD ["/bin/bash"]

@@ -17,7 +17,7 @@ import inspect
 import torch
 from transformers import PretrainedConfig
 
-from verl.utils.device import get_torch_device
+from verl.utils.device import get_torch_device, is_rocm_visible_devices
 
 _DEVICE_FLOPS = {
     "CPU": 448e9,
@@ -73,7 +73,11 @@ def get_device_flops(unit="T", device_name=None):
         if device == torch.cpu:
             device_name = "CPU"
         else:
-            device_name = get_torch_device().get_device_name()
+            try:
+                device_name = get_torch_device().get_device_name()
+            except (AssertionError, RuntimeError):
+                # ROCm or other backends can raise "Invalid device id" from get_device_properties
+                device_name = "MI300X" if is_rocm_visible_devices() else "Unknown"
 
     flops = float("inf")  # INF flops for unkown gpu type
 

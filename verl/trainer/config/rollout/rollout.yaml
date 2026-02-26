@@ -263,12 +263,12 @@ checkpoint_engine:
   # Larger values may improve throughput but increase memory overhead
   # Detailed performance comparison:
   # https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/169#issuecomment-3070686720
-  # Default value (512MB) is optimized for typical GPU memory configurations
+  # Default 4096 MB supports large embedding layers (e.g. Qwen 152k vocab).
   # For the best performance of `rebuild_cuda_tensor`, it is recommended to:
   # 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
   # 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
   # when using Tensor Parallelism (TP) >= 8.
-  update_weights_bucket_megabytes: 2048
+  update_weights_bucket_megabytes: 4096
 
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}

@@ -276,9 +276,21 @@ class Worker(WorkerHelper):
             # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
             # so we need to set local rank when the flag is set.
             device_name = "NPU" if is_npu_available else "GPU"
-            local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
+            accelerator_ids = ray.get_runtime_context().get_accelerator_ids()[device_name]
+            local_rank = accelerator_ids[0]
             os.environ["LOCAL_RANK"] = local_rank
             get_torch_device().set_device(int(local_rank))
+            # Restrict visible devices to this worker's assigned GPU(s). Set only one of
+            # HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES so Ray (in vLLM-spawned subprocesses)
+            # does not raise "Inconsistent values... use either HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES".
+            # Driver script: set VERL_USE_HIP_VISIBLE_DEVICES=1 for ROCm.
+            visible = ",".join(str(i) for i in accelerator_ids)
+            if os.environ.get("VERL_USE_HIP_VISIBLE_DEVICES"):
+                os.environ["HIP_VISIBLE_DEVICES"] = visible
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = visible
+                os.environ.pop("HIP_VISIBLE_DEVICES", None)
 
     def _configure_with_store(self, store: dict):
         """

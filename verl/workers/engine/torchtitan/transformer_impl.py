@@ -42,7 +42,7 @@ from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.device import get_device_id, get_device_name
+from verl.utils.device import get_device_id, get_device_name, is_rocm_visible_devices
 from verl.utils.fsdp_utils import (
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
@@ -194,9 +194,10 @@ class TorchTitanEngine(BaseEngine):
         else:
             entropy_from_logits = verl_F.entropy_from_logits
 
+        use_compile = self.engine_config.use_torch_compile and not is_rocm_visible_devices()
         self.compute_entropy_from_logits = (
             torch.compile(entropy_from_logits, dynamic=True)
-            if self.engine_config.use_torch_compile
+            if use_compile
             else entropy_from_logits
         )
 

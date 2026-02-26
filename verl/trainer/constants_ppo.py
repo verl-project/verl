@@ -36,6 +36,10 @@ PPO_RAY_RUNTIME_ENV = {
         # https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/maintenref/envvar/envref_07_0143.html
         "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
         "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+        # Hugging Face offline: use cache only, no Hub access. Set to "1" for offline; "0" to allow online.
+        "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1"),
+        "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE", "1"),
+        "HF_DATASETS_OFFLINE": os.environ.get("HF_DATASETS_OFFLINE", "1"),
     },
 }
 
@@ -56,4 +60,18 @@ def get_ppo_ray_runtime_env():
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+
+    # ROCm: pass only HIP_VISIBLE_DEVICES so Ray/vLLM subprocesses don't see both (Ray errors otherwise).
+    # In your driver script, set:  export VERL_USE_HIP_VISIBLE_DEVICES=1
+    #                             export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    # and do not set CUDA_VISIBLE_DEVICES.
+    # If you see "Ray worker died" with HSA_STATUS_ERROR_OUT_OF_RESOURCES / "Available Free mem : 0 MB",
+    # reduce GPU memory use: smaller ppo_micro_batch_size_per_gpu, ppo_mini_batch_size,
+    # log_prob_micro_batch_size_per_gpu, or enable actor_rollout_ref.actor.fsdp_config.param_offload=True.
+    if os.environ.get("VERL_USE_HIP_VISIBLE_DEVICES") and os.environ.get("HIP_VISIBLE_DEVICES"):
+        runtime_env["env_vars"]["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
+        runtime_env["env_vars"]["RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"] = "1"
+        runtime_env["env_vars"]["VERL_USE_HIP_VISIBLE_DEVICES"] = os.environ["VERL_USE_HIP_VISIBLE_DEVICES"]
+        runtime_env["env_vars"]["HIP_VISIBLE_DEVICES"] = os.environ["HIP_VISIBLE_DEVICES"]
+
     return runtime_env

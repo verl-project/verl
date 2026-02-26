@@ -31,7 +31,7 @@ import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
-from verl.utils.device import get_device_id, get_device_name
+from verl.utils.device import get_device_id, get_device_name, is_rocm_visible_devices
 from verl.utils.fsdp_utils import fsdp_version
 from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import log_gpu_memory_usage
@@ -129,9 +129,10 @@ class VeOmniEngine(FSDPEngine):
         else:
             entropy_from_logits = verl_F.entropy_from_logits
 
+        use_compile = self.engine_config.use_torch_compile and not is_rocm_visible_devices()
         self.compute_entropy_from_logits = (
             torch.compile(entropy_from_logits, dynamic=True)
-            if self.engine_config.use_torch_compile  #  use torch compile by default
+            if use_compile
             else entropy_from_logits
         )
 
