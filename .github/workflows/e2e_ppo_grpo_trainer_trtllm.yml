@@ -230,7 +230,7 @@ jobs:
         run: |
           python3 examples/data_preprocess/dapo_multiturn_w_tool.py --local_save_dir ${PWD}/data/dapo-math-17k
           python3 examples/data_preprocess/aime2024_multiturn_w_tool.py --local_save_dir ${PWD}/data/aime-2024
-      - name: Running DAPO E2E with FP8 TRT-LLM rollout (Qwen3-8B)
+      - name: Running DAPO E2E with FP8 TRT-LLM rollout (Qwen3-0.6B)
         run: |
           ray stop --force
           export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
