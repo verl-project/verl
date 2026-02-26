@@ -226,7 +226,7 @@ class MegatronWorker(Worker):
                     from megatron.bridge.models.gpt_provider import quantization_layer_spec
                     provider.transformer_layer_spec = quantization_layer_spec
 
-                    from verl.models.mcore.qat_patch import apply_qat_patch
+                    from verl.utils.modelopt.megatron_qat_patch import apply_qat_patch
                     apply_qat_patch()
 
                     from megatron.bridge.models.conversion.param_mapping import AutoMapping
