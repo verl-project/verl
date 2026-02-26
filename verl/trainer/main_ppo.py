@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
@@ -268,7 +269,7 @@ class TaskRunner:
         """Add teacher model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if config.distillation.enabled:
+        if is_distillation_enabled(config.distillation):
             # we do not use teacher model workers, so we only register teacher model in resource pool
             # without registering a teacher model worker in role-worker mapping
             if config.distillation.teacher_model.enable_resource_pool:
