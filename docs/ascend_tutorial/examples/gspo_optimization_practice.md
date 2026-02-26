@@ -100,8 +100,8 @@ echo "Use $DEFAULT_SH"
 ulimit -n 32768
 mkdir logs
 
-NNODES=2
-NPUS_PER_NODE=8
+NNODES=4
+NPUS_PER_NODE=16
 # 修改为对应主节点IP
 MASTER_ADDR="IP FOR MASTER NODE"
 # 修改为当前节点的通信网卡
@@ -364,5 +364,6 @@ actor_rollout_ref.rollout.enforce_eager=False
 环境变量相关：[环境变量列表-Ascend Extension for PyTorch6.0.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/600/apiref/Envvariables/Envir_001.html)
 
 社区性能调优教程：[性能调优流程-Ascend Extension for PyTorch6.0.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0001.html)
+
 
 
