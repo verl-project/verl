@@ -5,19 +5,17 @@ ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer"}
 TRAIN_FILES=${TRAIN_FILES:-/mnt/data/liuchonghan/235b_dataset/merged_sft_with_messages.parquet}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-256}
 backend=${BACKEND:-megatron}
-project_name=verl_sft_235ba22b_2507
+project_name=verl_sft_qwen2.5_72b
 RESUME_MODE=disable
-MODEL_ID=${MODEL_ID:-/mnt/data/liuchonghan/Qwen3-235B-A22B-Instruct-2507}
+MODEL_ID=${MODEL_ID:-/mnt/data/liuchonghan/Qwen2.5-72B-A064}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-2}
 
 SP_SIZE=${SP_SIZE:-1}
 FSDP_SIZE=${FSDP_SIZE:-64}
 FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp2"}
 
-TP_SIZE=${TP_SIZE:-4}
+TP_SIZE=${TP_SIZE:-8}
 PP_SIZE=${PP_SIZE:-1}
-EP_SIZE=${EP_SIZE:-8}
-VPP_SIZE=${VPP_SIZE:-null}
 CP_SIZE=${CP_SIZE:-1}
 
 PAD_MODE=${PAD_MODE:-no_padding}
@@ -50,18 +48,16 @@ MEGATRON_ENGINE_CONFIG="
     optim.min_lr=6e-7 \
     engine.tensor_model_parallel_size=${TP_SIZE} \
     engine.pipeline_model_parallel_size=${PP_SIZE} \
-    engine.expert_model_parallel_size=${EP_SIZE} \
-    engine.context_parallel_size=${CP_SIZE} \
-    engine.use_mbridge=True"
+    engine.context_parallel_size=${CP_SIZE}"
 
 if [ "$backend" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
     echo "Using fsdp engine"
-    exp_name=nvidia-qwen3-235b-a22b-moe-${backend}-${FSDP_STRATEGY}-sp${SP_SIZE}
+    exp_name=qwen2.5-72b-dense-${backend}-${FSDP_STRATEGY}-sp${SP_SIZE}
 else
     ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
     echo "Using megatron engine"
-    exp_name=nvidia-qwen3-235b-a22b-moe-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-ep${EP_SIZE}-vpp${VPP_SIZE}-cp${CP_SIZE}
+    exp_name=qwen2.5-72b-dense-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}
 fi
 
 CKPT_HOME=${CKPT_HOME:-/mnt/data/liuchonghan/ckpt_verl/sft/${project_name}/${exp_name}}
@@ -91,16 +87,15 @@ torchrun \
     ${ENTRYPOINT} \
     data.train_files="${TRAIN_FILES}" \
     data.train_batch_size=${TRAIN_BATCH_SIZE} \
-    data.max_length=1024 \
+    data.max_length=2048 \
     data.pad_mode=${PAD_MODE} \
     data.truncation=right \
     data.use_dynamic_bsz=True \
-    data.max_token_len_per_gpu=10240 \
+    data.max_token_len_per_gpu=4096 \
     data.messages_key=messages \
     data.ignore_input_ids_mismatch=True \
     model.path=$MODEL_ID \
     model.use_remove_padding=${USE_REMOVE_PADDING} \
-    +model.override_config.router_dtype="float16" \
     model.enable_gradient_checkpointing=True \
     ${ENGINE_CONFIG} \
     trainer.test_freq=-1 \
