@@ -97,9 +97,13 @@ def get_event_loop():
 def auto_await(func):
     """Auto await a coroutine function.
 
-    If the function is called in an async context (with a running event loop),
-    it will return the coroutine object. Otherwise, it will block the current thread
-    and run the coroutine until completion.
+    Handles three cases:
+    1. When the decorated function is called with await: returns the coroutine
+       so the caller can await it.
+    2. When called directly and there is no running event loop: runs the
+       coroutine with asyncio.run() and returns the result.
+    3. When called directly and the event loop is already running: runs the
+       coroutine (e.g. in a thread pool to avoid deadlock) and returns the result.
     """
 
     @functools.wraps(func)
@@ -114,9 +118,22 @@ def auto_await(func):
         except RuntimeError:
             loop = None
 
-        if loop and loop.is_running():
-            return coro
-        else:
+        # Case 1: No running loop -> run with asyncio.run()
+        if loop is None:
             return asyncio.run(coro)
+
+        # Case 2: Running loop -> return coro if caller will await
+        caller_frame = inspect.currentframe()
+        if caller_frame is not None:
+            caller_frame = caller_frame.f_back
+        caller_is_async = caller_frame is not None and (caller_frame.f_code.co_flags & inspect.CO_COROUTINE) != 0
+        if caller_is_async:
+            return coro
+
+        # Case 3: Running loop -> run coro in thread pool
+        # (cannot block the loop thread without deadlock)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
 
     return wrapper

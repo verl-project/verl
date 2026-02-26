@@ -182,7 +182,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         from verl.experimental.one_step_off_policy.agent_loop import OneStepOffAgentLoopManager
 
         self.async_rollout_mode = True
-        self.async_rollout_manager = OneStepOffAgentLoopManager(
+        self.async_rollout_manager = OneStepOffAgentLoopManager.create(
             rollout_config=self.config.actor_rollout_ref.rollout,
             model_config=self.config.actor_rollout_ref.model,
             data_config=self.config.data,
