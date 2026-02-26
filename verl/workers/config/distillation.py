@@ -92,18 +92,22 @@ class DistillationLossConfig(BaseConfig):
 
         if self.policy_loss_mode != "vanilla":
             raise NotImplementedError(
-                f"Only vanilla policy loss is currently supported when use_policy_gradient is True, but got {self.policy_loss_mode}."
+                f"Only vanilla policy loss is currently supported when use_policy_gradient is True, "
+                f"but got {self.policy_loss_mode}."
             )
 
         if self.use_policy_gradient and self.loss_mode == "forward_kl_topk":
-            # Warning is because PG is only directly considering gradient of the sampled log prob
-            # However, top-k loss gives information as to whether the logprobs of tokens in the top-k are overestimated or underestimated.
-            # This information is not fully utilized when only using the sampled log prob for policy gradient.
-            print("Warning: It is recommended to use use_policy_gradient=False for forward_kl_topk loss mode.")
+            print(
+                "WARNING: forward_kl_topk is most effective as a supervised distillation loss "
+                "(use_policy_gradient=False). With policy gradient, the update uses only the sampled"
+                " token's logprob ∇logπ(a), so the top-k distributional signal (how non-sampled logits "
+                "should move) is largely unused."
+            )
 
         if not self.use_policy_gradient and self.loss_mode == "k1":
             raise ValueError(
-                "Directly backpropagating k1 loss is incorrect since gradient of k1 loss wrt model weights does not depend on teacher log probabilities."
+                "Directly backpropagating k1 loss is incorrect since gradient of k1 loss"
+                " wrt model weights does not depend on teacher log probabilities."
             )
 
 

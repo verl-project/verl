@@ -129,7 +129,8 @@ class TeacherLoopWorker:
                     else:
                         response_ids = [None] * topk
                         response_logprobs = [None] * topk
-                        # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
+                        # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token
+                        # is not in top-k)
                         assert len(logprobs_dict) in [topk, topk + 1], len(logprobs_dict)
                         for token_id_str, token_dict in logprobs_dict.items():
                             if token_dict["rank"] > topk:
