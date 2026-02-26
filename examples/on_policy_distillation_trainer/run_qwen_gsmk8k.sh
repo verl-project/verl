@@ -4,7 +4,7 @@ conda activate verl
 export PATH=$CONDA_PREFIX/bin:$PATH
 export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=5,6,7,8
+export CUDA_VISIBLE_DEVICES=3,4
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
 export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
@@ -17,17 +17,17 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
-TEACHER_MODEL=Qwen2.5-3B-Instruct
+TEACHER_MODEL=Qwen2.5-7B-Instruct
 
 USE_POLICY_GRADIENT=False
-DISTILLATION_LOSS_MODE="k3"
+# DISTILLATION_LOSS_MODE="k3"
 DISTILLATION_LOSS_MODE="forward_kl_topk"
 
-DISTILLATION_LOSS_MODE="k1"
-USE_POLICY_GRADIENT=True
+# USE_POLICY_GRADIENT=True
+# DISTILLATION_LOSS_MODE="k1"
 
 DISTILLATION_LOSS_MAX_CLAMP=10.0
-DISTILLATION_LOG_PROB_MIN_CLAMP=null
+DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
 EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-pg-${USE_POLICY_GRADIENT}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
@@ -41,7 +41,7 @@ USE_DYNAMIC_BSZ=False
 
 STUDENT_WORLD_SIZE=2
 
-TEACHER_RESOURCE_POOL=True
+TEACHER_RESOURCE_POOL=False
 TEACHER_WORLD_SIZE=2
 
 ENFORCE_EAGER=False # true for faster debugging
@@ -122,7 +122,7 @@ ALGORITHM=(
 )
 
 TRAINER=(
-    trainer.logger='["console"]'
+    trainer.logger='["console","wandb"]'
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXP_NAME
     trainer.n_gpus_per_node=$STUDENT_WORLD_SIZE
