@@ -125,7 +125,7 @@ class CheckpointEngineConfig(BaseConfig):
     """
 
     # Backend for checkpoint engine: naive, nccl, nixl, hccl
-    backend: Optional[str] = MISSING
+    backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
     # Additional keyword arguments for checkpoint engine
@@ -237,6 +237,8 @@ class RolloutConfig(BaseConfig):
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
+
+    qat: Optional[dict] = None
 
     def __post_init__(self):
         """Validate the rollout config"""

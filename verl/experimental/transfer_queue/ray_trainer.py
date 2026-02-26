@@ -322,6 +322,8 @@ class RayPPOTrainer:
 
         self.tq_client = self._initialize_transferqueue()
 
+        self.checkpoint_manager = None
+
     def _initialize_transferqueue(self):
         # 1. initialize TransferQueueStorage
         if self.config.transfer_queue.storage_backend == "AsyncSimpleStorageManager":
@@ -562,8 +564,7 @@ class RayPPOTrainer:
         )
 
         # For agent loop, we need reward model keys to compute score.
-        if self.async_rollout_mode:
-            gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
+        gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
 
         return gen_batch
 
@@ -611,10 +612,7 @@ class RayPPOTrainer:
             print(f"batch_meta extra_info: {batch_meta.extra_info}")
 
             # TODO: (TQ) Support padding and unpadding to make DataProto divisible by dp_size with TransferQueue
-            if not self.async_rollout_mode:
-                test_output_gen_meta = self.actor_rollout_wg.generate_sequences(batch_meta)
-            else:
-                test_output_gen_meta = self.async_rollout_manager.generate_sequences(batch_meta)
+            test_output_gen_meta = self.async_rollout_manager.generate_sequences(batch_meta)
 
             batch_meta = batch_meta.union(test_output_gen_meta)
 
@@ -826,7 +824,7 @@ class RayPPOTrainer:
             )
 
             self.checkpoint_manager = CheckpointEngineManager(
-                backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+                config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
                 trainer=self.actor_rollout_wg,
                 replicas=self.async_rollout_manager.rollout_replicas,
             )
@@ -1173,10 +1171,7 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_output_meta = self.actor_rollout_wg.generate_sequences(gen_meta)
-                        else:
-                            gen_output_meta = self.async_rollout_manager.generate_sequences(gen_meta)
+                        gen_output_meta = self.async_rollout_manager.generate_sequences(gen_meta)
                         self.checkpoint_manager.sleep_replicas()
                         timing_raw.update(gen_output_meta.extra_info["timing"])
                         gen_output_meta.extra_info.pop("timing", None)
