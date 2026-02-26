@@ -1,10 +1,10 @@
-## NPU Qwen3-32B GSPO Optimization Practice
+# NPU Qwen3-32B GSPO Optimization Practice
 
-Last updated: 02/10/2026.
+Last updated: 02/26/2026.
 
 本文章对应脚本地址：[qwen3_32b_gspo_npu](https://github.com/volcengine/verl/blob/main/examples/gspo_trainer/run_qwen3_32b_gspo_npu.sh)
 
-### 算法适配
+## 算法适配
 
 GSPO通过将优化颗粒度从**token级**提升到**sequence级**，规避了GRPO会遇到的**方差急剧增大**导致训练不稳定的情况，增加了训练的稳定性，同时该算法也在一定程度上提升了算法的收敛速度。
 
@@ -30,11 +30,11 @@ actor_rollout_ref.rollout.n=16 \                  # 每个prompt生成16个响�
 
 一般选择入口函数为`verl.trainer.main_ppo`
 
-### 基础环境
+## 基础环境
 
 当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 4台Atlas 800T A3。关键软件版本可以参考：[Ascend Quickstart](https://github.com/volcengine/verl/blob/main/docs/ascend_tutorial/ascend_quick_start.rst)
 
-## 安装基础环境
+### 安装基础环境
 
 | software     | version                                                    |
 | ------------ | ---------------------------------------------------------- |
@@ -56,13 +56,167 @@ git checkout 252d76908b903ad8fb6969eb3a5e5f873c95ea2b
 git submodule update --init --recursive recipe
 ~~~
 
-### 性能调优
+### 权重获取
+
+从Hugging Face库下载对应的模型权重：[Qwen/Qwen3-32B · Hugging Face](https://huggingface.co/Qwen/Qwen3-32B)
+
+### 数据集准备
+
+~~~bash
+# 下载math-17k数据集
+git clone https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
+
+# 下载AIME_2024测试数据集
+git clone https://huggingface.co/datasets/Maxwell-Jia/AIME_2024
+~~~
+
+### jemalloc安装
+
+为了确保 Ray 进程能够正常回收内存，需要安装并使能 jemalloc 库进行内存管理。
+
+#### Ubuntu 操作系统
+
+通过操作系统源安装jemalloc（注意： 要求ubuntu版本>=20.04）：
+
+```shell
+sudo apt install libjemalloc2
+```
+
+在启动任务前执行如下命令通过环境变量导入jemalloc，需先通过 **find /usr -name libjemalloc.so.2** 确认文件是否存在 ：
+
+```shell
+# arm64架构
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+# x86_64架构
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+```
+
+#### OpenEuler 操作系统
+
+执行如下命令重操作系统源安装jemalloc
+
+```shell
+yum install jemalloc
+```
+
+如果上述方法无法正常安装，可以通过源码编译安装 前往jemalloc官网下载最新稳定版本，官网地址:https://github.com/jemalloc/jemalloc/releases/
+
+```shell
+tar -xvf jemalloc-{version}.tar.bz2
+cd jemalloc-{version}
+./configure --prefix=/usr/local
+make
+make install
+```
+
+在启动任务前执行如下命令通过环境变量导入jemalloc：
+
+```shell
+#根据实际安装路径设置环境变量，例如安装路径为:/usr/local/lib/libjemalloc.so.2,可通过以下命令来设置环境变量(可通过 find /usr -name libjemalloc.so.2 确认文件是否存在)
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+```
+
+### 多机任务拉起
+
+针对本实践提供的多机任务，可用下面的脚本拉起
+
+~~~bash
+pkill -9 python
+ray stop --force
+rm -rf /tmp/ray
+
+export RAY_DEDUP_LOGS=0
+export HYDRA_FULL_ERROR=1
+export TASK_QUEUE_ENABLE=1
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
+export HCCL_ASYNC_ERROR_HANDLING=0
+export CPU_AFFINITY_CONF=1
+export VLLM_USE_V1=1
+export VLLM_ATTENTION_BACKEND=XFORMERS
+export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
+export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
+export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
+
+# 修改为当前需要跑的用例路径
+DEFAULT_SH="./run_*.sh"
+echo "Use $DEFAULT_SH"
+
+ulimit -n 32768
+mkdir logs
+
+NNODES=4
+NPUS_PER_NODE=16
+# 修改为对应主节点IP
+MASTER_ADDR="IP FOR MASTER NODE"
+# 修改为当前节点的通信网卡
+SOCKET_IFNAME="Your SOCKET IFNAME"
+export HCCL_SOCKET_IFNAME="SOCKET IFNAME FOR CURRENT NODE"
+export GLOO_SOCKET_IFNAME="SOCKET IFNAME FOR CURRENT NODE"
+# 获取当前IP
+CURRENT_IP=$(ifconfig $SOCKET_IFNAME | grep -Eo 'inet (addr:)?([0-9]{1,3}\.){3}[0-9]{1,3}' | awk '{print $NF}')
+if [ "$MASTER_ADDR" = "$CURRENT_IP" ]; then
+  # 主节点启动
+  ray start --head --port 6766 --dashboard-host=$MASTER_ADDR --node-ip-address=$CURRENT_IP --dashboard-port=8260 --resources='{"NPU": '$NPUS_PER_NODE'}'
+
+  while true; do
+      ray_status_output=$(ray status)
+      npu_count=$(echo "$ray_status_output" | grep -oP '(?<=/)\d+\.\d+(?=\s*NPU)' | head -n 1)
+      npu_count_int=$(echo "$npu_count" | awk '{print int($1)}')
+      device_count=$((npu_count_int / $NPUS_PER_NODE))
+
+      # 判断device_count 是否与 NNODES 相等
+      if [ "$device_count" -eq "$NNODES" ]; then
+          echo "Ray cluster is ready with $device_count devices (from $npu_count NPU resources), starting Python script."
+          ray status
+          bash $DEFAULT_SH
+          break
+      else
+          echo "Waiting for Ray to allocate $NNODES devices. Current device count: $device_count"
+          sleep 5
+      fi
+  done
+else
+  # 子节点尝试往主节点注册 ray 直到成功
+  while true; do
+      # 尝试连接 ray 集群
+      ray start --address="$MASTER_ADDR:6766" --resources='{"NPU": '$NPUS_PER_NODE'}' --node-ip-address=$CURRENT_IP
+
+      # 检查连接是否成功
+      ray status
+      if [ $? -eq 0 ]; then
+          echo "Successfully connected to the Ray cluster!"
+          break
+      else
+          echo "Failed to connect to the Ray cluster. Retrying in 5 seconds..."
+          sleep 5
+      fi
+  done
+fi
+
+sleep 600
+~~~
+
+DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 [Qwen2.5-32B](https://github.com/volcengine/verl/blob/main/examples/gspo_trainer/run_qwen3_32b_gspo_npu.sh) 路径。
+
+NNODES 和 NPUS_PER_NODE:修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为4和16。
+
+MASTER_ADDR:修改为对应主节点 IP。即所有节点的 MASTER_ADDR 应该相同。
+
+SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网卡，通信网卡可以通过以下命令获取：
+
+```
+ifconfig |grep "$(hostname -I |awk '{print $1}'|awk -F '.' '{print $0}')" -B 1|awk -F ':' '{print$1}' | head -1 | tail -1
+```
+
+## 性能调优
 
 优化从训练、推理、调度和其他四个方面入手。
 
-#### 训练
+### 训练
 
-##### 动态bsz
+#### 动态bsz
 
 ~~~bash
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
@@ -80,9 +234,9 @@ infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
 - **`actor_ppo_max_token_len`**: Actor模型在PPO更新(前向+反向传播)时每个GPU能处理的最大token数
 - **`infer_ppo_max_token_len`**: 推理阶段(Reference policy和Rollout)计算log概率时每个GPU能处理的最大token数
 
-#### 推理
+### 推理
 
-##### ACLgraph+FULL_DECODE_ONLY
+#### ACLgraph+FULL_DECODE_ONLY
 
 推理算子下发方面的优化，平均能有`15%~20%`左右的性能收益。
 
@@ -121,9 +275,9 @@ cudagraph_capture_sizes设置的值对应的是批大小，这里的批大小不
 
 可以常开，一般都是正收益。
 
-#### 调度
+### 调度
 
-##### AIV
+#### AIV
 
 打开方式：设置`export HCCL_OP_EXPANSION_MODE="AIV"`
 
@@ -136,7 +290,7 @@ HCCL_OP_EXPANSION_MODE环境变量用于配置通信算法的编排展开位置�
 
 下面介绍两种展开机制
 
-###### HOST展开
+##### HOST展开
 
 <img src="https://github.com/wucong25/verl-data/blob/main/ascend_task_queue1.png" alt="image-20260113194257095" style="zoom:50%;" />
 
@@ -146,7 +300,7 @@ HCCL_OP_EXPANSION_MODE环境变量用于配置通信算法的编排展开位置�
 - 根据task类型分别调用掉SDMA和RDMA引擎。
     **单算子瓶颈**：hostbound 每个task提交是2~5us，一个通信算子有几百个task，单算子场景不会在device上缓存，下发一个执行一个
 
-###### AICpu机制展开
+##### AICpu机制展开
 
 <img src="https://github.com/wucong25/verl-data/blob/main/ascend_task_queue3.png" alt="image-20260113194333218" style="zoom:50%;" />
 
@@ -156,7 +310,7 @@ HCCL_OP_EXPANSION_MODE环境变量用于配置通信算法的编排展开位置�
 - 降低host和aicpu交互，由几百次降低为一次。
 - task的提交在AICPU上提交，做了提交的部分合并。
 
-##### TASK_QUEUE_ENABLE
+#### TASK_QUEUE_ENABLE
 
 **使用方式：**`export TASK_QUEUE_ENABLE=2`
 
@@ -172,17 +326,17 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 详细设置原理可看：https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0059.html
 
-#### 其他
+### 其他
 
 以下内容汇总了若干全局环境变量的调优配置。由于这些参数在训练阶段与推理阶段往往都能带来正向收益，且目前尚缺乏足够精细的消融实验来严格区分它们各自对训练或推理的贡献占比，故统一归拢在此，供后续持续监控与进一步拆解分析。
 
-##### 使能jemalloc
+#### 使能jemalloc
 
 使用方式（注意需要先安装jemalloc库）：`export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2`
 
 **安装使用教程：**[MindSpeed-RL/docs/install_guide.md · Ascend/MindSpeed-RL - AtomGit | GitCode](https://gitcode.com/Ascend/MindSpeed-RL/blob/master/docs/install_guide.md#高性能内存库-jemalloc-安装)
 
-##### 多流复用
+#### 多流复用
 
 内存方面有优化
 
@@ -190,7 +344,7 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 原理介绍：https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0040.html
 
-##### VLLM_ASCEND_ENABLE_FLASHCOMM
+#### VLLM_ASCEND_ENABLE_FLASHCOMM
 
 使用方式：`export VLLM_ASCEND_ENABLE_FLASHCOMM=1`
 
@@ -198,7 +352,7 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 地址：https://vllm-ascend.readthedocs.io/zh-cn/latest/user_guide/release_notes.html
 
-##### VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
+#### VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 使用方式：`export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1`
 
@@ -206,7 +360,7 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 地址：https://vllm-ascend.readthedocs.io/zh-cn/latest/user_guide/release_notes.html
 
-##### VLLM_ASCEND_ENABLE_PREFETCH_MLP
+#### VLLM_ASCEND_ENABLE_PREFETCH_MLP
 
 使用方式：`export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1`
 
@@ -214,7 +368,7 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 <img src="https://github.com/wucong25/verl-data/blob/main/ascend_prefetch.png" alt="image-20251124173132677" style="zoom:50%;" />
 
-##### verl框架参数设置
+### verl框架参数设置
 
 主要是内存方面的一些设置开关（注意，这个里面的优化都或多或少会导致吞吐量有一定程度的劣化）
 
@@ -251,9 +405,11 @@ actor_rollout_ref.rollout.gpu_memory_utilization=0.90
 actor_rollout_ref.rollout.enforce_eager=False
 ~~~
 
-### NPU调优参考文章
+## NPU调优参考文章
 
 环境变量相关：[环境变量列表-Ascend Extension for PyTorch6.0.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/600/apiref/Envvariables/Envir_001.html)
 
 社区性能调优教程：[性能调优流程-Ascend Extension for PyTorch6.0.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0001.html)
+
+
 
