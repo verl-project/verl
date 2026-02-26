@@ -360,6 +360,7 @@ class TorchtitanEngineConfig(EngineConfig):
     pipeline_parallel_size: int = 1
     context_parallel_size: int = 1
     attn_type: str = "flex"
+    max_seq_len: Optional[int] = None
     strategy: str = "torchtitan"
     seed: int = 42
     full_determinism: bool = False

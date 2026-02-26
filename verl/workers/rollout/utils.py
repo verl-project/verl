@@ -13,12 +13,9 @@
 # limitations under the License.
 import asyncio
 import logging
-import os
 
 import uvicorn
 from fastapi import FastAPI
-
-from verl.utils.net_utils import get_free_port
 
 logger = logging.getLogger(__file__)
 
@@ -35,25 +32,42 @@ def get_max_position_embeddings(hf_config) -> int:
     return int(max_len)
 
 
-async def run_unvicorn(app: FastAPI, server_args, server_address, max_retries=5) -> tuple[int, asyncio.Task]:
-    server_port, server_task = None, None
+class _UvicornServerAutoPort(uvicorn.Server):
+    """Uvicorn Server that reports the system-assigned port when port=0."""
 
-    for i in range(max_retries):
+    def __init__(self, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self.actual_port: int | None = None
+        self._startup_done: asyncio.Event = asyncio.Event()
+
+    async def startup(self, sockets=None) -> None:
         try:
-            server_port, sock = get_free_port(server_address)
-            app.server_args = server_args
-            config = uvicorn.Config(app, host=server_address, port=server_port, log_level="warning")
-            server = uvicorn.Server(config)
-            server.should_exit = True
-            await server.serve()
-            server_task = asyncio.create_task(server.main_loop())
-            break
-        except (OSError, SystemExit) as e:
-            logger.error(f"Failed to start HTTP server on port {server_port} at try {i}, error: {e}")
-    else:
-        logger.error(f"Failed to start HTTP server after {max_retries} retries, exiting...")
-        os._exit(-1)
+            await super().startup(sockets=sockets)
+            if self.servers and self.config.port == 0:
+                sock = self.servers[0].sockets[0]
+                self.actual_port = sock.getsockname()[1]
+            else:
+                self.actual_port = self.config.port
+        finally:
+            self._startup_done.set()
 
+    async def get_port(self) -> int | None:
+        await self._startup_done.wait()
+        return self.actual_port
+
+
+async def run_uvicorn(app: FastAPI, server_args, server_address) -> tuple[int, asyncio.Task]:
+    app.server_args = server_args
+    config = uvicorn.Config(app, host=server_address, port=0, log_level="warning")
+    server = _UvicornServerAutoPort(config)
+    server_task = asyncio.create_task(server.serve())
+    server_port = await server.get_port()
+    if server_port is None:
+        # server.startup() failed. await the task to re-raise exception from server.serve()
+        await server_task
+
+        # Fails on unexpected situation.
+        raise RuntimeError("Unexpected: HTTP server started without reporting listened port")
     logger.info(f"HTTP server started on port {server_port}")
     return server_port, server_task
 
