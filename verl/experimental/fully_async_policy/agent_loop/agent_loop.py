@@ -28,6 +28,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AsyncLLMServerManager,
     DictConfigWrap,
     _agent_loop_registry,
+    _get_rollout_and_model_config,
     get_trajectory_info,
 )
 from verl.protocol import DataProto
@@ -222,7 +223,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
-        self.rollout_config = config.actor_rollout_ref.rollout
+        self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
