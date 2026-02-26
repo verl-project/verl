@@ -179,7 +179,7 @@ class vLLMHttpServer:
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
-    
+
     @property
     def lora_as_adapter(self) -> bool:
         return (
