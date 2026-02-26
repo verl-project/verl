@@ -460,8 +460,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             qat_config = self.config.actor.get("qat", {})
             if qat_config.get("enable", False):
                 qat_mode = qat_config.get("mode", "w4a16")
+                ignore_patterns = qat_config.get("ignore_patterns", None)
                 for i in range(len(actor_module)):
-                    actor_module[i] = apply_qat(actor_module[i], qat_mode)
+                    actor_module[i] = apply_qat(actor_module[i], qat_mode, ignore_patterns=ignore_patterns)
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model

@@ -244,10 +244,9 @@ class vLLMHttpServer:
             quant_method = quantization_config_dict.get("quant_method", None)
 
             if quant_method == "modelopt":
+                from verl.utils.modelopt import apply_modelopt_nvfp4_patches
 
-                from verl.utils.modelopt import apply_vllm_modelopt_patches
-
-                apply_vllm_modelopt_patches()
+                apply_modelopt_nvfp4_patches()
                 quantization = "modelopt"
             elif quant_method == "compressed-tensors":
                 from verl.utils.qat import apply_qat_patches

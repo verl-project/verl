@@ -19,26 +19,38 @@ ModelOpt integration for verl.
 Supports NVFP4 quantization with Megatron QAT training + vLLM low-precision inference.
 
 Module Structure:
-- qat.py: QAT quantization config, apply_qat, QuantizationMetadata
+- quantize.py: Quantization config builder, apply_qat, QuantizationMetadata
 - weight_processor.py: QATWeightPostProcessor for converting QAT weights to quantized format
-- vllm_patch.py: vLLM monkey patches for NVFP4 inference (Linear, MoE, KV Cache)
+- vllm_modelopt_patch.py: vLLM monkey patches for ModelOpt NVFP4 inference (Linear, MoE, KV Cache)
 
 Usage:
     # Training side
     from verl.utils.modelopt import apply_qat, QATWeightPostProcessor
 
-    # Inference side
-    from verl.utils.modelopt import apply_vllm_modelopt_patches
+    # Inference side (dynamic weight reload lifecycle)
+    from verl.utils.modelopt import apply_modelopt_nvfp4_patches, prepare_modelopt_for_weight_reload, modelopt_process_weights_after_loading
 """
 
-from verl.utils.modelopt.qat import NVFP4_WEIGHT_ONLY_CFG, QuantizationMetadata, apply_qat
-from verl.utils.modelopt.vllm_patch import apply_vllm_modelopt_patches
+from verl.utils.modelopt.quantize import (
+    # DEFAULT_IGNORE_PATTERNS,
+    QuantizationMetadata,
+    apply_qat,
+    build_quantize_config,
+)
+from verl.utils.modelopt.vllm_modelopt_patch import (
+    apply_modelopt_nvfp4_patches,
+    modelopt_process_weights_after_loading,
+    prepare_modelopt_for_weight_reload,
+)
 from verl.utils.modelopt.weight_processor import QATWeightPostProcessor
 
+
 __all__ = [
-    "NVFP4_WEIGHT_ONLY_CFG",
+    "build_quantize_config",
     "apply_qat",
     "QuantizationMetadata",
     "QATWeightPostProcessor",
-    "apply_vllm_modelopt_patches",
+    "apply_modelopt_nvfp4_patches",
+    "prepare_modelopt_for_weight_reload",
+    "modelopt_process_weights_after_loading",
 ]

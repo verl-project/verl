@@ -29,7 +29,7 @@ from modelopt.torch.export.quant_utils import (
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 from verl.utils.megatron_utils import unwrap_model
-from verl.utils.modelopt.qat import QuantizationMetadata
+from verl.utils.modelopt.quantize import QuantizationMetadata
 
 
 class QATWeightPostProcessor:
