@@ -51,13 +51,13 @@ actor_rollout_ref:
 
       # LoRA rank (Dimension of the low-rank projection space.). Set to 0 to disable LoRA
       rank: 0  # typical values: 8, 16, 32, 64
-      
+
       #  Weighting factor for the low-rank projection. Defaults to 32
       alpha: 32
-      
+
       # Dropout rate for the low-rank projection. Defaults to 0.0
       dropout: 0.0
-      
+
       # A list of module names to apply LoRA to.
       # For fused LoRA, Defaults to all linear layers ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2'].
       # For canonical LoRA: ["linear_q", "linear_k", "linear_v", "linear_proj", "linear_fc1_up", "linear_fc1_gate", "linear_fc2"]
@@ -67,7 +67,7 @@ actor_rollout_ref:
       # - 'linear_fc2': Apply LoRA to the second fully-connected layer in MLP
       # Target modules can also contain wildcards. For example, you can specify
       # target_modules=['*.layers.0.*.linear_qkv', '*.layers.1.*.linear_qkv'] to add LoRA to only linear_qkv on the first two layers
-      # 
+      #
       # Note:
       # For MLA (e.g., DeepSeek), you should use ["linear_kv_down_proj","linear_kv_up_proj","linear_q_down_proj","linear_q_up_proj","linear_q_proj"]
       # Instead of "linear_qkv" or ["linear_q","linear_k","linear_v"]
@@ -77,7 +77,7 @@ actor_rollout_ref:
         - linear_proj
         - linear_fc1
         - linear_fc2
-      
+
       # A list of module names not to apply LoRa to. It will match all nn.Linear & nn.Linear-adjacent modules whose name
       # does not match any string in exclude_modules. If used, will require target_modules to be empty list or None
       exclude_modules: []
@@ -214,8 +214,8 @@ global_profiler:
         # valid values are "repeat-shutdown:n" or null.
         # For normal whole step profiling, n = len(profile_steps);
         # but for discrete profiling, n = len(profile_steps) * Number(subtasks).
-        # Or you can just leave it null and the program will use n = len(profile_steps) * 6;
-        capture-range-end: null
+        # To be simple, it's set to 6 for default, and you can change it if you want.
+        capture-range-end: "repeat-shutdown:6"
 
         # Send signal to the target application's process group. We let the program to exit by itself.
         kill: none
