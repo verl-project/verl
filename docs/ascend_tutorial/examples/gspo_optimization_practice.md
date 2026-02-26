@@ -70,6 +70,52 @@ git clone https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
 git clone https://huggingface.co/datasets/Maxwell-Jia/AIME_2024
 ~~~
 
+### jemalloc安装
+
+为了确保 Ray 进程能够正常回收内存，需要安装并使能 jemalloc 库进行内存管理。
+
+#### Ubuntu 操作系统
+
+通过操作系统源安装jemalloc（注意： 要求ubuntu版本>=20.04）：
+
+```shell
+sudo apt install libjemalloc2
+```
+
+在启动任务前执行如下命令通过环境变量导入jemalloc，需先通过 **find /usr -name libjemalloc.so.2** 确认文件是否存在 ：
+
+```shell
+# arm64架构
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+# x86_64架构
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+```
+
+#### OpenEuler 操作系统
+
+执行如下命令重操作系统源安装jemalloc
+
+```shell
+yum install jemalloc
+```
+
+如果上述方法无法正常安装，可以通过源码编译安装 前往jemalloc官网下载最新稳定版本，官网地址:https://github.com/jemalloc/jemalloc/releases/
+
+```shell
+tar -xvf jemalloc-{version}.tar.bz2
+cd jemalloc-{version}
+./configure --prefix=/usr/local
+make
+make install
+```
+
+在启动任务前执行如下命令通过环境变量导入jemalloc：
+
+```shell
+#根据实际安装路径设置环境变量，例如安装路径为:/usr/local/lib/libjemalloc.so.2,可通过以下命令来设置环境变量(可通过 find /usr -name libjemalloc.so.2 确认文件是否存在)
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+```
+
 ### 多机任务拉起
 
 针对本实践提供的多机任务，可用下面的脚本拉起
