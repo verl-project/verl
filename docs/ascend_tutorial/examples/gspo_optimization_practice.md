@@ -66,7 +66,7 @@ git submodule update --init --recursive recipe
 # 下载math-17k数据集
 git clone https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
 
-# 下载
+# 下载AIME_2024测试数据集
 git clone https://huggingface.co/datasets/Maxwell-Jia/AIME_2024
 ~~~
 
@@ -364,4 +364,5 @@ actor_rollout_ref.rollout.enforce_eager=False
 环境变量相关：[环境变量列表-Ascend Extension for PyTorch6.0.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/600/apiref/Envvariables/Envir_001.html)
 
 社区性能调优教程：[性能调优流程-Ascend Extension for PyTorch6.0.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0001.html)
+
 
