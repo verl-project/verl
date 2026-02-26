@@ -35,25 +35,50 @@ class DistillationLossConfig(BaseConfig):
         Distillation loss function to use.
     topk (int, optional):
         Number of top tokens to consider for top-k distillation losses.
-    use_policy_loss (bool):
-        Whether to include policy gradient loss alongside distillation loss.
+    use_task_rewards (bool):
+        Whether to include task rewards alongside distillation loss.
     distillation_loss_coef (float):
-        Coefficient for distillation loss when combined with policy loss.
+        Coefficient for distillation loss when combined with task rewards.
     loss_max_clamp (float, optional):
         Maximum value to clamp distillation loss. If None, no clamping is applied.
     log_prob_min_clamp (float, optional):
         Minimum value to clamp log probabilities for stability, e.g., log q - log p where p or q are
         very close to zero. If None, no clamping is applied.
+    use_policy_gradient (bool):
+        Whether to incorporate distillation loss as a reward, as done
+        by https://thinkingmachines.ai/blog/on-policy-distillation/. Recommended to use loss_mode=k1.
+        Otherwise, distillation loss is directly backpropagated as a supervised loss,
+        as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3 or forward_kl_topk.
+    policy_loss_mode (str):
+        Name of the policy loss to use when use_policy_gradient is true.
+    clip_ratio (float):
+        PPO clipping ratio for policy loss.
+    clip_ratio_low (float):
+        Lower bound for PPO clipping ratio.
+    clip_ratio_high (float):
+        Upper bound for PPO clipping ratio.
     loss_settings (DistillationLossSettings, optional):
         Runtime-populated settings based on loss_mode. Not set by user.
     """
 
     loss_mode: str = "k3"
     topk: Optional[int] = 128
-    use_policy_loss: bool = True
+    use_task_rewards: bool = True
     distillation_loss_coef: float = 1.0
     loss_max_clamp: Optional[float] = 10.0
     log_prob_min_clamp: Optional[float] = -10.0
+
+    use_policy_gradient: bool = True
+    policy_loss_mode: str = "vanilla"
+    clip_ratio: float = 0.2
+    clip_ratio_low: float = 0.2
+    clip_ratio_high: float = 0.2
+
+    # Store global batch info for loss aggregation:
+    # dp_size: data parallel size
+    # batch_num_tokens: number of valid tokens in global batch
+    # global_batch_size: global batch size
+    global_batch_info: dict = field(default_factory=dict)
 
     # Store distillation loss settings for computing the specified loss_mode
     # Not set by user, populated at runtime
@@ -61,6 +86,25 @@ class DistillationLossConfig(BaseConfig):
 
     def __post_init__(self):
         self._mutable_fields.add("loss_settings")
+        from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
+
+        self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
+
+        if self.policy_loss_mode != "vanilla":
+            raise NotImplementedError(
+                f"Only vanilla policy loss is currently supported when use_policy_gradient is True, but got {self.policy_loss_mode}."
+            )
+
+        if self.use_policy_gradient and self.loss_mode == "forward_kl_topk":
+            # Warning is because PG is only directly considering gradient of the sampled log prob
+            # However, top-k loss gives information as to whether the logprobs of tokens in the top-k are overestimated or underestimated.
+            # This information is not fully utilized when only using the sampled log prob for policy gradient.
+            print("Warning: It is recommended to use use_policy_gradient=False for forward_kl_topk loss mode.")
+
+        if not self.use_policy_gradient and self.loss_mode == "k1":
+            raise ValueError(
+                "Directly backpropagating k1 loss is incorrect since gradient of k1 loss wrt model weights does not depend on teacher log probabilities."
+            )
 
 
 @dataclass

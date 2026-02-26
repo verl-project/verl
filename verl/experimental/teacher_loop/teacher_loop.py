@@ -23,7 +23,7 @@ from omegaconf import DictConfig
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
-from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
+from verl.trainer.distillation.losses import DistillationLossSettings
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
@@ -43,11 +43,10 @@ class TeacherLoopWorker:
             teacher_router_address: str, the address of teacher router.
         """
         self.config = config
-        self.distillation_config: DistillationConfig = self.config.distillation
+        # to dataclass for the post init to handle top-k and engine kwargs and get distillation_loss_settings
+        self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
-        self.distillation_loss_settings: DistillationLossSettings = get_distillation_loss_settings(
-            self.distillation_loss_config.loss_mode
-        )
+        self.distillation_loss_settings: DistillationLossSettings = self.distillation_loss_config.loss_settings
         self.teacher_router_address = teacher_router_address
 
     async def compute_logprobs(self, data: DataProto) -> dict:
@@ -168,7 +167,7 @@ class TeacherLoopManager:
         self.config = config
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(
             self.config.distillation
-        )  # to dataclass for the post init to handle top-k and engine kwargs
+        )  # to dataclass for the post init to handle top-k and engine kwargs and get distillation_loss_settings
         self.teacher_model_manager = TeacherModelManager(self.distillation_config.teacher_model, teacher_resource_pool)
         self.teacher_router_address = self.teacher_model_manager.get_router_address()
 

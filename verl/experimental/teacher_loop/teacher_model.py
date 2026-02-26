@@ -46,6 +46,8 @@ class TeacherModelManager:
         self._initialize_llm_servers()
         self._initialize_router()
 
+        self.sleep()
+
     def _initialize_llm_servers(self):
         teacher_world_size = self.config.inference.tensor_model_parallel_size
         world_size = (

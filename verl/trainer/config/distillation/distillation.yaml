@@ -5,8 +5,6 @@ _target_: verl.workers.config.DistillationConfig
 defaults:
 
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
-  # Config for inferencing teacher
-  # - ../rollout@teacher_model.inference: rollout
 
   # load the default config, then apply the fields in the current yaml
   # self config override anything above
@@ -31,10 +29,11 @@ distillation_loss:
   # If distillation loss requires top-k logits, this is the value of k
   topk: 32
 
-  # Whether the loss should just be the distillation loss or a combination of the distillation loss and the policy loss
-  use_policy_loss: true
+  # Whether to include task rewards alongside distillation loss.
+  use_task_rewards: true
 
-  # The coef of the distillation loss when use_policy_loss is true
+
+  # The coef of the distillation loss when use_task_rewards is true
   distillation_loss_coef: 1.0
 
   # Optional max clamp value for distillation loss. If null, no clamping is applied.
@@ -42,6 +41,22 @@ distillation_loss:
 
   # Optional min clamp value for log probabilities for stability, e.g., log q - log p where p or q are very close to zero.
   log_prob_min_clamp: null
+
+  # Whether to incorporate distillation loss as a reward.
+  use_policy_gradient: false
+
+  # Name of the policy loss to use when use_policy_gradient is true.
+  policy_loss_mode: "vanilla"
+
+  # PPO clipping ratio for policy loss.
+  clip_ratio: 0.2
+
+  # Lower bound for PPO clipping ratio.
+  clip_ratio_low: 0.2 
+
+  # Upper bound for PPO clipping ratio.
+  clip_ratio_high: 0.2
+
 
 # teacher model config
 teacher_model:
@@ -80,5 +95,9 @@ teacher_model:
     disable_log_stats: true
     skip_tokenizer_init: false
 
-    prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
-    response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
+    # prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
+    # response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
+    prompt_length: 1
+    response_length: 1
+
+  

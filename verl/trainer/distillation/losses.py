@@ -20,7 +20,7 @@ import torch
 import verl.trainer.distillation.fsdp.losses as fsdp_losses
 from verl.base_config import BaseConfig
 from verl.trainer.distillation.types import DistillationLossInputs
-from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 
@@ -111,10 +111,13 @@ def compute_distillation_loss_range(
 
 def distillation_loss(
     inputs: DistillationLossInputs,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
     response_mask: torch.Tensor,
+    loss_agg_mode: str,
     config: ActorConfig,
     distillation_config: DistillationConfig,
-    loss_agg_mode: str = "token-mean",
+    rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics.
@@ -122,14 +125,20 @@ def distillation_loss(
     Args:
         inputs (DistillationLossInputs):
             Inputs containing probabilities from teacher and student policies.
+        old_log_prob (torch.Tensor):
+            Log-probabilities of actions under the old policy, shape (batch_size, response_length).
+        log_prob (torch.Tensor):
+            Log-probabilities of actions under the current policy, shape (batch_size, response_length).
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        loss_agg_mode (str, optional):
+            Aggregation mode for `agg_loss`. Defaults to "token-mean".
         config (ActorConfig):
             Actor configuration.
         distillation_config (DistillationConfig):
             Distillation configuration.
-        loss_agg_mode (str, optional):
-            Aggregation mode for `agg_loss`.
+        rollout_is_weights: `(torch.Tensor)`:
+            Importance-sampling weights of actions under the rollout policy, shape (batch_size, response_length).
 
     Returns:
         tuple[torch.Tensor, dict[str, Any]]: A tuple containing:
@@ -152,9 +161,30 @@ def distillation_loss(
     if loss_config.loss_max_clamp is not None:
         distillation_losses = distillation_losses.clamp_max(loss_config.loss_max_clamp)
 
-    distillation_loss = agg_loss(
-        loss_mat=distillation_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
-    )
+    if loss_config.use_policy_gradient:
+        # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
+        policy_loss_fn = get_policy_loss_fn(loss_config.policy_loss_mode)
+        for k, v in config.global_batch_info.items():
+            loss_config.global_batch_info[k] = v
+        distillation_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=-distillation_losses.detach(),
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=loss_config,
+            rollout_is_weights=rollout_is_weights,
+        )
+        pg_metrics = {f"distillation/{k[len('actor/') :]}": v for k, v in pg_metrics.items()}
+        distillation_metrics.update(pg_metrics)
+    else:
+        # Directly backpropagate distillation loss as a supervised loss, as in https://arxiv.org/abs/2306.13649.
+        distillation_loss = agg_loss(
+            loss_mat=distillation_losses,
+            loss_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            **config.global_batch_info,
+        )
 
     return distillation_loss, distillation_metrics
 
