@@ -236,8 +236,8 @@ class TaskRunner:
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
-        distillation_config = config.distillation
-        if distillation_config.enabled and distillation_config.teacher_model.enable_resource_pool:
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.teacher_model.enable_resource_pool:
             if distillation_config.teacher_model.n_gpus_per_node <= 0:
                 raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
             if distillation_config.teacher_model.nnodes <= 0:
@@ -269,7 +269,7 @@ class TaskRunner:
         """Add teacher model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if is_distillation_enabled(config.distillation):
+        if is_distillation_enabled(config.get("distillation")):
             # we do not use teacher model workers, so we only register teacher model in resource pool
             # without registering a teacher model worker in role-worker mapping
             if config.distillation.teacher_model.enable_resource_pool:
