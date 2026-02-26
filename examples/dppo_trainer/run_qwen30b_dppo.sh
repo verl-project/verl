@@ -58,7 +58,7 @@ bypass_mode=True
 # We recommand using Dr.GRPO to remove the length and difficulty bias in original GRPO.
 # See Section 3.1 in https://arxiv.org/pdf/2503.20783 for more details.
 norm_adv_by_std_in_grpo=False               # remove the difficulty bias
-loss_agg_mode="seq-mean-token-sum"          # remove the length bias
+loss_agg_mode="seq-mean-token-sum-norm"     # remove the length bias
 
 # reference policy
 use_kl_in_reward=False
