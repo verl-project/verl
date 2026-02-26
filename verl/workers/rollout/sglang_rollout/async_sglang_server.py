@@ -421,6 +421,9 @@ class SGLangHttpServer:
         ):
             await self.tokenizer_manager.stop_profile()
 
+    async def shutdown(self):
+        pass
+
 
 _rollout_worker_actor_cls = ray.remote(ServerAdapter)
 

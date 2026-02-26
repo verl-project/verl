@@ -29,6 +29,8 @@ class NsightToolConfig(BaseConfig):
 
     "True for each task has its own database, False for all tasks in one training step share one database."
     discrete: bool = False
+    controller_nsight_options: Optional[dict] = None
+    worker_nsight_options: Optional[dict] = None
     name: str = "nsight"
 
     def __post_init__(self) -> None:

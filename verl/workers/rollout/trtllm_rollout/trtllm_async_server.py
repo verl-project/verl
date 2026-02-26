@@ -362,13 +362,11 @@ class TRTLLMReplica(RolloutReplica):
             else f"trtllm_server_reward_{self.replica_rank}"
         )
 
-        if (
-            "nsys" in self.profiler_config.global_tool_config
-            and "worker_nsight_options" in self.profiler_config.global_tool_config["nsys"]
-        ):
-            nsight_options = self.profiler_config.global_tool_config["nsys"]["worker_nsight_options"]
+        if "nsys" in self.profiler_config.global_tool_config:
+            nsight_options = self.profiler_config.global_tool_config["nsys"].worker_nsight_options
         else:
-            nsight_options = {}
+            nsight_options = None
+
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,
