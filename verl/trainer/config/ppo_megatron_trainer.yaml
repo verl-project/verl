@@ -179,6 +179,10 @@ global_profiler:
   global_tool_config:
     # nsys config
     nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: False
 

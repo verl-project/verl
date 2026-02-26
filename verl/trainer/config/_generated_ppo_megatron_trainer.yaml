@@ -727,6 +727,7 @@ global_profiler:
   save_path: outputs/profile
   global_tool_config:
     nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
       discrete: false
       controller_nsight_options:
         trace: cuda,nvtx,cublas,ucx
