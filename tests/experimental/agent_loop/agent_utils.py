@@ -79,7 +79,7 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
         config=config,
         rm_resource_pool=rm_resource_pool,
     )
-    agent_loop_manager = AgentLoopManager(
+    agent_loop_manager = AgentLoopManager.create(
         rollout_config=config.actor_rollout_ref.rollout,
         model_config=config.actor_rollout_ref.model,
         data_config=config.data,

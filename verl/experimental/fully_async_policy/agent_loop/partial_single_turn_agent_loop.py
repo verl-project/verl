@@ -30,9 +30,9 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
-        self.response_length = self.config.actor_rollout_ref.rollout.response_length
-        self.apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
+        self.prompt_length = self.rollout_config.prompt_length
+        self.response_length = self.rollout_config.response_length
+        self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         output: Optional[AgentLoopOutput] = kwargs.get("output", None)

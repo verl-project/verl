@@ -39,7 +39,7 @@ from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.ray_utils import get_event_loop
+from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
@@ -888,10 +888,26 @@ class AgentLoopManager:
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
-        self._initialize_llm_servers()
-        self._init_agent_loop_workers()
+    @classmethod
+    @auto_await
+    async def create(
+        cls,
+        rollout_config: RolloutConfig,
+        model_config: HFModelConfig,
+        data_config: DictConfig,
+        worker_group: RayWorkerGroup = None,
+        rollout_resource_pool: RayResourcePool = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+    ):
+        """Create agent loop manager."""
+        instance = cls(
+            rollout_config, model_config, data_config, worker_group, rollout_resource_pool, reward_loop_worker_handles
+        )
+        await instance._initialize_llm_servers()
+        await instance._init_agent_loop_workers()
+        return instance
 
-    def _initialize_llm_servers(self):
+    async def _initialize_llm_servers(self):
         rollout_world_size = (
             self.rollout_config.tensor_model_parallel_size
             * self.rollout_config.data_parallel_size
@@ -915,17 +931,17 @@ class AgentLoopManager:
         ]
 
         if self.worker_group and self.rollout_config.name != "trtllm":
-            self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
+            await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
         # TODO: unify trtllm to init_hybrid
         elif self.worker_group and self.rollout_config.name == "trtllm":
-            self._run_all(
-                [
+            await asyncio.gather(
+                *[
                     server.init_hybrid_colocated(self.worker_group, self.rollout_resource_pool)
                     for server in self.rollout_replicas
                 ]
             )
         else:
-            self._run_all([server.init_standalone() for server in self.rollout_replicas])
+            await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
 
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
@@ -938,7 +954,7 @@ class AgentLoopManager:
                 raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
             update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
 
-    def _init_agent_loop_workers(self):
+    async def _init_agent_loop_workers(self):
         self.agent_loop_workers = []
         num_workers = self.rollout_config.agent.num_workers
 
@@ -961,7 +977,8 @@ class AgentLoopManager:
                 )
             )
 
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    @auto_await
+    async def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 
         Args:
@@ -972,8 +989,8 @@ class AgentLoopManager:
         """
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
-        outputs = ray.get(
-            [
+        outputs = await asyncio.gather(
+            *[
                 worker.generate_sequences.remote(chunk)
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
@@ -1014,20 +1031,17 @@ class AgentLoopManager:
 
         return timing
 
-    def clear_kv_cache(self):
+    @auto_await
+    async def clear_kv_cache(self):
         """Clear all rollout kv cache, but don`t sleep."""
-        self._run_all([replica.clear_kv_cache() for replica in self.rollout_replicas])
+        await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
 
-    def start_profile(self, **kwargs):
+    @auto_await
+    async def start_profile(self, **kwargs):
         """Start profiling on all rollout replicas."""
-        self._run_all([replica.start_profile(**kwargs) for replica in self.rollout_replicas])
+        await asyncio.gather(*[replica.start_profile(**kwargs) for replica in self.rollout_replicas])
 
-    def stop_profile(self):
+    @auto_await
+    async def stop_profile(self):
         """Stop profiling on all rollout replicas."""
-        self._run_all([replica.stop_profile() for replica in self.rollout_replicas])
-
-    def _run_all(self, tasks: list[asyncio.Task]):
-        async def run_all():
-            await asyncio.gather(*tasks)
-
-        asyncio.run(run_all())
+        await asyncio.gather(*[replica.stop_profile() for replica in self.rollout_replicas])

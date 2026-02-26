@@ -69,8 +69,8 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 |------------------------------------------------------------------|-----------------------------------------------------------------|
 | `trainer.nnodes`                                                 | Trainer的node数量                                                  |
 | `trainer.n_gpus_per_node`                                        | Trainer每个node上gpu的数量                                            |
-| `rollout.nnodes`                                                 | Rollouter的node数量                                                |
-| `rollout.n_gpus_per_node`                                        | Rollouter每个node上gpu的数量                                          |
+| `actor_rollout_ref.rollout.nnodes`                                                 | Rollouter的node数量                                                |
+| `actor_rollout_ref.rollout.n_gpus_per_node`                                        | Rollouter每个node上gpu的数量                                          |
 | `data.train_batch_size`                                          | 在fully async策略中，该值不生效（默认设置为0）                                   |
 | `data.gen_batch_size`                                            | 在fully async策略中，使用流式的样本生产逻辑（默认设置为1)                             |
 | `rollout.total_rollout_steps`                                    | 总的rollout的sample数量                                              |
@@ -256,8 +256,8 @@ python -m recipe.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     trainer.nnodes="${NNODES_TRAIN}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
-    rollout.nnodes="${NNODES_ROLLOUT}" \
-    rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
+    actor_rollout_ref.rollout.nnodes="${NNODES_ROLLOUT}" \
+    actor_rollout_ref.rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
     rollout.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \

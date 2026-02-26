@@ -30,12 +30,6 @@ async_training:
 # Rollout config
 rollout:
 
-  # Number of nodes used in the rollout
-  nnodes: 1
-
-  # Number of GPUs per node                     
-  n_gpus_per_node: 8
-
   # number of responses (i.e. num sample times). > 1 for grpo
   n: 4
 

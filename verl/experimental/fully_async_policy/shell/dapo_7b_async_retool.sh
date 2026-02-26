@@ -129,8 +129,8 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     data.gen_batch_size=${gen_prompt_bsz} \
     trainer.nnodes=$NNODES \
     trainer.n_gpus_per_node=$n_gpus_training \
-    rollout.nnodes=$NNODES \
-    rollout.n_gpus_per_node=$n_gpus_rollout \
+    actor_rollout_ref.rollout.nnodes=$NNODES \
+    actor_rollout_ref.rollout.n_gpus_per_node=$n_gpus_rollout \
     rollout.total_rollout_steps=$total_rollout_steps \
     rollout.total_epochs=10 \
     rollout.test_freq=$test_freq \
