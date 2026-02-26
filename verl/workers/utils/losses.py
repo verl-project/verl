@@ -13,10 +13,12 @@
 # limitations under the License.
 
 
+from typing import Optional
+
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.distillation import distillation_loss, prepare_distillation_inputs
+from verl.trainer.distillation import distillation_loss, is_distillation_enabled, prepare_distillation_inputs
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
@@ -57,13 +59,16 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
 def ppo_loss(
     config: ActorConfig,
-    distillation_config: DistillationConfig,
+    distillation_config: Optional[DistillationConfig],
     model_output: dict[str, torch.Tensor],
     data: TensorDict,
     dp_group=None,
 ):
-    distillation_enabled = distillation_config.enabled
-    distillation_loss_config: DistillationLossConfig = distillation_config.distillation_loss
+    distillation_enabled = is_distillation_enabled(distillation_config)
+    if distillation_enabled:
+        distillation_loss_config: DistillationLossConfig = distillation_config.distillation_loss
+    else:
+        distillation_loss_config = None
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
