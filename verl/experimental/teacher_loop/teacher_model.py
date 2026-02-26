@@ -38,8 +38,6 @@ class TeacherModelManager:
         Args:
             config (TeacherModelConfig): Teacher model configuration.
             resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
-
-        TODO: create ABC for distillation/reward manager after distillation manager has been extended to support multiple teachers (MOPD)
         """
         self.config = config
         self.resource_pool = resource_pool
