@@ -23,7 +23,7 @@ from ray.actor import ActorHandle
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
 
-from verl.single_controller.ray import RayClassWithInitArgs, SubRayResourcePool
+from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
@@ -241,9 +241,6 @@ class TRTLLMHttpServer:
         )
 
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
-
-
 class TRTLLMReplica(RolloutReplica):
     def __init__(
         self,
@@ -255,17 +252,6 @@ class TRTLLMReplica(RolloutReplica):
     ) -> None:
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
-
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        """Get rollout worker actor class for colocated and standalone mode."""
-        worker_dict_cls = RayClassWithInitArgs(
-            cls=_rollout_worker_actor_cls,
-            config=self.config,
-            model_config=self.model_config,
-            device_mesh=None,
-            replica_rank=self.replica_rank,
-        )
-        return worker_dict_cls
 
     def rollout_worker_use_gpu(self) -> bool:
         return False

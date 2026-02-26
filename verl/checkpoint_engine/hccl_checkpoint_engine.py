@@ -58,6 +58,9 @@ class HCCLCheckpointEngine(CollectiveCheckpointEngine):
             is_master=is_master,
             rollout_dtype=rollout_dtype,
         )
+        # HCCL does not support async broadcast, so we set it to False here:
+        # https://github.com/verl-project/verl/pull/5029/changes#r2773396972
+        self._async_broadcast_mode = False
         if self.is_master:
             self._dist_port, _ = get_free_port(self._ip)
 
@@ -86,6 +89,8 @@ class HCCLCheckpointEngine(CollectiveCheckpointEngine):
 
         self._send_buf = None
         self._recv_buf = None
+
+        torch.npu.empty_cache()
 
     def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata):
         """Initialize the HCCL process group.

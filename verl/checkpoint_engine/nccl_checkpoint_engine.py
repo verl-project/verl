@@ -59,6 +59,7 @@ class NCCLCheckpointEngine(CollectiveCheckpointEngine):
             is_master=is_master,
             rollout_dtype=rollout_dtype,
         )
+        self._async_broadcast_mode = True  # NCCL uses async broadcast
 
     def prepare(self) -> MasterMetadata | None:
         """Prepare checkpoint engine before each step send_weights/receive_weights."""
@@ -85,6 +86,8 @@ class NCCLCheckpointEngine(CollectiveCheckpointEngine):
 
         self._send_buf = None
         self._recv_buf = None
+
+        torch.cuda.empty_cache()
 
     def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata):
         """Initialize the NCCL process group.
