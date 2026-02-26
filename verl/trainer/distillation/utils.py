@@ -38,7 +38,7 @@ def prepare_student_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: Optional[DistillationConfig]
 ) -> dict[str, torch.Tensor]:
     """Prepare student distillation inputs."""
-    stage = batch.get("stage", None)
+    stage = None if "stage" not in batch else batch["stage"]
     if not is_distillation_enabled(config) or stage != Stage.ACTOR_UPDATE:
         return {}
     loss_config: DistillationLossConfig = config.distillation_loss
