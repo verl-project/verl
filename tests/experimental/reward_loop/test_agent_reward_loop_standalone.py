@@ -77,9 +77,7 @@ def test_agent_reward_loop_standalone():
     # 1. init reward model manager
     reward_loop_manager = RewardLoopManager(config)
     agent_loop_manager = AgentLoopManager.create(
-        rollout_config=config.actor_rollout_ref.rollout,
-        model_config=config.actor_rollout_ref.model,
-        data_config=config.data,
+        config=config,
         reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )
 

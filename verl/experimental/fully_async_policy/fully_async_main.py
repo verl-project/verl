@@ -59,14 +59,10 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
 
     # Rollout resource pool
     if Role.Rollout in roles:
-        assert config.actor_rollout_ref.rollout.n_gpus_per_node > 0, (
-            "config.actor_rollout_ref.rollout.n_gpus_per_node must be greater than 0"
-        )
-        assert config.actor_rollout_ref.rollout.nnodes > 0, (
-            "config.actor_rollout_ref.rollout.nnodes must be greater than 0"
-        )
+        assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
+        assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
 
-        rollout_pool = [config.actor_rollout_ref.rollout.n_gpus_per_node] * config.actor_rollout_ref.rollout.nnodes
+        rollout_pool = [config.rollout.n_gpus_per_node] * config.rollout.nnodes
         resource_pool_spec["rollout_pool"] = rollout_pool
         mapping[Role.Rollout] = "rollout_pool"
 
@@ -291,6 +287,9 @@ def main(config):
     from time import time
 
     start_time = time()
+    # TODO: unify rollout config with actor_rollout_ref
+    config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
+    config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node
     run_ppo(config, task_runner_class=FullyAsyncTaskRunner)
     print(f"total time: {time() - start_time:.2f} seconds")
 

@@ -92,8 +92,8 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 |------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
 | `trainer.nnodes`                                                 | Number of nodes for Trainer                                                                    |
 | `trainer.n_gpus_per_node`                                        | Number of GPUs per node for Trainer                                                            |
-| `actor_rollout_ref.rollout.nnodes`                                                 | Number of nodes for Rollouter                                                                  |
-| `actor_rollout_ref.rollout.n_gpus_per_node`                                        | Number of GPUs per node for Rollouter                                                          |
+| `rollout.nnodes`                                                 | Number of nodes for Rollouter                                                                  |
+| `rollout.n_gpus_per_node`                                        | Number of GPUs per node for Rollouter                                                          |
 | `data.train_batch_size`                                          | In the fully async strategy, this value is not effective (default is 0)                        |
 | `data.gen_batch_size`                                            | In the fully async strategy, uses streaming sample production logic (default is 1)             |
 | `rollout.total_rollout_steps`                                    | Total number of rollout samples                                                                |
@@ -313,8 +313,8 @@ python -m recipe.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     trainer.nnodes="${NNODES_TRAIN}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
-    actor_rollout_ref.rollout.nnodes="${NNODES_ROLLOUT}" \
-    actor_rollout_ref.rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
+    rollout.nnodes="${NNODES_ROLLOUT}" \
+    rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
     rollout.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \

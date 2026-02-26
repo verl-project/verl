@@ -80,9 +80,7 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
         rm_resource_pool=rm_resource_pool,
     )
     agent_loop_manager = AgentLoopManager.create(
-        rollout_config=config.actor_rollout_ref.rollout,
-        model_config=config.actor_rollout_ref.model,
-        data_config=config.data,
+        config=config,
         worker_group=actor_rollout_wg,
         reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )

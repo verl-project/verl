@@ -36,7 +36,6 @@ from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
 )
-from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -81,14 +80,12 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
 class FullyAsyncAgentLoopWorker(AgentLoopWorker):
     def __init__(
         self,
-        rollout_config: RolloutConfig,
-        model_config: HFModelConfig,
-        data_config: DictConfig,
+        config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        self.server_manager = FullyAsyncLLMServerManager(rollout_config, server_handles)
-        super().__init__(rollout_config, model_config, data_config, server_handles, reward_loop_worker_handles)
+        self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
+        super().__init__(config, server_handles, reward_loop_worker_handles)
         # A shared cancellation event for all agent loops running on this worker.
         self.cancellation_event = asyncio.Event()
 
@@ -219,22 +216,19 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
 class FullyAsyncAgentLoopManager(AgentLoopManager):
     def __init__(
         self,
-        rollout_config: RolloutConfig,
-        model_config: HFModelConfig,
-        data_config: DictConfig,
+        config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        self.rollout_config = rollout_config
-        self.model_config = model_config
-        self.data_config = data_config
+        self.config = config
+        self.rollout_config = config.actor_rollout_ref.rollout
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
 
         # Select rollout replica class based on rollout name
-        rollout_name = rollout_config.name
+        rollout_name = self.rollout_config.name
         if rollout_name == "sglang":
             from verl.experimental.fully_async_policy.sglang_rollout.sglang_async_server import FullyAsyncSGLangReplica
 

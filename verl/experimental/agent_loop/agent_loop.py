@@ -53,6 +53,14 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _get_rollout_and_model_config(config: DictConfig) -> RolloutConfig:
+    # TODO: backward compatibility, remove this once we switch to new trainer.
+    if config.get("actor_rollout_ref"):
+        return config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
+    else:
+        return config.rollout, config.model
+
+
 class AsyncLLMServerManager:
     """
     A class to manage multiple OpenAI compatible LLM servers. This class provides
@@ -60,17 +68,15 @@ class AsyncLLMServerManager:
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
     """
 
-    def __init__(
-        self, rollout_config: RolloutConfig, server_handles: list[ray.actor.ActorHandle], max_cache_size: int = 10000
-    ):
+    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], max_cache_size: int = 10000):
         """Initialize the AsyncLLMServerManager.
 
         Args:
-            rollout_config (RolloutConfig): rollout config.
+            config (DictConfig): whole config for main entrypoint.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
             max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.
         """
-        self.rollout_config = rollout_config
+        self.config = config
         self.server_handles = server_handles
         random.shuffle(self.server_handles)
 
@@ -195,7 +201,7 @@ class AgentLoopBase(ABC):
     environments.
 
     Args:
-        rollout_config (RolloutConfig): rollout config.
+        trainer_config (DictConfig): whole config for main entrypoint.
         server_manager (AsyncLLMServerManager): OpenAI compatible LLM server manager.
         tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
         processor (AutoProcessor): Processor for process messages.
@@ -205,7 +211,7 @@ class AgentLoopBase(ABC):
 
     def __init__(
         self,
-        rollout_config: DictConfigWrap,
+        trainer_config: DictConfigWrap,
         server_manager: AsyncLLMServerManager,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor,
@@ -213,7 +219,8 @@ class AgentLoopBase(ABC):
         data_config: DictConfigWrap,
         **kwargs,
     ):
-        self.rollout_config = rollout_config.config
+        self.config = trainer_config.config
+        self.rollout_config, _ = _get_rollout_and_model_config(self.config)
         self.server_manager = server_manager
         self.tokenizer = tokenizer
         self.processor = processor
@@ -346,30 +353,27 @@ class AgentLoopWorker:
     """Agent loop worker takes a batch of messages and run each message in an agent loop.
 
     Args:
-        rollout_config (RolloutConfig): rollout config.
-        model_config (HFModelConfig): model config.
-        data_config (DictConfig): data config.
+        config (DictConfig): whole config for main entrypoint.
         server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
     """
 
     def __init__(
         self,
-        rollout_config: RolloutConfig,
-        model_config: HFModelConfig,
-        data_config: DictConfig,
+        config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
+        self.config = config
+        rollout_config, model_config = _get_rollout_and_model_config(config)
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
-        self.data_config = data_config
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(self.rollout_config, server_handles)
+            self.server_manager = AsyncLLMServerManager(config, server_handles)
 
-        self.dataset_cls = get_dataset_class(data_config)
+        self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
         self.tokenizer = self.model_config.tokenizer
@@ -501,12 +505,12 @@ class AgentLoopWorker:
             agent_loop_config = _agent_loop_registry[agent_name]
             agent_loop = hydra.utils.instantiate(
                 config=agent_loop_config,
-                rollout_config=DictConfigWrap(self.rollout_config),
+                trainer_config=DictConfigWrap(config=self.config),
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 dataset_cls=self.dataset_cls,
-                data_config=DictConfigWrap(self.data_config),
+                data_config=DictConfigWrap(self.config.data),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, **kwargs)
@@ -856,9 +860,7 @@ class AgentLoopManager:
     - otherwise, rollout server is in standalone mode, use separate GPUs, e.g., one-step-off/fully async training.
 
     Args:
-        rollout_config (RolloutConfig): rollout config.
-        model_config (HFModelConfig): model config.
-        data_config (DictConfig): data config.
+        config (DictConfig): whole config for main entrypoint.
         worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
         rollout_resource_pool (RayResourcePool): Resource pool for hybrid mode, only used by TensorRT-LLM.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
@@ -866,21 +868,18 @@ class AgentLoopManager:
 
     def __init__(
         self,
-        rollout_config: RolloutConfig,
-        model_config: HFModelConfig,
-        data_config: DictConfig,
+        config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        assert worker_group is not None or rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
-
-        self.rollout_config = rollout_config
-        self.model_config = model_config
-        self.data_config = data_config
+        self.config = config
+        self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
         self.reward_loop_worker_handles = reward_loop_worker_handles
+
+        assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
@@ -892,17 +891,13 @@ class AgentLoopManager:
     @auto_await
     async def create(
         cls,
-        rollout_config: RolloutConfig,
-        model_config: HFModelConfig,
-        data_config: DictConfig,
+        config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Create agent loop manager."""
-        instance = cls(
-            rollout_config, model_config, data_config, worker_group, rollout_resource_pool, reward_loop_worker_handles
-        )
+        instance = cls(config, worker_group, rollout_resource_pool, reward_loop_worker_handles)
         await instance._initialize_llm_servers()
         await instance._init_agent_loop_workers()
         return instance
@@ -968,13 +963,7 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(
-                    self.rollout_config,
-                    self.model_config,
-                    self.data_config,
-                    self.server_handles,
-                    self.reward_loop_worker_handles,
-                )
+                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
             )
 
     @auto_await

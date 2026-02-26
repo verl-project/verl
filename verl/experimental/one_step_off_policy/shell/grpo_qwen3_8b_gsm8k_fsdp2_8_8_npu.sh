@@ -89,5 +89,5 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \
     trainer.resume_mode=auto \
     trainer.nnodes="${NNODES}" \
     trainer.n_gpus_per_node="${n_gpus_training}" \
-    actor_rollout_ref.rollout.nnodes="${NNODES}" \
-    actor_rollout_ref.rollout.n_gpus_per_node="${n_gpus_rollout}" $@
+    rollout.nnodes="${NNODES}" \
+    rollout.n_gpus_per_node="${n_gpus_rollout}" $@

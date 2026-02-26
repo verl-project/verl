@@ -832,9 +832,7 @@ class RayPPOTrainer:
         # to stream reward computation with actor rollout
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
-            rollout_config=self.config.actor_rollout_ref.rollout,
-            model_config=self.config.actor_rollout_ref.model,
-            data_config=self.config.actor_rollout_ref.data,
+            config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,

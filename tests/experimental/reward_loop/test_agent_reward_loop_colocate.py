@@ -99,9 +99,7 @@ def test_agent_reward_loop_standalone():
     actor_rollout_wg.init_model()
 
     agent_loop_manager = AgentLoopManager.create(
-        rollout_config=config.actor_rollout_ref.rollout,
-        model_config=config.actor_rollout_ref.model,
-        data_config=config.data,
+        config=config,
         worker_group=actor_rollout_wg,
     )
     # sleep rollout replicas

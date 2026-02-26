@@ -137,7 +137,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
         total_gpus = (
             config.trainer.nnodes * config.trainer.n_gpus_per_node
-            + config.actor_rollout_ref.rollout.nnodes * config.actor_rollout_ref.rollout.n_gpus_per_node
+            + config.rollout.nnodes * config.rollout.n_gpus_per_node
         )
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
 
@@ -147,7 +147,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             from verl.utils.dataset.rl_dataset import collate_fn
 
             val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
-            rollout_gpus = config.actor_rollout_ref.rollout.nnodes * config.actor_rollout_ref.rollout.n_gpus_per_node
+            rollout_gpus = config.rollout.nnodes * config.rollout.n_gpus_per_node
             print(f"[FullyAsyncTrainer] split before val_dataset total len: {len(val_dataset)}")
             split_dataset = val_dataset.split(total_gpus)
             rollout_val_dataset0 = split_dataset[rollout_gpus:]
@@ -311,9 +311,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
             self.async_rollout_mode = True
             self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
-                rollout_config=self.config.actor_rollout_ref.rollout,
-                model_config=self.config.actor_rollout_ref.model,
-                data_config=self.config.data,
+                config=self.config,
                 worker_group=self.actor_rollout_wg,
                 reward_loop_worker_handles=reward_loop_worker_handles,
             )

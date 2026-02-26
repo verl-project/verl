@@ -183,10 +183,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         self.async_rollout_mode = True
         self.async_rollout_manager = OneStepOffAgentLoopManager.create(
-            rollout_config=self.config.actor_rollout_ref.rollout,
-            model_config=self.config.actor_rollout_ref.model,
-            data_config=self.config.data,
-            reward_loop_worker_handles=reward_loop_worker_handles,
+            config=self.config, reward_loop_worker_handles=reward_loop_worker_handles
         )
 
     def _create_continuous_iterator(self):

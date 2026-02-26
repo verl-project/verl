@@ -148,7 +148,8 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     config = OmegaConf.create(
         {
             "actor_rollout_ref": {
-                "rollout": {"prompt_length": 16, "response_length": 16, "multi_turn": {"tool_config_path": None}}
+                "rollout": {"prompt_length": 16, "response_length": 16, "multi_turn": {"tool_config_path": None}},
+                "model": {},
             },
             "data": {
                 "tool_config_path": None,
@@ -161,11 +162,11 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     tokenizer = _FakeTokenizer()
     processor = None
 
-    rollout_config = DictConfigWrap(config.actor_rollout_ref.rollout)
+    trainer_config = DictConfigWrap(config)
     data_config = DictConfigWrap(config.data)
 
     single_turn = SingleTurnAgentLoop(
-        rollout_config=rollout_config,
+        trainer_config=trainer_config,
         server_manager=server_manager,
         tokenizer=tokenizer,
         processor=processor,
@@ -173,7 +174,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
         data_config=data_config,
     )
     partial_single_turn = PartialSingleTurnAgentLoop(
-        rollout_config=rollout_config,
+        trainer_config=trainer_config,
         server_manager=server_manager,
         tokenizer=tokenizer,
         processor=processor,

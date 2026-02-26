@@ -104,7 +104,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         self._validate_config()
         if self.config.async_training.use_trainer_do_validate:
-            rollout_gpus = config.actor_rollout_ref.rollout.nnodes * config.actor_rollout_ref.rollout.n_gpus_per_node
+            rollout_gpus = config.rollout.nnodes * config.rollout.n_gpus_per_node
             train_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node
             total_gpus = rollout_gpus + train_gpus
             print(f"[FullyAsyncRollouter] split before val_dataset total len: {len(val_dataset)}")
@@ -444,11 +444,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         self.async_rollout_mode = True
         self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
-            rollout_config=self.config.actor_rollout_ref.rollout,
-            model_config=self.config.actor_rollout_ref.model,
-            data_config=self.config.data,
-            worker_group=self.rollout_wg,
-            reward_loop_worker_handles=reward_loop_worker_handles,
+            config=self.config, worker_group=self.rollout_wg, reward_loop_worker_handles=reward_loop_worker_handles
         )
 
     # Add samples to the pending_queue
