@@ -23,7 +23,7 @@ SequentialMLP and quantised wrappers.
 import gc
 import logging
 import re
-from typing import Iterable, Optional
+from typing import Optional
 
 import torch
 
@@ -327,126 +327,43 @@ def revert_local_name_to_global_patch():
     logger.info("Reverted QAT patch: _megatron_local_name_to_global.")
 
 
-def apply_build_conversion_tasks_patch():
-    """Patch ``build_conversion_tasks`` to filter out ``None`` entries."""
-    import itertools
+def apply_skip_quantizer_params_patch():
+    """Extend ``_is_adapter_param_name`` to also skip ModelOpt quantizer parameters.
 
-    import megatron.bridge.models.conversion.model_bridge as bridge_module
-    from megatron.bridge.models.conversion.model_bridge import (
-        MegatronModelBridge,
-        WeightConversionTask,
-    )
-    from megatron.bridge.models.conversion.utils import (
-        get_module_and_param_from_name,
-        persistent_buffers,
-    )
-    from megatron.bridge.utils.common_utils import print_rank_0
-    from megatron.core import parallel_state
-    from megatron.core.utils import unwrap_model
-
-    if getattr(MegatronModelBridge, "_build_tasks_patched", False):
-        return
-    MegatronModelBridge._build_tasks_patched = True
-    MegatronModelBridge._original_build_conversion_tasks = MegatronModelBridge.build_conversion_tasks
-
-    def _patched_build_conversion_tasks(self, hf_pretrained, megatron_model):
-        if not (hasattr(hf_pretrained, "state") and hasattr(hf_pretrained.state, "source")):
-            raise ValueError("hf_pretrained.state.source is required for weight ordering")
-
-        hf_keys: Iterable[str] = hf_pretrained.state.source.get_all_keys()
-
-        mapping_registry = self.mapping_registry()
-        unwrapped_model = unwrap_model(megatron_model)[0]
-        model_config = unwrapped_model.config
-        embeddings_are_tied = self._share_embeddings_and_output_weights(model_config, unwrapped_model)
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-        sorted_global_param_names_all_pp_ranks = self._megatron_global_param_names_all_pp_ranks(megatron_model)
-
-        if embeddings_are_tied:
-            sorted_global_param_names_all_pp_ranks = [
-                name for name in sorted_global_param_names_all_pp_ranks if "output_layer" not in name
-            ]
-
-        global_names_index_dict = {name: idx for idx, name in enumerate(sorted_global_param_names_all_pp_ranks)}
-
-        tasks = [None] * len(sorted_global_param_names_all_pp_ranks)
-        for vp_stage, model in enumerate(megatron_model):
-            for local_name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)):
-                if "_extra_state" in local_name or self._is_adapter_param_name(local_name):
-                    continue
-
-                local_name = self._unwrap_name(local_name)
-                global_name = bridge_module._megatron_local_name_to_global(
-                    megatron_model, model_config, local_name, vp_stage
-                )
-                if global_name not in global_names_index_dict:
-                    print_rank_0(f"WARNING: {global_name} not in global_names_index_dict")
-                    continue
-                global_name_idx = global_names_index_dict[global_name]
-                mapping = mapping_registry.megatron_to_hf_lookup(self._get_lora_unwrapped_name(global_name))
-
-                if not mapping:
-                    logger.warning(f"WARNING: No mapping found for megatron_param: {global_name}")
-                    continue
-
-                if not mapping.allow_hf_name_mismatch:
-                    if isinstance(mapping.hf_param, str):
-                        if mapping.hf_param not in hf_keys:
-                            logger.warning(f"WARNING: Can't find {mapping.hf_param} in hf_keys")
-                            continue
-                    else:
-                        missing_params = [hf_param for hf_param in mapping.hf_param.values() if hf_param not in hf_keys]
-                        if missing_params:
-                            logger.warning(
-                                f"WARNING: Can't find the following HF parameters in hf_keys: {missing_params}"
-                            )
-                            continue
-
-                local_module, local_weights = get_module_and_param_from_name(megatron_model, local_name, vp_stage)
-                if local_module is not None and not hasattr(local_module, "config"):
-                    local_module.config = model_config
-
-                tasks[global_name_idx] = WeightConversionTask(
-                    pp_rank=pp_rank,
-                    vp_stage=vp_stage,
-                    param_name=local_name,
-                    global_param_name=global_name,
-                    megatron_module=local_module,
-                    param_weight=local_weights,
-                    mapping=mapping,
-                )
-
-        for idx, global_name in enumerate(sorted_global_param_names_all_pp_ranks):
-            if tasks[idx] is None:
-                mapping = mapping_registry.megatron_to_hf_lookup(self._get_lora_unwrapped_name(global_name))
-                if mapping is None:
-                    continue
-                tasks[idx] = WeightConversionTask(
-                    pp_rank=pp_rank,
-                    vp_stage=None,
-                    param_name=global_name,
-                    global_param_name=global_name,
-                    megatron_module=None,
-                    param_weight=None,
-                    mapping=mapping,
-                )
-
-        tasks = [task for task in tasks if task is not None]
-        return tasks
-
-    MegatronModelBridge.build_conversion_tasks = _patched_build_conversion_tasks
-    logger.info("Applied QAT patch: MegatronModelBridge.build_conversion_tasks now filters out None entries.")
-
-
-def revert_build_conversion_tasks_patch():
-    """Revert :func:`apply_build_conversion_tasks_patch`."""
+    After ``mtq.quantize()``, quantizer sub-modules (``weight_quantizer``,
+    ``input_quantizer``) are registered in the model tree.  Their internal
+    parameters (e.g. ``_amax``) have no HF counterpart and must not enter
+    the Bridge's conversion pipeline.
+    """
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 
-    if not getattr(MegatronModelBridge, "_build_tasks_patched", False):
+    if getattr(MegatronModelBridge, "_quantizer_filter_patched", False):
         return
-    MegatronModelBridge.build_conversion_tasks = MegatronModelBridge._original_build_conversion_tasks
-    MegatronModelBridge._build_tasks_patched = False
-    logger.info("Reverted QAT patch: MegatronModelBridge.build_conversion_tasks.")
+    MegatronModelBridge._quantizer_filter_patched = True
+    MegatronModelBridge._original_is_adapter_param_name = MegatronModelBridge._is_adapter_param_name
+
+    _orig = MegatronModelBridge._is_adapter_param_name
+
+    def _patched_is_adapter_param_name(self, param_name: str) -> bool:
+        if _orig(self, param_name):
+            return True
+        return "_quantizer" in param_name
+
+    MegatronModelBridge._is_adapter_param_name = _patched_is_adapter_param_name
+    logger.info(
+        "Applied QAT patch: _is_adapter_param_name now also skips ModelOpt quantizer parameters (*_quantizer*)."
+    )
+
+
+def revert_skip_quantizer_params_patch():
+    """Revert :func:`apply_skip_quantizer_params_patch`."""
+    from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
+
+    if not getattr(MegatronModelBridge, "_quantizer_filter_patched", False):
+        return
+    MegatronModelBridge._is_adapter_param_name = MegatronModelBridge._original_is_adapter_param_name
+    MegatronModelBridge._quantizer_filter_patched = False
+    logger.info("Reverted QAT patch: _is_adapter_param_name (quantizer filter).")
 
 
 def apply_detect_parallelism_type_patch():
@@ -493,7 +410,7 @@ def apply_qat_patch():
     apply_ep_gather_patch()
     apply_extract_sort_key_patch()
     apply_local_name_to_global_patch()
-    apply_build_conversion_tasks_patch()
+    apply_skip_quantizer_params_patch()
     apply_detect_parallelism_type_patch()
 
 
@@ -503,5 +420,5 @@ def revert_qat_patch():
     revert_ep_gather_patch()
     revert_extract_sort_key_patch()
     revert_local_name_to_global_patch()
-    revert_build_conversion_tasks_patch()
+    revert_skip_quantizer_params_patch()
     revert_detect_parallelism_type_patch()
