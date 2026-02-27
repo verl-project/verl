@@ -18,7 +18,7 @@ RUN ARCH=$(uname -m) && \
     fi && \
     # Clone libs
     git clone --depth 1 --branch v0.11.0 https://github.com/vllm-project/vllm.git && \
-    git clone --depth 1 --branch v0.11.0rc1 https://github.com/vllm-project/vllm-ascend.git && \
+    git clone --depth 1 --branch v0.11.0 https://github.com/vllm-project/vllm-ascend.git && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
     cd MindSpeed && git checkout f2b0977e && cd .. && \
     git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
