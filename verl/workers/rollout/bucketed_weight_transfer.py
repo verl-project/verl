@@ -58,6 +58,7 @@ def create_shared_memory(size: int, name: str):
         shm = shared_memory.SharedMemory(name=name, create=True, size=size)
     except FileExistsError:
         shm = shared_memory.SharedMemory(name=name)
+        assert shm.size >= size, f"Stale shm segment '{name}': expected {size} bytes, got {shm.size}"
     return shm
 
 
@@ -286,13 +287,15 @@ class BucketedWeightReceiver:
         if self.socket is not None:
             self.socket.close()
             self.socket = None
+        # Synchronize before releasing the buffer to ensure all async ops
+        # referencing it (e.g. clone, .to()) have completed.
+        get_torch_device().synchronize()
         del self.buffer
         self.buffer = None
         if self.shm is not None:
             self.shm.close()
             del self.shm
             self.shm = None
-        get_torch_device().synchronize()
         gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()

@@ -28,8 +28,10 @@ from verl.utils.device import get_device_name, get_torch_device
 
 PROCESS_TIMEOUT = 60
 
+# Use string checks to avoid initializing CUDA in the main pytest process,
+# which would make subsequent fork-based multiprocessing in other tests unsafe.
 HAS_ACCELERATOR = get_device_name() != "cpu"
-HAS_CUDA = torch.cuda.is_available()
+HAS_CUDA = "cuda" in get_device_name()
 
 
 def _unique_zmq_handle():
