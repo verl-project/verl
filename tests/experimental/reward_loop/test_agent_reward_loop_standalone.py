@@ -56,6 +56,7 @@ def test_agent_reward_loop_standalone():
     config.actor_rollout_ref.rollout.prompt_length = 1024
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
+    config.actor_rollout_ref.rollout.nnodes = 1
     config.trainer.n_gpus_per_node = 4
     config.trainer.nnodes = 1
 
