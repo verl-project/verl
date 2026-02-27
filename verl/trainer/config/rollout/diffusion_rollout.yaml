@@ -1,0 +1,371 @@
+# Target class for this configuration
+_target_: verl.workers.config.DiffusionRolloutConfig
+
+# actor_rollout_ref.rollout.name: vllm_omni/hf/vllm/sglang/trtllm. The default value will be removed in the future
+name: ???
+
+# sync: LLM, async: AsyncLLM
+mode: async
+
+# typically the same as data max prompt length
+# same as data.max_prompt_length if it exists
+prompt_length: ${oc.select:data.max_prompt_length,512}
+
+# for vllm rollout
+# Rollout model parameters type. Align with actor model's FSDP/Megatron type.
+dtype: bfloat16
+
+# Fraction of GPU memory used by vLLM/SGLang/TRTLLM for KV cache.
+gpu_memory_utilization: 0.5
+
+# Whether to disable CUDA graph. Default False to best performance.
+enforce_eager: False
+
+# batch size of cudagraph to capture. Require enforce_eager: False to use this option
+# Since cudagraph in inference engine can not be offloaded during update policy,
+# you can use smaller batch size to save memory used in cuda graph, eg: [1 ,2, 4, 8, 16, 32]
+# supported engines: vllm
+cudagraph_capture_sizes: null
+
+# Whether to free engine KVCache after generation.
+free_cache_engine: True
+
+# TP size for rollout. Not effective for hf
+tensor_model_parallel_size: 2
+
+# DP size for rollout
+data_parallel_size: 1
+
+# EP size for rollout
+expert_parallel_size: 1
+
+# PP size for rollout.
+pipeline_model_parallel_size: 1
+
+# max number of tokens in a batch
+max_num_batched_tokens: 8192
+
+# max length for rollout
+max_model_len: null
+
+# max length of sequences
+max_num_seqs: 1024
+
+# may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
+enable_chunked_prefill: True
+
+# Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
+enable_prefix_caching: True
+
+# logprobs mode for rollout logprobs
+logprobs_mode: processed_logprobs
+
+# scheduling policy for vllm rollout
+scheduling_policy: fcfs
+
+# Which loader to use for rollout model weights: dummy, hf, megatron, etc.
+# safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
+load_format: dummy
+
+# [Will be deprecated, use log_prob_micro_batch_size_per_gpu] The batch size for one forward pass in the computation of log_prob. Global batch size.
+log_prob_micro_batch_size: null
+
+# The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
+log_prob_micro_batch_size_per_gpu: null
+
+# enable dynamic batch size (sequence packing) for log_prob computation
+# same as actor_rollout_ref.actor.use_dynamic_bsz if it exists, otherwise false
+log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
+
+# max token length for log_prob computation
+# same as actor_rollout_ref.actor.ppo_max_token_len_per_gpu if it exists, otherwise 16384
+log_prob_max_token_len_per_gpu: ${oc.select:actor_rollout_ref.actor.ppo_max_token_len_per_gpu,16384}
+
+# disable logging statistics
+disable_log_stats: True
+
+# for hf rollout
+# Whether to sample during training rollout. False uses greedy sampling.
+do_sample: True
+
+# number of responses (i.e. num sample times). > 1 for grpo
+n: 1
+
+# image height for diffusion model rollout
+image_height: 512
+
+# image width for diffusion model rollout
+image_width: 512
+
+# number of inference steps for diffusion model rollout
+num_inference_steps: 10
+
+# noise level for diffusion model rollout
+noise_level: 0.7
+
+# guidance scale for classifier-free guidance
+guidance_scale: 4.5
+
+# SDE type during rollout
+sde_type: "sde"
+
+# SDE window size
+sde_window_size: null
+
+# SDE window range
+sde_window_range: null
+
+# Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail
+engine_kwargs:
+
+  # vllm engine config
+  # vllm: {}
+
+  # vllm-omni engine config
+  vllm_omni: {}
+
+  # sglang engine config
+  # sglang: {}
+
+  # trtllm engine config
+  # trtllm: {}
+
+# Sampling parameters used during validation.
+val_kwargs:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.DiffusionSamplingConfig
+
+  # whether to repeat n times for validation
+  n: 1
+
+  # Whether to sample during training rollout. False uses greedy sampling.
+  do_sample: False
+
+  # number of inference steps for diffusion model rollout
+  num_inference_steps: 40
+
+  # noise level for diffusion model rollout
+  noise_level: 0.0
+
+  # random seed for validation
+  seed: 42
+
+# Multi-turn interaction config for tools or chat.
+multi_turn:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.MultiTurnConfig
+
+  # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
+  enable: False
+
+  # null for no limit (default max_length // 3)
+  max_assistant_turns: null
+
+  # null for no tool
+  tool_config_path: null
+
+  # null for no limit (default max_length // 3)
+  max_user_turns: null
+
+  # max parallel call for tools in single turn
+  max_parallel_calls: 1
+
+  # max length of tool response
+  max_tool_response_length: 256
+
+  # truncate side of tool response: left, middle, right
+  tool_response_truncate_side: middle
+
+  # null for no interaction
+  interaction_config_path: null
+
+  # - When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior.
+  # - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output,
+  #   which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts.
+  use_inference_chat_template: False
+
+  # Tokenization is performed turn by turn and the resulting token ids are concatenated to form the full conversation.
+  # To ensure this matches the result of tokenizing the entire conversation at once, a sanity check is run at the end of each multi-turn rollout to compare the two sets of token ids.
+  # Some models are known to produce different tokenization results when tokenizing turn by turn vs. all at once. aThis behavior has already been validated for them.
+  # To reduce excessive warnings, you can turn off the sanity check for these models if you are using their default chat template:
+  # Qwen/QwQ-32B, Qwen/Qwen3-xxB
+  # - disable: disable tokenization sanity check
+  # - strict: enable strict tokenization sanity check (default)
+  # - ignore_strippable: ignore strippable tokens when checking tokenization sanity
+  tokenization_sanity_check_mode: strict
+
+  # Format of the multi-turn interaction. Options: hermes, llama3_json, ...
+  format: hermes
+
+  # Number of repeat rollouts for each interaction
+  num_repeat_rollouts: null
+
+
+# [Experimental] agent loop based rollout configs
+agent:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.AgentLoopConfig
+
+  # Number of agent loop workers
+  num_workers: 8
+
+  # default agent loop to use if `agent_name` not set in RL dataset
+  default_agent_loop: single_turn_agent
+
+  # custom agent loop config path, which should contain list of configs to initialize AgentLoop instances.
+  # https://hydra.cc/docs/advanced/instantiate_objects/overview/
+  #
+  # - name: react_agent
+  #   _target_: recipe.langgraph_agent.react_agent_loop.ReactAgentLoop
+  #   tools: ["get_current_temperature"]
+  # - name: math_expression
+  #   _target_: recipe.langgraph_agent.example.math_expression.MathExpressionReactAgentLoop
+  #   min_terms: 2
+  #   max_terms: 6
+  agent_loop_config_path: null
+
+  # custom async server configs
+  custom_async_server:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.workers.config.CustomAsyncServerConfig
+
+    # Path to the custom async server implementation
+    path: null
+
+    # Class name of the custom async server class (e.g. AsyncvLLMServer)
+    name: null
+
+# Checkpoint Engine config for update weights from trainer to rollout
+checkpoint_engine:
+
+  # Target class for checkpoint engine config
+  _target_: verl.workers.config.CheckpointEngineConfig
+
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  backend: naive
+
+  # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
+  # This parameter controls the maximum payload size for a single weight update request.
+  # Reference: https://github.com/volcengine/verl/pull/2418
+  # Currently only supported in SGLang rollout implementations
+  # Larger values may improve throughput but increase memory overhead
+  # Detailed performance comparison:
+  # https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/169#issuecomment-3070686720
+  # Default value (512MB) is optimized for typical GPU memory configurations
+  # For the best performance of `rebuild_cuda_tensor`, it is recommended to:
+  # 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
+  # 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+  # when using Tensor Parallelism (TP) >= 8.
+  update_weights_bucket_megabytes: 2048
+
+  # Additional keyword arguments to pass to the checkpoint engine constructor
+  engine_kwargs: {}
+
+# trace rollout data
+# trace:
+
+#   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+#   _target_: verl.workers.config.TraceConfig
+
+#   # trace backend, support mlflow, weave
+#   backend: null
+
+#   # whether translate token id to text in output
+#   token2text: False
+
+#   # Maximum number of unique samples to trace per agent worker per training step.
+#   # If null, all samples are traced. If set to N, each agent loop worker will randomly
+#   # select N unique samples to trace (including all their rollouts for GRPO).
+#   # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
+#   max_samples_per_step_per_worker: null
+
+# Whether to enable rollout routing replay for MoE models
+# When enabled (True), the rollout will record the routing decisions.
+enable_rollout_routing_replay: False
+
+
+# profile the rollout model in `generate_sequence`
+profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # profiler tool, default same as profiler.tool in global config
+  # choices: npu, torch
+  tool: ${oc.select:global_profiler.tool,null}
+
+  # whether enable profile on rollout
+  enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
+
+  # Whether to profile all ranks.
+  all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
+
+  # The ranks that will be profiled. [] or [0,1,...]
+  ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
+
+  # profile results saving path
+  save_path: ${oc.select:global_profiler.save_path,null}
+
+  # specific tool config
+  tool_config:
+
+    # npu config
+    npu:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NPUToolConfig
+
+      # Contents to profile, can be empty
+      # options: npu, cpu, memory, shapes, module, stack
+      contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+
+      # Collection level, optional values: level_none, level0, level1, level2.
+      level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+
+      # Whether to automatically parse the data.
+      analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+
+    # torch profiler config
+    torch:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+
+# prometheus configuration for vllm/sglang server mode
+prometheus:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.PrometheusConfig
+
+  # whether enable prometheus on server mode rollout
+  enable: false
+
+  # Port number that Prometheus listens on, default is 9090
+  port: 9090
+
+  # Path to Prometheus configuration file
+  file: /tmp/ray/session_latest/metrics/prometheus/prometheus.yml
+
+  # Specify served_model_name to avoid displaying overly long model paths in Grafana
+  served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
+
+# type of quantization in vllm, currently support fp8 and torchao
+quantization: null
+
+# extra quantization information serialized in a config file, e.g. torchao_config.json
+quantization_config_file: null
+

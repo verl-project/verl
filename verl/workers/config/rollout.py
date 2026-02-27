@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 from omegaconf import MISSING
 
@@ -23,6 +23,7 @@ from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
+    "DiffusionSamplingConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -30,6 +31,7 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
+    "DiffusionRolloutConfig",
     "CheckpointEngineConfig",
 ]
 
@@ -41,6 +43,15 @@ class SamplingConfig(BaseConfig):
     top_p: float = 1.0
     do_sample: bool = True
     n: int = 1
+
+
+@dataclass
+class DiffusionSamplingConfig(BaseConfig):
+    do_sample: bool = True
+    n: int = 1
+    noise_level: float = 0.0
+    num_inference_steps: int = 40
+    seed: int = 42
 
 
 @dataclass
@@ -263,6 +274,133 @@ class RolloutConfig(BaseConfig):
 
         if self.pipeline_model_parallel_size > 1:
             if self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":
+                raise NotImplementedError(
+                    f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
+                )
+
+
+@dataclass
+class DiffusionRolloutConfig(BaseConfig):
+    _mutable_fields = {"max_model_len", "load_format"}
+
+    name: Optional[str] = MISSING
+    mode: str = "async"
+
+    do_sample: bool = True
+    n: int = 1
+
+    # Early termination threshold for multi-turn rollout in sglang.
+    # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
+    over_sample_rate: float = 0.0
+
+    prompt_length: int = 512
+    # response_length: int = 512
+
+    dtype: str = "bfloat16"
+    gpu_memory_utilization: float = 0.5
+    enforce_eager: bool = True
+    cudagraph_capture_sizes: Optional[list] = None
+    free_cache_engine: bool = True
+    data_parallel_size: int = 1
+    expert_parallel_size: int = 1
+    tensor_model_parallel_size: int = 2
+    pipeline_model_parallel_size: int = 1
+    max_num_batched_tokens: int = 8192
+    logprobs_mode: Optional[str] = "processed_logprobs"
+    scheduling_policy: Optional[str] = "fcfs"
+
+    val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
+
+    max_model_len: Optional[int] = None
+    max_num_seqs: int = 1024
+
+    # note that the logprob computation should belong to the actor
+    log_prob_micro_batch_size: Optional[int] = None
+    log_prob_micro_batch_size_per_gpu: Optional[int] = None
+    log_prob_use_dynamic_bsz: bool = False
+    log_prob_max_token_len_per_gpu: int = 16384
+
+    disable_log_stats: bool = True
+
+    multi_stage_wake_up: bool = False
+    engine_kwargs: dict = field(default_factory=dict)
+
+    calculate_log_probs: bool = False
+
+    agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
+
+    trace: TraceConfig = field(default_factory=TraceConfig)
+
+    multi_turn: MultiTurnConfig = field(default_factory=MultiTurnConfig)
+
+    # Use Prometheus to collect and monitor rollout statistics
+    prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
+
+    # Checkpoint Engine config for update weights from trainer to rollout
+    checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
+
+    profiler: Optional[ProfilerConfig] = None
+
+    enable_chunked_prefill: bool = True
+
+    enable_prefix_caching: bool = True
+
+    load_format: str = "dummy"
+
+    layered_summon: bool = False
+
+    limit_images: Optional[int] = None
+
+    quantization: Optional[str] = None
+
+    quantization_config_file: Optional[str] = None
+
+    enable_rollout_routing_replay: bool = False
+
+    enable_sleep_mode: bool = True
+
+    qat: Optional[dict] = None
+
+    # diffusion use
+    image_height: int = 512
+
+    image_width: int = 512
+
+    num_inference_steps: int = 10
+
+    noise_level: float = 0.7
+
+    guidance_scale: float = 4.5
+
+    sde_type: Literal["sde", "cps"] = "sde"
+
+    sde_window_size: Optional[int] = None
+
+    sde_window_range: Optional[tuple[int, int]] = None
+
+    def __post_init__(self):
+        """Validate the rollout config"""
+        # Deprecation warning for mode field - only async mode is supported
+        if self.mode == "sync":
+            raise ValueError(
+                "Rollout mode 'sync' has been removed. Please set "
+                "`actor_rollout_ref.rollout.mode=async` or remove the mode setting entirely."
+            )
+        if self.mode != "async":
+            warnings.warn(
+                f"Unknown rollout mode '{self.mode}'. Only 'async' mode is supported. "
+                "The 'mode' field is deprecated and will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        if self.expert_parallel_size > 1:
+            assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
+                "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"
+            )
+
+        if self.pipeline_model_parallel_size > 1:
+            if self.name == "vllm_omni" or self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )

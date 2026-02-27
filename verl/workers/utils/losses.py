@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty, kl_penalty_image
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
@@ -96,7 +96,13 @@ def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) ->
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
-    log_prob = no_padding_2_padding(model_output["log_probs"], data)
+    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+    if loss_mode == "flow_grpo":
+        log_prob = model_output["log_probs"]
+    else:
+        log_prob = _slice_response_from_unpad_output(model_output["log_probs"], data)
+        log_prob = no_padding_2_padding(model_output["log_probs"], data)
+
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
@@ -130,8 +136,6 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     loss_agg_mode = config.loss_agg_mode
 
-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
-
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
@@ -162,12 +166,20 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # add kl loss
     if config.use_kl_loss:
-        ref_log_prob = data["ref_log_prob"]
-        # compute kl loss
-        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
-        kl_loss = agg_loss(
-            loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
-        )
+        if loss_mode == "flow_grpo":
+            ref_prev_sample_mean = data["ref_prev_sample_mean"]
+            prev_sample_mean = model_output["prev_sample_mean"]
+            std_dev_t = model_output["std_dev_t"]
+            kl_loss = kl_penalty_image(
+                prev_sample_mean=prev_sample_mean, ref_prev_sample_mean=ref_prev_sample_mean, std_dev_t=std_dev_t
+            )
+        else:
+            ref_log_prob = data["ref_log_prob"]
+            # compute kl loss
+            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
+            kl_loss = agg_loss(
+                loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+            )
 
         policy_loss += kl_loss * config.kl_loss_coef
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)

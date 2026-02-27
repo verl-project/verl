@@ -21,7 +21,7 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
 from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config import DiffusersModelConfig, HFModelConfig, RolloutConfig
 
 __all__ = ["BaseRollout"]
 
@@ -32,13 +32,13 @@ class BaseRollout(ABC):
     def __init__(
         self,
         config: RolloutConfig,
-        model_config: HFModelConfig,
+        model_config: HFModelConfig | DiffusersModelConfig,
         device_mesh: DeviceMesh,
         *args,
         **kwargs,
     ):
         self.config = omega_conf_to_dataclass(config)
-        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        self.model_config: HFModelConfig | DiffusersModelConfig = omega_conf_to_dataclass(model_config)
         self.device_mesh = device_mesh
 
     @abstractmethod
@@ -82,6 +82,7 @@ class BaseRollout(ABC):
 
 _ROLLOUT_REGISTRY = {
     ("vllm", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
+    ("vllm_omni", "async"): "verl.workers.rollout.vllm_rollout.vLLMOmniServerAdapter",
     ("sglang", "async"): "verl.workers.rollout.sglang_rollout.sglang_rollout.ServerAdapter",
     ("trtllm", "async"): "verl.workers.rollout.trtllm_rollout.trtllm_rollout.ServerAdapter",
 }

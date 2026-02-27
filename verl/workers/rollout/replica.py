@@ -44,6 +44,19 @@ class TokenOutput(BaseModel):
     """number of preempted times for metric calculation"""
 
 
+class ImageOutput(BaseModel):
+    image: list[list[list[float]]]
+    """generated image tensor (CHW format)"""
+    log_probs: Optional[list[float]] = None
+    """logprobs of generated image"""
+    stop_reason: Optional[str] = None
+    """stop reason: 'completed', 'aborted', or None for unknown"""
+    num_preempted: Optional[int] = None
+    """number of preempted times for metric calculation"""
+    extra_fields: dict[str, Any] = {}
+    """Extra fields for dynamic addition."""
+
+
 class RolloutMode(Enum):
     # Rollout engine and training engine(fsdp/megatron) fused in same process
     # Rollout and trainer share GPUs, switch context with weight synchronization.
@@ -290,6 +303,12 @@ def _load_vllm():
     return vLLMReplica
 
 
+def _load_vllm_omni():
+    from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
+
+    return vLLMOmniReplica
+
+
 def _load_sglang():
     os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
 
@@ -344,6 +363,7 @@ def _load_trtllm():
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
+RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
 
 
 # Original function for backward compatibility
