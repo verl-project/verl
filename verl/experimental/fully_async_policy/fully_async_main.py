@@ -206,11 +206,9 @@ class FullyAsyncTaskRunner:
     def _create_rollouter(self, config) -> None:
         rollouter = FullyAsyncRollouter.remote(
             config=config,
-            tokenizer=self.components["tokenizer"],
             role_worker_mapping=None,
             resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
-            processor=self.components["processor"],
             device_name=config.trainer.device,
         )
 
@@ -229,11 +227,9 @@ class FullyAsyncTaskRunner:
 
         trainer = FullyAsyncTrainer.remote(
             config=config,
-            tokenizer=self.components["tokenizer"],
             role_worker_mapping=trainer_role_mapping,
             resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
-            processor=self.components["processor"],
             device_name=config.trainer.device,
         )
 

@@ -51,17 +51,28 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     def __init__(
         self,
         config,
-        tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
-        processor=None,
         device_name=None,
     ):
-        # Store the tokenizer for text processing
-        self.tokenizer = tokenizer
-        self.processor = processor
         self.config = config
+
+        # Load tokenizer/processor locally in remote actor to avoid serialization issues
+        # with trust_remote_code models (transformers_modules not available in remote env)
+        from verl.utils import hf_processor, hf_tokenizer
+        from verl.utils.fs import copy_to_local
+
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+        )
+        trust_remote_code = config.actor_rollout_ref.model.get(
+            "trust_remote_code", config.data.get("trust_remote_code", False)
+        )
+
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
 
         assert not self.hybrid_engine
@@ -98,8 +109,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, self.tokenizer, self.processor)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, self.tokenizer, self.processor)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         self._validate_config()
@@ -200,7 +211,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
             )
 
-            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * 16
+            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * self.config.rollout.get(
+                "max_concurrent_samples_per_replica", 16
+            )
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
             self.max_queue_size = self.max_required_samples
 
@@ -271,9 +284,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     timing_raw=timing_raw, metrics=None, global_steps=global_steps, param_version=version
                 )
             elif need_validate and not self.parallel_validate_and_rollout:
-                data = self._validate_wrapper(timing_raw, version, global_steps, use_trainer_do_validate)
+                await self.async_rollout_manager.resume()
+                await self.do_validate_async(timing_raw, version, global_steps, use_trainer_do_validate)
 
-            if not need_validate or not self.parallel_validate_and_rollout:
+            if not need_validate:
                 await self.message_queue_client.put_validate(ray.cloudpickle.dumps(data))
 
             self.version_start_time = time.time()
@@ -281,10 +295,15 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         if need_validate and self.parallel_validate_and_rollout:
             if self.validate_task and not self.validate_task.done():
                 print("[FullyAsyncRollouter] validate_task is running, wait last validate_task to finish")
-                self.validate_task.get()
+                await self.validate_task
             self.validate_task = asyncio.create_task(
                 self.do_validate_async(timing_raw, version, global_steps, use_trainer_do_validate)
             )
+
+    async def wait_validate_task(self):
+        """Wait for the background validate task (parallel_validate_and_rollout=True) to complete."""
+        if self.validate_task and not self.validate_task.done():
+            await self.validate_task
 
     def _validate_wrapper(
         self, timing_raw: dict, version: int, global_steps: int = 0, use_trainer_do_validate: bool = False
@@ -500,13 +519,15 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     self.paused = True
                 while self.active_tasks:
                     async with self.lock:
-                        # After acquiring the lock, the number of active_tasks may change, need to be verified again
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
+                        tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
+
+                    if tasks_to_wait:
+                        done_tasks, _ = await asyncio.wait(tasks_to_wait, return_when=asyncio.FIRST_COMPLETED)
                         for task in done_tasks:
                             await task
+
+                        async with self.lock:
+                            self.active_tasks -= done_tasks
 
                 async with self.lock:
                     while self.paused:
@@ -528,23 +549,29 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 )
                 while self.active_tasks:
                     async with self.lock:
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
+                        tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
+
+                    if tasks_to_wait:
+                        done_tasks, _ = await asyncio.wait(tasks_to_wait, return_when=asyncio.FIRST_COMPLETED)
                         for task in done_tasks:
                             await task
+
+                        async with self.lock:
+                            self.active_tasks -= done_tasks
                 break
 
             # Check whether the number of concurrent tasks exceeds the limit
             while len(self.active_tasks) >= self.max_concurrent_samples:
                 async with self.lock:
-                    if self.active_tasks:
-                        done_tasks, self.active_tasks = await asyncio.wait(
-                            self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                        )
+                    tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
+
+                if tasks_to_wait:
+                    done_tasks, _ = await asyncio.wait(tasks_to_wait, return_when=asyncio.FIRST_COMPLETED)
                     for task in done_tasks:
                         await task
+
+                    async with self.lock:
+                        self.active_tasks -= done_tasks
 
             # Submit single sample processing
             async with self.lock:
@@ -739,22 +766,32 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     async def pause(self):
         """pause rollout"""
         print("[FullyAsyncRollouter][Public][Pause] partial rollout:", self.config.async_training.partial_rollout)
+
+        # Acquire lock to set paused state and copy tasks
         async with self.lock:
             self.paused = True
-            # Cancel all rollout tasks
-            if self.config.async_training.partial_rollout:
-                await self.async_rollout_manager.cancel()
-                print("[FullyAsyncRollouter][Public][Pause] Unfinished rollout tasks canceled")
-            if self.active_tasks:
-                await asyncio.gather(*self.active_tasks, return_exceptions=True)
-                self.active_tasks.clear()
-                print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
+            tasks_to_wait = set(self.active_tasks)
+            self.monitor_loop_trigger = False
+
+        # Cancel all rollout tasks
+        if self.config.async_training.partial_rollout:
+            await self.async_rollout_manager.cancel()
+            print("[FullyAsyncRollouter][Public][Pause] Unfinished rollout tasks canceled")
+
+        # Wait for all active tasks to complete outside the lock to avoid blocking
+        if tasks_to_wait:
+            await asyncio.gather(*tasks_to_wait, return_exceptions=True)
+            print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
+        
+        # Re-acquire lock to clear tasks
+        async with self.lock:
+            self.active_tasks.clear()
             print("[FullyAsyncRollouter][Public][Pause] Prefix cache reset")
             # Always clear KV cache to release GPU memory during weight synchronization,
             # regardless of partial_rollout setting.
             await self.async_rollout_manager.clear_kv_cache()
             self.monitor_loop_trigger = False
-
+            
     async def resume(self, dependency_ref: ObjectRef = None):
         if dependency_ref is not None:
             ray.get(dependency_ref)
