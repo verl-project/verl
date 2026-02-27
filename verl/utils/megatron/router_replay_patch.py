@@ -342,6 +342,7 @@ def apply_router_replay_patch():
     # Step 1: Patch TransformerConfig to include the feature flag
     try:
         from megatron.training import get_args
+
         global_args = get_args()
     except Exception:
         global_args = None
