@@ -6,7 +6,7 @@ TRAIN_FILES=${TRAIN_FILES:-/mnt/data/liuchonghan/235b_dataset/merged_sft_with_me
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-256}
 backend=${BACKEND:-megatron}
 project_name=verl_sft_qwen2.5_72b
-RESUME_MODE=disable
+RESUME_MODE=disable # auto
 MODEL_ID=${MODEL_ID:-/mnt/data/liuchonghan/Qwen2.5-72B-A064}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-2}
 
@@ -61,10 +61,10 @@ else
 fi
 
 CKPT_HOME=${CKPT_HOME:-/mnt/data/liuchonghan/ckpt_verl/sft/${project_name}/${exp_name}}
-NNODES=${WORLD_SIZE:-16}           
-NODE_RANK=${RANK:-0}              
-MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"} 
-MASTER_PORT=${MASTER_PORT:-23457} 
+NNODES=${WORLD_SIZE:-16}
+NODE_RANK=${RANK:-0}
+MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+MASTER_PORT=${MASTER_PORT:-23457}
 
 echo ">>> 节点信息: RANK $NODE_RANK / WORLD_SIZE $NNODES"
 echo ">>> 通信信息: MASTER $MASTER_ADDR : $MASTER_PORT"
