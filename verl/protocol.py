@@ -198,7 +198,6 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
     return tensor_dict1
 
 
-
 def fold_batch_dim(data: "DataProto", new_batch_size):
     """
     Fold a batch dim from [bsz, xxx] into [new_bsz, bsz // new_bsz, xxx]
