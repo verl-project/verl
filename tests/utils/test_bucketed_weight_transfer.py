@@ -24,8 +24,12 @@ import uuid
 import pytest
 import torch
 
-HAS_CUDA = torch.cuda.is_available()
+from verl.utils.device import get_device_name, get_torch_device
+
 PROCESS_TIMEOUT = 60
+
+HAS_ACCELERATOR = get_device_name() != "cpu"
+HAS_CUDA = torch.cuda.is_available()
 
 
 def _unique_zmq_handle():
@@ -33,19 +37,21 @@ def _unique_zmq_handle():
 
 
 def _generate_weights(weight_specs, seed):
-    """Deterministically generate weights on CUDA from specs.
+    """Deterministically generate weights on the best available device from specs.
 
     Args:
         weight_specs: list of (name, shape, dtype) tuples
         seed: random seed for reproducibility
     Returns:
-        list of (name, tensor_on_cuda) tuples
+        list of (name, tensor_on_device) tuples
     """
-    torch.cuda.manual_seed(seed)
+    device_name = get_device_name()
+    device = torch.device(f"{device_name}:0")
+    get_torch_device().manual_seed(seed)
     weights = []
     for name, shape, dtype in weight_specs:
-        # Generate in float32 on CUDA then cast, since torch.randn doesn't support all dtypes
-        t = torch.randn(shape, dtype=torch.float32, device="cuda:0").to(dtype)
+        # Generate in float32 then cast, since torch.randn doesn't support all dtypes
+        t = torch.randn(shape, dtype=torch.float32, device=device).to(dtype)
         weights.append((name, t))
     return weights
 
@@ -54,7 +60,7 @@ def _generate_weights(weight_specs, seed):
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------
 def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
-    """Sender process: generate weights, move to GPU, send."""
+    """Sender process: generate weights, move to device, send."""
     from verl.workers.rollout.bucketed_weight_transfer import BucketedWeightSender
 
     weights = _generate_weights(weight_specs, seed)
@@ -68,9 +74,10 @@ def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
 
 def _receiver_fn(zmq_handle, use_shm, result_queue):
     """Receiver process: receive weights, send back (name, dtype, shape, checksum)."""
+    from verl.utils.device import get_device_name
     from verl.workers.rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{get_device_name()}:0")
     receiver = BucketedWeightReceiver(
         zmq_handle=zmq_handle,
         device=device,
@@ -114,7 +121,7 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 
     summaries = result_queue.get(timeout=5)
 
-    # Regenerate expected weights on CUDA with the same seed
+    # Regenerate expected weights on device with the same seed
     expected = _generate_weights(weight_specs, seed)
 
     assert len(summaries) == len(expected), f"Expected {len(expected)} weights, got {len(summaries)}"
@@ -136,7 +143,7 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 # ---------------------------------------------------------------------------
 # Shared memory tests
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(not HAS_CUDA, reason="Requires CUDA")
+@pytest.mark.skipif(not HAS_ACCELERATOR, reason="Requires CUDA or NPU")
 class TestBucketedWeightTransferSHM:
     """Test BucketedWeightSender/Receiver via shared memory path."""
 
@@ -170,9 +177,9 @@ class TestBucketedWeightTransferSHM:
 
 
 # ---------------------------------------------------------------------------
-# CUDA IPC tests
+# CUDA IPC tests (CUDA only — IPC is not supported on NPU)
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(not HAS_CUDA, reason="Requires CUDA")
+@pytest.mark.skipif(not HAS_CUDA, reason="Requires CUDA (IPC not supported on NPU)")
 class TestBucketedWeightTransferIPC:
     """Test BucketedWeightSender/Receiver via CUDA IPC path."""
 
