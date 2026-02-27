@@ -442,6 +442,11 @@ def offload_megatron_model_to_cpu(models):
                         # if the grad_data size is already zero, we assume that it is already offloaded
                         buffer.grad_data_size = buffer.grad_data.storage().size()
                         buffer.grad_data.storage().resize_(0)
+            # Offload frozen parameters not in DDP buffers (e.g. base model in LoRA/PEFT)
+            # DDP buffers only contain requires_grad=True params, so frozen params must be offloaded separately.
+            for param in model_chunk.module.parameters():
+                if not param.requires_grad and param.device.type != "cpu":
+                    param.data = param.data.to("cpu", non_blocking=True)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
@@ -453,7 +458,14 @@ def offload_megatron_model_to_cpu(models):
 
 
 @torch.no_grad()
-def load_megatron_model_to_gpu(models, load_grad=True):
+def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
+    """
+    Load megatron model to GPU.
+    Args:
+        models: The model to load.
+        load_grad: Whether to load gradients.
+        load_frozen_params: Whether to load frozen parameters.
+    """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
@@ -468,6 +480,13 @@ def load_megatron_model_to_gpu(models, load_grad=True):
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+
+            # Load frozen parameters that were offloaded (e.g. base model in LoRA/PEFT)
+            if load_frozen_params:
+                device_id = get_device_id()
+                for param in model_chunk.module.parameters():
+                    if not param.requires_grad and param.device.type == "cpu":
+                        param.data = param.data.to(device_id, non_blocking=True)
         else:
             # we need this for ref module
             device_id = get_device_id()
