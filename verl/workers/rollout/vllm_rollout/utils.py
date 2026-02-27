@@ -292,6 +292,7 @@ class vLLMColocateWorkerExtension:
         # clean up
         socket.close()
         del buffer
+        gc.collect()
         if shm is not None:
             shm.close()
             del shm

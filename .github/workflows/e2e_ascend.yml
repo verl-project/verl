@@ -126,6 +126,10 @@ jobs:
           ray stop --force
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
+      - name: Running the E2E test with fully_async_policy algorithm (FSDP2)
+        run: |
+          ray stop --force
+          bash tests/special_npu/run_fully_async_policy.sh
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'

@@ -82,7 +82,7 @@ class NixlAgent:
 
     def start_zmq_server(self):
         self.ip = ray.util.get_node_ip_address().strip("[]")
-        self.listen_port, self.listen_sock = get_free_port(self.ip)
+        self.listen_port, _ = get_free_port(self.ip)
 
         context = zmq.asyncio.Context()
         self.socket = context.socket(zmq.PULL)
