@@ -16,6 +16,7 @@ import logging
 import os
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
@@ -30,12 +31,31 @@ from verl.utils.ulysses import (
 
 try:
     from fla.modules import FusedRMSNormGated, ShortConvolution
+    from fla.ops.cp import build_cp_context
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 except ImportError as err:
     raise ImportError("Please install flash-linear-attention for Qwen3-Next") from err
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+class _AllGather(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, local_tensor: torch.Tensor, group):
+        ctx.group = group
+        ctx.part_size = local_tensor.size(0)
+        return all_gather_tensor(local_tensor, group=group)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        grad_local = torch.empty(
+            (ctx.part_size, *grad_output.shape[1:]),
+            dtype=grad_output.dtype,
+            device=grad_output.device,
+        )
+        dist.reduce_scatter_tensor(grad_local, grad_output, op=dist.ReduceOp.SUM, group=ctx.group)
+        return grad_local, None
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/c9ea365a7b56326418769a4ba4682864d407ed63/src/transformers/models/qwen3_next/modular_qwen3_next.py#L428
@@ -120,12 +140,19 @@ class PatchQwen3NextGatedDeltaNet(nn.Module):
         self,
         hidden_states,
         cu_seqlens=None,
+        cp_context=None,
     ):
-        # NOTE: when using ulysses sequence parallelism, batch size is always 1
-        # pre-process: [bsz, seq, h] -> [seq, bsz, h] -> [seq * sp, bsz, h] -> [bsz, seq * sp, h]
-        hidden_states = hidden_states.transpose(0, 1).contiguous()
-        hidden_states = all_gather_tensor(hidden_states)
-        hidden_states = hidden_states.transpose(0, 1).contiguous()
+        if cp_context is not None:
+            use_cp_mode = True
+            cu_seqlens = cp_context.cu_seqlens
+        elif cu_seqlens is not None:
+            # pre-process: [bsz, seq, h] -> [seq, bsz, h] -> [seq * sp, bsz, h] -> [bsz, seq * sp, h]
+            use_cp_mode = False
+            hidden_states = hidden_states.transpose(0, 1).contiguous()
+            hidden_states = _AllGather.apply(hidden_states, get_ulysses_sequence_parallel_group())
+            hidden_states = hidden_states.transpose(0, 1).contiguous()
+        else:
+            raise ValueError("cu_seqlens or cp_context is required")
 
         projected_states_qkvz = self.in_proj_qkvz(hidden_states)
         projected_states_ba = self.in_proj_ba(hidden_states)
@@ -137,6 +164,7 @@ class PatchQwen3NextGatedDeltaNet(nn.Module):
         mixed_qkv, _ = self.conv1d(
             x=mixed_qkv,
             cu_seqlens=cu_seqlens,
+            cp_context=cp_context if use_cp_mode else None,
         )
 
         query, key, value = torch.split(
@@ -159,17 +187,30 @@ class PatchQwen3NextGatedDeltaNet(nn.Module):
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
 
-        core_attn_out, _ = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g=g,
-            beta=beta,
-            initial_state=None,
-            output_final_state=False,
-            use_qk_l2norm_in_kernel=True,
-            cu_seqlens=cu_seqlens,
-        )
+        if use_cp_mode:
+            core_attn_out, _ = chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=None,
+                output_final_state=False,
+                use_qk_l2norm_in_kernel=True,
+                cp_context=cp_context,
+            )
+        else:
+            core_attn_out, _ = chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=None,
+                output_final_state=False,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+            )
 
         z_shape_og = z.shape
         # reshape input data into 2D tensor
@@ -180,9 +221,9 @@ class PatchQwen3NextGatedDeltaNet(nn.Module):
         core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1)
 
         output = self.out_proj(core_attn_out)
-
-        # post-process: [bsz, seq * sp, h] -> [bsz, seq, h]
-        output = slice_input_tensor(output, dim=1, padding=False)
+        if not use_cp_mode:
+            # post-process: [bsz, seq * sp, h] -> [bsz, seq, h]
+            output = slice_input_tensor(output, dim=1, padding=False)
         return output
 
 
@@ -195,6 +236,7 @@ def patch_qwen3_next_decoder_layer_forward(
     position_ids=None,
     past_key_values=None,
     cache_position=None,
+    gdn_use_cp: bool = True,
     **kwargs,
 ):
     residual = hidden_states
@@ -205,15 +247,27 @@ def patch_qwen3_next_decoder_layer_forward(
     if self.layer_type == "linear_attention":
         # 1. Get the global position ids
         ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
+        ulysses_sp_group = get_ulysses_sequence_parallel_group()
         position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
-        torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
+        torch.distributed.all_gather(position_ids_list, position_ids, group=ulysses_sp_group)
         position_ids = torch.concat(position_ids_list, dim=-1)
         # 2. Get the cu_seqlens by position_ids
         (cu_seqlens_q, _), _ = prepare_fa_kwargs_from_position_ids(position_ids)
-        hidden_states = self.linear_attn(
-            hidden_states=hidden_states,
-            cu_seqlens=cu_seqlens_q,
-        )
+        if gdn_use_cp:
+            cp_context = build_cp_context(
+                cu_seqlens_q,
+                group=ulysses_sp_group,
+                conv1d_kernel_size=self.linear_attn.conv_kernel_size,
+            )
+            hidden_states = self.linear_attn(
+                hidden_states=hidden_states,
+                cp_context=cp_context,
+            )
+        else:
+            hidden_states = self.linear_attn(
+                hidden_states=hidden_states,
+                cu_seqlens=cu_seqlens_q,
+            )
     elif self.layer_type == "full_attention":
         # Self Attention
         hidden_states, _ = self.self_attn(
