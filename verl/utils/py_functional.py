@@ -363,10 +363,6 @@ def list_of_dict_to_dict_of_list(list_of_dict: list[dict]):
     output = {key: [] for key in keys}
     for data in list_of_dict:
         for key, item in data.items():
-            assert key in output
-
-            assert key in output
-            if key not in output:
-                raise KeyError(f"Key '{key}' not found in output")
+            assert key in output, f"Key '{key}' is not present in the keys of the first dictionary in the list."
             output[key].append(item)
     return output
