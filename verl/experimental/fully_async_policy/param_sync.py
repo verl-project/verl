@@ -116,7 +116,7 @@ class ParameterSynchronizer:
         # sync weights
         # For sglang, always use sync_rollout_weights instead of sync_rollout_weights_by_checkpoint
 
-        self.checkpoint_manager.update_weights()
+        self.checkpoint_manager.update_weights(global_steps)
         end_time = time.time()
         print(
             f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds, "

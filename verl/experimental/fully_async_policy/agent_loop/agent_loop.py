@@ -19,6 +19,7 @@ from typing import Any, Optional, Sequence
 import hydra
 import numpy as np
 import ray
+import torch
 from omegaconf import DictConfig
 
 from verl.experimental.agent_loop.agent_loop import (
@@ -27,6 +28,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopWorker,
     AsyncLLMServerManager,
     DictConfigWrap,
+    TokenOutput,
     _agent_loop_registry,
     get_trajectory_info,
 )
@@ -43,6 +45,84 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class FullyAsyncLLMServerManager(AsyncLLMServerManager):
+    @rollout_trace_op
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+    ) -> TokenOutput:
+        """Generate tokens from prompt ids.
+
+        Args:
+            request_id (str): request id for sticky session.
+            prompt_ids (List[int]): List of prompt token ids.
+            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
+
+        Returns:
+            TokenOutput: token output
+        """
+        limit_key = None
+        if "max_tokens" in sampling_params:
+            limit_key = "max_tokens"
+        elif "max_new_tokens" in sampling_params:
+            limit_key = "max_new_tokens"
+        original_max_tokens = sampling_params.get(limit_key) if limit_key else None
+
+        final_output = TokenOutput(
+            token_ids=[],
+            log_probs=[],
+            num_preempted=0,
+        )
+
+        while True:
+            # 1. generate tokens
+            output = await super().generate(
+                request_id=request_id,
+                prompt_ids=prompt_ids + final_output.token_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+
+            # 2. merge output into final_output
+            final_output.token_ids.extend(output.token_ids)
+            if output.log_probs is not None:
+                final_output.log_probs.extend(output.log_probs)
+            if output.routed_experts is not None:
+                if final_output.routed_experts is None:
+                    final_output.routed_experts = output.routed_experts
+                else:
+                    final_output.routed_experts = torch.cat([final_output.routed_experts, output.routed_experts], dim=0)
+            if output.num_preempted is not None:
+                final_output.num_preempted += output.num_preempted
+            final_output.stop_reason = output.stop_reason
+
+            # update model weights version
+            if final_output.global_steps is None:
+                final_output.global_steps = output.global_steps
+                final_output.min_global_steps = output.global_steps
+                final_output.max_global_steps = output.global_steps
+            else:
+                final_output.global_steps = output.global_steps
+                final_output.max_global_steps = output.global_steps
+
+            # 3. update max_new_tokens
+            if original_max_tokens is not None:
+                sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
+                if len(final_output.token_ids) >= original_max_tokens:
+                    final_output.stop_reason = "length"
+                    break
+
+            # 4. check stop reason
+            if output.stop_reason != "aborted" or not self.config.async_training.partial_rollout_resume:
+                break
+
+        return final_output
+
     @rollout_trace_op
     async def generate_for_partial(
         self,
