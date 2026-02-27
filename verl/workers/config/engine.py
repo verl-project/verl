@@ -74,6 +74,8 @@ class EngineConfig(BaseConfig):
         "infer_micro_batch_size_per_gpu",
         "use_fused_kernels",
         "use_remove_padding",
+        "forward_only",
+        "param_offload",
     }
     # whether to offload param
     param_offload: bool = False

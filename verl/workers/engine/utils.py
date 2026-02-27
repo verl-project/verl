@@ -70,7 +70,10 @@ def prepare_micro_batches(
     use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
     sp_size = tu.get_non_tensor_data(data=data, key="sp_size", default=1)
 
+    force_group_size = tu.get_non_tensor_data(data=data, key="force_group_size", default=1)
+
     if use_dynamic_bsz:
+        assert force_group_size == 1, "force_group_size is not supported when use_dynamic_bsz is True"
         assert "max_token_len_per_gpu" in data.keys(), "max_token_len_per_gpu must be set when use_dynamic_bsz is True"
         max_token_len_per_gpu = data["max_token_len_per_gpu"]
         max_token_len = max_token_len_per_gpu * sp_size
@@ -84,8 +87,12 @@ def prepare_micro_batches(
             use_dynamic_bsz_balance=use_dynamic_bsz_balance,
         )
     else:
+        total_data_size = len(data)
         micro_batch_size_per_gpu = data["micro_batch_size_per_gpu"]
-        micro_batches = tu.chunk_tensordict(data, len(data) // micro_batch_size_per_gpu)
+        assert total_data_size % (force_group_size * micro_batch_size_per_gpu) == 0, (
+            "data size must be divisible by force_group_size * micro_batch_size_per_gpu"
+        )
+        micro_batches = tu.chunk_tensordict(data, total_data_size // (micro_batch_size_per_gpu * force_group_size))
         batch_idx_list = None
     return micro_batches, batch_idx_list
 
