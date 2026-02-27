@@ -14,7 +14,7 @@
 import asyncio
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import ray
 import torch
