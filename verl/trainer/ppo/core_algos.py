@@ -1058,7 +1058,7 @@ def agg_loss(
                 raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
-    elif loss_agg_mode == "seq-mean-token-sum":
+    elif loss_agg_mode in ["seq-mean-token-sum", "seq-mean-token-sum-norm"]:
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
@@ -1066,6 +1066,11 @@ def agg_loss(
                 raise ValueError("global_batch_size is required when dp_size > 1")
             global_batch_size = seq_mask.sum()
         loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
+        if loss_agg_mode == "seq-mean-token-sum-norm":
+            if loss_scale_factor is None:
+                horizon = loss_mask.shape[-1]
+                loss_scale_factor = horizon
+            loss /= loss_scale_factor
     elif loss_agg_mode == "seq-mean-token-mean":
         seq_mask = torch.sum(loss_mask, dim=-1)  # per-sequence token count
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
@@ -1075,14 +1080,6 @@ def agg_loss(
                 raise ValueError("global_batch_size is required when dp_size > 1")
             global_batch_size = seq_mask.sum()
         loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
-    elif loss_agg_mode == "seq-mean-token-sum-norm":
-        if loss_scale_factor is None:
-            raise ValueError(
-                f"{loss_agg_mode=} but {loss_scale_factor=}. "
-                'If not intented for custom scaling factor, try setting loss_agg_mode="seq-mean-token-sum".'
-            )
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
-        loss = torch.sum(seq_losses) / loss_scale_factor * dp_size
     else:
         raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 
@@ -1250,6 +1247,172 @@ def compute_policy_loss_vanilla(
     pg_loss = agg_loss(
         loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
+
+    pg_metrics = {
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
+@register_policy_loss("dppo_tv")
+def compute_policy_loss_dppo_tv(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """
+    Compute the clipped policy objective and related metrics for DPPO-Binary-TV.
+
+    See https://arxiv.org/pdf/2602.04879 for more details.
+
+    Args:
+        old_log_prob (torch.Tensor):
+            Log-probabilities of actions under the old policy, shape (batch_size, response_length).
+        log_prob (torch.Tensor):
+            Log-probabilities of actions under the current policy, shape (batch_size, response_length).
+        advantages (torch.Tensor):
+            Advantage estimates for each action, shape (batch_size, response_length).
+        response_mask (torch.Tensor):
+            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        loss_agg_mode (str, optional):
+            Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        config: `(verl.trainer.config.ActorConfig)`:
+            config for the actor.
+        rollout_log_probs: `(torch.Tensor)`:
+            log probabilities of actions under the rollout policy, shape (batch_size, response_length).
+    """
+
+    assert config is not None
+    assert not isinstance(config, AlgoConfig)
+    # Note: the clip_ratio is different from the standard PPO, it is the TV divergence threshold for DPPO.
+    clip_divergence = config.clip_ratio
+    clip_divergence_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_divergence
+    clip_divergence_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_divergence
+
+    negative_approx_kl = log_prob - old_log_prob
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    # Instead of dual-clip PPO, we use truncated importance sampling (TIS) to clip the policy loss.
+    # However, a large threshold is recommended to avoid performance degradation due to the truncation bias.
+    # See Section 5.4 in https://arxiv.org/pdf/2602.04879 for more details.
+    clip_ratio_c = config.get("clip_ratio_c", 20.0)
+    truncated_ratio = torch.clamp(ratio, max=clip_ratio_c)
+    truncated_ratio = truncated_ratio.detach()
+
+    # Compute valid mask for DPPO-Binary-TV
+    prob = torch.exp(log_prob)
+    old_prob = torch.exp(old_log_prob)
+    valid_positive_mask = (prob - old_prob) <= clip_divergence_high
+    valid_negative_mask = (prob - old_prob) >= -clip_divergence_low
+    valid_mask = torch.where(advantages > 0, valid_positive_mask, valid_negative_mask)
+    valid_mask = valid_mask.detach().float()
+
+    pg_losses = -advantages * truncated_ratio * log_prob * valid_mask
+
+    # Apply rollout correction weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+
+    pg_clipfrac = verl_F.masked_mean((1.0 - valid_mask).float(), response_mask)
+    pg_clipfrac_lower = verl_F.masked_mean((ratio > clip_ratio_c).float() * valid_mask, response_mask)
+
+    pg_metrics = {
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
+@register_policy_loss("dppo_kl")
+def compute_policy_loss_dppo_kl(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """
+    Compute the clipped policy objective and related metrics for DPPO-Binary-KL.
+
+    See https://arxiv.org/pdf/2602.04879 for more details.
+
+    Args:
+        old_log_prob (torch.Tensor):
+            Log-probabilities of actions under the old policy, shape (batch_size, response_length).
+        log_prob (torch.Tensor):
+            Log-probabilities of actions under the current policy, shape (batch_size, response_length).
+        advantages (torch.Tensor):
+            Advantage estimates for each action, shape (batch_size, response_length).
+        response_mask (torch.Tensor):
+            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        loss_agg_mode (str, optional):
+            Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        config: `(verl.trainer.config.ActorConfig)`:
+            config for the actor.
+        rollout_log_probs: `(torch.Tensor)`:
+            log probabilities of actions under the rollout policy, shape (batch_size, response_length).
+    """
+
+    assert config is not None
+    assert not isinstance(config, AlgoConfig)
+    # Note: the clip_ratio is different from the standard PPO, it is the KL divergence threshold for DPPO.
+    clip_divergence = config.clip_ratio
+    clip_divergence_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_divergence
+    clip_divergence_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_divergence
+
+    negative_approx_kl = log_prob - old_log_prob
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    # Instead of dual-clip PPO, we use truncated importance sampling (TIS) to clip the policy loss.
+    # However, a large threshold is recommended to avoid performance degradation due to the truncation bias.
+    # See Section 5.4 in https://arxiv.org/pdf/2602.04879 for more details.
+    clip_ratio_c = config.get("clip_ratio_c", 20.0)
+    truncated_ratio = torch.clamp(ratio, max=clip_ratio_c)
+    truncated_ratio = truncated_ratio.detach()
+
+    # Compute valid mask for DPPO-Binary-KL
+    prob = torch.exp(log_prob)
+    old_prob = torch.exp(old_log_prob)
+    binary_kl = old_prob * (old_log_prob - log_prob) + (1 - old_prob) * torch.log(
+        (1.0 - old_prob + 1e-8) / (1.0 - prob + 1e-8)
+    )
+    valid_positive_mask = (binary_kl <= clip_divergence_high) | (prob <= old_prob)
+    valid_negative_mask = (binary_kl <= clip_divergence_low) | (prob >= old_prob)
+    valid_mask = torch.where(advantages > 0, valid_positive_mask, valid_negative_mask)
+    valid_mask = valid_mask.detach().float()
+
+    pg_losses = -advantages * truncated_ratio * log_prob * valid_mask
+
+    # Apply rollout correction weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+
+    # For compatibility, return zero for pg_clipfrac_lower (not used in standard DPPO)
+    pg_clipfrac = verl_F.masked_mean((1.0 - valid_mask).float(), response_mask)
+    pg_clipfrac_lower = verl_F.masked_mean((ratio > clip_ratio_c).float() * valid_mask, response_mask)
 
     pg_metrics = {
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
