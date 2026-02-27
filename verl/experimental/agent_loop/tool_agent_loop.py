@@ -353,10 +353,14 @@ class ToolAgentLoop(AgentLoopBase):
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
         else:
+            # Note that we have to pass None to the images and videos if there are no new images / videos
+            # to stay compatible with downstream image processing logic!
+            images = new_images_this_turn if new_images_this_turn else None
+            videos = None
             response_ids = await self.apply_chat_template(
                 add_messages,
-                images=new_images_this_turn,  # Using local variable
-                videos=None,
+                images=images,
+                videos=videos,
                 remove_system_prompt=True,
             )
 
