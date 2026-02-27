@@ -178,6 +178,8 @@ class TRTLLMHttpServer:
         self.llm = await AsyncLLM(**llm_kwargs)
 
         trtllm_server = OpenAIServer(
+            # TODO: update to generator in future
+            # generator=self.llm,
             llm=self.llm,
             model=self.model_config.local_path,
             tool_parser=None,

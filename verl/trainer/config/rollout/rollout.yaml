@@ -313,6 +313,7 @@ profiler:
   # choices: npu, torch
   tool: ${oc.select:global_profiler.tool,null}
 
+  # global tool config
   global_tool_config: ${oc.select:global_profiler.global_tool_config,null}
 
   # whether enable profile on rollout
