@@ -1,4 +1,4 @@
-Align the Inference results of the verl and vLLM frameworks on Ascend devices(zh)
+推理一致性指导
 ====================================
 
 在昇腾设备上对齐verl和vLLM两个框架下的推理结果。
