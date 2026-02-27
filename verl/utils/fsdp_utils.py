@@ -144,7 +144,7 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
 
 @torch.no_grad()
 def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
-    if fsdp_version(model) == 2:
+    if fsdp_version(model) == 2 or fsdp_version(model) == 0:
         offload_fsdp2_model_to_cpu(model, empty_cache)
         return
 
@@ -178,7 +178,7 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
 
 @torch.no_grad()
 def load_fsdp_model_to_gpu(model: FSDP):
-    if fsdp_version(model) == 2:
+    if fsdp_version(model) == 2 or fsdp_version(model) == 0:
         load_fsdp2_model_to_gpu(model)
         return
 
@@ -438,7 +438,7 @@ def get_fsdp_full_state_dict(model: torch.nn.Module, offload_to_cpu: bool = True
         ):
             state_dict = model.state_dict()
         return state_dict
-    elif fsdp_version(model) == 2:
+    elif fsdp_version(model) == 2 or fsdp_version(model) == 0:
         from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 
         state_dict_config = StateDictOptions(
