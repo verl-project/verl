@@ -13,13 +13,9 @@ set -xeuo pipefail
 
 ################################################### quick config ###################################################
 
-rollout_mode="async"
-return_raw_chat="False"
+return_raw_chat="True"
 rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
+export VLLM_USE_V1=1
 dtype="bfloat16"
 
 project_name='DAPO'
@@ -150,7 +146,6 @@ ACTOR=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${rollout_name}
-    actor_rollout_ref.rollout.mode=${rollout_mode}
     actor_rollout_ref.rollout.gpu_memory_utilization=0.70
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp}
     actor_rollout_ref.rollout.enable_chunked_prefill=True

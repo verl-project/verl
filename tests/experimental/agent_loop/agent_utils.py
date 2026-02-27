@@ -68,9 +68,6 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     actor_rollout_wg = all_wg["actor_rollout"]
     actor_rollout_wg.init_model()
 
-    if config.actor_rollout_ref.rollout.mode == "sync":
-        raise ValueError("Agent loop tests require async rollout mode. Please set rollout.mode=async.")
-
     # =========================== 2. Create AgentLoopManager ===========================
     rm_resource_pool = (
         resource_pool_manager.get_resource_pool(Role.RewardModel) if config.reward.reward_model.enable else None

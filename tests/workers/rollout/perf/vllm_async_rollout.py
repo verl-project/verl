@@ -63,7 +63,6 @@ def init_config(n_gpus_per_node) -> DictConfig:
     config.data.train_batch_size = 128
     config.data.return_raw_chat = True
     config.actor_rollout_ref.model.path = "Qwen/Qwen2.5-7B-Instruct"
-    config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
     config.actor_rollout_ref.rollout.multi_turn.format = "hermes"
@@ -106,7 +105,7 @@ def initialize(config, backend) -> tuple[AgentLoopManager | RayWorkerGroup, Stat
 
 def perf_rollout(mode, backend, n_gpus_per_node, num_steps):
     config = init_config(n_gpus_per_node)
-    config.actor_rollout_ref.rollout.mode = mode
+
     agent_loop_manager, dataloader = initialize(config, backend)
 
     for step, batch in enumerate(dataloader):

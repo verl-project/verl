@@ -2,12 +2,9 @@
 set -xeuo pipefail
 pwd=`pwd`
 
-rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
+export VLLM_USE_V1=1
+return_raw_chat="True"
 
 TP=${TP:-2}
 PP=${PP:-2}

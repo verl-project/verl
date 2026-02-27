@@ -8,12 +8,9 @@ HF_MODEL_PATH=${HF_MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen2.5-VL-7B-Instruct"}
 train_path=$HOME/data/geo3k/train.parquet
 test_path=$HOME/data/geo3k/test.parquet
 
-rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
+export VLLM_USE_V1=1
+return_raw_chat="True"
 
 # Fully async specific parameters
 NNODES=${NNODES:-1}
@@ -71,7 +68,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=5120 \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.mode=${rollout_mode} \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \

@@ -51,7 +51,6 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=$HOME/data/gsm8k/test.parquet \
     trainer.total_epochs=15 \
     actor_rollout_ref.rollout.trace.token2text=False \
-    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.multi_turn.enable=true \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.actor.use_torch_compile=False \

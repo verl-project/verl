@@ -37,7 +37,6 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.actor.use_dynamic_bsz = True
     config.actor_rollout_ref.model.path = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
-    config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.skip_tokenizer_init = False
 
     return config

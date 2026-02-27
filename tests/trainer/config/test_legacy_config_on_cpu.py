@@ -29,6 +29,7 @@ _BREAKING_CHANGES = [
     "actor_rollout_ref.ref.megatron.expert_tensor_parallel_size",
     "critic.megatron.expert_tensor_parallel_size",
     "reward_model.megatron.expert_tensor_parallel_size",
+    "actor_rollout_ref.rollout.mode",  # removed since async mode is the only supported mode
 ]
 
 
@@ -49,6 +50,7 @@ class TestConfigComparison(unittest.TestCase):
         "profile_steps",
         "worker_nsight_options",
         "controller_nsight_options",
+        "mode",
     ]
     ignored_paths = ["reward_model", "custom_reward_function"]
 

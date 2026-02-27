@@ -134,7 +134,6 @@ if [ "$ENGINE" = "vllm" ]; then
 fi
 
 exp_name="$(basename "${MODEL_ID,,}")-megatron-gsm8k-minimal"
-ROLLOUT_MODE="async"
 ROLLOUT_QUANTIZATION=${ROLLOUT_QUANTIZATION:-null}
 
 RETURN_RAW_CHAT="True"
@@ -207,7 +206,6 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.actor.profiler.ranks=$PROFILE_RANKS \
     actor_rollout_ref.actor.profiler.all_ranks=$PROFILE_RANKS_ALL \
     actor_rollout_ref.rollout.name="${ENGINE}" \
-    actor_rollout_ref.rollout.mode="${ROLLOUT_MODE}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \

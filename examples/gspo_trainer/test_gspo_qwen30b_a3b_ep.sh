@@ -131,7 +131,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.name=${rollout_name} \
-    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.data_parallel_size=${gen_dp} \

@@ -203,7 +203,6 @@ actor_rollout_ref:
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
-    mode: async
     temperature: 1.0
     top_k: -1
     top_p: 1

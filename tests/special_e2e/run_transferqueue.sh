@@ -9,12 +9,9 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp"}  # fsdp or megatron
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 
-rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
+export VLLM_USE_V1=1
+return_raw_chat="True"
 
 # Algorithm parameters
 adv_estimator=grpo
@@ -105,7 +102,6 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.name=${rollout_name}
-    actor_rollout_ref.rollout.mode=${rollout_mode}
     actor_rollout_ref.rollout.disable_log_stats=True
     trainer.logger=console
     trainer.project_name='verl-test-transferqueue'

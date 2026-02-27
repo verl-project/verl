@@ -18,12 +18,9 @@ TRAIN_FILE=${TRAIN_FILE:-"${DATA_PATH}/shared/data/dapo-math/dapo-math-17k.parqu
 TEST_FILE=${TEST_FILE:-"${DATA_PATH}/shared/data/dapo-math/aime-2024.parquet"}
 
 
-rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
+export VLLM_USE_V1=1
+return_raw_chat="True"
 
 # Algorithm parameters
 adv_estimator=grpo
@@ -159,7 +156,6 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
     actor_rollout_ref.rollout.name=${rollout_name} \
-    actor_rollout_ref.rollout.mode=${rollout_mode} \
     reward.reward_manager.name=dapo \
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
     +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
