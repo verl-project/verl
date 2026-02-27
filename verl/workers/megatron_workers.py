@@ -64,6 +64,7 @@ from verl.utils.megatron_utils import (
 )
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
+from verl.utils.modelopt import apply_qat
 from verl.utils.profiler import (
     DistProfiler,
     DistProfilerExtension,
@@ -73,7 +74,6 @@ from verl.utils.profiler import (
     simple_timer,
 )
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
-from verl.utils.modelopt import apply_qat
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.torch_functional import use_original_torch_compile
 from verl.workers.actor.megatron_actor import MegatronPPOActor
@@ -224,14 +224,17 @@ class MegatronWorker(Worker):
                 qat_enabled = self.config.actor.get("qat", {}).get("enable", False)
                 if qat_enabled:
                     from megatron.bridge.models.gpt_provider import quantization_layer_spec
+
                     provider.transformer_layer_spec = quantization_layer_spec
 
                     from verl.utils.modelopt.megatron_qat_patch import apply_qat_patch
+
                     apply_qat_patch()
 
                     from megatron.bridge.models.conversion.param_mapping import AutoMapping
-                    AutoMapping.register_module_type('QuantColumnParallelLinear', 'column')
-                    AutoMapping.register_module_type('QuantRowParallelLinear', 'row')
+
+                    AutoMapping.register_module_type("QuantColumnParallelLinear", "column")
+                    AutoMapping.register_module_type("QuantRowParallelLinear", "row")
 
                 # Apply transformer config overrides
                 for key, value in override_transformer_config.items():
@@ -737,14 +740,14 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             )
         qat_config = self.config.actor.get("qat", {})
         if qat_config.get("enable", False):
-            from verl.utils.modelopt import QATWeightPostProcessor
+            from verl.utils.modelopt import QATWeightExporter
 
             qat_mode = qat_config.get("mode", "w4a16")
-            qat_weight_post_processor = QATWeightPostProcessor(
-                self.actor.actor_module, qat_mode
-            )
-            per_tensor_param = qat_weight_post_processor.process_weights_iterator(per_tensor_param)
-
+            qat_weight_exporter = QATWeightExporter(self.actor.actor_module, qat_mode, bridge=self.bridge)
+            # qat_weight_exporter = QATWeightExporter(
+            #     self.actor.actor_module, qat_mode
+            # )
+            per_tensor_param = qat_weight_exporter.process_weights_iterator(per_tensor_param)
 
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])

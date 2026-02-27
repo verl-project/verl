@@ -44,6 +44,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 # Utility Functions
 # ============================================================================
 
+
 def save_param_meta(layer: torch.nn.Module, param_name: str):
     """Save parameter metadata (shape, dtype, param_class, dims) for later rebuild."""
     if not hasattr(layer, "_hf_param_meta"):
@@ -139,6 +140,7 @@ def _update_ref_or_create(layer, ref_name, new_data):
 # ============================================================================
 # ModelOptParamMetaDict
 # ============================================================================
+
 
 class ModelOptParamMetaDict(dict):
     """
@@ -295,13 +297,19 @@ def _modelopt_dense_process_weights(self, layer: torch.nn.Module) -> None:
     perm = torch.empty(0, dtype=torch.int, device=device)
     qweight = weight_data.view(torch.int32).T.contiguous()
     marlin_weight = ops.gptq_marlin_repack(
-        b_q_weight=qweight, perm=perm,
-        size_k=part_size_k, size_n=part_size_n, num_bits=4,
+        b_q_weight=qweight,
+        perm=perm,
+        size_k=part_size_k,
+        size_n=part_size_n,
+        num_bits=4,
     )
 
     weight_scale = weight_scale_data.T.contiguous().to(param_dtype)
     weight_scale = marlin_permute_scales(
-        s=weight_scale, size_k=part_size_k, size_n=part_size_n, group_size=group_size,
+        s=weight_scale,
+        size_k=part_size_k,
+        size_n=part_size_n,
+        group_size=group_size,
     )
     marlin_weight_scale = nvfp4_marlin_process_scales(weight_scale)
     marlin_weight_scale_2 = nvfp4_marlin_process_global_scale(weight_scale_2_max.to(param_dtype))
@@ -329,6 +337,7 @@ def _modelopt_dense_process_weights(self, layer: torch.nn.Module) -> None:
 # MoE Helpers (Marlin)
 # ============================================================================
 
+
 def _marlin_repack_experts(packed, perm, size_k, size_n, num_experts):
     """Repack weight for each expert into Marlin format and stack."""
     import vllm._custom_ops as ops
@@ -338,8 +347,11 @@ def _marlin_repack_experts(packed, perm, size_k, size_n, num_experts):
         qweight = packed[i].view(torch.int32).T.contiguous()
         result.append(
             ops.gptq_marlin_repack(
-                b_q_weight=qweight, perm=perm,
-                size_k=size_k, size_n=size_n, num_bits=4,
+                b_q_weight=qweight,
+                perm=perm,
+                size_k=size_k,
+                size_n=size_n,
+                num_bits=4,
             )
         )
     return torch.stack(result)
@@ -363,8 +375,14 @@ def _marlin_process_scales_experts(scale_hf, param_dtype, size_k, size_n, group_
 # ============================================================================
 
 _MOE_HF_PARAMS = [
-    "w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale",
-    "w13_weight_scale_2", "w2_weight_scale_2", "w13_input_scale", "w2_input_scale",
+    "w13_weight",
+    "w2_weight",
+    "w13_weight_scale",
+    "w2_weight_scale",
+    "w13_weight_scale_2",
+    "w2_weight_scale_2",
+    "w13_input_scale",
+    "w2_input_scale",
 ]
 
 
@@ -393,10 +411,20 @@ def _modelopt_moe_marlin_convert(self, layer: torch.nn.Module, is_first_call: bo
 
     # Process scales
     w13_weight_scale_marlin = _marlin_process_scales_experts(
-        layer.w13_weight_scale.data, param_dtype, size_k_w13, size_n_w13, group_size, e,
+        layer.w13_weight_scale.data,
+        param_dtype,
+        size_k_w13,
+        size_n_w13,
+        group_size,
+        e,
     )
     w2_weight_scale_marlin = _marlin_process_scales_experts(
-        layer.w2_weight_scale.data, param_dtype, size_k_w2, size_n_w2, group_size, e,
+        layer.w2_weight_scale.data,
+        param_dtype,
+        size_k_w2,
+        size_n_w2,
+        group_size,
+        e,
     )
 
     # Process global scales  (w13_weight_scale_2 is already (E,) after common processing)
@@ -412,14 +440,23 @@ def _modelopt_moe_marlin_convert(self, layer: torch.nn.Module, is_first_call: bo
         layer.w2_weight_scale_2 = Parameter(w2_scale_2_processed, requires_grad=False)
         if not hasattr(layer, "_marlin_tensor_refs"):
             layer._marlin_tensor_refs = {}
-        for rn in ["w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale",
-                    "w13_weight_scale_2", "w2_weight_scale_2"]:
+        for rn in [
+            "w13_weight",
+            "w2_weight",
+            "w13_weight_scale",
+            "w2_weight_scale",
+            "w13_weight_scale_2",
+            "w2_weight_scale_2",
+        ]:
             layer._marlin_tensor_refs[rn] = getattr(layer, rn).data
     else:
         for rn, nd in [
-            ("w13_weight", w13_weight_marlin), ("w2_weight", w2_weight_marlin),
-            ("w13_weight_scale", w13_weight_scale_marlin), ("w2_weight_scale", w2_weight_scale_marlin),
-            ("w13_weight_scale_2", w13_scale_2_processed), ("w2_weight_scale_2", w2_scale_2_processed),
+            ("w13_weight", w13_weight_marlin),
+            ("w2_weight", w2_weight_marlin),
+            ("w13_weight_scale", w13_weight_scale_marlin),
+            ("w2_weight_scale", w2_weight_scale_marlin),
+            ("w13_weight_scale_2", w13_scale_2_processed),
+            ("w2_weight_scale_2", w2_scale_2_processed),
         ]:
             _update_ref_or_create(layer, rn, nd)
 
@@ -444,9 +481,7 @@ def _modelopt_moe_process_weights(self, layer: torch.nn.Module) -> None:
         _save_weight_loaders(layer, _MOE_HF_PARAMS)
 
     # ---- w13_weight_scale_2: reduce (E, 2) → (E,) ----
-    if self.moe.is_act_and_mul and not torch.allclose(
-        layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-    ):
+    if self.moe.is_act_and_mul and not torch.allclose(layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]):
         logger.warning("w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.")
 
     w13_weight_scale_2 = layer.w13_weight_scale_2.data
@@ -462,6 +497,7 @@ def _modelopt_moe_process_weights(self, layer: torch.nn.Module) -> None:
 # ============================================================================
 # KV Cache Patch
 # ============================================================================
+
 
 def _modelopt_kv_process_weights(self, layer) -> None:
     """
@@ -614,11 +650,11 @@ def apply_modelopt_nvfp4_patches():
 
     logger.info("Applying ModelOpt NVFP4 patches for dynamic weight loading...")
 
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4LinearMethod,
-        ModelOptNvFp4FusedMoE,
-    )
     from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+        ModelOptNvFp4LinearMethod,
+    )
 
     ModelOptNvFp4LinearMethod.process_weights_after_loading = _modelopt_dense_process_weights
     ModelOptNvFp4FusedMoE.process_weights_after_loading = _modelopt_moe_process_weights

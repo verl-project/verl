@@ -16,15 +16,10 @@
 """ModelOpt NVFP4 quantization config and application for Megatron QAT."""
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Optional
-
-import torch
-import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+import torch.nn as nn
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
-
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +36,7 @@ _NVFP4_W4A16_QUANTIZER_CFG = {
 
 
 def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> dict:
-    """Convert user-provided ignore patterns to ModelOpt ``quant_cfg`` entries.
-
-    Each pattern is wrapped with ``*`` on both ends (if not already present)
-    so that it performs glob-style substring matching against module names.
-    For example, ``"lm_head"`` becomes ``"*lm_head*"`` and ``"mlp.gate."``
-    becomes ``"*mlp.gate.*"`` (the trailing dot prevents matching
-    ``mlp.gate_proj``).
-    """
+    """Convert user-provided ignore patterns to ModelOpt ``quant_cfg`` entries."""
     cfg = {}
     for pattern in ignore_patterns:
         key = pattern
@@ -64,17 +52,7 @@ def build_quantize_config(
     qat_mode: str,
     ignore_patterns: list[str] | None = None,
 ) -> dict:
-    """Build a complete ModelOpt quantization config for ``mtq.quantize``.
-
-    Args:
-        qat_mode: Quantization mode. Currently only ``"w4a16"`` is supported.
-        ignore_patterns: Layer name patterns to skip quantization for.
-            Uses glob-style matching (e.g. ``"lm_head"`` matches ``*lm_head*``).
-            If *None*, uses :data:`DEFAULT_IGNORE_PATTERNS`.
-
-    Returns:
-        A config dict suitable for ``mtq.quantize()``.
-    """
+    """Build a complete ModelOpt quantization config for ``mtq.quantize``."""
     if qat_mode != "w4a16":
         raise ValueError(f"Only 'w4a16' is supported, got: {qat_mode}")
 
@@ -98,34 +76,7 @@ def apply_qat(
     qat_mode: str,
     ignore_patterns: list[str] | None = None,
 ) -> nn.Module:
-    """Apply Quantization-Aware Training to a Megatron model.
-
-    Args:
-        model: The Megatron model to quantize.
-        qat_mode: Quantization mode. Currently only ``"w4a16"`` is supported.
-        ignore_patterns: Layer name patterns to skip quantization for.
-            If *None*, uses :data:`DEFAULT_IGNORE_PATTERNS`.
-
-    Returns:
-        The quantized model (modified in-place).
-    """
+    """Apply Quantization-Aware Training to a Megatron model."""
     config = build_quantize_config(qat_mode, ignore_patterns)
     mtq.quantize(model, config)
     return model
-
-
-@dataclass
-class QuantizationMetadata:
-    """Metadata for a quantized module."""
-
-    qformat: str
-    weight_quantizer: Any
-    input_quantizer: Any
-    module: torch.nn.Module
-    vpp_idx: int
-    block_size: int = 16  # Default NVFP4 block size
-    weight_amax: Optional[torch.Tensor] = None
-    input_amax: Optional[torch.Tensor] = None
-    is_local: bool = True
-    global_expert_idx: Optional[int] = None
-    local_expert_idx: Optional[int] = None

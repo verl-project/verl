@@ -21,7 +21,6 @@ from pprint import pprint
 from typing import Any, Callable, Optional
 
 import numpy as np
-from numpy.random import f
 import ray
 import vllm.entrypoints.cli.serve
 from packaging import version
@@ -253,7 +252,7 @@ class vLLMHttpServer:
 
                 apply_qat_patches()
                 quantization = "compressed-tensors"
-                
+
             else:
                 raise ValueError(f"Unsupported quant_method: {quant_method}")
             logger.info(f"QAT quantization config injected (quant_method={quant_method})")

@@ -44,25 +44,14 @@ def apply_swiglu_sharded_factory_patch():
     mlp_module._swiglu_patched = True
     mlp_module._original_apply_swiglu_sharded_factory = mlp_module.apply_swiglu_sharded_factory
 
-    def patched_apply_swiglu_sharded_factory(
-        original_sh_ten, sharded_offsets, singleton_local_shards: bool = False
-    ):
+    def patched_apply_swiglu_sharded_factory(original_sh_ten, sharded_offsets, singleton_local_shards: bool = False):
         swiglu_shard_axis = 0
         prepend_axis_num = len(sharded_offsets)
         original_shape = original_sh_ten.local_shape
         local_axis_size = original_shape[swiglu_shard_axis]
-        assert (
-            original_sh_ten.global_offset[swiglu_shard_axis + prepend_axis_num]
-            % local_axis_size
-            == 0
-        )
-        rank_offset = (
-            original_sh_ten.global_offset[swiglu_shard_axis + prepend_axis_num]
-            // local_axis_size
-        )
-        axis_frag = original_sh_ten.axis_fragmentations[
-            swiglu_shard_axis + prepend_axis_num
-        ]
+        assert original_sh_ten.global_offset[swiglu_shard_axis + prepend_axis_num] % local_axis_size == 0
+        rank_offset = original_sh_ten.global_offset[swiglu_shard_axis + prepend_axis_num] // local_axis_size
+        axis_frag = original_sh_ten.axis_fragmentations[swiglu_shard_axis + prepend_axis_num]
 
         @torch.no_grad()
         def sh_ten_build_fn(
@@ -89,12 +78,20 @@ def apply_swiglu_sharded_factory_patch():
             tensor_w, tensor_v = torch.chunk(t, 2, dim=swiglu_shard_axis)
             return [
                 ShardedTensor.from_rank_offsets(
-                    w_key, tensor_w, *sharded_offsets, offset_w,
-                    replica_id=replica_id, prepend_axis_num=prepend_axis_num,
+                    w_key,
+                    tensor_w,
+                    *sharded_offsets,
+                    offset_w,
+                    replica_id=replica_id,
+                    prepend_axis_num=prepend_axis_num,
                 ),
                 ShardedTensor.from_rank_offsets(
-                    v_key, tensor_v, *sharded_offsets, offset_v,
-                    replica_id=replica_id, prepend_axis_num=prepend_axis_num,
+                    v_key,
+                    tensor_v,
+                    *sharded_offsets,
+                    offset_v,
+                    replica_id=replica_id,
+                    prepend_axis_num=prepend_axis_num,
                 ),
             ]
 
@@ -104,7 +101,8 @@ def apply_swiglu_sharded_factory_patch():
                     return torch.cat(sub_state_dict)
                 except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
                     logger.warning(
-                        "CUDA OOM during tensor merge – falling back to CPU. (Error: %s)", e,
+                        "CUDA OOM during tensor merge – falling back to CPU. (Error: %s)",
+                        e,
                     )
                     merged = torch.cat([t.cpu() for t in sub_state_dict])
                     gc.collect()
@@ -156,9 +154,7 @@ def apply_ep_gather_patch():
             model_config = self._get_config(megatron_module)
             num_experts = model_config.num_moe_experts
             num_experts_per_rank = num_experts // self.ep_size
-            num_experts_per_rank = self.broadcast_obj_from_pp_rank(
-                num_experts_per_rank, "num_experts_per_rank"
-            )
+            num_experts_per_rank = self.broadcast_obj_from_pp_rank(num_experts_per_rank, "num_experts_per_rank")
 
         local_expert_number = None
 
@@ -212,10 +208,7 @@ def apply_ep_gather_patch():
         return weights_dict
 
     MegatronParamMapping.gather_from_ep_ranks = _patched_gather_from_ep_ranks
-    logger.info(
-        "Applied QAT patch: MegatronParamMapping.gather_from_ep_ranks "
-        "now supports SequentialMLP pattern."
-    )
+    logger.info("Applied QAT patch: MegatronParamMapping.gather_from_ep_ranks now supports SequentialMLP pattern.")
 
 
 def revert_ep_gather_patch():
@@ -231,8 +224,8 @@ def revert_ep_gather_patch():
 
 def apply_extract_sort_key_patch():
     """Patch ``extract_sort_key`` to support SequentialMLP naming pattern."""
-    import megatron.bridge.models.conversion.utils as utils_module
     import megatron.bridge.models.conversion.model_bridge as bridge_module
+    import megatron.bridge.models.conversion.utils as utils_module
 
     if getattr(utils_module, "_sort_key_patched", False):
         return
@@ -270,15 +263,13 @@ def apply_extract_sort_key_patch():
 
     utils_module.extract_sort_key = _patched_extract_sort_key
     bridge_module.extract_sort_key = _patched_extract_sort_key
-    logger.info(
-        "Applied QAT patch: extract_sort_key now supports SequentialMLP pattern."
-    )
+    logger.info("Applied QAT patch: extract_sort_key now supports SequentialMLP pattern.")
 
 
 def revert_extract_sort_key_patch():
     """Revert :func:`apply_extract_sort_key_patch`."""
-    import megatron.bridge.models.conversion.utils as utils_module
     import megatron.bridge.models.conversion.model_bridge as bridge_module
+    import megatron.bridge.models.conversion.utils as utils_module
 
     if not getattr(utils_module, "_sort_key_patched", False):
         return
@@ -307,11 +298,7 @@ def apply_local_name_to_global_patch():
         param_name = _orig_fn(models, config, param_name, vp_stage)
 
         ep_group = parallel_state.get_expert_model_parallel_group()
-        if (
-            ".mlp.experts.local_experts." in param_name
-            and get_pg_size(ep_group) > 1
-            and ".adapter." not in param_name
-        ):
+        if ".mlp.experts.local_experts." in param_name and get_pg_size(ep_group) > 1 and ".adapter." not in param_name:
             num_experts = config.num_moe_experts
             num_experts_per_rank = num_experts // ep_group.size()
             local_experts_match = re.search(r"\.local_experts\.(\d+)\.", param_name)
@@ -326,10 +313,7 @@ def apply_local_name_to_global_patch():
         return param_name
 
     bridge_module._megatron_local_name_to_global = _patched_megatron_local_name_to_global
-    logger.info(
-        "Applied QAT patch: _megatron_local_name_to_global "
-        "now supports SequentialMLP pattern."
-    )
+    logger.info("Applied QAT patch: _megatron_local_name_to_global now supports SequentialMLP pattern.")
 
 
 def revert_local_name_to_global_patch():
@@ -363,9 +347,7 @@ def apply_build_conversion_tasks_patch():
     if getattr(MegatronModelBridge, "_build_tasks_patched", False):
         return
     MegatronModelBridge._build_tasks_patched = True
-    MegatronModelBridge._original_build_conversion_tasks = (
-        MegatronModelBridge.build_conversion_tasks
-    )
+    MegatronModelBridge._original_build_conversion_tasks = MegatronModelBridge.build_conversion_tasks
 
     def _patched_build_conversion_tasks(self, hf_pretrained, megatron_model):
         if not (hasattr(hf_pretrained, "state") and hasattr(hf_pretrained.state, "source")):
@@ -378,24 +360,18 @@ def apply_build_conversion_tasks_patch():
         model_config = unwrapped_model.config
         embeddings_are_tied = self._share_embeddings_and_output_weights(model_config, unwrapped_model)
         pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-        sorted_global_param_names_all_pp_ranks = self._megatron_global_param_names_all_pp_ranks(
-            megatron_model
-        )
+        sorted_global_param_names_all_pp_ranks = self._megatron_global_param_names_all_pp_ranks(megatron_model)
 
         if embeddings_are_tied:
             sorted_global_param_names_all_pp_ranks = [
                 name for name in sorted_global_param_names_all_pp_ranks if "output_layer" not in name
             ]
 
-        global_names_index_dict = {
-            name: idx for idx, name in enumerate(sorted_global_param_names_all_pp_ranks)
-        }
+        global_names_index_dict = {name: idx for idx, name in enumerate(sorted_global_param_names_all_pp_ranks)}
 
         tasks = [None] * len(sorted_global_param_names_all_pp_ranks)
         for vp_stage, model in enumerate(megatron_model):
-            for local_name, _ in itertools.chain(
-                model.named_parameters(), persistent_buffers(model)
-            ):
+            for local_name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)):
                 if "_extra_state" in local_name or self._is_adapter_param_name(local_name):
                     continue
 
@@ -407,9 +383,7 @@ def apply_build_conversion_tasks_patch():
                     print_rank_0(f"WARNING: {global_name} not in global_names_index_dict")
                     continue
                 global_name_idx = global_names_index_dict[global_name]
-                mapping = mapping_registry.megatron_to_hf_lookup(
-                    self._get_lora_unwrapped_name(global_name)
-                )
+                mapping = mapping_registry.megatron_to_hf_lookup(self._get_lora_unwrapped_name(global_name))
 
                 if not mapping:
                     logger.warning(f"WARNING: No mapping found for megatron_param: {global_name}")
@@ -421,23 +395,16 @@ def apply_build_conversion_tasks_patch():
                             logger.warning(f"WARNING: Can't find {mapping.hf_param} in hf_keys")
                             continue
                     else:
-                        missing_params = [
-                            hf_param
-                            for hf_param in mapping.hf_param.values()
-                            if hf_param not in hf_keys
-                        ]
+                        missing_params = [hf_param for hf_param in mapping.hf_param.values() if hf_param not in hf_keys]
                         if missing_params:
                             logger.warning(
-                                f"WARNING: Can't find the following HF parameters in hf_keys: "
-                                f"{missing_params}"
+                                f"WARNING: Can't find the following HF parameters in hf_keys: {missing_params}"
                             )
                             continue
 
-                local_module, local_weights = get_module_and_param_from_name(
-                    megatron_model, local_name, vp_stage
-                )
+                local_module, local_weights = get_module_and_param_from_name(megatron_model, local_name, vp_stage)
                 if local_module is not None and not hasattr(local_module, "config"):
-                    setattr(local_module, "config", model_config)
+                    local_module.config = model_config
 
                 tasks[global_name_idx] = WeightConversionTask(
                     pp_rank=pp_rank,
@@ -451,9 +418,7 @@ def apply_build_conversion_tasks_patch():
 
         for idx, global_name in enumerate(sorted_global_param_names_all_pp_ranks):
             if tasks[idx] is None:
-                mapping = mapping_registry.megatron_to_hf_lookup(
-                    self._get_lora_unwrapped_name(global_name)
-                )
+                mapping = mapping_registry.megatron_to_hf_lookup(self._get_lora_unwrapped_name(global_name))
                 if mapping is None:
                     continue
                 tasks[idx] = WeightConversionTask(
@@ -470,10 +435,7 @@ def apply_build_conversion_tasks_patch():
         return tasks
 
     MegatronModelBridge.build_conversion_tasks = _patched_build_conversion_tasks
-    logger.info(
-        "Applied QAT patch: MegatronModelBridge.build_conversion_tasks "
-        "now filters out None entries."
-    )
+    logger.info("Applied QAT patch: MegatronModelBridge.build_conversion_tasks now filters out None entries.")
 
 
 def revert_build_conversion_tasks_patch():
@@ -482,9 +444,7 @@ def revert_build_conversion_tasks_patch():
 
     if not getattr(MegatronModelBridge, "_build_tasks_patched", False):
         return
-    MegatronModelBridge.build_conversion_tasks = (
-        MegatronModelBridge._original_build_conversion_tasks
-    )
+    MegatronModelBridge.build_conversion_tasks = MegatronModelBridge._original_build_conversion_tasks
     MegatronModelBridge._build_tasks_patched = False
     logger.info("Reverted QAT patch: MegatronModelBridge.build_conversion_tasks.")
 
@@ -503,8 +463,7 @@ def apply_detect_parallelism_type_patch():
         module_type = type(module).__name__
         if "LayerNormColumnParallelLinear" in module_type:
             if self.megatron_param and (
-                self.megatron_param.endswith("layer_norm_weight")
-                or self.megatron_param.endswith("layer_norm_bias")
+                self.megatron_param.endswith("layer_norm_weight") or self.megatron_param.endswith("layer_norm_bias")
             ):
                 return "replicated"
             return "column"

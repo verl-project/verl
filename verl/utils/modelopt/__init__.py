@@ -15,8 +15,12 @@
 
 """ModelOpt integration for NVFP4 quantization with Megatron QAT training and vLLM inference."""
 
+from verl.utils.modelopt.megatron_qat_patch import (
+    apply_qat_patch,
+    revert_qat_patch,
+)
+from verl.utils.modelopt.qat_weight_exporter import QATWeightExporter
 from verl.utils.modelopt.quantize import (
-    QuantizationMetadata,
     apply_qat,
     build_quantize_config,
 )
@@ -25,18 +29,11 @@ from verl.utils.modelopt.vllm_modelopt_patch import (
     modelopt_process_weights_after_loading,
     prepare_modelopt_for_weight_reload,
 )
-from verl.utils.modelopt.weight_processor import QATWeightPostProcessor
-from verl.utils.modelopt.megatron_qat_patch import (
-    apply_qat_patch,
-    revert_qat_patch,
-)
-
 
 __all__ = [
     "build_quantize_config",
     "apply_qat",
-    "QuantizationMetadata",
-    "QATWeightPostProcessor",
+    "QATWeightExporter",
     "apply_modelopt_nvfp4_patches",
     "prepare_modelopt_for_weight_reload",
     "modelopt_process_weights_after_loading",

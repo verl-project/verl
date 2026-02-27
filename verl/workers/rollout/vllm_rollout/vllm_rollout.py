@@ -198,7 +198,6 @@ class ServerAdapter(BaseRollout):
             # transfer volume.
             # weight = weight.to(dtype, non_blocking=True)
 
-
             # fill the tensor bucket
             if offset + weight.nbytes > bucket_size:
                 get_torch_device().synchronize()
