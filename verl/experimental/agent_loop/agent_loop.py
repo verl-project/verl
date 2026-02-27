@@ -908,7 +908,6 @@ class AgentLoopManager:
             if profiling_replica_ranks
             else []
         )
-        print(f"david: profiling_replicas: {self.profiling_replicas}")
 
         if self.worker_group and rollout_config.name != "trtllm":
             self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])

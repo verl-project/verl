@@ -320,7 +320,7 @@ profiler:
   enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
 
   # Whether to profile all replicas.
-  all_replicas: false
+  all_replicas: true
 
   # The replicas that will be profiled. [] or [0,1,...]
   replicas: []
