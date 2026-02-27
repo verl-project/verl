@@ -19,11 +19,11 @@ from tensorrt_llm import serialization
 from tensorrt_llm._ray_utils import control_action_decorator
 from tensorrt_llm._torch.modules.fused_moe.moe_load_balancer import MoeLoadBalancer
 from tensorrt_llm._torch.utils import get_device_uuid
-from tensorrt_llm.llmapi.rlhf_utils import WorkerExtension as trtllm_worker_extension
+from tensorrt_llm.llmapi.rlhf_utils import WorkerExtension as TrtllmWorkerExtension
 from tensorrt_llm.logger import logger
 
 
-class WorkerExtension(trtllm_worker_extension):
+class WorkerExtension(TrtllmWorkerExtension):
     def __init__(self):
         pass
 
