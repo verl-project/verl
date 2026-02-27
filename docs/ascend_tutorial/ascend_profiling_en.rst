@@ -1,4 +1,4 @@
-profiling data collection guide
+Profiling Data Collection Guide
 ==========================================================================================
 
 Last updated: 12/20/2025.
