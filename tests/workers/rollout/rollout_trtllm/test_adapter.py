@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import os
-import subprocess
 from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
@@ -142,7 +141,17 @@ class TestTRTLLMServerAdapter:
 
         try:
             os.environ.setdefault("TLLM_RAY_FORCE_LOCAL_CLUSTER", "1")
-            ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
+            ray.init(
+                runtime_env={
+                    "env_vars": {
+                        "TOKENIZERS_PARALLELISM": "true",
+                        "NCCL_DEBUG": "WARN",
+                        "VLLM_LOGGING_LEVEL": "INFO",
+                        "VLLM_USE_V1": "1",
+                    }
+                },
+                ignore_reinit_error=True,
+            )
 
             config_dir = os.path.abspath("verl/verl/trainer/config")
             if not os.path.exists(config_dir):
@@ -187,5 +196,5 @@ class TestTRTLLMServerAdapter:
                 os.environ.pop("RANK", None)
             else:
                 os.environ["RANK"] = prev_rank
+            print("\nShutting down Ray...")
             ray.shutdown()
-            subprocess.run(["ray", "stop"], capture_output=True)

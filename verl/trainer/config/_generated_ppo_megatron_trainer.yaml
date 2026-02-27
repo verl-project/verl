@@ -113,7 +113,7 @@ actor_rollout_ref:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
       enable: false
-      all_ranks: false
+      all_ranks: true
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
       tool_config:
@@ -300,7 +300,10 @@ actor_rollout_ref:
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
+      global_tool_config: ${oc.select:global_profiler.global_tool_config,null}
       enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
+      all_replicas: true
+      replicas: []
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
@@ -724,6 +727,7 @@ global_profiler:
   save_path: outputs/profile
   global_tool_config:
     nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
       discrete: false
       controller_nsight_options:
         trace: cuda,nvtx,cublas,ucx
@@ -734,7 +738,7 @@ global_profiler:
         cuda-memory-usage: 'true'
         cuda-graph-trace: graph
         capture-range: cudaProfilerApi
-        capture-range-end: null
+        capture-range-end: repeat-shutdown:6
         kill: none
     torch_memory:
       trace_alloc_max_entries: 100000

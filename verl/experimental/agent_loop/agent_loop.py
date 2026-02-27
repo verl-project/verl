@@ -866,7 +866,6 @@ class AgentLoopManager:
         self.config = config
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
-
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
             self.rollout_replica_class = get_rollout_replica_class(self.config.actor_rollout_ref.rollout.name)
@@ -900,6 +899,15 @@ class AgentLoopManager:
             )
             for replica_rank in range(num_replicas)
         ]
+        profiling_all_replicas = OmegaConf.select(self.config.actor_rollout_ref.rollout.profiler, "all_replicas")
+        profiling_replica_ranks = OmegaConf.select(self.config.actor_rollout_ref.rollout.profiler, "replicas")
+        self.profiling_replicas = (
+            self.rollout_replicas
+            if profiling_all_replicas
+            else [self.rollout_replicas[replica_rank] for replica_rank in profiling_replica_ranks]
+            if profiling_replica_ranks
+            else []
+        )
 
         if self.worker_group and rollout_config.name != "trtllm":
             self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
@@ -1000,14 +1008,18 @@ class AgentLoopManager:
 
     def start_profile(self, **kwargs):
         """Start profiling on all rollout replicas."""
-        self._run_all([replica.start_profile(**kwargs) for replica in self.rollout_replicas])
+        self._run_all([replica.start_profile(**kwargs) for replica in self.profiling_replicas])
 
     def stop_profile(self):
         """Stop profiling on all rollout replicas."""
-        self._run_all([replica.stop_profile() for replica in self.rollout_replicas])
+        self._run_all([replica.stop_profile() for replica in self.profiling_replicas])
 
     def _run_all(self, tasks: list[asyncio.Task]):
         async def run_all():
             await asyncio.gather(*tasks)
 
         asyncio.run(run_all())
+
+    def shutdown(self):
+        """Shutdown all rollout replicas."""
+        self._run_all([replica.shutdown() for replica in self.rollout_replicas])

@@ -457,8 +457,6 @@ class RayWorkerGroup(WorkerGroup):
         self.profile_steps = kwargs.get("profile_steps", None)
         self.worker_nsight_options = kwargs.get("worker_nsight_options", None)
         self.customized_worker_env = kwargs.get("worker_env", {})
-        if self.worker_nsight_options is not None and self.worker_nsight_options["capture-range-end"] is None:
-            self.worker_nsight_options["capture-range-end"] = f"repeat-shutdown:{6 * len(self.profile_steps)}"
 
         if worker_names is not None and (not self.fused_worker_used):
             assert self._is_init_with_detached_workers

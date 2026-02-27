@@ -26,6 +26,7 @@ from ray.actor import ActorHandle
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import is_torch_npu_available
+from verl.utils.profiler.config import ProfilerConfig
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
@@ -116,6 +117,7 @@ class RolloutReplica(ABC):
         self.servers: list[ActorHandle] = []
         self._server_address: str = None
         self._server_handle: ActorHandle = None
+        self.profiler_config: ProfilerConfig = omega_conf_to_dataclass(self.config.profiler)
 
     async def init_hybrid(self, worker_group: RayWorkerGroup):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
@@ -263,6 +265,10 @@ class RolloutReplica(ABC):
     async def stop_profile(self):
         """Stop profiling on the replica."""
         await asyncio.gather(*[server.stop_profile.remote() for server in self.servers])
+
+    async def shutdown(self):
+        """Shutdown the replica."""
+        await asyncio.gather(*[server.shutdown.remote() for server in self.servers])
 
 
 class RolloutReplicaRegistry:

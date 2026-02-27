@@ -1218,6 +1218,10 @@ class RayPPOTrainer:
             critic_output = self.critic_wg.update_critic(batch)
         return critic_output
 
+    def shutdown(self):
+        """Shutdown the Ray PPO trainer"""
+        self.async_rollout_manager.shutdown()
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1281,12 +1285,27 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
 
+                start_profiling_flag = (
+                    not prev_step_profile and curr_step_profile
+                    if self.config.global_profiler.profile_continuous_steps
+                    else curr_step_profile
+                )
+                next_step_profile = (
+                    self.global_steps + 1 in self.config.global_profiler.steps
+                    if self.config.global_profiler.steps is not None
+                    else False
+                )
+                stop_profiling_flag = (
+                    curr_step_profile and not next_step_profile
+                    if self.config.global_profiler.profile_continuous_steps
+                    else curr_step_profile
+                )
+                prev_step_profile = curr_step_profile
+                curr_step_profile = next_step_profile
+
                 with marked_timer("start_profile", timing_raw):
-                    self._start_profiling(
-                        not prev_step_profile and curr_step_profile
-                        if self.config.global_profiler.profile_continuous_steps
-                        else curr_step_profile
-                    )
+                    self._start_profiling(start_profiling_flag)
+
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
@@ -1307,11 +1326,11 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if curr_step_profile:
+                        if start_profiling_flag:
                             self.async_rollout_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                         self.checkpoint_manager.sleep_replicas()
-                        if curr_step_profile:
+                        if stop_profiling_flag:
                             self.async_rollout_manager.stop_profile()
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
@@ -1321,11 +1340,11 @@ class RayPPOTrainer:
                         with marked_timer("gen_max", timing_raw, color="purple"):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
-                            if curr_step_profile:
+                            if start_profiling_flag:
                                 self.async_rollout_manager.start_profile()
                             gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
                             self.checkpoint_manager.sleep_replicas()
-                            if curr_step_profile:
+                            if stop_profiling_flag:
                                 self.async_rollout_manager.stop_profile()
                             batch = batch.union(gen_baseline_output)
                             # compute reward model score on batch
@@ -1542,18 +1561,7 @@ class RayPPOTrainer:
                     metrics.update(val_metrics)
 
                 with marked_timer("stop_profile", timing_raw):
-                    next_step_profile = (
-                        self.global_steps + 1 in self.config.global_profiler.steps
-                        if self.config.global_profiler.steps is not None
-                        else False
-                    )
-                    self._stop_profiling(
-                        curr_step_profile and not next_step_profile
-                        if self.config.global_profiler.profile_continuous_steps
-                        else curr_step_profile
-                    )
-                    prev_step_profile = curr_step_profile
-                    curr_step_profile = next_step_profile
+                    self._stop_profiling(stop_profiling_flag)
 
                 steps_duration = timing_raw["step"]
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
@@ -1599,6 +1607,7 @@ class RayPPOTrainer:
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    self.shutdown()
                     return
 
                 # this is experimental and may be changed/removed in the future

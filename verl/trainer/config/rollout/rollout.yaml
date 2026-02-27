@@ -313,8 +313,17 @@ profiler:
   # choices: npu, torch
   tool: ${oc.select:global_profiler.tool,null}
 
+  # global tool config
+  global_tool_config: ${oc.select:global_profiler.global_tool_config,null}
+
   # whether enable profile on rollout
   enable: ${oc.select:actor_rollout_ref.actor.profiler.enable,false}
+
+  # Whether to profile all replicas.
+  all_replicas: true
+
+  # The replicas that will be profiled. [] or [0,1,...]
+  replicas: []
 
   # Whether to profile all ranks.
   all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}

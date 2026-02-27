@@ -269,8 +269,8 @@ global_profiler:
         # valid values are "repeat-shutdown:n" or null.
         # For normal whole step profiling, n = len(profile_steps);
         # but for discrete profiling, n = len(profile_steps) * Number(subtasks).
-        # Or you can just leave it null and the program will use n = len(profile_steps) * 6;
-        capture-range-end: null
+        # To be simple, it's set to 6 for default, and you can change it if you want.
+        capture-range-end: "repeat-shutdown:6"
 
         # Send signal to the target application's process group. We let the program to exit by itself.
         kill: none

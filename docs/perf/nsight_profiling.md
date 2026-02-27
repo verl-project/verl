@@ -27,13 +27,21 @@ Nsys options in controller nodes and worker nodes are configured in `global_prof
 * **`global_profiler.global_tool_config.nsys.controller_nsight_options`**. This config group is for the single controller. All fields in this config group will be just sent to Nsight Systems when Ray starts the controller process. `ppo_trainer.yaml` provides a workable example. Users can reference [Nsight Systems manual](https://docs.nvidia.com/nsight-systems/UserGuide/index.html) and [Ray user guide](https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html) for more details.
 * **`global_profiler.global_tool_config.nsys.worker_nsight_options`**. This config group is for the worker processes. Similarly all fields in this config group will be just sent to Nsight Systems when Ray starts the controller process. Capture range is used to control the profiler when to start and stop. So `capture-range: "cudaProfilerApi"` is fixed and does not change it. Users can change `capture-range-end` with some accurate calculation or just leave it `null`.
 
-### Worker process profiling
+### Actor_rollout_ref (SPMD) Worker process profiling
 
 Verl manages mulitiple RL roles, _Actor_, _Ref_, _Rollout_, _Critic_, _Reward_, which are implemented in different Worker classes. And these workers can be combined into one Ray Actor, running in a process group. Each RL role has its own profiling config group, `profiler`, which consists of three fields:
 
-* **`all_ranks` and `ranks`**. When `all_ranks` is set `True` then all ranks will be profiled; when set `False`, `ranks` will be profiled. By default, verl profiles the whole training process in a series ` worker_process_<PID>.<RID>.nsys-rep` files for each process rank. PID is the process ID; RID is the capture range ID.
+* **`all_ranks` and `ranks`**. When `all_ranks` is set `True` then all ranks will be profiled; when set `False`, `ranks` will be profiled. By default, verl profiles the whole training process in a series `worker_process_<PID>.<RID>.nsys-rep` files for each process rank. PID is the process ID; RID is the capture range ID.
 * **`discrete`**. When set `False`, all the roles actions in one training step will be dumped in one database. When set `True`, the actions annotated by `DistProfiler.annotate` will be dumped into a discrete database. In this case, each role's action occupies one `<RID>`.
 * **Verl collocate mode**. Verl can combine two Worker sub classes to one Worker Actor. In this case, the user should take care that the combined Workers have consistent `discrete`. The Nsight Systems profiler uses a `torch.cuda.profiler.start()` and `stop()` pair to dump a `<step>` database anyway.
+
+### Rollout server worker process profiling
+Verl now use rollout server mode. AgentLoopManger mangages a list of rollout replicas; one repica manages a list of servers (in most cases, list length is 1); one server manages a list ranks of workers.
+In current config interface, `actor_rollout_ref.rollout.profiler` is a standalone config, and not is shared with Actor/Ref.
+`all_replicas=True` means all replicas are profiled, otherwise `replicas=[...]` are profiled.
+`all_ranks=True` means all ranks are profiled, otherwise `ranks=[...]` are profiled.
+Since a replica usually has one server, there is no control knobs for servers in a replica.
+An example is here `verl/examples/grpo_trainer/run_qwen2-7b_math_trtllm_nsys.sh`
 
 ### where to find the profiling data
 
@@ -64,6 +72,13 @@ To enable profiling for specific components and steps, modify your ppo_trainer.y
                 enable: True
                 all_ranks: True
         # rollout & ref follow actor settings
+        rollout:
+            profiler:
+                enable: True
+                all_replicas: True
+                #replicas: [0,2]
+                all_ranks:False
+                ranks: [0,2]
     critic:
             profiler:
                 enable: True

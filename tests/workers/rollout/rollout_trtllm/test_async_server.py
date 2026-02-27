@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-import subprocess
 import time
 from unittest.mock import MagicMock, patch
 
@@ -170,7 +169,17 @@ class TestTRTLLMHttpServer:
         """Test TRT-LLM generate method with real model."""
         try:
             os.environ.setdefault("TLLM_RAY_FORCE_LOCAL_CLUSTER", "1")
-            ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
+            ray.init(
+                runtime_env={
+                    "env_vars": {
+                        "TOKENIZERS_PARALLELISM": "true",
+                        "NCCL_DEBUG": "WARN",
+                        "VLLM_LOGGING_LEVEL": "INFO",
+                        "VLLM_USE_V1": "1",
+                    }
+                },
+                ignore_reinit_error=True,
+            )
 
             rollout_config, model_config = self._build_rollout_config(response_length=50)
 
@@ -209,14 +218,24 @@ class TestTRTLLMHttpServer:
             print(f"Log probs: {result.log_probs[:10]}...")  # Print first 10 log probs
 
         finally:
+            print("\nShutting down Ray...")
             ray.shutdown()
-            subprocess.run(["ray", "stop"], capture_output=True)
 
     def test_async_memory_management(self):
         """Test TRT-LLM async memory management (sleep) reduces memory usage."""
         try:
             os.environ.setdefault("TLLM_RAY_FORCE_LOCAL_CLUSTER", "1")
-            ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
+            ray.init(
+                runtime_env={
+                    "env_vars": {
+                        "TOKENIZERS_PARALLELISM": "true",
+                        "NCCL_DEBUG": "WARN",
+                        "VLLM_LOGGING_LEVEL": "INFO",
+                        "VLLM_USE_V1": "1",
+                    }
+                },
+                ignore_reinit_error=True,
+            )
 
             rollout_config, model_config = self._build_rollout_config(free_cache_engine=True)
 
@@ -271,5 +290,5 @@ class TestTRTLLMHttpServer:
             )
 
         finally:
+            print("\nShutting down Ray...")
             ray.shutdown()
-            subprocess.run(["ray", "stop"], capture_output=True)

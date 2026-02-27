@@ -420,6 +420,9 @@ class SGLangHttpServer:
         ):
             await self.tokenizer_manager.stop_profile()
 
+    async def shutdown(self):
+        pass
+
 
 class SGLangReplica(RolloutReplica):
     def __init__(

@@ -773,6 +773,9 @@ class vLLMHttpServer:
             logger.error(f"Error aborting request {request_id}: {e}")
             return {"aborted": False, "request_id": request_id, "error": str(e)}
 
+    async def shutdown(self):
+        pass
+
 
 class vLLMReplica(RolloutReplica):
     def __init__(

@@ -62,6 +62,8 @@ class TRTLLMHttpServer:
         max_colocate_count: int,
         pgs: list[PlacementGroup] = None,
         bundle_indices: list[list[int]] = None,
+        nsight_options: dict = None,
+        profiling_ranks: list[int] | None = None,
     ):
         os.environ["TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL"] = "1"
         assert torch.cuda.is_available(), "TRTLLM http server should run on GPU node"
@@ -84,6 +86,8 @@ class TRTLLMHttpServer:
         self.max_colocate_count = max_colocate_count
         self.pgs = pgs
         self.bundle_indices = bundle_indices
+        self.nsight_options = nsight_options
+        self.profiling_ranks = profiling_ranks
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -145,6 +149,8 @@ class TRTLLMHttpServer:
             "enable_sleep": self.config.enable_sleep_mode,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
+            # TODO: add nsight options back, mute it for CI
+            # "ray_worker_nsight_options": self.nsight_options,
             **engine_kwargs,
         }
 
@@ -172,6 +178,8 @@ class TRTLLMHttpServer:
         self.llm = await AsyncLLM(**llm_kwargs)
 
         trtllm_server = OpenAIServer(
+            # TODO: update to generator in future
+            # generator=self.llm,
             llm=self.llm,
             model=self.model_config.local_path,
             tool_parser=None,
@@ -237,8 +245,21 @@ class TRTLLMHttpServer:
         """Report GPU device UUIDs from TRT-LLM workers."""
         return await self.llm.collective_rpc(
             "report_device_id",
+            # TODO: mute target_ranks for CI
+            # target_ranks=[0],
             unique_reply_rank=0,
         )
+
+    async def start_profile(self, **kwargs):
+        await self.llm.collective_rpc("start_profile", target_ranks=self.profiling_ranks)
+
+    async def stop_profile(self, **kwargs):
+        await self.llm.collective_rpc("stop_profile", target_ranks=self.profiling_ranks)
+
+    async def shutdown(self):
+        """Shutdown the server."""
+        self.llm.shutdown()
+        pass
 
 
 class TRTLLMReplica(RolloutReplica):
@@ -332,6 +353,11 @@ class TRTLLMReplica(RolloutReplica):
             else f"trtllm_server_reward_{self.replica_rank}"
         )
 
+        if "nsys" in self.profiler_config.global_tool_config:
+            nsight_options = self.profiler_config.global_tool_config["nsys"].worker_nsight_options
+        else:
+            nsight_options = None
+
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,
@@ -349,6 +375,8 @@ class TRTLLMReplica(RolloutReplica):
             max_colocate_count=self.resource_pool.max_colocate_count,
             pgs=pgs,
             bundle_indices=bundle_indices,
+            nsight_options=nsight_options,
+            profiling_ranks=(None if self.profiler_config.all_ranks else self.profiler_config.ranks),
         )
         self.servers.append(server)
 
