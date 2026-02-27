@@ -184,7 +184,7 @@ class TRTLLMHttpServer:
 
     async def generate(
         self,
-        prompt_ids: str,
+        prompt_ids: Union[str, list[int]],
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
@@ -200,9 +200,8 @@ class TRTLLMHttpServer:
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
-        if self.is_vlm_model:
-            org_prompt = self.llm.tokenizer.decode(prompt_ids)
-            if image_data or video_data:
+        if self.is_vlm_model and (image_data or video_data):
+                org_prompt = self.llm.tokenizer.decode(prompt_ids)
                 input_dict = {
                     "prompt": org_prompt,
                     "multi_modal_data": {},
@@ -217,11 +216,6 @@ class TRTLLMHttpServer:
                     inputs=input_dict,
                     sampling_params=trt_llm_sampling_params,
                 )
-            else:
-                outputs = await self.llm.generate_async(
-                    inputs=prompt_ids,
-                    sampling_params=trt_llm_sampling_params,
-                )
         else:
             outputs = await self.llm.generate_async(
                 inputs=prompt_ids,
@@ -230,7 +224,8 @@ class TRTLLMHttpServer:
         token_ids = outputs.outputs[0].token_ids
         log_probs = None
         if outputs.outputs[0].logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(outputs.outputs[0].logprobs)]
+            # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position
+            log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
         return TokenOutput(token_ids=token_ids, log_probs=log_probs)
 
     async def wake_up(self):
