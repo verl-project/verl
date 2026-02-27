@@ -84,6 +84,8 @@ class TRTLLMHttpServer:
         self.max_colocate_count = max_colocate_count
         self.pgs = pgs
         self.bundle_indices = bundle_indices
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -211,7 +213,11 @@ class TRTLLMHttpServer:
         log_probs = None
         if trt_llm_sampling_params.logprobs is not None:
             log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs)
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, global_steps=self.global_steps)
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
 
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:
