@@ -150,7 +150,6 @@ class AutomodelEngine(BaseEngine):
         return build_optimizer(trainable_params, self.optimizer_config)
 
     def _build_lr_scheduler(self, optimizer):
-        """Build Automodel's OptimizerParamScheduler (matching train_ft.py build_lr_scheduler)."""
         cfg = self.optimizer_config
         total_steps = cfg.total_training_steps
         num_warmup_steps = cfg.lr_warmup_steps
@@ -204,7 +203,7 @@ class AutomodelEngine(BaseEngine):
 
         num_micro_batches = len(micro_batches)
         for i, micro_batch in enumerate(micro_batches):
-            # Signal final backward for MoE support (matching train_ft.py)
+            # Signal final backward for MoE 
             if not forward_only and i == num_micro_batches - 1:
                 prepare_for_final_backward([self.module])
 
@@ -399,8 +398,7 @@ class AutomodelEvalModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, AutomodelEngine)
         super().__enter__()
-        # Set model to train mode (same as VeOmni pattern for FSDP2 compatibility)
-        self.engine.module.train()
+        self.engine.module.eval()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, AutomodelEngine)
