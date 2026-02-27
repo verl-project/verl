@@ -26,8 +26,6 @@ import torch
 import torch.distributed
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-
-import verl.utils.torch_functional as verl_F
 from torchtitan.config.job_config import (
     Checkpoint,
     Compile,
@@ -42,6 +40,8 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.train import Trainer
+
+import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
