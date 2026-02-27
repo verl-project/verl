@@ -306,9 +306,6 @@ def compute_score(solution_str, ground_truth, step=0):
     format_max_possible = 1.0
     format_min_possible = 0.0
 
-    length_max_possible = 1.0
-    length_min_possible = 0.0
-
     completions = [[{"role": "assistant", "content": predict_str}]]
     answer = [ground_truth]
 
@@ -317,14 +314,11 @@ def compute_score(solution_str, ground_truth, step=0):
         completions, answer, step, tool_max_possible, tool_min_possible
     )[0]
 
-    if str(os.getenv("WITHLENGTH", 0)) == "1":
-        print("WITHLENGTH is set to 1, so length score is set!")
-        length_score = customize_length_reward_func(
-            completions, answer, step, length_max_possible, length_min_possible
-        )[0]
-    else:
-        length_score = 0
+    score = fomrat_score + correctness_score
 
-    score = fomrat_score + correctness_score + length_score
+    result = {
+        "score": score,
+        "score_list": [fomrat_score, correctness_score],
+    }
 
-    return score, fomrat_score, correctness_score, length_score
+    return result

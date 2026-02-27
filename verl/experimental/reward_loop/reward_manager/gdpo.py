@@ -78,6 +78,14 @@ class GDPOdRewardManager(RewardManagerBase):
                 ),
             )
 
+        # result = {
+        # "score": score,
+        # "score_list": [fomrat_score, correctness_score],
+        # }
+
+        # return = {"reward_score": reward, "reward_extra_info": reward_extra_info}
+        # reward_extra_info = {"score": score, "score_list": [fomrat_score, correctness_score]}
+
         reward_extra_info = {}
 
         score: float
