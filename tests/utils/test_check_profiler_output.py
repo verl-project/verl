@@ -1,8 +1,21 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import argparse
 import glob
 import logging
 import os
-import shutil
 import sys
 
 logger = logging.getLogger(__file__)
@@ -49,17 +62,6 @@ def check_profiler_output(profiler_dir: str) -> bool:
     return True
 
 
-def clean_profiler_output(profiler_dir: str):
-    """Clean up profiler deliverables"""
-    logger.info("Starting cleanup...")
-    if os.path.exists(profiler_dir):
-        try:
-            shutil.rmtree(profiler_dir)
-            logger.info(f"Successfully deleted directory: {profiler_dir}")
-        except Exception as e:
-            logger.error(f"Failed to delete directory: {e}")
-
-
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="Check and clean Profiler deliverables")
@@ -70,13 +72,10 @@ def parse_args():
 def main():
     args = parse_args()
 
-    try:
-        if check_profiler_output(args.profiler_dir):
-            sys.exit(0)
-        else:
-            sys.exit(1)
-    finally:
-        clean_profiler_output(args.profiler_dir)
+    if check_profiler_output(args.profiler_dir):
+        sys.exit(0)
+    else:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

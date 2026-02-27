@@ -7,11 +7,11 @@ SAVE_PATH=tests/utils/ci/profiler_data
 rm -rf "$SAVE_PATH"
 
 LEVEL="level0"
-CONTENTS="['npu','cpu']"
+CONTENTS=['npu','cpu']
 ANALYSIS=False
-PROFILE_STEPS="[1]"
+PROFILE_STEPS=[1]
 PROFILE_RANKS_ALL=False
-PROFILE_RANKS="[0]"
+PROFILE_RANKS=[0]
 DISCRETE=True
 
 python3 -m verl.trainer.main_ppo \
@@ -75,5 +75,4 @@ python3 -m verl.trainer.main_ppo \
     global_profiler.save_path="$SAVE_PATH" $@
 
 python3 "tests/utils/test_check_and_profiler_output.py" --profiler-dir="$SAVE_PATH"
-
-
+rm -rf "$SAVE_PATH"
