@@ -128,14 +128,11 @@ class AsyncLLMServerManager:
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            load_balancer_handle (Optional[ray.actor.ActorHandle]): shared global load balancer actor (required).
+            load_balancer_handle (Optional[ray.actor.ActorHandle]): shared global load balancer actor.
         """
         self.config = config
-        self.server_handles = list(server_handles)
+        self.server_handles = server_handles
         self._load_balancer = load_balancer_handle
-
-        if self._load_balancer is None:
-            raise ValueError("load_balancer_handle is required to enforce global routing single source of truth.")
 
     async def _acquire_server_with_index(self, request_id: str, uid: str = None) -> tuple[int, ray.actor.ActorHandle]:
         server_idx = await self._load_balancer.acquire_server.remote(request_id=request_id, uid=uid)
@@ -1031,23 +1028,10 @@ class AgentLoopManager:
             )
 
     def _init_global_load_balancer(self) -> None:
-        max_cache_size = self._get_routing_cache_size()
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
             num_servers=len(self.server_handles),
-            max_cache_size=max_cache_size,
+            max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
         )
-
-    def _get_routing_cache_size(self) -> int:
-        rollout_agent_cfg = getattr(self.config.actor_rollout_ref.rollout, "agent", {})
-        cache_size = getattr(rollout_agent_cfg, "max_cache_size", DEFAULT_ROUTING_CACHE_SIZE)
-        try:
-            parsed_cache_size = int(cache_size)
-            if parsed_cache_size <= 0:
-                raise ValueError(f"max_cache_size must be positive, got {parsed_cache_size}")
-            return parsed_cache_size
-        except (TypeError, ValueError):
-            logger.warning("Invalid rollout.agent.max_cache_size=%s, fallback to %d", cache_size, DEFAULT_ROUTING_CACHE_SIZE)
-            return DEFAULT_ROUTING_CACHE_SIZE
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
