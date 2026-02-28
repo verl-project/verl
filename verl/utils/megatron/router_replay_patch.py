@@ -386,7 +386,9 @@ def apply_router_replay_patch():
         @wraps(original_tf_config_init)
         def patched_tf_config_init(self, *args, **kwargs):
             # Simple solution: remove the unknown parameter before calling original constructor
-            enable_routing_replay = kwargs.pop("enable_routing_replay", False)
+            enable_routing_replay = kwargs.get("enable_routing_replay", False)
+            if "enable_routing_replay" not in native_params:
+                enable_routing_replay = kwargs.pop("enable_routing_replay", False)
 
             # Call original constructor with remaining kwargs
             original_tf_config_init(self, *args, **kwargs)
