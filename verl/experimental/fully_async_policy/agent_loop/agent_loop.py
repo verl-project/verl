@@ -27,6 +27,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopWorker,
     AsyncLLMServerManager,
     DictConfigWrap,
+    _current_uid,
     _agent_loop_registry,
     get_trajectory_info,
 )
@@ -66,15 +67,20 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             - Element 1 (list[float]): Log probabilities for the response token IDs.
             - Element 2 (bool): A flag or status indicating cancellation.
         """
-        server = self._choose_server(request_id)
-        output = await server.generate_for_partial.remote(
-            request_id=request_id,
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            image_data=image_data,
-            video_data=video_data,
-        )
-        return output
+        server_idx = None
+        uid = _current_uid.get(None)
+        try:
+            server_idx, server = await self._acquire_server_with_index(request_id=request_id, uid=uid)
+            output = await server.generate_for_partial.remote(
+                request_id=request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+            return output
+        finally:
+            await self._release_server(server_idx)
 
 
 @ray.remote
@@ -84,9 +90,19 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        load_balancer_handle: Optional[ray.actor.ActorHandle] = None,
     ):
-        self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
-        super().__init__(config, server_handles, reward_loop_worker_handles)
+        self.server_manager = FullyAsyncLLMServerManager(
+            config,
+            server_handles,
+            load_balancer_handle=load_balancer_handle,
+        )
+        super().__init__(
+            config,
+            server_handles,
+            reward_loop_worker_handles,
+            load_balancer_handle,
+        )
         # A shared cancellation event for all agent loops running on this worker.
         self.cancellation_event = asyncio.Event()
 
@@ -182,6 +198,10 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
                 assert agent_name in _agent_loop_registry, (
                     f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
                 )
+                multi_turn_cfg = getattr(self.config.actor_rollout_ref.rollout, "multi_turn", {})
+                multi_turn_enabled = getattr(multi_turn_cfg, "enable", False)
+                uid = kwargs.get("uid")
+                _current_uid.set(str(uid) if not multi_turn_enabled and uid is not None else None)
 
                 agent_loop_config = _agent_loop_registry[agent_name]
                 agent_loop = hydra.utils.instantiate(
@@ -259,6 +279,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
     async def _async_init(self):
         await self._initialize_llm_servers_async()
+        self._init_global_load_balancer()
         self._init_agent_loop_workers()
 
     async def _initialize_llm_servers_async(self):
@@ -318,18 +339,13 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         Returns:
             list[AgentLoopOutput]: Processing results
         """
-        worker = self._select_best_worker()
+        worker_idx = 0
+        uid_batch = sample.non_tensor_batch.get("uid")
+        if uid_batch is not None and len(uid_batch) > 0 and uid_batch[0] is not None:
+            worker_idx = abs(hash(str(uid_batch[0]))) % len(self.agent_loop_workers)
+        worker = self.agent_loop_workers[worker_idx]
         output_future = worker.generate_sequences_no_post.remote(sample, partial_output_list)
         return await asyncio.wrap_future(output_future.future())
-
-    def _select_best_worker(self):
-        """Select the best worker, simple round-robin load balancing"""
-        if not hasattr(self, "_worker_index"):
-            self._worker_index = 0
-
-        worker = self.agent_loop_workers[self._worker_index]
-        self._worker_index = (self._worker_index + 1) % len(self.agent_loop_workers)
-        return worker
 
     async def cancel(self):
         worker_cancel_tasks = [worker.cancel_agent_loops.remote() for worker in self.agent_loop_workers]

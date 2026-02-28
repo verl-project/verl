@@ -52,6 +52,8 @@ from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+DEFAULT_ROUTING_CACHE_SIZE = 10000
+
 # Per-task uid for GRPO prefix cache affinity.
 # Set in _run_agent_loop, read in AsyncLLMServerManager.generate().
 # asyncio.create_task copies context, so each task has its own value.
@@ -62,7 +64,7 @@ _current_uid: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_c
 class GlobalRequestLoadBalancer:
     """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers."""
 
-    def __init__(self, num_servers: int, max_cache_size: int = 10000):
+    def __init__(self, num_servers: int, max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
         if num_servers <= 0:
             raise ValueError(f"num_servers must be positive, got {num_servers}")
 
@@ -111,7 +113,7 @@ class GlobalRequestLoadBalancer:
 class AsyncLLMServerManager:
     """
     A class to manage multiple OpenAI compatible LLM servers. This class provides
-    - Load balance: least in-flight requests load balancing with optional global coordination
+    - Load balance: least in-flight requests load balancing via global coordination
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
     """
 
@@ -119,7 +121,6 @@ class AsyncLLMServerManager:
         self,
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
-        max_cache_size: int = 10000,
         load_balancer_handle: Optional[ray.actor.ActorHandle] = None,
     ):
         """Initialize the AsyncLLMServerManager.
@@ -127,57 +128,16 @@ class AsyncLLMServerManager:
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.
-            load_balancer_handle (Optional[ray.actor.ActorHandle]): shared global load balancer actor.
+            load_balancer_handle (Optional[ray.actor.ActorHandle]): shared global load balancer actor (required).
         """
         self.config = config
         self.server_handles = list(server_handles)
         self._load_balancer = load_balancer_handle
 
-        # In global load-balancer mode, server index must map to the same instance on every worker.
         if self._load_balancer is None:
-            random.shuffle(self.server_handles)
-
-        # Least in-flight requests load balancing.
-        self._inflight_requests = [0 for _ in self.server_handles]
-        self._next_server_idx = 0
-
-        # LRU cache to map request_id to server index.
-        self.request_id_to_server = LRUCache(maxsize=max_cache_size)
-
-    def _select_least_loaded_server_idx(self) -> int:
-        if not self._inflight_requests:
-            raise RuntimeError("No server is available for routing.")
-
-        min_inflight = min(self._inflight_requests)
-        num_servers = len(self._inflight_requests)
-        for offset in range(num_servers):
-            candidate_idx = (self._next_server_idx + offset) % num_servers
-            if self._inflight_requests[candidate_idx] == min_inflight:
-                self._next_server_idx = (candidate_idx + 1) % num_servers
-                return candidate_idx
-
-        raise RuntimeError("Failed to select a server for routing.")
-
-    def _choose_server_with_index(self, request_id: str) -> tuple[int, ray.actor.ActorHandle]:
-        if request_id in self.request_id_to_server:
-            server_idx = self.request_id_to_server[request_id]
-            return server_idx, self.server_handles[server_idx]
-
-        server_idx = self._select_least_loaded_server_idx()
-        self.request_id_to_server[request_id] = server_idx
-        return server_idx, self.server_handles[server_idx]
-
-    def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
-        _, server = self._choose_server_with_index(request_id)
-        return server
+            raise ValueError("load_balancer_handle is required to enforce global routing single source of truth.")
 
     async def _acquire_server_with_index(self, request_id: str, uid: str = None) -> tuple[int, ray.actor.ActorHandle]:
-        if self._load_balancer is None:
-            server_idx, server = self._choose_server_with_index(request_id)
-            self._inflight_requests[server_idx] += 1
-            return server_idx, server
-
         server_idx = await self._load_balancer.acquire_server.remote(request_id=request_id, uid=uid)
         if not isinstance(server_idx, int) or not (0 <= server_idx < len(self.server_handles)):
             # Release the acquired slot before raising to prevent inflight counter leak
@@ -187,10 +147,6 @@ class AsyncLLMServerManager:
 
     async def _release_server(self, server_idx: Optional[int]) -> None:
         if server_idx is None:
-            return
-        if self._load_balancer is None:
-            if self._inflight_requests[server_idx] > 0:
-                self._inflight_requests[server_idx] -= 1
             return
         # Fire-and-forget: release is just a counter decrement, no need to await.
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
@@ -1075,11 +1031,23 @@ class AgentLoopManager:
             )
 
     def _init_global_load_balancer(self) -> None:
-        max_cache_size = 10000
+        max_cache_size = self._get_routing_cache_size()
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(
             num_servers=len(self.server_handles),
             max_cache_size=max_cache_size,
         )
+
+    def _get_routing_cache_size(self) -> int:
+        rollout_agent_cfg = getattr(self.config.actor_rollout_ref.rollout, "agent", {})
+        cache_size = getattr(rollout_agent_cfg, "max_cache_size", DEFAULT_ROUTING_CACHE_SIZE)
+        try:
+            parsed_cache_size = int(cache_size)
+            if parsed_cache_size <= 0:
+                raise ValueError(f"max_cache_size must be positive, got {parsed_cache_size}")
+            return parsed_cache_size
+        except (TypeError, ValueError):
+            logger.warning("Invalid rollout.agent.max_cache_size=%s, fallback to %d", cache_size, DEFAULT_ROUTING_CACHE_SIZE)
+            return DEFAULT_ROUTING_CACHE_SIZE
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
