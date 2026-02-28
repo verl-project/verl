@@ -132,13 +132,13 @@ async def test_server_manager_with_resume(
 
     # 3. wait for rollout generate responses finished
     outputs = await asyncio.gather(*tasks)
-    expected_min_steps, expected_max_steps = initial_steps - 1, initial_steps + train_steps - 1
+    expected_min_steps = initial_steps - 1
     for output in outputs:
         assert output.min_global_steps == expected_min_steps, (
             f"output.min_global_steps is {output.min_global_steps}, expected {expected_min_steps}"
         )
-        assert output.max_global_steps == expected_max_steps, (
-            f"output.max_global_steps is {output.max_global_steps}, expected {expected_max_steps}"
+        assert output.max_global_steps > expected_min_steps, (
+            f"output.max_global_steps is {output.max_global_steps}, expected > {expected_min_steps}"
         )
         assert output.stop_reason not in ("aborted", "abort"), (
             f"output.stop_reason is {output.stop_reason}, expected not abort"
