@@ -14,9 +14,12 @@
 
 import copy
 import heapq
+from enum import Enum, auto
 from itertools import chain
+from typing import Optional
 
 import torch
+from tensordict import TensorDict
 from torch import distributed as dist
 
 from verl.protocol import DataProto
@@ -345,6 +348,171 @@ def roundup_divisible(a: int, b: int) -> int:
     return ((a + b - 1) // b) * b
 
 
+class PaddingMode(Enum):
+    """Padding strategy for micro-batch construction during training.
+
+    REMOVE_PADDING: Use sequence packing (unpad/repad) to eliminate all padding.
+        Best performance when the model supports flash_attn_varlen.
+    TRUNCATE_PADDING: Sort sequences by length and greedily pack micro-batches
+        to reduce padding. Combined with sequence-level padding truncation in the
+        forward pass. Useful for architectures that cannot use sequence packing
+        (e.g., Mamba/SSM-based models).
+    MAX_SEQUENCE_LENGTH_PADDING: Pad all sequences to the maximum length in the batch
+        (standard padding behavior).
+    """
+
+    MAX_SEQUENCE_LENGTH_PADDING = auto()
+    REMOVE_PADDING = auto()
+    TRUNCATE_PADDING = auto()
+
+
+def synchronize_micro_batches_num_across_ranks(
+    micro_batches_idx: list[list[int]],
+    dp_group: Optional[dist.ProcessGroup] = None,
+) -> list[list[int]]:
+    """Ensure all ranks have the same number of micro-batches by splitting larger batches.
+
+    When using dynamic micro-batching, different DP ranks may end up with different
+    numbers of micro-batches due to varying sequence length distributions. This function
+    synchronizes the count by splitting the largest micro-batches on ranks that have fewer.
+
+    Args:
+        micro_batches_idx: List of index lists for micro-batches.
+        dp_group: The distributed group for data-parallel sync.
+
+    Returns:
+        List of index lists with the same count across all ranks.
+    """
+    if not dist.is_initialized():
+        return micro_batches_idx
+
+    num_micro_batches = len(micro_batches_idx)
+    num_micro_batches_tensor = torch.tensor([num_micro_batches], device=get_device_name())
+    dist.all_reduce(num_micro_batches_tensor, op=dist.ReduceOp.MAX, group=dp_group)
+    max_num_micro_batches = num_micro_batches_tensor.cpu().item()
+
+    if not micro_batches_idx and max_num_micro_batches > 0:
+        rank = dist.get_rank(dp_group)
+        raise RuntimeError(
+            f"Cannot create {max_num_micro_batches} micro-batches from an empty batch on rank {rank}. "
+            "All ranks in a DP group must have a non-empty batch if any rank does."
+        )
+
+    while len(micro_batches_idx) < max_num_micro_batches:
+        largest_batch_idx = max(range(len(micro_batches_idx)), key=lambda i: len(micro_batches_idx[i]))
+        largest_batch = micro_batches_idx[largest_batch_idx]
+        if len(largest_batch) <= 1:
+            num_sequences = sum(len(batch) for batch in micro_batches_idx)
+            rank = dist.get_rank(dp_group)
+            raise RuntimeError(
+                f"Cannot split micro-batches further without creating empty batches. "
+                f"Need {max_num_micro_batches} micro-batches but only have {num_sequences} "
+                f"sequences in rank {rank}. Total batch size should be equal across ranks."
+            )
+        mid = len(largest_batch) // 2
+        micro_batches_idx[largest_batch_idx] = largest_batch[:mid]
+        micro_batches_idx.append(largest_batch[mid:])
+
+    return micro_batches_idx
+
+
+def get_truncate_padding_micro_batches(
+    batch: TensorDict,
+    max_token_len: int,
+    dp_group: Optional[dist.ProcessGroup] = None,
+    same_micro_num_in_dp: bool = True,
+) -> list[list[int]]:
+    """Create micro-batch index lists that minimize padding waste.
+
+    Uses a greedy algorithm: sorts sequences by actual length (descending) and
+    packs them into batches such that when padded to the longest sequence in each
+    batch, total tokens <= max_token_len.
+
+    This is useful for models that cannot use sequence packing (use_remove_padding)
+    but still benefit from reduced padding, such as Mamba/SSM architectures.
+
+    Args:
+        batch: TensorDict containing at least "attention_mask" and "input_ids".
+        max_token_len: Maximum number of tokens per micro-batch.
+        dp_group: torch.distributed group for data-parallel sync.
+        same_micro_num_in_dp: If True, ensure same micro-batch count across DP ranks.
+
+    Returns:
+        List of index lists, one per micro-batch. Sequences within each micro-batch
+        are ordered so the longest comes first, minimizing the padding needed.
+    """
+    sequence_lengths = batch["attention_mask"].sum(dim=1).cpu().tolist()
+
+    sorted_sequence_lengths_with_idx = sorted(
+        [(length, idx) for idx, length in enumerate(sequence_lengths)], key=lambda x: x[0], reverse=True
+    )
+
+    micro_batches_idx = []
+
+    if not sorted_sequence_lengths_with_idx:
+        if same_micro_num_in_dp:
+            micro_batches_idx = synchronize_micro_batches_num_across_ranks(micro_batches_idx, dp_group)
+        return micro_batches_idx
+
+    longest_sequence_length, longest_sequence_idx = sorted_sequence_lengths_with_idx[0]
+    current_micro_batch_idx = [longest_sequence_idx]
+    current_micro_batch_max_len = longest_sequence_length
+
+    for sequence_length, idx in sorted_sequence_lengths_with_idx[1:]:
+        new_micro_batch_size = len(current_micro_batch_idx) + 1
+        new_total_tokens = new_micro_batch_size * current_micro_batch_max_len
+
+        if new_total_tokens <= max_token_len:
+            current_micro_batch_idx.append(idx)
+        else:
+            micro_batches_idx.append(current_micro_batch_idx)
+            current_micro_batch_idx = [idx]
+            current_micro_batch_max_len = sequence_length
+
+    if current_micro_batch_idx:
+        micro_batches_idx.append(current_micro_batch_idx)
+
+    if same_micro_num_in_dp:
+        micro_batches_idx = synchronize_micro_batches_num_across_ranks(micro_batches_idx, dp_group)
+
+    return micro_batches_idx
+
+
+def get_max_sequence_length_padding_micro_batches(
+    batch: TensorDict,
+    max_token_len: int,
+    dp_group: Optional[dist.ProcessGroup] = None,
+    same_micro_num_in_dp: bool = True,
+) -> list[list[int]]:
+    """Create micro-batches for the standard case where all sequences are padded to the same length.
+
+    Simply divides the batch into equal-sized chunks based on max_token_len and
+    the padded sequence length.
+
+    Args:
+        batch: TensorDict containing at least "input_ids".
+        max_token_len: Maximum number of tokens per micro-batch.
+        dp_group: torch.distributed group for data-parallel sync.
+        same_micro_num_in_dp: If True, ensure same micro-batch count across DP ranks.
+
+    Returns:
+        List of index lists, one per micro-batch.
+    """
+    padded_seq_len = batch["input_ids"].shape[-1]
+    batch_size = batch["input_ids"].shape[0]
+    micro_batch_size = max_token_len // padded_seq_len
+
+    micro_batches_idx = []
+    for start_idx in range(0, batch_size, micro_batch_size):
+        end_idx = min(start_idx + micro_batch_size, batch_size)
+        micro_batches_idx.append(list(range(start_idx, end_idx)))
+
+    if same_micro_num_in_dp:
+        micro_batches_idx = synchronize_micro_batches_num_across_ranks(micro_batches_idx, dp_group)
+
+    return micro_batches_idx
+
+
 def rearrange_micro_batches(
     batch,
     max_token_len,
@@ -446,39 +614,69 @@ def prepare_dynamic_batch(
     data: DataProto,
     max_token_len: int,
     dp_group=None,
-    num_batches_divided_by=None,
     same_micro_num_in_dp=True,
-    min_num_micro_batch=None,
-    use_dynamic_bsz_balance=True,
+    padding_mode: PaddingMode = PaddingMode.REMOVE_PADDING,
+    **kwargs,
 ) -> tuple[list[DataProto], list[list[int]]]:
-    """
-    Prepare a batch for dynamic batching.
+    """Prepare a batch for dynamic micro-batching with configurable padding strategy.
+
+    Splits data into micro-batches based on the chosen padding mode:
+    - REMOVE_PADDING: Uses sequence packing with workload-balanced partitioning.
+    - TRUNCATE_PADDING: Greedy packing that sorts by length to reduce padding.
+    - MAX_SEQUENCE_LENGTH_PADDING: Simple chunking based on padded sequence length.
 
     Args:
-        data (DataProto): The input data.
-        max_token_len (int): The maximum token length for dynamic batching.
+        data: The input DataProto containing batch tensors and non-tensor data.
+        max_token_len: Maximum number of tokens per micro-batch.
+        dp_group: torch.distributed group for data-parallel sync.
+        same_micro_num_in_dp: If True, ensure same micro-batch count across DP ranks.
+        padding_mode: Strategy for handling padding in micro-batches.
+        **kwargs: Additional arguments passed to rearrange_micro_batches when
+            using REMOVE_PADDING mode (e.g., num_batches_divided_by, min_num_micro_batch).
 
     Returns:
-        Tuple[List[DataProto], List[List[int]]]: A tuple containing a list of DataProto objects
-        and a list of index lists.
+        Tuple of (micro_batches, batch_idx_list) where micro_batches is a list of
+        DataProto objects and batch_idx_list maps each micro-batch back to original indices.
     """
-    batch, batch_idx_list = rearrange_micro_batches(
-        data.batch,
-        max_token_len=max_token_len,
-        dp_group=dp_group,
-        num_batches_divided_by=num_batches_divided_by,
-        same_micro_num_in_dp=same_micro_num_in_dp,
-        min_num_micro_batch=min_num_micro_batch,
-        use_dynamic_bsz_balance=use_dynamic_bsz_balance,
+    max_seq_len = data.batch["input_ids"].shape[-1]
+    assert max_token_len >= max_seq_len, (
+        f"max_token_len must be >= the max sequence length (max_prompt_length + max_response_length). "
+        f"Got {max_token_len=} and {max_seq_len=}."
     )
-    micro_batches = []
-    for i, batch_idx in enumerate(batch_idx_list):
-        tensors = dict(batch[i])
-        non_tensors = {key: value[batch_idx] for key, value in data.non_tensor_batch.items()}
-        meta_info = copy.deepcopy(data.meta_info)
-        micro_batches.append(DataProto.from_dict(tensors, non_tensors, meta_info=meta_info))
 
-    return micro_batches, batch_idx_list
+    if padding_mode == PaddingMode.TRUNCATE_PADDING:
+        micro_batches_idx = get_truncate_padding_micro_batches(
+            batch=data.batch,
+            max_token_len=max_token_len,
+            dp_group=dp_group,
+            same_micro_num_in_dp=same_micro_num_in_dp,
+        )
+    elif padding_mode == PaddingMode.REMOVE_PADDING:
+        _, micro_batches_idx = rearrange_micro_batches(
+            data.batch,
+            max_token_len=max_token_len,
+            dp_group=dp_group,
+            same_micro_num_in_dp=same_micro_num_in_dp,
+            **kwargs,
+        )
+    elif padding_mode == PaddingMode.MAX_SEQUENCE_LENGTH_PADDING:
+        micro_batches_idx = get_max_sequence_length_padding_micro_batches(
+            batch=data.batch,
+            max_token_len=max_token_len,
+            dp_group=dp_group,
+            same_micro_num_in_dp=same_micro_num_in_dp,
+        )
+    else:
+        raise ValueError(f"Invalid padding mode: {padding_mode}")
+
+    micro_batches = []
+    for micro_batch_idx in micro_batches_idx:
+        tensors = tu.index_select_tensor_dict(data.batch, micro_batch_idx)
+        non_tensors = {key: value[micro_batch_idx] for key, value in data.non_tensor_batch.items()}
+        meta_info = copy.deepcopy(data.meta_info)
+        micro_batches.append(DataProto.from_dict(tensors=dict(tensors), non_tensors=non_tensors, meta_info=meta_info))
+
+    return micro_batches, micro_batches_idx
 
 
 def restore_dynamic_batch(data: torch.Tensor, batch_idx_list: list[list[int]]) -> torch.Tensor:

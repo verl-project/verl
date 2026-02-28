@@ -20,6 +20,7 @@ from verl import DataProto
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.model import create_random_mask
 from verl.utils.seqlen_balancing import (
+    PaddingMode,
     ceildiv,
     get_reverse_idx,
     prepare_dynamic_batch,
@@ -59,6 +60,69 @@ def test_dynamic_batch():
     input_ids = torch.cat([micro_batch.batch["input_ids"] for micro_batch in micro_batches], dim=0)
     input_ids = restore_dynamic_batch(input_ids, micro_bsz_idx_lst)
     torch.testing.assert_close(input_ids, dataproto.batch["input_ids"])
+
+
+def test_truncate_padding_micro_batching_reduces_padding():
+    """TRUNCATE_PADDING groups similar-length sequences, reducing effective tokens processed.
+
+    lengths=[50,10,45,5,40,8], max_seq_len=50, max_token_len=100.
+
+    MAX_SEQUENCE_LENGTH_PADDING (chunks of 2 in original order):
+      [50,10]->2*50=100, [45,5]->2*45=90, [40,8]->2*40=80 => total 270
+
+    TRUNCATE_PADDING (greedy packing, sorted desc: [50,45,40,10,8,5]):
+      [50,45]->2*50=100, [40,10]->2*40=80, [8,5]->2*8=16 => total 196
+
+    Real tokens = 158, so padding: 112 -> 38 (66% reduction).
+    """
+    lengths = [50, 10, 45, 5, 40, 8]
+    batch_size = len(lengths)
+    max_seq_len = 50
+    input_ids = torch.randint(1, 100, (batch_size, max_seq_len))
+    attention_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
+    for i, length in enumerate(lengths):
+        attention_mask[i, max_seq_len - length:] = 1
+    dataproto = DataProto.from_single_dict({"input_ids": input_ids, "attention_mask": attention_mask})
+
+    def total_tokens(micro_batches):
+        """Total tokens the model would process after trimming common padding per micro-batch."""
+        total = 0
+        for mb in micro_batches:
+            mask = mb.batch["attention_mask"]
+            max_real_len = mask.sum(dim=1).max().item()
+            total += len(mask) * max_real_len
+        return total
+
+    truncate_batches, _ = prepare_dynamic_batch(
+        dataproto, max_token_len=100, padding_mode=PaddingMode.TRUNCATE_PADDING
+    )
+    max_len_batches, _ = prepare_dynamic_batch(
+        dataproto, max_token_len=100, padding_mode=PaddingMode.MAX_SEQUENCE_LENGTH_PADDING
+    )
+
+    assert total_tokens(max_len_batches) == 270
+    assert total_tokens(truncate_batches) == 196
+
+
+def test_dynamic_batch_all_padding_modes():
+    """prepare_dynamic_batch round-trips correctly for every PaddingMode."""
+    lengths = [30, 25, 20, 15, 10, 5]
+    batch_size = len(lengths)
+    max_seq_len = 30
+    input_ids = torch.randint(1, 100, (batch_size, max_seq_len))
+    attention_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
+    for i, length in enumerate(lengths):
+        attention_mask[i, max_seq_len - length :] = 1
+    dataproto = DataProto.from_single_dict({"input_ids": input_ids, "attention_mask": attention_mask})
+
+    for mode in PaddingMode:
+        micro_batches, idx_list = prepare_dynamic_batch(dataproto, max_token_len=60, padding_mode=mode)
+        assert len(micro_batches) > 0, f"{mode}: should produce at least one micro-batch"
+        all_indices = sorted(idx for batch_indices in idx_list for idx in batch_indices)
+        assert all_indices == list(range(batch_size)), f"{mode}: all sample indices must be covered"
+        result_ids = torch.cat([mb.batch["input_ids"] for mb in micro_batches], dim=0)
+        restored = restore_dynamic_batch(result_ids, idx_list)
+        torch.testing.assert_close(restored, dataproto.batch["input_ids"], msg=f"{mode}: round-trip failed")
 
 
 def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):

@@ -33,9 +33,9 @@ from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
+from verl.utils.seqlen_balancing import PaddingMode, prepare_dynamic_batch, restore_dynamic_batch
 from verl.utils.torch_dtypes import PrecisionType
-from verl.utils.torch_functional import logprobs_from_logits
+from verl.utils.torch_functional import logprobs_from_logits, pad_along_dim, pad_and_stack
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
@@ -63,8 +63,25 @@ class DataParallelPPOActor(BasePPOActor):
         role = "Ref" if actor_optimizer is None else "Actor"
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
+        self.truncate_padding = self.config.get("truncate_padding", False)
+
+        if self.use_remove_padding and self.truncate_padding:
+            raise ValueError("You cannot enable both use_remove_padding and truncate_padding")
+        if self.truncate_padding and self.config.ulysses_sequence_parallel_size > 1:
+            raise ValueError("truncate_padding is not compatible with Ulysses sequence parallelism")
+
+        if self.use_remove_padding:
+            self.padding_mode = PaddingMode.REMOVE_PADDING
+        elif self.truncate_padding:
+            self.padding_mode = PaddingMode.TRUNCATE_PADDING
+        else:
+            self.padding_mode = PaddingMode.MAX_SEQUENCE_LENGTH_PADDING
+
         if torch.distributed.get_rank() == 0:
             print(f"{role} use_remove_padding={self.use_remove_padding}")
+            print(f"{role} truncate_padding={self.truncate_padding}")
+            print(f"{role} padding_mode={self.padding_mode}")
+
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
         if torch.distributed.get_rank() == 0:
             print(f"{role} use_fused_kernels={self.use_fused_kernels}")
@@ -119,7 +136,7 @@ class DataParallelPPOActor(BasePPOActor):
                 log_probs: (bs, response_len)
                 if calculate_entropy is True:
                     entropys: (bs, response_len)
-                if calculate_sum_pi_squared is False:
+                if calculate_sum_pi_squared is True:
                     sum_pi_squared: (bs, response_len)
         """
         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
@@ -343,43 +360,126 @@ class DataParallelPPOActor(BasePPOActor):
                     sum_pi_squared = full_sum_pi_squared.squeeze(-1)[:, -response_length - 1 : -1]
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
-            else:  # not using rmpad and no ulysses sp
+            else:  # not using sequence packing (remove_padding) and no ulysses sp
+                model_inputs = {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                }
+
+                response_start_idx = torch.full((batch_size,), seqlen - response_length - 1, device=input_ids.device)  # (B,)
+                response_end_idx = torch.full((batch_size,), seqlen - 1, device=input_ids.device)  # (B,)
+
+                if self.truncate_padding:
+                    # Minimize padding so the model sees shorter sequences:
+                    # 1. Roll each sequence's left padding to the right, making real
+                    #    tokens contiguous starting at position 0.
+                    # 2. Trim columns of padding that are common to every sequence
+                    #    in the micro-batch (now all on the right after rolling).
+                    # 3. Adjust per-sequence response indices accordingly.
+
+                    left_padding = attention_mask.argmax(dim=1)  # (B,)
+                    shifts = left_padding.long()  # (B,)
+                    arange_l = torch.arange(seqlen, device=input_ids.device)  # (L,)
+                    roll_indices = (arange_l + shifts.unsqueeze(1)) % seqlen  # (B, L)
+
+                    for key, t in list(model_inputs.items()):
+                        if t.dim() == 2:  # (B, L) — input_ids, attention_mask
+                            model_inputs[key] = torch.gather(t, 1, roll_indices)
+                        elif t.dim() == 3:
+                            if t.shape[0] == batch_size:  # (B, C, L) — e.g. position_ids after transpose
+                                expanded = roll_indices.unsqueeze(1).expand(
+                                    -1, t.shape[1], -1
+                                )  # (B, C, L)
+                                model_inputs[key] = torch.gather(t, 2, expanded)
+                            else:  # (C, B, L) — e.g. qwen2vl mrope position_ids
+                                expanded = roll_indices.unsqueeze(0).expand(
+                                    t.shape[0], -1, -1
+                                )  # (C, B, L)
+                                model_inputs[key] = torch.gather(t, 2, expanded)
+                        else:
+                            rolled = torch.empty_like(t)
+                            for i in range(batch_size):
+                                rolled[i] = torch.roll(
+                                    t[i], -int(left_padding[i]), dims=-1
+                                )
+                            model_inputs[key] = rolled
+
+                    response_start_idx -= left_padding
+                    response_end_idx -= left_padding
+
+                    # Trim columns of right padding shared by all sequences
+                    mask = model_inputs["attention_mask"]  # (B, L)
+                    last_one_idx = (
+                        mask * torch.arange(seqlen, device=mask.device)
+                    ).max(dim=-1)[0]  # (B,)
+                    common_pad_right = (seqlen - 1 - last_one_idx).min().item()
+                    if common_pad_right > 0:
+                        model_inputs = {
+                            k: t[..., : seqlen - common_pad_right]
+                            for k, t in model_inputs.items()
+                        }
+
                 extra_args = {}
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
                 output = self.actor_module(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
+                    **model_inputs,
                     **multi_modal_inputs,
                     use_cache=False,
                     **extra_args,
-                )  # prevent model thinks we are generating
+                )
+
+                def _extract_response_tokens(tensor):
+                    """Slice each sequence's response window and pad to uniform length.
+
+                    Args:
+                        tensor: (B, L, ...) model output (logits, log_probs, or entropy).
+
+                    Returns:
+                        (B, max_response_len, ...) padded tensor.
+                    """
+                    slices = [
+                        tensor[i, int(response_start_idx[i]) : int(response_end_idx[i])] for i in range(batch_size)
+                    ]
+                    return pad_and_stack(slices, pad_value=0)
 
                 if self.use_fused_kernels:
-                    log_probs = output.log_probs[:, -response_length - 1 : -1]
-                    entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
-
+                    log_probs = _extract_response_tokens(output.log_probs)  # (B, response_len)
+                    entropy = _extract_response_tokens(output.entropy)  # (B, response_len)
                 else:
-                    logits = output.logits
+                    response_logits = _extract_response_tokens(output.logits)  # (B, response_len, vocab)
+                    response_logits.div_(temperature)
 
-                    logits.div_(temperature)
-                    logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
-                    log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                    labels = micro_batch["responses"][:, : response_logits.shape[1]]  # (B, response_len)
+                    log_probs = logprobs_from_logits(logits=response_logits, labels=labels)  # (B, response_len)
+
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
-                            entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                            entropy = self.compute_entropy_from_logits(response_logits)
                         else:
-                            entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+                            entropy = torch.utils.checkpoint.checkpoint(
+                                self.compute_entropy_from_logits, response_logits
+                            )
                     # Compute sum_pi_squared if requested (for optimal_token_baseline)
                     if calculate_sum_pi_squared:
-                        sum_pi_squared = (
-                            self.calculate_sum_pi_squared_from_logits(logits)
-                            if not sum_pi_squared_checkpointing
-                            else torch.utils.checkpoint.checkpoint(self.calculate_sum_pi_squared_from_logits, logits)
-                        )
+                        if not sum_pi_squared_checkpointing:
+                            sum_pi_squared = self.calculate_sum_pi_squared_from_logits(response_logits)
+                        else:
+                            sum_pi_squared = torch.utils.checkpoint.checkpoint(
+                                self.calculate_sum_pi_squared_from_logits, response_logits
+                            )
+
+                # restore tensors to original padded length
+                log_probs = pad_along_dim(tensor=log_probs, target_length=response_length, pad_value=0, dim=1)
+                if calculate_entropy:
+                    entropy = pad_along_dim(tensor=entropy, target_length=response_length, pad_value=0, dim=1)
+                if calculate_sum_pi_squared:
+                    sum_pi_squared = pad_along_dim(
+                        tensor=sum_pi_squared, target_length=response_length, pad_value=0, dim=1
+                    )
 
             outputs = {"log_probs": log_probs}
             if calculate_entropy:
@@ -465,7 +565,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         if use_dynamic_bsz:
             max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
-            micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
+            micro_batches, batch_idx_list = prepare_dynamic_batch(
+                data, max_token_len=max_token_len, padding_mode=self.padding_mode
+            )
         else:
             micro_batches = data.split(micro_batch_size)
 
@@ -557,7 +659,9 @@ class DataParallelPPOActor(BasePPOActor):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                    micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
+                    micro_batches, _ = prepare_dynamic_batch(
+                        mini_batch, max_token_len=max_token_len, padding_mode=self.padding_mode
+                    )
                 else:
                     self.gradient_accumulation = (
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
