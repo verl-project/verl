@@ -235,6 +235,9 @@ class vLLMColocateWorkerExtension:
             # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
             patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
+        # save vllm model to safetensors before weight update
+        self._save_vllm_model_to_safetensors(suffix="before")
+
         # receive bucket and update weights
         while True:
             metadata = socket.recv_pyobj()
@@ -272,6 +275,9 @@ class vLLMColocateWorkerExtension:
             model_config = self.model_runner.vllm_config.model_config
             process_weights_after_loading(model, model_config, self.device)
 
+        # save vllm model to safetensors after weight update
+        self._save_vllm_model_to_safetensors(suffix="after")
+
         # clean up
         socket.close()
         del buffer
@@ -307,6 +313,25 @@ class vLLMColocateWorkerExtension:
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
                 self.model_runner.model.load_weights(weights)
+
+    def _save_vllm_model_to_safetensors(self, suffix: str):
+        """Save vLLM model to safetensors via save_model.
+        Dir from env VERL_VLLM_WEIGHT_SAVE_DIR (default None for not saving).
+        Args:
+         suffix: The suffix of the saved model.
+        """
+        save_dir = os.environ.get("VERL_VLLM_WEIGHT_SAVE_DIR", None)
+        if save_dir is None:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+        model = self.model_runner.model
+        rank = getattr(self, "local_rank", 0)
+        device_uuid = get_device_uuid(self.device.index)
+        path = os.path.join(save_dir, f"vllm_weights_{suffix}_rank{rank}_device{device_uuid}.safetensors")
+        from safetensors.torch import save_model
+
+        save_model(model, path)
+        logger.info(f"vLLM model saved to {path}")
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""
