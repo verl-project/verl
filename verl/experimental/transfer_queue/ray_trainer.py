@@ -817,7 +817,7 @@ class RayPPOTrainer:
             reward_loop_worker_handles = (
                 self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
             )
-            self.async_rollout_manager = AgentLoopManager(
+            self.async_rollout_manager = AgentLoopManager.create(
                 config=self.config,
                 worker_group=self.actor_rollout_wg,
                 reward_loop_worker_handles=reward_loop_worker_handles,

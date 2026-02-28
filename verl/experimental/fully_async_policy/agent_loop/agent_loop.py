@@ -28,11 +28,11 @@ from verl.experimental.agent_loop.agent_loop import (
     AsyncLLMServerManager,
     DictConfigWrap,
     _agent_loop_registry,
+    _get_rollout_and_model_config,
     get_trajectory_info,
 )
-from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.protocol import DataProto
-from verl.single_controller.ray import RayWorkerGroup
+from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
 from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
@@ -102,7 +102,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         Returns:
             list[AgentLoopOutput]: List of agent loop outputs, one per sample in the batch.
         """
-        config = self.config.actor_rollout_ref.rollout
+        config = self.rollout_config
         sampling_params = dict(
             temperature=config.temperature,
             top_p=config.top_p,
@@ -191,7 +191,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
                     tokenizer=self.tokenizer,
                     processor=self.processor,
                     dataset_cls=self.dataset_cls,
-                    dataset_config=DictConfigWrap(config=self.config.data),
+                    data_config=DictConfigWrap(config=self.config.data),
                 )
                 output: AgentLoopOutput = await agent_loop.run(
                     sampling_params, cancellation_event=self.cancellation_event, **kwargs
@@ -219,15 +219,17 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self,
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
+        rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
+        self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
 
         # Select rollout replica class based on rollout name
-        rollout_name = config.actor_rollout_ref.rollout.name
+        rollout_name = self.rollout_config.name
         if rollout_name == "sglang":
             from verl.experimental.fully_async_policy.sglang_rollout.sglang_async_server import FullyAsyncSGLangReplica
 
@@ -245,63 +247,6 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self.server_handles = None
         self.server_addresses = None
         self.agent_loop_workers = None
-
-    @classmethod
-    async def create(
-        cls,
-        config: DictConfig,
-        worker_group: RayWorkerGroup = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-    ):
-        instance = cls(config, worker_group, reward_loop_worker_handles)
-        await instance._async_init()
-        return instance
-
-    async def _async_init(self):
-        await self._initialize_llm_servers_async()
-        self._init_agent_loop_workers()
-
-    async def _initialize_llm_servers_async(self):
-        rollout_world_size = (
-            self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-            * self.config.actor_rollout_ref.rollout.data_parallel_size
-            * self.config.actor_rollout_ref.rollout.pipeline_model_parallel_size
-        )
-        world_size = (
-            self.worker_group.world_size
-            if self.worker_group
-            else self.config.rollout.n_gpus_per_node * self.config.rollout.nnodes
-        )
-        num_replicas = world_size // rollout_world_size
-
-        rollout_config = self.config.actor_rollout_ref.rollout
-        model_config = self.config.actor_rollout_ref.model
-        self.rollout_replicas = [
-            self.rollout_replica_class(
-                replica_rank=replica_rank,
-                config=rollout_config,
-                model_config=model_config,
-                gpus_per_node=self.config.rollout.n_gpus_per_node,
-            )
-            for replica_rank in range(num_replicas)
-        ]
-
-        if self.worker_group:
-            await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
-        else:
-            await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
-
-        self.server_handles = [server._server_handle for server in self.rollout_replicas]
-        self.server_addresses = [server._server_address for server in self.rollout_replicas]
-
-        print(f"AgentLoopManager: {self.server_addresses}")
-        # Update Prometheus configuration with server addresses
-        if rollout_config.prometheus.enable:
-            if rollout_config.disable_log_stats:
-                raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
-            await asyncio.to_thread(
-                update_prometheus_config, rollout_config.prometheus, self.server_addresses, rollout_config.name
-            )
 
     async def generate_single_sample_async(
         self,

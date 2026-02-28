@@ -80,6 +80,8 @@ class AgentLoopConfig(BaseConfig):
 
 @dataclass
 class TraceConfig(BaseConfig):
+    project_name: Optional[str] = None
+    experiment_name: Optional[str] = None
     backend: Optional[str] = None
     token2text: bool = False
     max_samples_per_step_per_worker: Optional[int] = None
@@ -138,6 +140,8 @@ class RolloutConfig(BaseConfig):
 
     name: Optional[str] = MISSING
     mode: str = "async"
+    nnodes: int = 0
+    n_gpus_per_node: int = 8
 
     temperature: float = 1.0
     top_k: int = -1
