@@ -66,15 +66,19 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             - Element 1 (list[float]): Log probabilities for the response token IDs.
             - Element 2 (bool): A flag or status indicating cancellation.
         """
-        server = self._choose_server(request_id)
-        output = await server.generate_for_partial.remote(
-            request_id=request_id,
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            image_data=image_data,
-            video_data=video_data,
-        )
-        return output
+        server_idx = None
+        try:
+            server_idx, server = await self._acquire_server_with_index(request_id=request_id)
+            output = await server.generate_for_partial.remote(
+                request_id=request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+            return output
+        finally:
+            await self._release_server(server_idx)
 
 
 @ray.remote
@@ -84,9 +88,19 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        load_balancer_handle: Optional[ray.actor.ActorHandle] = None,
     ):
-        self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
-        super().__init__(config, server_handles, reward_loop_worker_handles)
+        self.server_manager = FullyAsyncLLMServerManager(
+            config,
+            server_handles,
+            load_balancer_handle=load_balancer_handle,
+        )
+        super().__init__(
+            config,
+            server_handles,
+            reward_loop_worker_handles,
+            load_balancer_handle,
+        )
         # A shared cancellation event for all agent loops running on this worker.
         self.cancellation_event = asyncio.Event()
 
