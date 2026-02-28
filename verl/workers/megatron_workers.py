@@ -740,13 +740,16 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             )
         qat_config = self.config.actor.get("qat", {})
         if qat_config.get("enable", False):
+            if not self.bridge or self.vanilla_bridge:
+                raise ValueError(
+                    "QAT (Quantization-Aware Training) requires Megatron bridge. "
+                    "Please ensure 'actor.megatron.use_mbridge' is set to True and "
+                    "'actor.megatron.vanilla_mbridge' is set to False in your configuration."
+                )
             from verl.utils.modelopt import QATWeightExporter
 
             qat_mode = qat_config.get("mode", "w4a16")
             qat_weight_exporter = QATWeightExporter(self.actor.actor_module, qat_mode, bridge=self.bridge)
-            # qat_weight_exporter = QATWeightExporter(
-            #     self.actor.actor_module, qat_mode
-            # )
             per_tensor_param = qat_weight_exporter.process_weights_iterator(per_tensor_param)
 
         if self.config.rollout.free_cache_engine:

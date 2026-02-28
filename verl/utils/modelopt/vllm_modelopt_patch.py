@@ -40,11 +40,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-
 def save_param_meta(layer: torch.nn.Module, param_name: str):
     """Save parameter metadata (shape, dtype, param_class, dims) for later rebuild."""
     if not hasattr(layer, "_hf_param_meta"):
@@ -135,11 +130,6 @@ def _update_ref_or_create(layer, ref_name, new_data):
         logger.warning(f"_marlin_tensor_refs['{ref_name}'] not found, creating new Parameter")
         t = new_data.clone() if isinstance(new_data, torch.Tensor) else torch.tensor(new_data)
         setattr(layer, ref_name, Parameter(t, requires_grad=False))
-
-
-# ============================================================================
-# ModelOptParamMetaDict
-# ============================================================================
 
 
 class ModelOptParamMetaDict(dict):
@@ -246,10 +236,6 @@ class ModelOptParamMetaDict(dict):
             return default
 
 
-# ============================================================================
-# Dense Linear Patch (Marlin)
-# ============================================================================
-
 _DENSE_HF_PARAMS = ["weight", "weight_scale", "input_scale", "weight_scale_2"]
 
 
@@ -333,11 +319,6 @@ def _modelopt_dense_process_weights(self, layer: torch.nn.Module) -> None:
             delattr(layer, attr)
 
 
-# ============================================================================
-# MoE Helpers (Marlin)
-# ============================================================================
-
-
 def _marlin_repack_experts(packed, perm, size_k, size_n, num_experts):
     """Repack weight for each expert into Marlin format and stack."""
     import vllm._custom_ops as ops
@@ -369,10 +350,6 @@ def _marlin_process_scales_experts(scale_hf, param_dtype, size_k, size_n, group_
         result.append(nvfp4_marlin_process_scales(s))
     return torch.stack(result)
 
-
-# ============================================================================
-# MoE Patch (Marlin)
-# ============================================================================
 
 _MOE_HF_PARAMS = [
     "w13_weight",
@@ -479,10 +456,6 @@ def _modelopt_moe_process_weights(self, layer: torch.nn.Module) -> None:
         for pname in _MOE_HF_PARAMS:
             save_param_meta(layer, pname)
         _save_weight_loaders(layer, _MOE_HF_PARAMS)
-
-    # ---- w13_weight_scale_2: reduce (E, 2) → (E,) ----
-    if self.moe.is_act_and_mul and not torch.allclose(layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]):
-        logger.warning("w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.")
 
     w13_weight_scale_2 = layer.w13_weight_scale_2.data
     if w13_weight_scale_2.dim() == 2:

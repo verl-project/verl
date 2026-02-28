@@ -19,7 +19,6 @@ import logging
 
 import modelopt.torch.quantization as mtq
 import torch.nn as nn
-from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +37,15 @@ _NVFP4_W4A16_QUANTIZER_CFG = {
 def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> dict:
     """Convert user-provided ignore patterns to ModelOpt ``quant_cfg`` entries."""
     cfg = {}
+    mapping = {
+        "lm_head": "*output_layer*",
+        "*mlp.gate": "*router*",
+        "*self_attn*": "*self_attention*",
+    }
     for pattern in ignore_patterns:
         key = pattern
-        if not key.startswith("*"):
-            key = f"*{key}"
-        if not key.endswith("*"):
-            key = f"{key}*"
+        if key in mapping:
+            key = mapping[key]
         cfg[key] = {"enable": False}
     return cfg
 
@@ -63,7 +65,6 @@ def build_quantize_config(
 
     quant_cfg = {
         **_NVFP4_W4A16_QUANTIZER_CFG,
-        **_default_disabled_quantizer_cfg,
         **ignore_cfg,
     }
     logger.info("Built NVFP4 %s quantize config, ignore_patterns=%s", qat_mode, ignore_patterns)
