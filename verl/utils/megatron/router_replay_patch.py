@@ -281,6 +281,11 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     # Apply Z-Loss
     logits = self.apply_z_loss(logits)
 
+    # Megatron versions before 0.14.0 do not have 'moe_router_fusion' in TransformerConfig.
+    # We use getattr with a default value of False to ensure compatibility across different
+    # versions of Megatron-LM and MindSpeed.
+    moe_router_fusion = getattr(self.config, "moe_router_fusion", False)
+
     # Calculate probs and routing_map for token dispatching
     if self.routing_type == "sinkhorn":
         probs, routing_map = self.sinkhorn_load_balancing(logits)
@@ -294,7 +299,7 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
             scaling_factor=self.config.moe_router_topk_scaling_factor,
             score_function=self.score_function,
             expert_bias=self.expert_bias,
-            fused=self.config.moe_router_fusion,
+            fused=moe_router_fusion,
             router_replay=self.router_replay,
         )
 
@@ -340,26 +345,38 @@ def apply_router_replay_patch():
     # Clear router instances to avoid state leakage between model initializations.
     RouterReplay.router_instances.clear()
     # Step 1: Patch TransformerConfig to include the feature flag
-    try:
-        from megatron.training import get_args
-
-        global_args = get_args()
-    except Exception:
-        global_args = None
 
     try:
         sig = inspect.signature(TransformerConfig.__init__)
         native_params = sig.parameters
+        params = list(sig.parameters.values())
     except Exception:
+        sig = None
         native_params = {}
+        params = []
 
-    ext_attrs = ["enable_routing_replay", "moe_router_fusion"]
+    ext_attrs = ["enable_routing_replay"]
 
+    # Update __signature__ to prevent NPU/MindSpeed wrappers from filtering out or blocking custom parameters.
     for attr in ext_attrs:
-        val = getattr(global_args, attr, False) if global_args else False
+        if attr not in native_params:
+            if sig:
+                new_param = inspect.Parameter(
+                    attr,
+                    inspect.Parameter.KEYWORD_ONLY,
+                    default=False
+                )
+                if params and params[-1].kind == inspect.Parameter.VAR_KEYWORD:
+                    params.insert(-1, new_param)
+                else:
+                    params.append(new_param)
 
-        if not hasattr(TransformerConfig, attr):
-            setattr(TransformerConfig, attr, val)
+    if sig:
+        try:
+            TransformerConfig.__init__.__signature__ = sig.replace(parameters=params)
+        except Exception as e:
+            print(f"Failed to update signature metadata: {e}")
+
 
     if not hasattr(TransformerConfig, "_verl_router_patched"):
         # Store original __init__ method
@@ -369,17 +386,13 @@ def apply_router_replay_patch():
         @wraps(original_tf_config_init)
         def patched_tf_config_init(self, *args, **kwargs):
             # Simple solution: remove the unknown parameter before calling original constructor
-            if "enable_routing_replay" not in native_params:
-                enable_routing_replay = kwargs.pop("enable_routing_replay", TransformerConfig.enable_routing_replay)
+            enable_routing_replay = kwargs.pop("enable_routing_replay", False)
 
-            if "moe_router_fusion" not in native_params:
-                moe_router_fusion = kwargs.pop("moe_router_fusion", TransformerConfig.moe_router_fusion)
             # Call original constructor with remaining kwargs
             original_tf_config_init(self, *args, **kwargs)
 
             # Set the instance attribute
             self.enable_routing_replay = enable_routing_replay
-            self.moe_router_fusion = moe_router_fusion
 
         # Apply the patch
         TransformerConfig.__init__ = patched_tf_config_init
@@ -401,7 +414,7 @@ def apply_router_replay_patch():
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
         self.router_replay = None
-        if self.config.enable_routing_replay:
+        if getattr(self.config, "enable_routing_replay", False):
             self.router_replay = RouterReplay()
 
     # Step 4: Patch MoEAlltoAllTokenDispatcher.preprocess to handle router replay
