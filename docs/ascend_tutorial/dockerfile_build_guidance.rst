@@ -5,6 +5,16 @@ Last updated: 12/4/2025.
 
 我们在verl上增加对华为昇腾镜像构建的支持。
 
+镜像获取 & 公开镜像地址
+--------------------
+
+昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于上述 Dockerfile 构建。
+
+每日构建镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-latest
+
+verl release版本镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-{verl release版本号}
+
+
 
 镜像硬件支持
 -----------------------------------
@@ -68,14 +78,6 @@ A3              8.3.RC1         SGLang          `Dockerfile.ascend.sglang_8.3.rc
    # SGLang
    docker build -f Dockerfile.ascend.sglang_8.3.rc1_a2 -t verl-ascend-sglang:8.3.rc1-a2 .
 
-公开镜像地址
---------------------
-
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于上述 Dockerfile 构建。
-
-每日构建镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-latest
-
-verl release版本镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-{verl release版本号}
 
 声明
 --------------------
