@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
+import os
+import time
 from abc import ABC, abstractmethod
-from typing import Any, Generator, TypedDict
+from dataclasses import dataclass
+from typing import Any, Callable, Generator
 
 import ray
 import torch
+import zmq
 
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
@@ -26,12 +31,97 @@ from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
 
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
-class TensorMeta(TypedDict):
+
+@dataclass
+class TensorMeta:
+    """Metadata for a tensor in the checkpoint bucket."""
+
     name: str
     shape: torch.Size
     dtype: torch.dtype
     offset: int
+    chunk_idx: int | None = None
+    total_chunks: int | None = None
+
+
+@dataclass
+class MasterMetadata:
+    """Metadata for master process communication.
+
+    Args:
+        zmq_ip: IP address for ZMQ communication.
+        zmq_port: Port for ZMQ communication.
+        dist_ip: IP address for distributed communication (HCCL only).
+        dist_port: Port for distributed communication (HCCL only).
+    """
+
+    zmq_ip: str
+    zmq_port: int
+    dist_ip: str | None = None
+    dist_port: int | None = None
+
+
+class BroadcastOperation:
+    """Broadcast operation that can be async or sync.
+
+    Args:
+        rank: The rank of the current process.
+        bucket: The tensor to broadcast.
+        metadata: The metadata of the tensor.
+        socket: The zeromq socket to communicate with master.
+        topic: The topic to subscribe.
+        broadcast_fn: The function to broadcast tensor.
+        async_mode: Whether to execute broadcast asynchronously. If False, runs in __init__.
+    """
+
+    def __init__(
+        self,
+        rank: int,
+        bucket: torch.Tensor,
+        metadata: dict[str, TensorMeta] | None,
+        socket: zmq.Socket,
+        topic: str,
+        broadcast_fn: Callable[[torch.Tensor, int], None],
+        async_mode: bool = True,
+    ) -> None:
+        self.rank = rank
+        self.bucket = bucket
+        self.metadata = metadata
+        self.socket = socket
+        self.topic = topic
+        self._broadcast_fn = broadcast_fn
+        self._async_mode = async_mode
+
+        if self._async_mode:
+            loop = asyncio.get_running_loop()
+            self._task = loop.run_in_executor(None, self._run)
+        else:
+            self._run()
+
+    def _run(self):
+        # broadcast tensor meta via zeromq PUB/SUB
+        if self.rank == 0:
+            self.socket.send_string(self.topic, flags=zmq.SNDMORE)
+            self.socket.send_pyobj(self.metadata)
+        else:
+            self.socket.recv_string()
+            self.metadata = self.socket.recv_pyobj()
+
+        # broadcast tensor via backend-specific function
+        self._broadcast_fn(self.bucket, src_rank=0)
+
+    async def wait_for_complete(self) -> dict[str, TensorMeta]:
+        """Wait for the broadcast operation to complete.
+
+        Returns:
+            dict[str, TensorMeta]: The bucket meta after broadcast.
+        """
+        if self._async_mode:
+            await self._task
+        return self.metadata
 
 
 class CheckpointEngineRegistry:
@@ -158,6 +248,51 @@ class CheckpointEngine(ABC):
         """
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def bucket_size(self) -> int:
+        """Return the bucket size in bytes."""
+        raise NotImplementedError
+
+    def _slice_weight_into_chunks(self, name: str, weight: torch.Tensor) -> list[tuple[torch.Tensor, dict]]:
+        """Slice a large weight tensor into chunks that fit in bucket.
+
+        Args:
+            name: Name of the weight tensor.
+            weight: The weight tensor to slice.
+
+        Returns:
+            List of (chunk, metadata) tuples.
+        """
+        from verl.utils.tensor_utils import compute_weight_chunks
+
+        chunk_infos = compute_weight_chunks(name, weight, self.bucket_size)
+
+        # Check if no slicing needed (single chunk covering entire tensor)
+        if len(chunk_infos) == 1 and chunk_infos[0].chunk_idx == 0 and chunk_infos[0].total_chunks == 1:
+            meta = {
+                "name": name,
+                "shape": weight.shape,
+                "dtype": weight.dtype,
+                "offset": 0,
+            }
+            return [(weight, meta)]
+
+        chunks = []
+        for info in chunk_infos:
+            chunk = weight[info.start_idx : info.end_idx]
+            meta = {
+                "name": name,
+                "shape": chunk.shape,
+                "dtype": chunk.dtype,
+                "offset": 0,  # Will be set when filling bucket
+                "chunk_idx": info.chunk_idx,
+                "total_chunks": info.total_chunks,
+            }
+            chunks.append((chunk, meta))
+
+        return chunks
+
     @abstractmethod
     async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
         """Send the weights of the model.
@@ -175,6 +310,402 @@ class CheckpointEngine(ABC):
             A tuple of the name of the weight tensor and the tensor itself.
         """
         raise NotImplementedError
+
+    def _yield_tensors_from_buffer(
+        self,
+        buffer: torch.Tensor,
+        bucket_meta: dict,
+        pending_chunks: dict,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Yield tensors from buffer, handling chunk merging for large weights.
+
+        Args:
+            buffer: The buffer containing the tensor data.
+            bucket_meta: The metadata of the bucket.
+            pending_chunks: Dictionary to collect chunks for weights that were sliced.
+
+        Yields:
+            A tuple of the name of the weight tensor and the tensor itself.
+        """
+        for name, meta in bucket_meta.items():
+            dtype, shape = meta["dtype"], meta["shape"]
+            size = dtype.itemsize * shape.numel()
+            tensor = buffer[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
+
+            # Check if this is a chunk of a sliced weight
+            if "chunk_idx" in meta and "total_chunks" in meta:
+                # This is a chunk, store it for later merging
+                original_name = meta["name"]
+                chunk_idx = meta["chunk_idx"]
+                if original_name not in pending_chunks:
+                    pending_chunks[original_name] = {}
+                # NOTE: we need to clone the tensor here because the buffer will be
+                # reused for next bucket, which will overwrite the tensor data
+                pending_chunks[original_name][chunk_idx] = tensor.clone()
+
+                # Check if we have all chunks for this weight
+                if len(pending_chunks[original_name]) == meta["total_chunks"]:
+                    # Merge all chunks back into one tensor
+                    chunks_dict = pending_chunks[original_name]
+                    sorted_chunks = [chunks_dict[i] for i in range(meta["total_chunks"])]
+                    merged_tensor = torch.cat(sorted_chunks, dim=0)
+                    yield original_name, merged_tensor
+                    del pending_chunks[original_name]
+            else:
+                yield name, tensor
+
+
+class CollectiveCheckpointEngine(CheckpointEngine):
+    """Base class for collective communication checkpoint engines (NCCL, HCCL).
+
+    This class provides common logic for collective communication backends like NCCL and HCCL.
+    It implements send_weights and receive_weights with bucket-based double-buffering and
+    chunked weight handling for large tensors.
+
+    Subclasses must implement:
+        - _broadcast(bucket, src_rank): Broadcast tensor using backend-specific collective operation
+        - _synchronize(): Synchronize device operations (e.g., torch.cuda.synchronize)
+        - _copy_to_buffer(buffer, tensor, offset): Copy tensor to buffer at given offset
+        - prepare(): Allocate send/receive buffers and return MasterMetadata if master
+        - finalize(): Free buffers and optionally destroy process group
+        - init_process_group(rank, world_size, master_metadata): Initialize the process group
+
+    Args:
+        bucket_size: Bucket size in bytes to transfer multiple weights at one time.
+        group_name: The name of the process group.
+        rebuild_group: Whether to rebuild the process group in each update.
+        is_master: Whether the current process is the master process.
+        rollout_dtype: The dtype of the weights received from rollout workers.
+    """
+
+    def __init__(
+        self,
+        bucket_size: int,
+        group_name: str = "default",
+        rebuild_group: bool = False,
+        is_master: bool = False,
+        rollout_dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        self._bucket_size = bucket_size
+        self._rank: int | None = None
+        self._send_buf = None
+        self._recv_buf = None
+        self._world_size: int | None = None
+        self.group_name = group_name
+        self.rebuild_group = rebuild_group
+        self.rollout_dtype = rollout_dtype
+        self.is_master = is_master
+        self.topic = "bucket_metadata"
+        self._async_broadcast_mode = True
+
+        if self.is_master:
+            self._start_zmq_server()
+
+    @property
+    def bucket_size(self) -> int:
+        """Return the bucket size in bytes."""
+        return self._bucket_size
+
+    @property
+    def rank(self) -> int:
+        """Return the rank of the current process."""
+        return self._rank
+
+    @property
+    def send_buf(self):
+        """Return the send buffer."""
+        return self._send_buf
+
+    @property
+    def recv_buf(self):
+        """Return the receive buffer."""
+        return self._recv_buf
+
+    def _start_zmq_server(self):
+        """Start zeromq server for broadcasting bucket tensor metadata."""
+        from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+
+        self._ip = ray.util.get_node_ip_address().strip("[]")
+        self._zmq_port, self._listen_sock = get_free_port(self._ip)
+
+        context = zmq.Context()
+        self._socket = context.socket(zmq.PUB)
+        if is_valid_ipv6_address(self._ip):
+            address = f"tcp://[{self._ip}]:{self._zmq_port}"
+            self._socket.setsockopt(zmq.IPV6, 1)
+        else:
+            address = f"tcp://{self._ip}:{self._zmq_port}"
+        self._socket.bind(address)
+
+    def _connect_zmq_client(self, metadata: MasterMetadata):
+        """Connect to zeromq server for receiving bucket tensor metadata."""
+        from verl.utils.net_utils import is_valid_ipv6_address
+
+        assert not self.is_master, "Master process should not connect to other processes."
+        context = zmq.Context()
+        self._socket = context.socket(zmq.SUB)
+        if is_valid_ipv6_address(metadata.zmq_ip):
+            address = f"tcp://[{metadata.zmq_ip}]:{metadata.zmq_port}"
+            self._socket.setsockopt(zmq.IPV6, 1)
+        else:
+            address = f"tcp://{metadata.zmq_ip}:{metadata.zmq_port}"
+        self._socket.connect(address)
+        self._socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
+
+    @classmethod
+    def build_topology(
+        cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]
+    ) -> tuple[dict[str, list[Any]], dict[str, list[Any]]]:
+        """Build communication topology between all workers.
+
+        Args:
+            trainer_world_size: The world size of the trainer worker group.
+            rollout_world_size: The world size of the rollout replica.
+            metadata: A list of metadata `prepare` from all workers.
+
+        Returns:
+            A tuple of two dictionaries for trainer and rollout worker group.
+        """
+        trainer_kwargs = {
+            "rank": [0] + [-1] * (trainer_world_size - 1),
+            "world_size": [rollout_world_size + 1] * trainer_world_size,
+            "master_metadata": [metadata[0]] * trainer_world_size,
+        }
+        rollout_kwargs = {
+            "rank": list(range(1, rollout_world_size + 1)),
+            "world_size": [rollout_world_size + 1] * rollout_world_size,
+            "master_metadata": [metadata[0]] * rollout_world_size,
+        }
+        return trainer_kwargs, rollout_kwargs
+
+    # ========== Abstract methods to be implemented by subclasses ==========
+
+    @abstractmethod
+    def _broadcast(self, bucket, src_rank: int):
+        """Broadcast tensor using backend-specific collective operation.
+
+        Args:
+            bucket: The tensor to broadcast.
+            src_rank: The source rank to broadcast from.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _synchronize(self):
+        """Synchronize device operations."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _copy_to_buffer(self, buffer, tensor, offset):
+        """Copy tensor to buffer at given offset.
+
+        Args:
+            buffer: The buffer to copy to.
+            tensor: The tensor to copy.
+            offset: The offset in the buffer.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare(self) -> MasterMetadata | None:
+        """Prepare checkpoint engine before each step send_weights/receive_weights."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def finalize(self):
+        """Finalize checkpoint engine after each step send_weights/receive_weights."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata):
+        """Initialize the process group.
+
+        Args:
+            rank: The rank of the current process.
+            world_size: The total number of processes.
+            master_metadata: The metadata from the master process.
+        """
+        raise NotImplementedError
+
+    def _create_broadcast_send_op(self, bucket, metadata) -> BroadcastOperation:
+        """Create broadcast operation for sending weights."""
+        return BroadcastOperation(
+            rank=self._rank,
+            bucket=bucket,
+            metadata=metadata,
+            socket=self._socket,
+            topic=self.topic,
+            broadcast_fn=self._broadcast,
+            async_mode=self._async_broadcast_mode,
+        )
+
+    def _create_broadcast_recv_op(self, bucket) -> BroadcastOperation:
+        """Create broadcast operation for receiving weights."""
+        return BroadcastOperation(
+            rank=self._rank,
+            bucket=bucket,
+            metadata=None,
+            socket=self._socket,
+            topic=self.topic,
+            broadcast_fn=self._broadcast,
+            async_mode=self._async_broadcast_mode,
+        )
+
+    @torch.no_grad()
+    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+        """Send the weights of the model.
+
+        Args:
+            weights: A generator that yields the name of the weight tensor and the tensor itself.
+        """
+
+        assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
+
+        # For trainer rank other than 0, consume weights without sending.
+        if self.rank < 0:
+            for name, weight in weights:
+                pass
+            return
+
+        send_buf, recv_buf = self.send_buf, self.recv_buf
+        broadcast_op = None
+
+        start_time = time.time()
+        bucket_meta: dict[str, TensorMeta] = {}
+        offset = 0
+
+        for name, weight in weights:
+            weight_size = weight.nbytes
+            # Check if the weight needs to be sliced into chunks
+            if weight_size > self.bucket_size:
+                # Slice the weight into chunks
+                chunks = self._slice_weight_into_chunks(name, weight)
+
+                for chunk, chunk_meta in chunks:
+                    chunk_size = chunk.nbytes
+
+                    # Fill bucket with chunk
+                    if offset + chunk_size > self.bucket_size:
+                        self._synchronize()
+
+                        # wait previous broadcast op finish
+                        if broadcast_op is not None:
+                            await broadcast_op.wait_for_complete()
+
+                        broadcast_op = self._create_broadcast_send_op(
+                            send_buf, {"bucket_meta": bucket_meta, "is_last": False}
+                        )
+
+                        # swap send_buf and recv_buf
+                        send_buf, recv_buf = recv_buf, send_buf
+                        bucket_meta = {}
+                        offset = 0
+
+                    # Update offset in meta (for key, we use indexed key)
+                    indexed_key = f"{name}_chunk_{chunk_meta['chunk_idx']}"
+                    bucket_meta[indexed_key] = {
+                        "name": chunk_meta["name"],
+                        "shape": chunk_meta["shape"],
+                        "dtype": chunk_meta["dtype"],
+                        "offset": offset,
+                        "chunk_idx": chunk_meta["chunk_idx"],
+                        "total_chunks": chunk_meta["total_chunks"],
+                    }
+                    self._copy_to_buffer(send_buf, chunk, offset)
+                    offset += chunk_size
+
+                continue
+
+            # fill the tensor bucket
+            if offset + weight_size > self.bucket_size:
+                self._synchronize()
+
+                # wait previous broadcast op finish
+                if broadcast_op is not None:
+                    await broadcast_op.wait_for_complete()
+
+                broadcast_op = self._create_broadcast_send_op(send_buf, {"bucket_meta": bucket_meta, "is_last": False})
+
+                # swap send_buf and recv_buf
+                send_buf, recv_buf = recv_buf, send_buf
+                bucket_meta = {}
+                offset = 0
+
+            bucket_meta[name] = {
+                "name": name,
+                "shape": weight.shape,
+                "dtype": weight.dtype,
+                "offset": offset,
+            }
+            self._copy_to_buffer(send_buf, weight, offset)
+            offset += weight_size
+
+        # broadcast last bucket
+        self._synchronize()
+        if broadcast_op is not None:
+            await broadcast_op.wait_for_complete()
+
+        broadcast_op = self._create_broadcast_send_op(send_buf, {"bucket_meta": bucket_meta, "is_last": True})
+        await broadcast_op.wait_for_complete()
+        logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
+
+    @torch.no_grad()
+    async def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Receive the weights of the model.
+
+        Yields:
+            A tuple of the name of the weight tensor and the tensor itself.
+        """
+        assert self.rank > 0, "Rank 0 should not receive weights."
+        send_buf, recv_buf = self.send_buf, self.recv_buf
+        total_bytes, total_params = 0, 0
+
+        # Buffer to collect chunks for weights that were sliced
+        pending_chunks = {}  # name -> {chunk_idx: tensor, ...}
+
+        # receive first bucket
+        start_time = time.time()
+        broadcast_op = self._create_broadcast_recv_op(recv_buf)
+        metadata = await broadcast_op.wait_for_complete()
+        total_bytes += self.bucket_size
+
+        # swap send_buf and recv_buf
+        send_buf, recv_buf = recv_buf, send_buf
+
+        while not metadata["is_last"]:
+            # 1. receive next bucket
+            broadcast_op = self._create_broadcast_recv_op(recv_buf)
+
+            # 2. yield tensor from send_buf
+            for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+                total_params += 1
+                yield tensor_tuple
+
+            # 3. wait for next bucket broadcast finish
+            metadata = await broadcast_op.wait_for_complete()
+            total_bytes += self.bucket_size
+
+            # 4. swap send_buf and recv_buf
+            self._synchronize()
+            send_buf, recv_buf = recv_buf, send_buf
+
+        # yield tensor from send_buf
+        for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+            total_params += 1
+            yield tensor_tuple
+
+        # Check if there are any remaining chunks that weren't processed
+        if pending_chunks:
+            raise RuntimeError(
+                f"Received chunks for weights {list(pending_chunks.keys())} but did not receive all chunks for them."
+            )
+
+        time_cost = time.time() - start_time
+        bandwidth = total_bytes / time_cost / (1024 * 1024 * 1024)
+        logger.info(
+            f"Rank {self.rank} receive weights done, total_params: {total_params}, "
+            f"time cost: {time_cost:.2f}s, bandwidth: {bandwidth:.2f} GB/s"
+        )
 
 
 class CheckpointEngineWithCache(CheckpointEngine):
@@ -209,6 +740,16 @@ class ColocatedCheckpointEngine(CheckpointEngine):
     def __init__(self, bucket_size: int, is_master: bool = False) -> None:
         self.bucket_size = bucket_size
         self.is_master = is_master
+
+    @property
+    def bucket_size(self) -> int:
+        """Return the bucket size in bytes."""
+        return self._bucket_size
+
+    @bucket_size.setter
+    def bucket_size(self, value: int):
+        """Set the bucket size in bytes."""
+        self._bucket_size = value
 
     def prepare(self):
         raise NotImplementedError

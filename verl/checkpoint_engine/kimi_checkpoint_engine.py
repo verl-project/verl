@@ -245,6 +245,16 @@ class KIMICheckpointEngine(CheckpointEngine):
         self.initialized = False
         self.checkpoint_name = "kimi_checkpoint_engine"
 
+    @property
+    def bucket_size(self) -> int:
+        """Return the bucket size in bytes."""
+        return self._bucket_size
+
+    @bucket_size.setter
+    def bucket_size(self, value: int):
+        """Set the bucket size in bytes."""
+        self._bucket_size = value
+
     def prepare(self) -> MasterMetadata:
         if self.is_master:
             self.ip = ray.util.get_node_ip_address().strip("[]")
