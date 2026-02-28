@@ -1722,6 +1722,6 @@ class CriticWorker(Worker, DistProfilerExtension):
 # ================================= Async related workers =================================
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self):
+    async def update_weights(self, global_steps: int = None):
         await self.rollout_mode()
         return True

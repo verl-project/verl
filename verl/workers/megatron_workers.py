@@ -985,7 +985,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self):
+    async def update_weights(self, global_steps: int = None):
         await self.rollout_mode()
         return True
 
