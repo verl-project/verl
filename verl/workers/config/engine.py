@@ -209,6 +209,8 @@ class FSDPEngineConfig(EngineConfig):
     # fsdp specific flags
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     offload_policy: bool = False
+    per_layer_optimizer_step: bool = False
+    optimizer_step_prefetch_layers: int = 1
     reshard_after_forward: bool = True
     fsdp_size: int = -1
     forward_prefetch: bool = False

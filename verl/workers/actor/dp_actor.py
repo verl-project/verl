@@ -110,6 +110,10 @@ class DataParallelPPOActor(BasePPOActor):
                 f"{self.use_fused_kernels=} or {self.use_prefix_grouper=} for now."
             )
 
+        # Per-layer GPU optimizer stepper (set externally by fsdp_workers.py)
+        self._per_layer_optimizer_stepper = None
+        self._last_opt_step_metrics = None
+
     def _forward_micro_batch(
         self, micro_batch: dict[str, torch.Tensor], temperature: float, calculate_entropy: bool = False
     ) -> dict[str, torch.Tensor]:
@@ -411,7 +415,11 @@ class DataParallelPPOActor(BasePPOActor):
                 print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
                 self.actor_optimizer.zero_grad()
             else:
-                self.actor_optimizer.step()
+                if self._per_layer_optimizer_stepper is not None:
+                    self._per_layer_optimizer_stepper.step()
+                    self._last_opt_step_metrics = self._per_layer_optimizer_stepper.last_step_metrics
+                else:
+                    self.actor_optimizer.step()
 
         # Clear cached weight scales for QAT (weights changed)
         if getattr(self.actor_module, "_qat_fuse_enabled", False):
@@ -671,6 +679,15 @@ class DataParallelPPOActor(BasePPOActor):
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                if self._last_opt_step_metrics is not None:
+                    m = self._last_opt_step_metrics
+                    mini_batch_metrics["perf/optimizer_step_time_s"] = m["step_time_s"]
+                    mini_batch_metrics["perf/optimizer_step_peak_memory_gb"] = m["peak_memory_gb"]
+                    mini_batch_metrics["perf/optimizer_step_avg_h2d_ms"] = m["avg_h2d_ms"]
+                    mini_batch_metrics["perf/optimizer_step_avg_compute_ms"] = m["avg_compute_ms"]
+                    mini_batch_metrics["perf/optimizer_step_avg_d2h_ms"] = m["avg_d2h_ms"]
+                    mini_batch_metrics["perf/optimizer_step_stall_count"] = m["compute_stall_count"]
+                    self._last_opt_step_metrics = None
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics
