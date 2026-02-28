@@ -88,6 +88,8 @@ jobs:
           npu-smi info
       - name: Check initial pip list from image
         run: |
+          rm -rf /vllm-ascend
+          git clone --depth 1 --branch v0.11.0 https://github.com/vllm-project/vllm-ascend.git && cd vllm-ascend && pip install -v -e . && cd ..
           pip list
       - name: Checkout volcengine/verl repo
         uses: actions/checkout@v4
@@ -155,6 +157,8 @@ jobs:
           npu-smi info
       - name: Check initial pip list from image
         run: |
+          rm -rf /vllm-ascend
+          git clone --depth 1 --branch v0.11.0 https://github.com/vllm-project/vllm-ascend.git && cd vllm-ascend && pip install -v -e . && cd ..
           pip list
       - name: Checkout volcengine/verl repo
         uses: actions/checkout@v4
