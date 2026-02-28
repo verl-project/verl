@@ -133,7 +133,7 @@ trainer:
   logger: ["console", "wandb"]
 
   # Number of generations to log during validation
-  log_val_generations: 0
+  log_val_generations: 10
 
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null

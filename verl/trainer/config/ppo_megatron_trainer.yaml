@@ -26,7 +26,7 @@ defaults:
 actor_rollout_ref:
   hybrid_engine: True
 
-  nccl_timeout: 600 # seconds, default is 10 minutes for torch, you can set it to a larger value if you have long-running operations like 32B or 72B model using megatron
+  nccl_timeout: 1200 # seconds, default is 10 minutes for torch, you can set it to a larger value if you have long-running operations like 32B or 72B model using megatron
 
   model:
     override_config:
