@@ -2384,8 +2384,8 @@ def compute_gdpo_outcome_advantage(
     score_list: Optional[list[torch.Tensor]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute advantage for GDPO, operating only on Outcome reward
-    (with only one scalar reward for each response).
+    Compute advantage for GDPO with multi scalar rewards for each response.
+    (normalization first, then sum)
 
     Args:
         token_level_rewards: `(torch.Tensor)`
@@ -2412,10 +2412,9 @@ def compute_gdpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
-    if score_list is None:
+    if score_list is None:  # single score
         score_list = [token_level_rewards]
-        # for debug
-        print("------no multi-score-find---------")
+
     num_scores = len(score_list)
     new_advantage = None
     for i in range(num_scores):

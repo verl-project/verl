@@ -218,32 +218,10 @@ def compute_advantage(
                 "change the reward function to compute multi-scores."
             )
 
-            # prompt_length = prompt_ids.size(1)
-            # response_length = attention_mask[:, prompt_length:].sum(dim=1) - 1
-            # rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
-            # rm_scores[torch.arange(response_mask.size(0)), response_length] =
-            # torch.tensor(scores, dtype=torch.float32)
-            # batch["rm_scores"] = rm_scores
-
-            #     batch = TensorDict(
-            #     {
-            #         "prompts": prompt_ids,  # [bsz, prompt_length]
-            #         "responses": response_ids,  # [bsz, response_length]
-            #         "response_mask": response_mask,  # [bsz, response_length]
-            #         "input_ids": input_ids,  # [bsz, prompt_length + response_length]
-            #         "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
-            #         # position_ids: [bsz, 3, prompt_length + response_length]
-            # or [bsz, prompt_length + response_length]
-            #         "position_ids": position_ids,
-            #         **optional_outputs,
-            #     },
-            #     batch_size=len(inputs),
-            # )
             score_list = []
             multi_score_tensor = torch.tensor(
                 data.non_tensor_batch["score_list"], dtype=torch.float32
             )  # # [bsz, score_num, 1]
-            print(f"----------multi_score_tensor:{multi_score_tensor.shape}")
 
             for i in range(multi_score_tensor.shape[1]):
                 rm_score = multi_score_tensor[:, i]
@@ -255,14 +233,8 @@ def compute_advantage(
                 )
                 score_list.append(rm_scores)
 
-            # sum_score_tensor = data.batch["token_level_rewards"]
-
-            # rm_scores[torch.arange(rm_scores.size(0)), valid_response_length - 1] = torch.tensor(
-            #     scores, dtype=torch.float32
-            # )
             adv_kwargs["score_list"] = score_list
 
-            # np.array([[format_score,correct_score] for info in reward_extra_infos])
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
         data.batch["advantages"] = advantages

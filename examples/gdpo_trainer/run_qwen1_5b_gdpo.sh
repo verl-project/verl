@@ -3,6 +3,14 @@ export BASE_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 export EXPERIMENT_NAME="qwen2.5-1.5B-GDPO"
 export CKPT_DIR="verl/results/gdpo"
 
+# Env variables for computing score in rlla.py
+export REFINEDREWARD=0
+export COARSEREWARD=0
+export CORRECTMAX1=0
+export MAX1STEP30MAX3=0
+export SCHEDULEREWARD=0
+export SCHEDULELENGTH=0
+
 PROJECT_DIR="$(pwd)"
 
 trainer_n_gpus_per_node=8
@@ -34,7 +42,7 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
-    reward.custom_reward_function.path="$PROJECT_DIR/verl/experimental/reward_loop/reward_manager/gdpo.py" \
+    reward.custom_reward_function.path="$PROJECT_DIR/verl/utils/reward_score/rlla.py" \
     reward.custom_reward_function.name=compute_score \
     trainer.critic_warmup=0 \
     trainer.logger=['console'] \
