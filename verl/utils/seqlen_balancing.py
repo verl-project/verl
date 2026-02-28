@@ -414,13 +414,9 @@ def rearrange_micro_batches(
     # When force_group_size > 1, aggregate workloads by groups
     if force_group_size > 1:
         # Calculate workload for each group (sum of workloads of samples in the group)
-        group_workloads = []
-        for group_idx in range(num_groups):
-            start_idx = group_idx * force_group_size
-            end_idx = start_idx + force_group_size
-            group_seqlen = seq_len_effective[start_idx:end_idx]
-            group_workload = calculate_workload(group_seqlen).sum().cpu().item()
-            group_workloads.append(group_workload)
+        workloads_per_sample = calculate_workload(seq_len_effective)
+        workloads_per_sample_grouped = workloads_per_sample.view(num_groups, force_group_size)
+        group_workloads = workloads_per_sample_grouped.sum(dim=1).cpu().tolist()
 
         # Partition groups instead of individual samples
         micro_bsz_group_idx = get_seqlen_balanced_partitions(group_workloads, num_micro_batches, equal_size=False)
