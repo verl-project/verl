@@ -156,7 +156,7 @@ class vLLMColocateWorkerExtension:
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
-        from verl.workers.rollout.bucketed_weight_transfer import BucketedWeightReceiver
+        from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
         if current_platform.device_type == "npu" and self.device is None:
             self.device = torch.device(f"npu:{self.local_rank}")
