@@ -404,6 +404,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if getattr(actor_model_config, "model_type", None) == "kimi_vl":
             actor_model_config.text_config.topk_method = "greedy"
 
+        # patch for nemotron-h: enable flash_attention_2 support
+        if getattr(actor_model_config, "model_type", None) == "nemotron_h":
+            from verl.models.transformers.nemotron_h import patch_nemotron_h_flash_attention_support
+
+            patch_nemotron_h_flash_attention_support(actor_model_config)
+
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
         override_config_kwargs = {

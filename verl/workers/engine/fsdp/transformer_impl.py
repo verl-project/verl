@@ -227,6 +227,13 @@ class FSDPEngine(BaseEngine):
 
             auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
 
+            # patch for nemotron-h: enable flash_attention_2 support
+            model_type = getattr(self.model_config.hf_config, "model_type", None)
+            if model_type == "nemotron_h":
+                from verl.models.transformers.nemotron_h import patch_nemotron_h_flash_attention_support
+
+                patch_nemotron_h_flash_attention_support(self.model_config.hf_config)
+
             module = auto_class.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,
                 torch_dtype=torch_dtype,
