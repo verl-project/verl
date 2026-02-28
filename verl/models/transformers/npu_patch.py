@@ -23,6 +23,7 @@ from transformers.activations import ACT2FN
 from transformers.models.qwen2 import modeling_qwen2
 from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl
 from transformers.models.qwen3 import modeling_qwen3
+from transformers.models.qwen3_5 import modeling_qwen3_5
 from transformers.models.qwen3_moe import modeling_qwen3_moe
 from transformers.models.qwen3_next import modeling_qwen3_next
 from transformers.models.qwen3_vl import modeling_qwen3_vl
@@ -298,6 +299,11 @@ modeling_qwen2_5_vl.Qwen2_5_VLMLP.forward = silu_forward_npu
 modeling_qwen3.Qwen3RMSNorm.forward = rms_norm_forward_npu
 modeling_qwen3.Qwen3MLP.forward = silu_forward_npu
 modeling_qwen3.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+
+# Patches for Qwen3.5 Model
+modeling_qwen3_5.Qwen3_5RMSNorm.forward = rms_norm_forward_npu
+modeling_qwen3_5.Qwen3_5MLP.forward = silu_forward_npu
+modeling_qwen3_5.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
 # Patches for Qwen3 MoE Model
 modeling_qwen3_moe.Qwen3MoeRMSNorm.forward = rms_norm_forward_npu

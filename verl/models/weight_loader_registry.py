@@ -19,6 +19,8 @@ def get_weight_loader(arch: str):
     _MODEL_WEIGHT_MEGATRON_LOADER_REGISTRY = {
         "LlamaForCausalLM": load_state_dict_to_megatron_gptmodel,
         "Qwen2ForCausalLM": load_state_dict_to_megatron_gptmodel,
+        "Qwen3ForCausalLM": load_state_dict_to_megatron_gptmodel,
+        "Qwen3_5ForCausalLM": load_state_dict_to_megatron_gptmodel,
     }
 
     if arch in _MODEL_WEIGHT_MEGATRON_LOADER_REGISTRY:
@@ -46,6 +48,7 @@ def get_weight_saver(arch: str):
         "Qwen2_5_VLForConditionalGeneration": merge_megatron_ckpt_gptmodel_qwen2_5_vl,
         "DeepseekV3ForCausalLM": merge_megatron_ckpt_gptmodel_dpskv3,
         "Qwen3ForCausalLM": merge_megatron_ckpt_gptmodel,
+        "Qwen3_5ForCausalLM": merge_megatron_ckpt_gptmodel,
         "Qwen3ForTokenClassification": merge_megatron_ckpt_gptmodel,
         "Qwen3MoeForCausalLM": merge_megatron_ckpt_gptmodel_qwen_moe,
         "LlamaForTokenClassification": merge_megatron_ckpt_gptmodel,
