@@ -42,13 +42,8 @@ class TokenOutput(BaseModel):
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
     """number of preempted times for metric calculation"""
-
-    global_steps: Optional[int] = None
-    """global steps of rollout model weights"""
-    min_global_steps: Optional[int] = None
-    """[partial rollout] min global steps of rollout model weights"""
-    max_global_steps: Optional[int] = None
-    """[partial rollout] max global steps of rollout model weights"""
+    extra_info: dict[str, Any] = {}
+    """extra info for rollout"""
 
 
 class RolloutMode(Enum):

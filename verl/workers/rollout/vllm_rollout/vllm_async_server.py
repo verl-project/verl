@@ -602,7 +602,7 @@ class vLLMHttpServer:
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
-            global_steps=self.global_steps,
+            extra_info={"global_steps": self.global_steps},
         )
 
     async def wake_up(self):

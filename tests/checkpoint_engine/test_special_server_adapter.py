@@ -89,12 +89,11 @@ async def _run_server_manager_without_resume(
         outputs = await asyncio.gather(*tasks)
         expected_steps = global_steps - 1
         for output in outputs:
+            global_steps = output.extra_info["global_steps"]
             assert output.stop_reason in ("aborted", "abort"), (
                 f"output.stop_reason is {output.stop_reason}, expected in abort"
             )
-            assert output.global_steps == expected_steps, (
-                f"output.global_steps is {output.global_steps}, expected {expected_steps}"
-            )
+            assert global_steps == expected_steps, f"output.global_steps is {global_steps}, expected {expected_steps}"
         print(f"========== [{initial_steps=}, {train_steps=}] ==========")
         print("[RESPONSE]", tokenizer.decode(outputs[0].token_ids, skip_special_tokens=True))
 
@@ -134,11 +133,13 @@ async def _run_server_manager_with_resume(
     outputs = await asyncio.gather(*tasks)
     expected_min_steps = initial_steps - 1
     for output in outputs:
-        assert output.min_global_steps == expected_min_steps, (
-            f"output.min_global_steps is {output.min_global_steps}, expected {expected_min_steps}"
+        min_global_steps = output.extra_info["min_global_steps"]
+        max_global_steps = output.extra_info["max_global_steps"]
+        assert min_global_steps == expected_min_steps, (
+            f"output.min_global_steps is {min_global_steps}, expected {expected_min_steps}"
         )
-        assert output.max_global_steps > expected_min_steps, (
-            f"output.max_global_steps is {output.max_global_steps}, expected > {expected_min_steps}"
+        assert max_global_steps > expected_min_steps, (
+            f"output.max_global_steps is {max_global_steps}, expected > {expected_min_steps}"
         )
         assert output.stop_reason not in ("aborted", "abort"), (
             f"output.stop_reason is {output.stop_reason}, expected not abort"
