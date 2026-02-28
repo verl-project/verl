@@ -219,6 +219,12 @@ class TRTLLMHttpServer:
         """Set the global steps of the model weights."""
         self.global_steps = global_steps
 
+    async def abort_all_requests(self):
+        raise NotImplementedError
+
+    async def resume_generation(self):
+        raise NotImplementedError
+
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:
             # In hybrid mode, rollout is wake up in `update_weights`

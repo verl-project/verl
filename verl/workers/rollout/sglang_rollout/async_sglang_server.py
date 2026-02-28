@@ -325,10 +325,6 @@ class SGLangHttpServer:
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
 
-    async def set_global_steps(self, global_steps: int):
-        """Set the global steps of the model weights."""
-        self.global_steps = global_steps
-
     async def generate(
         self,
         prompt_ids: torch.Tensor,
@@ -416,6 +412,10 @@ class SGLangHttpServer:
             stop_reason=finish_reason,
             global_steps=self.global_steps,
         )
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
 
     async def abort_all_requests(self):
         await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))

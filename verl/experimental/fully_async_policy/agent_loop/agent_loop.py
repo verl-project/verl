@@ -45,6 +45,10 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class FullyAsyncLLMServerManager(AsyncLLMServerManager):
+    """FullyAsyncLLMServerManager supports resume generation on partial rollout, making rollout interruption
+    invisible to the AgentLoop.
+    """
+
     @rollout_trace_op
     async def generate(
         self,
@@ -118,7 +122,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
                     break
 
             # 4. check stop reason
-            if output.stop_reason != "aborted" or not self.config.async_training.partial_rollout_resume:
+            if output.stop_reason not in ("aborted", "abort") or not self.config.async_training.partial_rollout_resume:
                 break
 
         return final_output
