@@ -175,6 +175,7 @@ class McoreModuleWrapperConfig:
     share_embeddings_and_output_weights: bool = False
     wrap_with_ddp: bool = True
     use_distributed_optimizer: bool = True
+    use_megatron_fsdp: bool = False
 
 
 def make_megatron_module(
@@ -276,12 +277,26 @@ def make_megatron_module(
             # Extract TransformerConfig from the created model
             tf_config = get_model_config(model[0] if isinstance(model, list) else model)
         else:
+            ddp_config = {}
+            if override_ddp_config is not None:
+                ddp_config.update(override_ddp_config)
+
+            if wrap_config.use_megatron_fsdp:
+                ddp_config.setdefault("use_distributed_optimizer", True)
+                ddp_config.setdefault("check_for_nan_in_grad", True)
+                ddp_config.setdefault("use_megatron_fsdp", True)
+                ddp_config.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
+                ddp_config.setdefault("overlap_grad_reduce", True)
+                wrap_config.wrap_with_ddp = True
+
             model = bridge.get_model(
                 post_model_creation_callbacks=post_model_creation_callbacks,
                 wrap_with_ddp=wrap_config.wrap_with_ddp,
                 fp16=tf_config.fp16,
                 bf16=tf_config.bf16,
-                ddp_config=override_ddp_config,
+                use_megatron_fsdp=wrap_config.use_megatron_fsdp,
+                ddp_config=ddp_config,
+                data_parallel_random_init=False,
             )
 
         if isinstance(tf_config, MLATransformerConfig):
@@ -316,7 +331,13 @@ def make_megatron_module(
     return model, tf_config
 
 
-ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
+try:
+    from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as _MegatronFSDP
+    from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP
+
+    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module, _MegatronFSDP, MegatronFSDP)
+except ImportError:
+    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
 
 def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
@@ -332,6 +353,25 @@ def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
     if not return_list:
         return unwrapped_model[0]
     return unwrapped_model
+
+
+def synchronize_megatron_fsdp_params(model_chunks: list) -> bool:
+    """Synchronize FSDP parameter state from raw sharded tensors back to DTensors.
+
+    Returns True if synchronization was performed.
+    """
+    for model_chunk in model_chunks:
+        fsdp = model_chunk.module
+        if getattr(fsdp, "data_parallel_sharding_strategy", None) == "optim_grads_params":
+            fsdp.synchronize_param_gather()
+            return True
+    return False
+
+
+def restore_megatron_fsdp_params(model_chunks: list):
+    """Restore FSDP parameters to raw sharded state for training."""
+    for model_chunk in model_chunks:
+        model_chunk.start_param_sync()
 
 
 def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerConfig:

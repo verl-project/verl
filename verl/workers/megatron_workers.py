@@ -61,6 +61,8 @@ from verl.utils.megatron_utils import (
     offload_megatron_optimizer,
     per_tensor_generator,
     register_megatron_training_hooks,
+    restore_megatron_fsdp_params,
+    synchronize_megatron_fsdp_params,
 )
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
@@ -406,6 +408,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
                 wrap_with_ddp=True,
                 use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
+                use_megatron_fsdp=self.config.actor.megatron.get("use_megatron_fsdp", False),
             )
             actor_module, updated_tf_config = make_megatron_module(
                 wrap_config=wrap_config,
@@ -700,6 +703,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.rollout.sleep_level != 1 and self.config.rollout.free_cache_engine
             )
 
+        if self.config.actor.megatron.get("use_megatron_fsdp", False):
+            self._fsdp_needs_param_sync_restore = synchronize_megatron_fsdp_params(self.actor.actor_module)
+            if hasattr(self, "ref_module") and self.ref_module is not None:
+                synchronize_megatron_fsdp_params(self.ref_module)
+
         if self.bridge is not None:
             if self.vanilla_bridge:
                 per_tensor_param = self.bridge.export_weights(self.actor.actor_module)
@@ -747,6 +755,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):
         assert self._is_actor
+
+        if getattr(self, "_fsdp_needs_param_sync_restore", False):
+            restore_megatron_fsdp_params(self.actor.actor_module)
+            self._fsdp_needs_param_sync_restore = False
+
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
             log_gpu_memory_usage("After load actor params and grad during update_actor", logger=logger)

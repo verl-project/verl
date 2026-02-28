@@ -143,6 +143,7 @@ class McoreEngineConfig(EngineConfig):
         override_ddp_config (dict[str, Any]): Override configuration for DDP.
         override_transformer_config (dict[str, Any]): Override configuration for transformer.
         use_mbridge (bool): Whether to use MBridge for communication.
+        use_megatron_fsdp (bool): Whether to use Megatron-FSDP (Zero-3 sharding).
         dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
 
@@ -167,6 +168,7 @@ class McoreEngineConfig(EngineConfig):
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
     use_mbridge: bool = True
     vanilla_mbridge: bool = True
+    use_megatron_fsdp: bool = False
     strategy: str = "megatron"
 
     def __post_init__(self) -> None:

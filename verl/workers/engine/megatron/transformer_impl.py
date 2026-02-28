@@ -218,6 +218,7 @@ class MegatronEngine(BaseEngine):
             share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
+            use_megatron_fsdp=getattr(self.engine_config, "use_megatron_fsdp", False),
         )
         module, updated_tf_config = make_megatron_module(
             wrap_config=wrap_config,
