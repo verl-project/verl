@@ -96,6 +96,7 @@ class AdvantageEstimator(str, Enum):
 
     GAE = "gae"
     GRPO = "grpo"
+    GDPO = "gdpo"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     REMAX = "remax"
@@ -2370,3 +2371,69 @@ def compute_policy_loss_bypass_mode(
     pg_metrics.update(rollout_metrics)
 
     return pg_loss, pg_metrics
+
+
+@register_adv_est(AdvantageEstimator.GDPO)  # or simply: @register_adv_est("gdpo")
+def compute_gdpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    score_list: Optional[list[torch.Tensor]] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for GDPO with multi scalar rewards for each response.
+    (normalization first, then sum)
+
+    Args:
+        token_level_rewards: `(torch.Tensor)`
+            shape is (bs, response_length)
+        response_mask: `(torch.Tensor)`
+            shape is (bs, response_length)
+        index: `(np.ndarray)`
+            index array for grouping
+        epsilon: `(float)`
+            small value to avoid division by zero
+        norm_adv_by_std_in_grpo: `(bool)`
+            whether to scale the GRPO advantage
+        config: `(Optional[AlgoConfig])`
+            algorithm configuration object
+        score_list: `(Optional[list[torch.Tensor]])`
+            multi scores for GDPO
+
+    Note:
+        Ref GDPO (https://arxiv.org/abs/2601.05242).
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape is (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape is (bs, response_length)
+    """
+    if score_list is None:  # single score
+        score_list = [token_level_rewards]
+
+    num_scores = len(score_list)
+    new_advantage = None
+    for i in range(num_scores):
+        token_level_scores = score_list[i]
+
+        normalized_score, _ = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_scores,
+            response_mask=response_mask,
+            index=index,
+            epsilon=epsilon,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
+        )
+
+        if new_advantage is None:
+            new_advantage = normalized_score
+        else:
+            new_advantage += normalized_score
+
+    advantages = verl_F.masked_whiten(new_advantage, response_mask) * response_mask
+
+    return advantages, advantages

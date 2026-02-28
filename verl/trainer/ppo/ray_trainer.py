@@ -211,6 +211,30 @@ def compute_advantage(
             rollout_is_weights = data.batch.get("rollout_is_weights", None)
             adv_kwargs["rollout_is_weights"] = rollout_is_weights
 
+        if adv_estimator == AdvantageEstimator.GDPO:
+            assert "score_list" in data.batch, (
+                "GDPO need multi-scores. "
+                "Please change the config: reward.custom_reward_function.path to point gdpo.py or "
+                "change the reward function to compute multi-scores."
+            )
+
+            score_list = []
+            multi_score_tensor = torch.tensor(
+                data.non_tensor_batch["score_list"], dtype=torch.float32
+            )  # # [bsz, score_num, 1]
+
+            for i in range(multi_score_tensor.shape[1]):
+                rm_score = multi_score_tensor[:, i]
+                prompt_length = data.batch["prompts"].size(1)
+                response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1) - 1
+                rm_scores = torch.zeros_like(data.batch["response_mask"], dtype=torch.float32)
+                rm_scores[torch.arange(data.batch["response_mask"].size(0)), response_length] = torch.tensor(
+                    rm_score, dtype=torch.float32
+                )
+                score_list.append(rm_scores)
+
+            adv_kwargs["score_list"] = score_list
+
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
         data.batch["advantages"] = advantages
