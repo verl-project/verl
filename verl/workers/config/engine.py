@@ -31,6 +31,7 @@ __all__ = [
     "VeOmniEngineConfig",
     "EngineConfig",
     "EngineRouterReplayConfig",
+    "QATEngineConfig",
 ]
 
 
@@ -180,6 +181,27 @@ class McoreEngineConfig(EngineConfig):
 
 
 @dataclass
+class QATEngineConfig(BaseConfig):
+    """Configuration for QAT (Quantization-Aware Training) within an engine.
+
+    Args:
+        enable (bool): Whether to enable QAT, default False
+        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
+        group_size (int): Group size for blockwise quantization, default 16
+        ignore_patterns (list[str]): Module name patterns to exclude from quantization
+        activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
+        quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
+    """
+
+    enable: bool = False
+    mode: str = "w4a16"
+    group_size: int = 16
+    ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
+    activation_observer: str = "static_minmax"
+    quantization_config_path: Optional[str] = None
+
+
+@dataclass
 class FSDPEngineConfig(EngineConfig):
     """Configuration for FSDP (Fully Sharded Data Parallel).
 
@@ -201,6 +223,7 @@ class FSDPEngineConfig(EngineConfig):
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
+        qat (QATEngineConfig): QAT configuration, default disabled
     """
 
     # ulysses_sequence_parallel_size is mutable for backward compatibility
@@ -220,6 +243,7 @@ class FSDPEngineConfig(EngineConfig):
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "fsdp"
+    qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self):
         super().__post_init__()

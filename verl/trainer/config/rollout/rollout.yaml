@@ -399,5 +399,5 @@ quantization_config_file: null
 # MTP configuration, reuse model configuration
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 
-# QAT configuration (inherited from actor.qat)
-qat: ${oc.select:actor_rollout_ref.actor.qat,null}
+# QAT configuration (inherited from actor's engine config)
+qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,null}
