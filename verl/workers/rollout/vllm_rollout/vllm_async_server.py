@@ -240,18 +240,28 @@ class vLLMHttpServer:
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
         if qat_config_dict.get("enable", False):
-            # QAT uses compressed-tensors quantization, apply patches for dynamic weight loading
-            from verl.utils.qat import QATConfig, apply_qat_patches, load_quantization_config
+            from verl.utils.qat import QATConfig, load_quantization_config
 
-            apply_qat_patches()
-
-            # Load quantization config from JSON file
             qat_config = QATConfig(**qat_config_dict)
             quantization_config_dict = load_quantization_config(qat_config)
-            hf_overrides["quantization_config"] = quantization_config_dict
-            quantization = "compressed-tensors"
+            quant_method = quantization_config_dict.get("quant_method", None)
 
-            logger.info("QAT quantization config injected to vLLM async server")
+            if quant_method == "modelopt":
+                from verl.utils.modelopt import apply_modelopt_nvfp4_patches
+
+                apply_modelopt_nvfp4_patches()
+                quantization = "modelopt"
+            elif quant_method == "compressed-tensors":
+                from verl.utils.qat import apply_qat_patches
+
+                apply_qat_patches()
+                quantization = "compressed-tensors"
+
+            else:
+                raise ValueError(f"Unsupported quant_method: {quant_method}")
+            logger.info(f"QAT quantization config injected (quant_method={quant_method})")
+            hf_overrides["quantization_config"] = quantization_config_dict
+            print(f"quantization config: {quantization_config_dict}")
         elif quantization is not None:
             # Handle other quantization methods (fp8, torchao)
             _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]

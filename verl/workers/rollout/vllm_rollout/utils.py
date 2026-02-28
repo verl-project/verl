@@ -167,11 +167,17 @@ class vLLMColocateWorkerExtension:
         vllm_config = kwargs.get("vllm_config")
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
         _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
+        _is_modelopt_qat = type(quant_config).__name__ == "ModelOptNvFp4Config"
         if _is_qat_model:
             from verl.utils.qat import apply_qat_patches
 
             apply_qat_patches()
-            logger.info("Applied QAT patches in vLLM worker subprocess")
+            logger.info("Applied QAT (compressed-tensors) patches in vLLM worker subprocess")
+        elif _is_modelopt_qat:
+            from verl.utils.modelopt import apply_modelopt_nvfp4_patches
+
+            apply_modelopt_nvfp4_patches()
+            logger.info("Applied ModelOpt NVFP4 patches in vLLM worker subprocess")
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -183,6 +189,7 @@ class vLLMColocateWorkerExtension:
 
         instance = super().__new__(cls)
         instance._is_qat_model = _is_qat_model
+        instance._is_modelopt_qat = _is_modelopt_qat
         return instance
 
     def monkey_patch_model(self, vocab_size: int):
@@ -226,11 +233,16 @@ class vLLMColocateWorkerExtension:
         )
 
         if self._is_qat_model:
-            # QAT: Prepare for weight loading BEFORE receiving any buckets
+            # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
             from verl.utils.qat import prepare_qat_for_load_weights
 
             prepare_qat_for_load_weights(self.model_runner.model, device=self.device)
             logger.info("QAT: prepare_qat_for_load_weights completed")
+        elif self._is_modelopt_qat:
+            from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
+
+            prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
+            logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
         elif use_standard_weight_load:
             # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
             patch_vllm_moe_model_weight_loader(self.model_runner.model)
@@ -259,11 +271,16 @@ class vLLMColocateWorkerExtension:
                 break
 
         if self._is_qat_model:
-            # QAT: call process_weights_after_loading AFTER all buckets are received
+            # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
             from verl.utils.qat import manual_process_weights_after_loading
 
             manual_process_weights_after_loading(self.model_runner.model)
             logger.info("QAT: process_weights_after_loading completed")
+        elif self._is_modelopt_qat:
+            from verl.utils.modelopt.vllm_modelopt_patch import modelopt_process_weights_after_loading
+
+            modelopt_process_weights_after_loading(self.model_runner.model)
+            logger.info("ModelOpt QAT: process_weights_after_loading completed")
         elif use_standard_weight_load:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading

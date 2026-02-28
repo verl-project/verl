@@ -64,6 +64,7 @@ from verl.utils.megatron_utils import (
 )
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
+from verl.utils.modelopt import apply_qat
 from verl.utils.profiler import (
     DistProfiler,
     DistProfilerExtension,
@@ -218,6 +219,21 @@ class MegatronWorker(Worker):
                 provider.variable_seq_lengths = True
                 provider.moe_token_dispatcher_type = "alltoall"
                 provider.moe_router_load_balancing_type = "none"
+
+                qat_enabled = self.config.actor.get("qat", {}).get("enable", False)
+                if qat_enabled:
+                    from megatron.bridge.models.gpt_provider import quantization_layer_spec
+
+                    provider.transformer_layer_spec = quantization_layer_spec
+
+                    from verl.utils.modelopt.megatron_qat_patch import apply_qat_patch
+
+                    apply_qat_patch()
+
+                    from megatron.bridge.models.conversion.param_mapping import AutoMapping
+
+                    AutoMapping.register_module_type("QuantColumnParallelLinear", "column")
+                    AutoMapping.register_module_type("QuantRowParallelLinear", "row")
 
                 # Apply transformer config overrides
                 for key, value in override_transformer_config.items():
@@ -443,6 +459,12 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self.rank == 0:
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
+            qat_config = self.config.actor.get("qat", {})
+            if qat_config.get("enable", False):
+                qat_mode = qat_config.get("mode", "w4a16")
+                ignore_patterns = qat_config.get("ignore_patterns", None)
+                for i in range(len(actor_module)):
+                    actor_module[i] = apply_qat(actor_module[i], qat_mode, ignore_patterns=ignore_patterns)
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model
@@ -716,6 +738,19 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.tf_config,
                 self.layer_name_mapping,
             )
+        qat_config = self.config.actor.get("qat", {})
+        if qat_config.get("enable", False):
+            if not self.bridge or self.vanilla_bridge:
+                raise ValueError(
+                    "QAT (Quantization-Aware Training) requires Megatron bridge. "
+                    "Please ensure 'actor.megatron.use_mbridge' is set to True and "
+                    "'actor.megatron.vanilla_mbridge' is set to False in your configuration."
+                )
+            from verl.utils.modelopt import QATWeightExporter
+
+            qat_mode = qat_config.get("mode", "w4a16")
+            qat_weight_exporter = QATWeightExporter(self.actor.actor_module, qat_mode, bridge=self.bridge)
+            per_tensor_param = qat_weight_exporter.process_weights_iterator(per_tensor_param)
 
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])

@@ -120,6 +120,16 @@ actor_rollout_ref:
       mode: disabled
       record_file: null
       replay_file: null
+    qat:
+      enable: false
+      mode: w4a16
+      group_size: 16
+      ignore_patterns:
+      - lm_head
+      - embed_tokens
+      - re:.*mlp.gate$
+      activation_observer: static_minmax
+      quantization_config_path: null
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni

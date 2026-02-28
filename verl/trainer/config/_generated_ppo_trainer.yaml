@@ -120,13 +120,6 @@ actor_rollout_ref:
       mode: disabled
       record_file: null
       replay_file: null
-    grad_clip: 1.0
-    ulysses_sequence_parallel_size: 1
-    entropy_from_logits_with_chunking: false
-    entropy_checkpointing: false
-    use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
-    calculate_sum_pi_squared: false
-    sum_pi_squared_checkpointing: false
     qat:
       enable: false
       mode: w4a16
@@ -137,6 +130,13 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    grad_clip: 1.0
+    ulysses_sequence_parallel_size: 1
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
+    use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+    calculate_sum_pi_squared: false
+    sum_pi_squared_checkpointing: false
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: ${actor_rollout_ref.actor.strategy}
