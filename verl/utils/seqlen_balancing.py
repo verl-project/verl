@@ -410,7 +410,7 @@ def rearrange_micro_batches(
 
     # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
     seq_len_effective = seq_len_effective.long()
-    
+
     # When force_group_size > 1, aggregate workloads by groups
     if force_group_size > 1:
         # Calculate workload for each group (sum of workloads of samples in the group)
@@ -421,10 +421,10 @@ def rearrange_micro_batches(
             group_seqlen = seq_len_effective[start_idx:end_idx]
             group_workload = calculate_workload(group_seqlen).sum().cpu().item()
             group_workloads.append(group_workload)
-        
+
         # Partition groups instead of individual samples
         micro_bsz_group_idx = get_seqlen_balanced_partitions(group_workloads, num_micro_batches, equal_size=False)
-        
+
         # Convert group indices back to sample indices
         micro_bsz_idx = []
         for group_partition in micro_bsz_group_idx:
@@ -433,7 +433,7 @@ def rearrange_micro_batches(
                 start_idx = group_idx * force_group_size
                 sample_partition.extend(range(start_idx, start_idx + force_group_size))
             micro_bsz_idx.append(sample_partition)
-        
+
         workloads = group_workloads
     else:
         # Original logic for force_group_size == 1
