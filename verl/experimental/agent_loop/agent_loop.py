@@ -154,6 +154,23 @@ class AgentLoopOutput(BaseModel):
     """Extra fields for dynamic addition."""
 
 
+class AgentLoopGroupOutput(BaseModel):
+    """A group of trajectories from a single rollout.
+
+    Each trajectory is a fully independent training sample with its own
+    prompt_ids, response_ids, response_mask. The agent implementor decides
+    which model interaction steps to include as separate trajectories.
+
+    Trajectory role convention (set via extra_fields["trajectory_role"]):
+    - "final": the end-to-end trajectory (default for backward compat)
+    - "intermediate": a step-level trajectory from context-modifying agents
+    """
+
+    trajectories: list[AgentLoopOutput]
+    shared_reward: Optional[float] = None
+    """Shared reward for the group. If None, framework computes from last trajectory."""
+
+
 class _InternalAgentLoopOutput(AgentLoopOutput):
     """Internal agent loop output with padded sequences."""
 
@@ -309,7 +326,7 @@ class AgentLoopBase(ABC):
         return prompt_ids
 
     @abstractmethod
-    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput | AgentLoopGroupOutput:
         """Run agent loop to interact with LLM server and environment.
 
         Args:
@@ -317,7 +334,8 @@ class AgentLoopBase(ABC):
             **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
 
         Returns:
-            AgentLoopOutput: Agent loop output.
+            AgentLoopOutput or AgentLoopGroupOutput: Agent loop output, either a single
+            trajectory or a group of trajectories from a single rollout.
         """
         raise NotImplementedError
 
@@ -481,7 +499,7 @@ class AgentLoopWorker:
         agent_name: str,
         trace: bool = True,
         **kwargs,
-    ) -> _InternalAgentLoopOutput:
+    ) -> tuple[list[_InternalAgentLoopOutput], Optional[float]]:
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -504,8 +522,54 @@ class AgentLoopWorker:
                 dataset_cls=self.dataset_cls,
                 dataset_config=DictConfigWrap(self.config.data),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-            return await self._agent_loop_postprocess(output, **kwargs)
+            raw_output = await agent_loop.run(sampling_params, **kwargs)
+
+            # Phase 1: Normalize to group
+            if isinstance(raw_output, AgentLoopGroupOutput):
+                group = raw_output
+            else:
+                # Backward compat: single trajectory -> single-element group
+                group = AgentLoopGroupOutput(trajectories=[raw_output])
+
+            assert len(group.trajectories) > 0, "AgentLoopGroupOutput must have at least one trajectory"
+
+            # Phase 2: Postprocess ALL trajectories (including reward computation)
+            internal_outputs = []
+            for traj in group.trajectories:
+                internal_out = await self._agent_loop_postprocess(traj, **kwargs)
+                internal_outputs.append(internal_out)
+
+            # Phase 3: Compute shared_reward for the group
+            shared_reward = self._compute_group_reward(group, internal_outputs)
+
+            return (internal_outputs, shared_reward)
+
+    def _compute_group_reward(
+        self,
+        group: AgentLoopGroupOutput,
+        internal_outputs: list[_InternalAgentLoopOutput],
+    ) -> Optional[float]:
+        """Compute shared reward for a trajectory group.
+
+        Priority:
+        1. If group.shared_reward is explicitly set by the agent, use it
+        2. Otherwise, use the reward_score of the 'final' trajectory
+        3. If no 'final' trajectory, use the last trajectory's reward_score
+        """
+        if group.shared_reward is not None:
+            return group.shared_reward
+
+        # Find the 'final' trajectory
+        for out in internal_outputs:
+            role = out.extra_fields.get("trajectory_role", "final")
+            if role == "final" and out.reward_score is not None:
+                return out.reward_score
+
+        # Fallback: last trajectory's reward
+        if internal_outputs[-1].reward_score is not None:
+            return internal_outputs[-1].reward_score
+
+        return None
 
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
@@ -719,22 +783,44 @@ class AgentLoopWorker:
 
     def _postprocess(
         self,
-        inputs: list[_InternalAgentLoopOutput],
+        inputs: list[tuple[list[_InternalAgentLoopOutput], Optional[float]]],
         input_non_tensor_batch: dict | None = None,
     ) -> DataProto:
-        """Process the padded outputs from _run_agent_loop and combine them into a batch."""
+        """Process the padded outputs from _run_agent_loop and combine them into a batch.
+
+        Each element of inputs is a (trajectory_list, shared_reward) tuple from a single rollout.
+        Multi-trajectory groups are flattened into a single batch with trajectory_group_id tracking.
+        """
+        # Flatten trajectory groups
+        flat_outputs = []
+        flat_shared_rewards = []
+        flat_input_indices = []  # which original sample each trajectory came from
+        flat_group_ids = []  # unique id per rollout group
+
+        for sample_idx, (traj_list, shared_reward) in enumerate(inputs):
+            group_id = str(uuid4())
+            for traj in traj_list:
+                flat_outputs.append(traj)
+                flat_shared_rewards.append(shared_reward)
+                flat_input_indices.append(sample_idx)
+                flat_group_ids.append(group_id)
+
         # Convert lists back to tensors and stack them to create a batch.
-        prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
-        response_ids = torch.cat([input.response_ids for input in inputs], dim=0)
-        response_mask = torch.cat([input.response_mask for input in inputs], dim=0)
-        attention_mask = torch.cat([input.attention_mask for input in inputs], dim=0)
-        input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
-        position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
+        prompt_ids = torch.cat([output.prompt_ids for output in flat_outputs], dim=0)
+        response_ids = torch.cat([output.response_ids for output in flat_outputs], dim=0)
+        response_mask = torch.cat([output.response_mask for output in flat_outputs], dim=0)
+        attention_mask = torch.cat([output.attention_mask for output in flat_outputs], dim=0)
+        input_ids = torch.cat([output.input_ids for output in flat_outputs], dim=0)
+        position_ids = torch.cat([output.position_ids for output in flat_outputs], dim=0)
         optional_outputs = {}
-        if inputs[0].response_logprobs is not None:
-            optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
-        if inputs[0].routed_experts is not None:
-            optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
+        # Keep rollout log probs
+        if flat_outputs[0].response_logprobs is not None:
+            optional_outputs["rollout_log_probs"] = torch.cat(
+                [output.response_logprobs for output in flat_outputs], dim=0
+            )
+        # Keep experts
+        if flat_outputs[0].routed_experts is not None:
+            optional_outputs["routed_experts"] = torch.cat([output.routed_experts for output in flat_outputs], dim=0)
 
         batch = TensorDict(
             {
@@ -747,10 +833,11 @@ class AgentLoopWorker:
                 "position_ids": position_ids,
                 **optional_outputs,
             },
-            batch_size=len(inputs),
+            batch_size=len(flat_outputs),
         )
 
-        scores = [input.reward_score for input in inputs]
+        # Use shared_reward for rm_scores (what GRPO uses for advantage computation)
+        scores = flat_shared_rewards
         if all(score is not None for score in scores):
             prompt_length = prompt_ids.size(1)
             response_length = attention_mask[:, prompt_length:].sum(dim=1) - 1
@@ -759,24 +846,49 @@ class AgentLoopWorker:
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {
-            "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
+            "__num_turns__": np.array([output.num_turns for output in flat_outputs], dtype=np.int32),
         }
-        if self.reward_loop_worker_handles is None and input_non_tensor_batch:
-            non_tensor_batch.update(input_non_tensor_batch)
+
+        # Propagate input non_tensor_batch fields using flat_input_indices.
+        # When reward_loop_worker_handles is None (trainer computes reward), all fields are needed.
+        # When reward_loop_worker_handles is not None (async reward), we still need computation-critical
+        # fields (uid, data_source, reward_model, extra_info) for advantage computation and the
+        # multi-trajectory expansion path where batch = gen_batch_output directly.
+        if input_non_tensor_batch:
+            critical_keys = {"uid", "data_source", "reward_model", "extra_info"}
+            if self.reward_loop_worker_handles is None:
+                propagate_keys = set(input_non_tensor_batch.keys())
+            else:
+                propagate_keys = critical_keys
+            for key in propagate_keys:
+                if key in input_non_tensor_batch and key not in non_tensor_batch:
+                    non_tensor_batch[key] = np.array(input_non_tensor_batch[key], dtype=object)[flat_input_indices]
+
+        # Store trajectory_group_id for intra-group advantage distribution
+        has_multi_trajectory = any(len(traj_list) > 1 for traj_list, _ in inputs)
+        if has_multi_trajectory:
+            non_tensor_batch["trajectory_group_id"] = np.array(flat_group_ids, dtype=object)
+
+        # Store per-trajectory reward for possible future use (e.g., custom advantage methods, logging)
+        per_traj_rewards = [output.reward_score for output in flat_outputs]
+        if any(r is not None for r in per_traj_rewards):
+            non_tensor_batch["per_trajectory_reward"] = np.array(per_traj_rewards, dtype=object)
 
         # add reward_extra_info to non_tensor_batch
-        reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
+        reward_extra_infos = [output.extra_fields.get("reward_extra_info", {}) for output in flat_outputs]
         reward_extra_keys = list(reward_extra_infos[0].keys())
         for key in reward_extra_keys:
             non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
 
         # Add multi_modal_inputs to non_tensor_batch if any samples have them
-        multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
+        multi_modal_inputs_list = [output.multi_modal_inputs for output in flat_outputs]
         if any(mmi is not None for mmi in multi_modal_inputs_list):
             non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
 
-        metrics = [input.metrics.model_dump() for input in inputs]
-        # Collect extra fields from all inputs and convert them to np.ndarray
+        # Metrics are per-original-sample (first trajectory of each group)
+        metrics = [inputs[i][0][0].metrics.model_dump() for i in range(len(inputs))]
+
+        # Collect extra fields from all flat outputs and convert them to np.ndarray
         # Keep a stable set of keys so downstream batch concat stays consistent across agent loops.
         extra_fields = {}
         default_extra_keys = {
@@ -787,20 +899,21 @@ class AgentLoopWorker:
             "param_version_end",
             "extras",
         }
-        all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
+        all_keys = set(key for output in flat_outputs for key in output.extra_fields) | default_extra_keys
         for key in all_keys:
-            temp_arr = np.empty(len(inputs), dtype=object)
-            temp_arr[:] = [input.extra_fields.get(key) for input in inputs]
+            temp_arr = np.empty(len(flat_outputs), dtype=object)
+            temp_arr[:] = [output.extra_fields.get(key) for output in flat_outputs]
             extra_fields[key] = temp_arr
 
         non_tensor_batch.update(extra_fields)
 
         # Only include reward_extra_keys in meta_info if rm_scores is in batch
         # This avoids conflicts when reward_tensor is merged later in ray_trainer.py
+        meta_info = {"metrics": metrics}
         if "rm_scores" in batch.keys():
-            meta_info = {"metrics": metrics, "reward_extra_keys": reward_extra_keys}
-        else:
-            meta_info = {"metrics": metrics}
+            meta_info["reward_extra_keys"] = reward_extra_keys
+        # Store group_sizes for performance metrics attribution
+        meta_info["group_sizes"] = [len(traj_list) for traj_list, _ in inputs]
 
         return DataProto(
             batch=batch,
@@ -984,7 +1097,25 @@ class AgentLoopManager:
 
         # batch sequence generation is bounded by the slowest sample
         slowest = np.argmax(t_generate_sequences + t_tool_calls)
-        attention_mask = output.batch["attention_mask"][slowest]
+
+        # Map the slowest original-sample index to a row in the (possibly expanded) output batch.
+        # group_sizes tells us how many trajectories each original sample produced.
+        group_sizes = output.meta_info.get("group_sizes")
+        if group_sizes is not None:
+            # flatten across chunks: group_sizes from each worker chunk were already flattened during concat
+            flat_group_sizes = group_sizes if isinstance(group_sizes, list) else list(group_sizes)
+            # cumulative sum gives the starting index in the flattened batch for each original sample
+            cumulative = 0
+            slowest_row = 0
+            for i, gs in enumerate(flat_group_sizes):
+                if i == slowest:
+                    slowest_row = cumulative  # use first trajectory of the group
+                    break
+                cumulative += gs
+        else:
+            slowest_row = slowest
+
+        attention_mask = output.batch["attention_mask"][slowest_row]
         prompt_length = output.batch["prompts"].shape[1]
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
