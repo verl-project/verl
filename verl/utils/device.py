@@ -183,7 +183,6 @@ def get_device_capability(device_id: int = 0) -> tuple[int | None, int | None]:
 
     return major, minor
 
-
 def get_npu_versions() -> tuple[str, str]:
     """Get the software version and CANN toolkit version for NPU devices.
 
@@ -194,12 +193,12 @@ def get_npu_versions() -> tuple[str, str]:
         RuntimeError: If unable to retrieve version information
     """
     # Check npu-smi software version
-    result = subprocess.run(["npu-smi", "info", "-t", "board", "-i", "1"], capture_output=True, text=True, check=True)
+    result = subprocess.run(["npu-smi", "info"], capture_output=True, text=True, check=True)
 
     # Parse software version from output
     software_version = None
     for line in result.stdout.split("\n"):
-        if "Software Version" in line:
+        if "Version" in line:
             # Extract version from line like: "Software Version : 25.3.rc1.2"
             parts = line.split(":")
             if len(parts) > 1:
