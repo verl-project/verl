@@ -57,7 +57,7 @@ def init_config() -> DictConfig:
     return config
 
 
-async def test_server_manager_without_resume(
+async def _run_server_manager_without_resume(
     initial_steps: int,
     train_steps: int,
     server_manager: AsyncLLMServerManager,
@@ -99,7 +99,7 @@ async def test_server_manager_without_resume(
         print("[RESPONSE]", tokenizer.decode(outputs[0].token_ids, skip_special_tokens=True))
 
 
-async def test_server_manager_with_resume(
+async def _run_server_manager_with_resume(
     initial_steps: int,
     train_steps: int,
     server_manager: FullyAsyncLLMServerManager,
@@ -213,7 +213,7 @@ async def test_server_adapter(init_config):
     # 4. test AsyncLLMServerManager without partial rollout resume
     server_handles = [server._server_handle for server in rollout_replicas]
     server_manager = AsyncLLMServerManager(config=init_config, server_handles=server_handles)
-    await test_server_manager_without_resume(
+    await _run_server_manager_without_resume(
         initial_steps=1,
         train_steps=3,
         server_manager=server_manager,
@@ -224,7 +224,7 @@ async def test_server_adapter(init_config):
 
     # 5. test FullyAsyncLLMServerManager with partial rollout resume
     server_manager = FullyAsyncLLMServerManager(config=init_config, server_handles=server_handles)
-    await test_server_manager_with_resume(
+    await _run_server_manager_with_resume(
         initial_steps=4,
         train_steps=3,
         server_manager=server_manager,
