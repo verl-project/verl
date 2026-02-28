@@ -490,7 +490,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_module.to(torch_dtype)
 
             if enable_gradient_checkpointing:
-                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                gc_kwargs = {"use_reentrant": False}
+                checkpoint_input_offload = (
+                    role == "actor"
+                    and hasattr(self.config, 'actor')
+                    and self.config.actor.get("fsdp_config", {}).get("checkpoint_input_offload", False)
+                )
+                if checkpoint_input_offload and use_prefix_grouper:
+                    raise ValueError(
+                        "checkpoint_input_offload and use_prefix_grouper cannot be enabled simultaneously. "
+                        "PrefixGrouper uses a separate forward path that bypasses the offload context manager, "
+                        "causing checkpoint_input_offload to be silently inactive. "
+                        "Please disable one of them: set fsdp_config.checkpoint_input_offload=false "
+                        "or set use_prefix_grouper=false."
+                    )
+                if checkpoint_input_offload:
+                    from verl.utils.checkpoint_offload import CheckpointInputOffload
+                    self._checkpoint_offloader = CheckpointInputOffload(pin_memory=True)
+                    gc_kwargs["context_fn"] = self._checkpoint_offloader.get_context_fn()
+                else:
+                    self._checkpoint_offloader = None
+                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gc_kwargs)
 
         if self._is_lora:
             print("Applying LoRA to actor module")
@@ -913,6 +933,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = DataParallelPPOActor(
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )
+            # Pass checkpoint input offloader to actor
+            if hasattr(self, '_checkpoint_offloader') and self._checkpoint_offloader is not None:
+                self.actor._checkpoint_offloader = self._checkpoint_offloader
 
         if self._is_rollout:
             self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))

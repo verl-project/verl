@@ -110,6 +110,9 @@ class DataParallelPPOActor(BasePPOActor):
                 f"{self.use_fused_kernels=} or {self.use_prefix_grouper=} for now."
             )
 
+        # Checkpoint input CPU offloader (set externally by fsdp_workers.py)
+        self._checkpoint_offloader = None
+
     def _forward_micro_batch(
         self, micro_batch: dict[str, torch.Tensor], temperature: float, calculate_entropy: bool = False
     ) -> dict[str, torch.Tensor]:
@@ -124,6 +127,15 @@ class DataParallelPPOActor(BasePPOActor):
         """
         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
+        # Defensive check: PrefixGrouper bypasses the offload context manager,
+        # so the two features are incompatible during training.
+        if self.use_prefix_grouper and self._checkpoint_offloader is not None and self.actor_module.training:
+            raise RuntimeError(
+                "use_prefix_grouper and checkpoint_input_offload are both active during training. "
+                "PrefixGrouper's forward path bypasses CheckpointInputOffload, making offload silently inactive. "
+                "This should have been caught at build time — please check fsdp_workers.py configuration."
+            )
+
         # PrefixGrouper path for shared-prefix optimization
         if self.use_prefix_grouper:
             can_use_pg = (
@@ -144,6 +156,13 @@ class DataParallelPPOActor(BasePPOActor):
                     param_dtype=self.param_dtype,
                     use_chunking_entropy=self.config.get("entropy_from_logits_with_chunking", False),
                 )
+
+        from contextlib import nullcontext
+        _offload_ctx = (
+            self._checkpoint_offloader
+            if self._checkpoint_offloader is not None and self.actor_module.training
+            else nullcontext()
+        )
 
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -241,14 +260,15 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
-                output = self.actor_module(
-                    input_ids=input_ids_rmpad,
-                    attention_mask=None,
-                    position_ids=position_ids_rmpad,
-                    **multi_modal_inputs,
-                    use_cache=False,
-                    **extra_args,
-                )  # prevent model thinks we are generating
+                with _offload_ctx:
+                    output = self.actor_module(
+                        input_ids=input_ids_rmpad,
+                        attention_mask=None,
+                        position_ids=position_ids_rmpad,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                        **extra_args,
+                    )  # prevent model thinks we are generating
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -349,14 +369,15 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
-                output = self.actor_module(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    **multi_modal_inputs,
-                    use_cache=False,
-                    **extra_args,
-                )  # prevent model thinks we are generating
+                with _offload_ctx:
+                    output = self.actor_module(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                        **extra_args,
+                    )  # prevent model thinks we are generating
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
