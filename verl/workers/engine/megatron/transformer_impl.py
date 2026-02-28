@@ -594,11 +594,6 @@ class MegatronEngine(BaseEngine):
             forward_only=forward_only,
         )
 
-        if enable_routing_replay:
-            if self.engine_config.router_replay.mode in ["R3"]:
-                RouterReplay.clear_global_indices()
-                RouterReplay.clear_global_router_replay_action()
-
         if self.model_config.mtp.enable and self.is_mp_src_rank_with_outputs():
             # add mtp_losses
             metrics = get_megatron_mtp_loss(n_micro_batch)
