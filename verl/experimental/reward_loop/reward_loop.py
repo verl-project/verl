@@ -21,6 +21,7 @@ import numpy as np
 import ray
 import torch
 from omegaconf import DictConfig, open_dict
+from ray.actor import ActorHandle
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
@@ -285,6 +286,18 @@ class RewardLoopManager:
 
         self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self._init_reward_loop_workers()
+
+    @property
+    def reward_loop_worker_handles(self) -> list[ActorHandle]:
+        """Return worker handles for agent loop worker to compute reward score.
+
+        Only return worker handles when reward computation can be parallelized with rollout:
+        (1) rule-based reward without reward model
+        (2) reward model with extra resource pool
+        """
+        if not self.config.reward.reward_model.enable or self.config.reward.reward_model.enable_resource_pool:
+            return self.reward_loop_workers
+        return None
 
     def _init_reward_loop_workers(self):
         self.reward_loop_workers = []

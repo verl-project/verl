@@ -78,7 +78,7 @@ def compute_reward_decorated(data):
     return reward_tensor, reward_extra_info
 
 
-@tqbridge(put_data=False)
+@tqbridge()
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -145,7 +145,7 @@ def compute_response_mask(batch_meta: BatchMeta, tq_client):
     return batch_meta
 
 
-@tqbridge(put_data=False)
+@tqbridge()
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
@@ -220,22 +220,22 @@ def compute_advantage(
     return advantages, returns
 
 
-@tqbridge(put_data=False)
+@tqbridge()
 def compute_data_metrics_decorated(batch, use_critic: bool = True):
     return compute_data_metrics(batch, use_critic)
 
 
-@tqbridge(put_data=False)
+@tqbridge()
 def compute_timing_metrics_decorated(batch, timing_raw: dict[str, float]) -> dict[str, Any]:
     return compute_timing_metrics(batch, timing_raw)
 
 
-@tqbridge(put_data=False)
+@tqbridge()
 def compute_throughout_metrics_decorated(batch, timing_raw: dict[str, float], n_gpus: int) -> dict[str, Any]:
     return compute_throughout_metrics(batch, timing_raw, n_gpus)
 
 
-@tqbridge(put_data=False)
+@tqbridge()
 def calculate_debug_metrics_decorated(data):
     from verl.utils.debug.metrics import calculate_debug_metrics
 

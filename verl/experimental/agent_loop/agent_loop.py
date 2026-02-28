@@ -161,6 +161,32 @@ class AgentLoopOutput(BaseModel):
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
+    def as_dict(self) -> dict[str, Any]:
+        """Convert agent loop output to a dictionary."""
+        output = self.model_dump(exclude_unset=True)
+
+        output["prompts"] = torch.tensor(output.pop("prompt_ids"), dtype=torch.int64)
+        output["responses"] = torch.tensor(output.pop("response_ids"), dtype=torch.int64)
+        output["response_mask"] = torch.tensor(output.pop("response_mask"), dtype=torch.int64)
+        output["attention_mask"] = torch.ones(len(self.prompt_ids) + len(self.response_ids), dtype=torch.int64)
+
+        response_logprobs = output.pop("response_logprobs", None)
+        if response_logprobs is not None:
+            output["rollout_log_probs"] = torch.tensor(response_logprobs, dtype=torch.float32)
+
+        routed_experts = output.pop("routed_experts", None)
+        if routed_experts is not None:
+            output["routed_experts"] = torch.tensor(routed_experts, dtype=torch.int64)
+
+        # rm_scores: reward score for each token
+        reward_score = output.pop("reward_score", None)
+        if reward_score is not None:
+            rm_scores = torch.zeros_like(output["response_mask"], dtype=torch.float32)
+            rm_scores[-1] = reward_score
+            output["rm_scores"] = rm_scores
+
+        return output
+
 
 class _InternalAgentLoopOutput(AgentLoopOutput):
     """Internal agent loop output with padded sequences."""
