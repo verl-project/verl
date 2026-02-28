@@ -321,6 +321,7 @@ class vLLMHttpServer:
             "hf_overrides": hf_overrides,
             "scheduling_policy": self.config.scheduling_policy,
             "compilation_config": compilation_config,
+            "kv_transfer_config": self.config.kv_transfer_config,
             **engine_kwargs,
         }
 

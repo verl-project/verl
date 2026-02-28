@@ -244,6 +244,8 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
+    kv_transfer_config: Optional[str] = None
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported
