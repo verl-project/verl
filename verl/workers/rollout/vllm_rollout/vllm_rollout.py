@@ -155,7 +155,9 @@ class ServerAdapter(BaseRollout):
             await self._execute_method("sleep", kwargs={"level": self.sleep_level})
 
     @torch.no_grad()
-    async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
+    async def update_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+    ):
         """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
         start_time = time.time()
 
@@ -246,6 +248,8 @@ class ServerAdapter(BaseRollout):
         # reset prefix cache after updating weights
         if self.rollout_rank == 0:
             await self.server_handle.clear_kv_cache.remote()
+            if global_steps is not None:
+                await self.server_handle.set_global_steps.remote(global_steps)
 
         if self.replica_rank == 0 and self.rollout_rank == 0:
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")

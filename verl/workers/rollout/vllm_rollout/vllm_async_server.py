@@ -127,6 +127,8 @@ class vLLMHttpServer:
         self.node_rank = node_rank
         self.gpus_per_node = gpus_per_node
         self.nnodes = nnodes
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -600,6 +602,7 @@ class vLLMHttpServer:
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
+            extra_info={"global_steps": self.global_steps},
         )
 
     async def wake_up(self):
@@ -655,6 +658,10 @@ class vLLMHttpServer:
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.engine.reset_prefix_cache()
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
 
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
@@ -899,11 +906,6 @@ class vLLMReplica(RolloutReplica):
 
     async def resume_generation(self):
         """Resume generation on all servers after abort_all_requests."""
-        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
-
-    # TODO(petersh6): refact the checkpoint engine's update_weights and rename this method
-    async def resume_all_requests(self):
-        """Resume all requests on all servers."""
         await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:

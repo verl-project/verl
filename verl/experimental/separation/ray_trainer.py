@@ -292,7 +292,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
-        self.checkpoint_manager.update_weights()
+        self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -632,7 +632,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.config.trainer.critic_warmup <= self.global_steps:
             # update weights from trainer to rollout
             with marked_timer("update_weights", timing_raw, color="red"):
-                self.checkpoint_manager.update_weights()
+                self.checkpoint_manager.update_weights(self.global_steps)
 
     def _fit_dump_data(self, batch: DataProto):
         timing_raw = self.timing_raw

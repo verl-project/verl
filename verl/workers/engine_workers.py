@@ -619,7 +619,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self):
+    async def update_weights(self, global_steps: int = None):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
@@ -647,7 +647,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon, base_sync_done=True
         )
 
-        await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=True)
+        await self.rollout.update_weights(
+            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+        )
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:

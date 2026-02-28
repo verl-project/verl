@@ -24,6 +24,10 @@ async_training:
   # When synchronizing parameters, whether to interrupt rollouter and perform partial rollout
   partial_rollout: True
 
+  # Whether to resume generation when rollout is interrupted. If True, AsyncLLMServerManager
+  # auto resume generation, making rollout interruption invisible to the AgentLoop.
+  partial_rollout_resume: True
+
   # whether to use trainer do_validate
   use_trainer_do_validate: False
 

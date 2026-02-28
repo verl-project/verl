@@ -384,7 +384,9 @@ class ServerAdapter(BaseRollout):
 
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
-    async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
+    async def update_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+    ):
         assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
 
         """Update the weights of the rollout model.
@@ -433,6 +435,8 @@ class ServerAdapter(BaseRollout):
         if self.is_leader_rank:
             # Finalize update weights
             await self._adapter.update_weights(None)
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
         gc.collect()
