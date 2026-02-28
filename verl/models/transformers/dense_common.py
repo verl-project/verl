@@ -19,6 +19,28 @@ import torch
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+from verl.utils.ulysses import get_ulysses_sequence_parallel_world_size, slice_input_tensor
+
+
+def compute_rolled_labels(
+    input_ids: Optional[torch.LongTensor],
+    labels: Optional[torch.LongTensor],
+    backend_name: str,
+) -> torch.LongTensor:
+    """Compute rolled labels for PPO loss, with Ulysses Sequence Parallel slicing."""
+    if labels is not None:
+        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+    elif input_ids is not None:
+        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
+    else:
+        raise RuntimeError(f"To use {backend_name}, either labels or input_ids must be provided.")
+
+    sp_size = get_ulysses_sequence_parallel_world_size()
+    if sp_size > 1:
+        rolled_labels = slice_input_tensor(rolled_labels, dim=-1, padding=False)
+
+    return rolled_labels
+
 
 @dataclass
 class CausalLMOutputForPPO(CausalLMOutputWithPast):
@@ -105,13 +127,7 @@ def forward_with_torch_backend(
     if not return_dict:
         raise NotImplementedError("forward_with_torch_backend has to return_dict")
 
-    # Loss calculations
-    if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
-    elif input_ids is not None:
-        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
-    else:
-        raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
+    rolled_labels = compute_rolled_labels(input_ids, labels, "forward_with_torch_backend")
 
     fused_linear_for_ppo = FusedLinearForPPO()
     log_probs, entropy = fused_linear_for_ppo.forward(
@@ -168,13 +184,7 @@ def forward_with_triton_backend(
     if not return_dict:
         raise NotImplementedError("forward_with_triton_backend has to return_dict")
 
-    # Loss calculations
-    if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
-    elif input_ids is not None:
-        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
-    else:
-        raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
+    rolled_labels = compute_rolled_labels(input_ids, labels, "forward_with_triton_backend")
 
     log_probs, entropy = linear_cross_entropy(
         hidden_states,

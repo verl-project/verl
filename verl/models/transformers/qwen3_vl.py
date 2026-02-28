@@ -24,6 +24,8 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLForConditionalGeneration,
 )
 
+from verl.models.transformers.dense_common import compute_rolled_labels
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -281,13 +283,7 @@ def forward_with_torch_backend(
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
 
-    # Loss calculations
-    if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
-    elif input_ids is not None:
-        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
-    else:
-        raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
+    rolled_labels = compute_rolled_labels(input_ids, labels, "forward_with_torch_backend")
 
     fused_linear_for_ppo = FusedLinearForPPO()
     log_probs, entropy = fused_linear_for_ppo.forward(
@@ -315,13 +311,7 @@ def forward_with_triton_backend(
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
 
-    # Loss calculations
-    if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
-    elif input_ids is not None:
-        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
-    else:
-        raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
+    rolled_labels = compute_rolled_labels(input_ids, labels, "forward_with_triton_backend")
 
     log_probs, entropy = linear_cross_entropy(
         hidden_states,
