@@ -258,13 +258,17 @@ def apply_patch():
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         # query: [96, 1, 16, 128], key:[96, 1, 16, 128], value:[96, 1, 16, 128]
-        query, key, value = self.get_query_key_value_tensors(
+        qkv = self.get_query_key_value_tensors(
             hidden_states,
             key_value_states,
             position_ids,
             packed_seq_params,
             inference_context=inference_context,
         )
+        query, key, value = qkv[:3]
+        q_compressed = None
+        if len(qkv) > 3:
+            q_compressed = qkv[3]
 
         # ===================================================
         # Adjust key, value for inference
@@ -298,6 +302,12 @@ def apply_patch():
                 query, key, value, attention_mask, packed_seq_params=packed_seq_params
             )
         else:
+            extra_kwargs = {}
+            if getattr(self.config, "experimental_attention_variant", None) == "dsa":
+                # For dsa we need to pass in the original hidden states and the compressed
+                # query representation.
+                extra_kwargs["x"] = hidden_states
+                extra_kwargs["qr"] = q_compressed
             core_attn_out = self.core_attention(
                 query,
                 key,
@@ -305,6 +315,7 @@ def apply_patch():
                 attention_mask,
                 packed_seq_params=packed_seq_params,
                 attn_mask_type=attn_mask_type,
+                **extra_kwargs,
             )
         if thd_qkv_format:
             if core_attn_out.ndim == 2:
@@ -329,7 +340,11 @@ def apply_patch():
 
         return output, bias
 
-    MLASelfAttention.get_query_key_value_tensors = patch_get_query_key_value_tensors
+    # This patch targets mcore 0.12 MLA behavior only.
+    # For newer mcore, upstream MLA already has packed-seq + CP handling and
+    # overriding it with the legacy implementation can break RoPE shapes.
+    if not mcore_ge_013:
+        MLASelfAttention.get_query_key_value_tensors = patch_get_query_key_value_tensors
 
     MultiLatentAttention.forward = patch_forward
 
