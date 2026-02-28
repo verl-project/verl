@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
@@ -32,17 +31,13 @@ from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentL
 from verl.experimental.fully_async_policy.agent_loop.partial_single_turn_agent_loop import PartialSingleTurnAgentLoop
 from verl.protocol import DataProto
 from verl.utils.dataset.rl_dataset import RLHFDataset
-
-
-@dataclass
-class _FakeTokenOutput:
-    token_ids: list[int]
-    log_probs: Optional[list[float]] = None
-    routed_experts: Any = None
-    num_preempted: Optional[int] = None
+from verl.workers.rollout.replica import TokenOutput
 
 
 class _FakeServerManager:
+    def __init__(self, *, return_routed_experts: bool = False):
+        self.return_routed_experts = return_routed_experts
+
     async def generate(
         self,
         request_id: str,
@@ -51,10 +46,20 @@ class _FakeServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-    ) -> _FakeTokenOutput:
+    ) -> TokenOutput:
         del request_id, sampling_params, image_data, video_data
         # Return a short, deterministic "generation" for testing.
-        return _FakeTokenOutput(token_ids=prompt_ids[-1:] + [11, 12, 13], log_probs=[0.0, 0.0, 0.0, 0.0])
+        routed_experts = None
+        if self.return_routed_experts:
+            num_tokens = len(prompt_ids[-1:] + [11, 12, 13])
+            num_layers = 2
+            num_experts_per_tok = 2
+            routed_experts = np.arange(num_tokens * num_layers * num_experts_per_tok).reshape(
+                num_tokens, num_layers, num_experts_per_tok
+            )
+        return TokenOutput(
+            token_ids=prompt_ids[-1:] + [11, 12, 13], log_probs=[0.0, 0.0, 0.0, 0.0], routed_experts=routed_experts
+        )
 
     async def generate_for_partial(
         self,
@@ -64,12 +69,21 @@ class _FakeServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-    ) -> tuple[list[int], list[float], bool]:
+    ) -> tuple[TokenOutput, bool]:
         del request_id, sampling_params, image_data, video_data
         # Return a short partial generation and "not cancelled".
         response_ids = prompt_ids[-1:] + [21, 22]
         response_logprobs = [0.0] * len(response_ids)
-        return response_ids, response_logprobs, False
+        routed_experts = None
+        if self.return_routed_experts:
+            # Mock routed experts for full sequence (prompt + response)
+            num_tokens = len(prompt_ids) + len(response_ids)
+            num_layers = 2
+            num_experts_per_tok = 2
+            routed_experts = np.arange(num_tokens * num_layers * num_experts_per_tok).reshape(
+                num_tokens, num_layers, num_experts_per_tok
+            )
+        return TokenOutput(token_ids=response_ids, log_probs=response_logprobs, routed_experts=routed_experts), False
 
 
 class _FakeTokenizer:
@@ -258,3 +272,48 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     assert merged.non_tensor_batch["tool_rewards"][0] == []
     assert merged.non_tensor_batch["turn_scores"][1] == []
     assert merged.non_tensor_batch["tool_rewards"][1] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_with_routed_experts_on_cpu():
+    """Test that routed experts (R3) are properly passed through the agent loop."""
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {"rollout": {"prompt_length": 16, "response_length": 16}},
+            "data": {
+                "tool_config_path": None,
+                "apply_chat_template_kwargs": {},
+            },
+        }
+    )
+
+    server_manager = _FakeServerManager(return_routed_experts=True)
+    tokenizer = _FakeTokenizer()
+    processor = None
+
+    trainer_config = DictConfigWrap(config)
+    dataset_config = DictConfigWrap(config.data)
+
+    partial_single_turn = PartialSingleTurnAgentLoop(
+        trainer_config=trainer_config,
+        server_manager=server_manager,
+        tokenizer=tokenizer,
+        processor=processor,
+        dataset_cls=RLHFDataset,
+        dataset_config=dataset_config,
+    )
+
+    raw_prompt = [{"role": "user", "content": "hi"}]
+    sampling_params: dict[str, Any] = {}
+
+    output = await partial_single_turn.run(sampling_params=sampling_params, raw_prompt=raw_prompt, param_version=0)
+
+    # Verify routed_experts is present and has correct shape
+    assert output.routed_experts is not None, "routed_experts should not be None when R3 is enabled"
+    assert isinstance(output.routed_experts, np.ndarray), "routed_experts should be a numpy array"
+    assert output.routed_experts.ndim == 3, "routed_experts should be 3D: [seq_len, num_layers, num_experts_per_tok]"
+    # Check that it has the right number of tokens (prompt + response, truncated to response_length)
+    expected_seq_len = min(len(output.prompt_ids) + len(output.response_ids), 16)
+    assert output.routed_experts.shape[0] == expected_seq_len, (
+        f"routed_experts seq_len should match expected {expected_seq_len}, got {output.routed_experts.shape[0]}"
+    )

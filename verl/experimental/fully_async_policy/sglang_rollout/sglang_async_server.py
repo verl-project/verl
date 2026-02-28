@@ -20,7 +20,7 @@ import torch
 from ray.actor import ActorHandle
 
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode
+from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.sglang_rollout.async_sglang_server import (
     SGLangHttpServer,
     SGLangReplica,
@@ -117,10 +117,10 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-    ) -> tuple[list[int], list[float], bool]:
+    ) -> tuple[TokenOutput, bool]:
         async with self.lock:
             if self.paused:
-                return [], [], True
+                return TokenOutput(token_ids=[], log_probs=[]), True
             self.req_output[request_id] = None
             self.cancel_event[request_id] = asyncio.Event()
             cancel_handle = asyncio.create_task(self.cancel_event[request_id].wait())
@@ -141,7 +141,7 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
             if output is None:
                 self.cancel_event.pop(request_id, None)
                 self.req_output.pop(request_id, None)
-                return [], [], True
+                return TokenOutput(token_ids=[], log_probs=[]), True
             meta_info = output.get("meta_info", {})
             output_token_logprobs = meta_info.get("output_token_logprobs")
 
@@ -155,11 +155,30 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
             else:
                 token_ids = list(output["output_ids"])
                 log_probs = []
+
+            routed_experts = None
+            if self.config.enable_rollout_routing_replay:
+                if self.config.skip_tokenizer_init:
+                    routed_experts = output.get("meta_info", {}).get("routed_experts", None)
+                else:
+                    from sglang.srt.layers.moe.routed_experts_capturer import extract_routed_experts_from_meta_info
+
+                    hf_config = self.model_config.hf_config
+                    if not hasattr(hf_config, "num_hidden_layers") or not hasattr(hf_config, "num_experts_per_tok"):
+                        raise AttributeError(
+                            "enable_rollout_routing_replay is set, but hf_config is missing "
+                            "'num_hidden_layers' or 'num_experts_per_tok'. This feature requires an MoE model "
+                            "configuration that defines these attributes."
+                        )
+                    routed_experts = extract_routed_experts_from_meta_info(output).reshape(
+                        -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
+                    )
+
             is_cancel = generation_handle not in done
             self.cancel_event.pop(request_id, None)
             self.req_output.pop(request_id, None)
 
-        return token_ids, log_probs, is_cancel
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts), is_cancel
 
     async def cancel(self):
         async with self.lock:

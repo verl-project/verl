@@ -13,7 +13,7 @@
 # limitations under the License.
 import asyncio
 import logging
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 import ray
 from ray.actor import ActorHandle
@@ -22,7 +22,7 @@ from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode
+from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.vllm_rollout.vllm_async_server import (
     _qwen2_5_vl_dedup_image_tokens,
     vLLMHttpServer,
@@ -97,11 +97,11 @@ class vLLMHttpServerForPartial(vLLMHttpServer):
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-    ) -> tuple[list[Any], list[Any], bool] | tuple[Sequence[int], list[float], Any]:
+    ) -> tuple[TokenOutput, bool]:
         async with self.lock:
             if self.paused:
                 # After cancel, all tasks will return directly and wait for the next submission
-                return [], [], True
+                return TokenOutput(token_ids=[], log_probs=[]), True
             self.req_output[request_id]: Optional[RequestOutput] = None
             self.cancel_event[request_id] = asyncio.Event()
             cancel_handle = asyncio.create_task(self.cancel_event[request_id].wait())
@@ -119,7 +119,7 @@ class vLLMHttpServerForPartial(vLLMHttpServer):
 
         async with self.lock:
             if self.req_output[request_id] is None:
-                return [], [], True
+                return TokenOutput(token_ids=[], log_probs=[]), True
             token_ids = self.req_output[request_id].outputs[0].token_ids
             log_probs: list[float] = []
             for i, x in enumerate(self.req_output[request_id].outputs[0].logprobs):
@@ -127,10 +127,15 @@ class vLLMHttpServerForPartial(vLLMHttpServer):
                 # but in practice there are multiple. Take the log_prob corresponding to token_id
                 token_id = self.req_output[request_id].outputs[0].token_ids[i]
                 log_probs.append(x[token_id].logprob)
+            routed_experts = getattr(self.req_output[request_id].outputs[0], "routed_experts", None)
             is_cancel = generation_handle not in done
             self.cancel_event.pop(request_id, None)
             self.req_output.pop(request_id, None)
-        return token_ids, log_probs, is_cancel
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            routed_experts=routed_experts,
+        ), is_cancel
 
     async def cancel(self):
         async with self.lock:

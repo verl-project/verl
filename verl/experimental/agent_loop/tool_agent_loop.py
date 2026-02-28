@@ -77,6 +77,7 @@ class AgentData:
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
+        self.routed_experts: Optional[list[list[int]]] = None
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
         self.user_turns = 0
