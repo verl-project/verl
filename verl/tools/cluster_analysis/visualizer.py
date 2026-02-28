@@ -1,3 +1,18 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import logging
 import os
 from typing import Callable
 
@@ -5,6 +20,13 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from schema import FigureConfig
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
 
 ClusterVisualizerFn = Callable[
     [pd.DataFrame, str, dict],
@@ -46,12 +68,12 @@ def get_cluster_visualizer_fn(fn_name):
 @register_cluster_visualizer("html")
 def cluster_visualizer_html(data: pd.DataFrame, output_path: str, config: dict) -> None:
     generate_rl_timeline(data, output_path)
-    print("in html")
+    logger.info("in html")
 
 
 @register_cluster_visualizer("chart")
 def cluster_visualizer_chart(data: pd.DataFrame, output_path: str, config: dict) -> None:
-    print("in chart")
+    logger.info("in chart")
 
 
 def generate_rl_timeline(
@@ -235,6 +257,7 @@ def build_traces(df: pd.DataFrame, y_mapping: dict):
         traces.append(trace)
     return traces
 
+
 def assemble_figure(traces: list[go.Bar], df: pd.DataFrame, cfg: FigureConfig) -> go.Figure:
     max_time = df["Finish"].max()
     unique_y_labels = sorted(df["Y_Label"].unique())
@@ -330,6 +353,7 @@ def assemble_figure(traces: list[go.Bar], df: pd.DataFrame, cfg: FigureConfig) -
         ],
     )
     return fig
+
 
 def save_html(fig: go.Figure, output_dir: str, output_filename: str):
     os.makedirs(output_dir, exist_ok=True)

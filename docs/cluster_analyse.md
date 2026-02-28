@@ -43,8 +43,7 @@ python cluster_analysis.py --input-path <profiling_data_path> --output-path <out
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--input-path` | `test` | Profiling 数据的原始路径 |
-| `--profiler-type` | `mstx` | 性能数据种类（当前仅支持 mstx） |
-| `--data-type` | `text` | 性能文件类型（当前仅支持 text） |
+| `--profiler-type` | `mstx` | 性能数据种类 |
 | `--output-path` | `test` | 输出路径 |
 | `--vis-type` | `html` | 可视化类型（当前仅支持 html） |
 | `--rank-list` | `all` | Rank ID 列表（当前仅支持 "all"） |

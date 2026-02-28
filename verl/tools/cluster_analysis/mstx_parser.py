@@ -1,10 +1,25 @@
-from collections import defaultdict
-from pathlib import Path
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import logging
 import os
-from schema import Constant, DataMap, EventRow
+from collections import defaultdict
+from pathlib import Path
+
 from parser import BaseClusterParser, register_cluster_parser
+from schema import Constant, DataMap, EventRow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,69 +28,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 @register_cluster_parser("mstx")
 class MstxClusterParser(BaseClusterParser):
-
     def __init__(self, params) -> None:
         super().__init__(params)
-
-    # TODO: Future support for parsing with MSTX events
-    def _parse_rl_mstx_event(self, profiler_data_path: str, rank_id: int, role: str) -> list[EventRow]:
-        """Parse MSTX json and return rows whose args contain event_type and domain as a DataFrame.
-
-        Args:
-            profiler_data_path: Path to the MSTX json file.
-            rank_id: Rank id to attach to each row.
-            role: Role string to attach to each row.
-        """
-        data: list[dict] = []
-        events: list[dict] = []
-
-        with open(profiler_data_path, encoding="utf-8") as f:
-            data = json.load(f)
-
-        if data is None or not data:
-            logger.warning(f"Rank {rank_id}: No MSTX events found in json")
-            return events
-
-        for row in data:
-            args = row.get("args")
-            if not isinstance(args, dict):
-                continue
-            if "event_type" not in args or "domain" not in args:
-                continue
-            # Convert to milliseconds
-            us_to_ms = Constant.US_TO_MS
-
-            # Validate required fields exist
-            if "ts" not in row or "dur" not in row:
-                logger.warning("Row missing required fields: ts or dur. Skipping row.")
-                continue
-
-            try:
-                # Convert to float and calculate millisecond values
-                start_time_ms = float(row["ts"]) / us_to_ms
-                duration_ms = float(row["dur"]) / us_to_ms
-                end_time_ms = start_time_ms + duration_ms
-
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Failed to convert time values: {e}. Row data: {row}. Skipping row.")
-                continue
-
-            event_data = {
-                "name": row["name"],
-                "role": role,
-                "domain": args["domain"],
-                "start_time_ms": start_time_ms,
-                "end_time_ms": end_time_ms,
-                "duration_ms": duration_ms,
-                "rank_id": rank_id,
-                "tid": row["tid"],
-            }
-
-            events.append(event_data)
-
-        return events
 
     def parse_analysis_data(self, profiler_data_path: str, rank_id: int, role: str) -> list[EventRow]:
         data: list[dict] = []
@@ -173,7 +130,7 @@ class MstxClusterParser(BaseClusterParser):
 
     def _get_rank_path_with_role(self, data_map) -> list[DataMap]:
         """Get json path information for all ranks.
-        
+
         This function is intentionally decoupled from class state; pass required
         dependencies in via arguments.
         """
@@ -182,7 +139,7 @@ class MstxClusterParser(BaseClusterParser):
             logger.error("RL analysis currently only supports processing all ranks")
             return []
 
-        rank_ids_with_role= list(data_map.keys())
+        rank_ids_with_role = list(data_map.keys())
         data_paths: list[dict] = []
         for task_role, rank_id in rank_ids_with_role:
             rank_path_list = data_map[(task_role, rank_id)]
@@ -229,9 +186,7 @@ class MstxClusterParser(BaseClusterParser):
     def _get_rank_id(self, dir_name: str):
         files = os.listdir(dir_name)
         for file_name in files:
-            if file_name.startswith(Constant.ASCEND_PROFILER_INFO_HEAD) and file_name.endswith(
-                Constant.JSON_EXTENSION
-            ):
+            if file_name.startswith(Constant.ASCEND_PROFILER_INFO_HEAD) and file_name.endswith(Constant.JSON_EXTENSION):
                 rank_id_str = file_name[len(Constant.ASCEND_PROFILER_INFO_HEAD) : -1 * len(Constant.JSON_EXTENSION)]
                 try:
                     rank_id = int(rank_id_str)
