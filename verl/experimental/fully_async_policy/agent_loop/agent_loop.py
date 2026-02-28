@@ -81,6 +81,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             log_probs=[],
             num_preempted=0,
         )
+        min_global_steps, max_global_steps = None, None
 
         while True:
             # 1. generate tokens
@@ -106,13 +107,10 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             final_output.stop_reason = output.stop_reason
 
             # update model weights version
-            if final_output.global_steps is None:
-                final_output.global_steps = output.global_steps
-                final_output.min_global_steps = output.global_steps
-                final_output.max_global_steps = output.global_steps
-            else:
-                final_output.global_steps = output.global_steps
-                final_output.max_global_steps = output.global_steps
+            global_steps = output.extra_info.get("global_steps", None)
+            if min_global_steps is None:
+                min_global_steps = global_steps
+            max_global_steps = global_steps
 
             # 3. update max_new_tokens
             if original_max_tokens is not None:
@@ -124,7 +122,9 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             # 4. check stop reason
             if output.stop_reason not in ("aborted", "abort") or not self.config.async_training.partial_rollout_resume:
                 break
-
+        final_output.extra_info["global_steps"] = global_steps
+        final_output.extra_info["min_global_steps"] = min_global_steps
+        final_output.extra_info["max_global_steps"] = max_global_steps
         return final_output
 
     @rollout_trace_op

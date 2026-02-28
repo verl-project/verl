@@ -410,7 +410,7 @@ class SGLangHttpServer:
             log_probs=log_probs,
             routed_experts=routed_experts,
             stop_reason=finish_reason,
-            global_steps=self.global_steps,
+            extra_info={"global_steps": self.global_steps},
         )
 
     async def set_global_steps(self, global_steps: int):
