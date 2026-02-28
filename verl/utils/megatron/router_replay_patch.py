@@ -11,8 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import inspect
+import types
 import warnings
 from enum import Enum
+from functools import wraps
 
 import torch
 
@@ -237,6 +240,30 @@ def _patched_topk_routing_with_score_function(
     return routing_probs, routing_map
 
 
+def _get_aux_loss_coeff(_self, aux_loss_type: str) -> float:
+    """Return the aux loss coeff for the given auxiliary loss type.
+    If the auxiliary loss type is not found, return 0.0.
+    """
+    if isinstance(_self.routing_type, str):
+        if _self.routing_type == aux_loss_type:
+            return _self.config.moe_aux_loss_coeff
+    if isinstance(_self.routing_type, list):
+        try:
+            idx = _self.routing_type.index(aux_loss_type)
+            return _self.config.moe_aux_loss_coeff[idx]
+        except (ValueError, IndexError):
+            return 0.0
+    return 0.0
+
+
+def _is_aux_loss_enabled(_self) -> bool:
+    """Check if the auxiliary loss is enabled."""
+    for aux_loss_type in ["aux_loss", "seq_aux_loss", "global_aux_loss"]:
+        if _get_aux_loss_coeff(_self, aux_loss_type) > 0:
+            return True
+    return False
+
+
 def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     """Top-k routing function
 
@@ -254,6 +281,11 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
     # Apply Z-Loss
     logits = self.apply_z_loss(logits)
 
+    # Megatron versions before 0.14.0 do not have 'moe_router_fusion' in TransformerConfig.
+    # We use getattr with a default value of False to ensure compatibility across different
+    # versions of Megatron-LM and MindSpeed.
+    moe_router_fusion = getattr(self.config, "moe_router_fusion", False)
+
     # Calculate probs and routing_map for token dispatching
     if self.routing_type == "sinkhorn":
         probs, routing_map = self.sinkhorn_load_balancing(logits)
@@ -267,7 +299,7 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
             scaling_factor=self.config.moe_router_topk_scaling_factor,
             score_function=self.score_function,
             expert_bias=self.expert_bias,
-            fused=self.config.moe_router_fusion,
+            fused=moe_router_fusion,
             router_replay=self.router_replay,
         )
 
@@ -282,6 +314,8 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
             pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
         )
 
+    if not hasattr(self, "is_aux_loss_enabled"):
+        self.is_aux_loss_enabled = types.MethodType(_is_aux_loss_enabled, self)
     # Apply each aux loss type and attach aux loss autograd function to probs
     if self.training and torch.is_grad_enabled() and self.is_aux_loss_enabled():
         # Calculate scores and routing_map for aux loss
@@ -311,17 +345,50 @@ def apply_router_replay_patch():
     # Clear router instances to avoid state leakage between model initializations.
     RouterReplay.router_instances.clear()
     # Step 1: Patch TransformerConfig to include the feature flag
-    if not hasattr(TransformerConfig, "enable_routing_replay"):
-        # Add class attribute with default value
-        TransformerConfig.enable_routing_replay = False
 
+    try:
+        sig = inspect.signature(TransformerConfig.__init__)
+        native_params = sig.parameters
+        params = list(sig.parameters.values())
+    except Exception:
+        sig = None
+        native_params = {}
+        params = []
+
+    ext_attrs = ["enable_routing_replay"]
+
+    # Update __signature__ to prevent NPU/MindSpeed wrappers from filtering out or blocking custom parameters.
+    for attr in ext_attrs:
+        if attr not in native_params:
+            if sig:
+                new_param = inspect.Parameter(
+                    attr,
+                    inspect.Parameter.KEYWORD_ONLY,
+                    default=False
+                )
+                if params and params[-1].kind == inspect.Parameter.VAR_KEYWORD:
+                    params.insert(-1, new_param)
+                else:
+                    params.append(new_param)
+
+    if sig:
+        try:
+            TransformerConfig.__init__.__signature__ = sig.replace(parameters=params)
+        except Exception as e:
+            print(f"Failed to update signature metadata: {e}")
+
+
+    if not hasattr(TransformerConfig, "_verl_router_patched"):
         # Store original __init__ method
         original_tf_config_init = TransformerConfig.__init__
 
         # Define new __init__ method that safely handles enable_routing_replay parameter
+        @wraps(original_tf_config_init)
         def patched_tf_config_init(self, *args, **kwargs):
             # Simple solution: remove the unknown parameter before calling original constructor
-            enable_routing_replay = kwargs.pop("enable_routing_replay", TransformerConfig.enable_routing_replay)
+            enable_routing_replay = kwargs.get("enable_routing_replay", False)
+            if "enable_routing_replay" not in native_params:
+                enable_routing_replay = kwargs.pop("enable_routing_replay", False)
 
             # Call original constructor with remaining kwargs
             original_tf_config_init(self, *args, **kwargs)
@@ -331,6 +398,7 @@ def apply_router_replay_patch():
 
         # Apply the patch
         TransformerConfig.__init__ = patched_tf_config_init
+        TransformerConfig._verl_router_patched = True
 
     # Step 2: Patch TopKRouter only once to ensure idempotency.
     if hasattr(TopKRouter, "_router_replay_patched"):
@@ -348,7 +416,7 @@ def apply_router_replay_patch():
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
         self.router_replay = None
-        if self.config.enable_routing_replay:
+        if getattr(self.config, "enable_routing_replay", False):
             self.router_replay = RouterReplay()
 
     # Step 4: Patch MoEAlltoAllTokenDispatcher.preprocess to handle router replay
