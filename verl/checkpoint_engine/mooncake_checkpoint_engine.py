@@ -12,22 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import gc
 import logging
 import os
 import time
-import gc
-from collections import defaultdict
-from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Generator
 
 import ray
 import torch
-from vllm.distributed.utils import StatelessProcessGroup
-from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
-from verl.utils.device import get_torch_device
-
 from mooncake.engine import TransferEngine
+from vllm.distributed.utils import StatelessProcessGroup
+
+from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
+from verl.utils.device import get_torch_device
+from verl.utils.net_utils import get_free_port
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -91,7 +89,10 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         """Prepare send and recv buckets"""
         # self.buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device=self.device)
         # self.engine.register_memory(self.buf.data_ptr(), self.bucket_size)
-        logger.info(f"prepare ptr={self.buf.data_ptr():#x} len={2*self.bucket_size} magic_buf_ptr={self.magic_buf.data_ptr():#x}")
+        logger.info(
+            f"prepare ptr={self.buf.data_ptr():#x} len={2 * self.bucket_size} "
+            f"magic_buf_ptr={self.magic_buf.data_ptr():#x}"
+        )
         port, _ = get_free_port(self.hostname)
         return {"addr": self.hostname, "port": port}
 
@@ -131,9 +132,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         info_list = self.store.all_gather_obj(info)
         self.buffer_info = None if rank == 0 else info_list[rank - 1]
 
-        logger.info(
-            f"init_process_group rank={rank} world_size={world_size} buffer_info={self.buffer_info}"
-        )
+        logger.info(f"init_process_group rank={rank} world_size={world_size} buffer_info={self.buffer_info}")
 
     def finalize(self):
         """Cleanup communication and deregister memory"""
@@ -143,7 +142,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         logger.info(f"finalize rank={self.rank}")
 
     async def wait_for_complete(self, buf: torch.Tensor):
-        magic = torch.tensor([0xab, 0xdc, 0xef, 0x88], dtype=torch.uint8, device=self.device)
+        magic = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
         while True:
             if torch.equal(buf[:4], magic):
                 break
@@ -163,7 +162,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         should_wait = False
-        bufs = [self.buf[:self.bucket_size], self.buf[self.bucket_size:]]
+        bufs = [self.buf[: self.bucket_size], self.buf[self.bucket_size :]]
         idx = 0
         current = bufs[idx]
 
@@ -226,10 +225,10 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         """Receive weights using Mooncake TransferEngine"""
         start_time = time.time()
         total_bytes = 0
-        bufs = [self.buf[:self.bucket_size], self.buf[self.bucket_size:]]
+        bufs = [self.buf[: self.bucket_size], self.buf[self.bucket_size :]]
         idx = 0
         current = bufs[idx]
-        self.magic_buf[:4] = torch.tensor([0xab, 0xdc, 0xef, 0x88], dtype=torch.uint8, device=self.device)
+        self.magic_buf[:4] = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
 
         while True:
             # 1 receive info from previous rank
@@ -279,6 +278,5 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         time_cost = time.time() - start_time
         bandwidth = total_bytes / time_cost / (1024 * 1024 * 1024)
         logger.info(
-            f"Rank {self.rank} receive weights done, "
-            f"time cost: {time_cost:.2f}s, bandwidth: {bandwidth:.2f} GB/s"
+            f"Rank {self.rank} receive weights done, time cost: {time_cost:.2f}s, bandwidth: {bandwidth:.2f} GB/s"
         )
