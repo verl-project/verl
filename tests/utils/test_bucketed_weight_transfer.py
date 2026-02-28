@@ -63,7 +63,7 @@ def _generate_weights(weight_specs, seed):
 # ---------------------------------------------------------------------------
 def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
     """Sender process: generate weights, move to device, send."""
-    from verl.workers.rollout.bucketed_weight_transfer import BucketedWeightSender
+    from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 
     weights = _generate_weights(weight_specs, seed)
     sender = BucketedWeightSender(
@@ -77,7 +77,7 @@ def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
 def _receiver_fn(zmq_handle, use_shm, result_queue):
     """Receiver process: receive weights, send back (name, dtype, shape, checksum)."""
     from verl.utils.device import get_device_name
-    from verl.workers.rollout.bucketed_weight_transfer import BucketedWeightReceiver
+    from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
     device = torch.device(f"{get_device_name()}:0")
     receiver = BucketedWeightReceiver(
