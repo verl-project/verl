@@ -29,6 +29,7 @@ __all__ = [
     "TrainingWorkerConfig",
     "TorchtitanEngineConfig",
     "VeOmniEngineConfig",
+    "AutomodelEngineConfig",
     "EngineConfig",
     "EngineRouterReplayConfig",
 ]
@@ -370,6 +371,104 @@ class TorchtitanEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["torchtitan"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class AutomodelEngineConfig(EngineConfig):
+    """Configuration for Automodel (nemo_automodel) backend.
+
+    The Automodel backend uses NeMoAutoModelForCausalLM for model loading and
+    supports FSDP2, MegatronFSDP, and DDP distributed strategies with optional
+    TP, CP, and EP parallelism.
+
+    Args:
+        strategy (str): Backend strategy identifier, must be "automodel".
+        distributed_strategy (str): Distributed training strategy: "fsdp2", "megatron_fsdp", or "ddp".
+        tp_size (int): Tensor parallel size.
+        pp_size (int): Pipeline parallel size (only pp_size=1 supported initially).
+        cp_size (int): Context parallel size.
+        ep_size (int): Expert parallel size for MoE models.
+        dp_replicate_size (int): Data-parallel replicate size for HSDP. 1 = pure sharding.
+        sequence_parallel (bool): Enable sequence parallelism in the TP plan.
+        defer_fsdp_grad_sync (bool): Defer FSDP gradient sync to the final micro-batch.
+        activation_checkpointing (bool): Whether to enable activation checkpointing.
+        enable_fp8 (bool): Whether to enable FP8 training.
+        enable_compile (bool): Whether to enable torch.compile for the model.
+        model_dtype (str): Model data type for loading weights. "fp32" loads in float32
+            (matching FSDP golden), "auto" uses the dtype from the model config.
+        attn_implementation (str): Attention implementation to use ("sdpa", "flash_attention_2", "eager", "te").
+
+    Backend settings (nemo_automodel BackendConfig):
+        use_te_backend (bool): Use TransformerEngine attn/linear/rms_norm.
+        rope_fusion (bool): Enable RoPE fusion (requires TransformerEngine).
+        gate_precision (Optional[str]): Precision for MoE gate/router weights (e.g. "fp32", "bf16").
+        enable_hf_state_dict_adapter (bool): Enable HuggingFace state dict compatibility.
+        enable_fsdp_optimizations (bool): Enable FSDP-specific optimizations in TE layers.
+
+    MoE / Expert Parallelism settings:
+        enable_deepep (bool): Enable DeepEP for distributed expert parallelism.
+        reshard_after_forward (bool): Reshard parameters after forward pass in MoE parallelizer.
+        fake_balanced_gate (bool): Use balanced gate for performance analysis.
+        ignore_router_for_ac (bool): Use selective activation checkpointing that saves router outputs.
+        lm_head_precision (Optional[str]): Custom precision for lm_head layer (e.g. "fp32").
+        wrap_outer_model (bool): Wrap outer model in FSDP if it differs from inner model.
+
+    Mixed precision policy (FSDP2):
+        mp_param_dtype (str): Parameter dtype for FSDP2 mixed precision policy.
+        mp_reduce_dtype (str): Reduce dtype for FSDP2 mixed precision policy.
+        mp_output_dtype (str): Output dtype for FSDP2 mixed precision policy.
+
+    Entropy computation:
+        entropy_from_logits_with_chunking (bool): Whether to use chunked entropy computation.
+        use_torch_compile (bool): Whether to use torch.compile for entropy computation.
+        entropy_checkpointing (bool): Whether to use checkpointing for entropy computation.
+    """
+
+    strategy: str = "automodel"
+    distributed_strategy: str = "fsdp2"
+    # Parallelism sizes
+    tp_size: int = 1
+    pp_size: int = 1
+    cp_size: int = 1
+    ep_size: int = 1
+    dp_replicate_size: int = 1
+    sequence_parallel: bool = False
+    defer_fsdp_grad_sync: bool = True
+    # Model settings
+    activation_checkpointing: bool = False
+    enable_fp8: bool = False
+    enable_compile: bool = False
+    model_dtype: str = "fp32"
+    attn_implementation: str = "sdpa"
+    # Backend settings (BackendConfig)
+    use_te_backend: bool = False
+    rope_fusion: bool = True
+    gate_precision: Optional[str] = None
+    enable_hf_state_dict_adapter: bool = True
+    enable_fsdp_optimizations: bool = False
+    # MoE / Expert Parallelism settings
+    enable_deepep: bool = False
+    reshard_after_forward: bool = False
+    fake_balanced_gate: bool = False
+    ignore_router_for_ac: bool = False
+    lm_head_precision: Optional[str] = None
+    wrap_outer_model: bool = True
+    # Mixed precision policy
+    mp_param_dtype: str = "bf16"
+    mp_reduce_dtype: str = "fp32"
+    mp_output_dtype: str = "bf16"
+    # Entropy computation
+    entropy_from_logits_with_chunking: bool = False
+    use_torch_compile: bool = True
+    entropy_checkpointing: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.strategy == "automodel", f"strategy must be 'automodel', got {self.strategy}"
+        assert self.distributed_strategy in ["fsdp2", "megatron_fsdp", "ddp"], (
+            f"distributed_strategy {self.distributed_strategy} not supported"
+        )
+        assert self.pp_size == 1, "Pipeline parallelism (pp_size > 1) is not yet supported for automodel backend"
 
 
 @dataclass

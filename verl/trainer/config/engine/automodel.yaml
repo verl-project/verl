@@ -1,0 +1,76 @@
+# Target class for this configuration
+_target_: verl.workers.config.AutomodelEngineConfig
+
+# Backend strategy identifier
+strategy: automodel
+
+# Distributed training strategy: "fsdp2", "megatron_fsdp", or "ddp"
+distributed_strategy: fsdp2
+
+# Parallelism sizes
+tp_size: 1
+pp_size: 1
+cp_size: 1
+ep_size: 1
+dp_replicate_size: 1
+sequence_parallel: false
+defer_fsdp_grad_sync: true
+
+# Whether to offload model parameters to CPU
+param_offload: false
+
+# Whether to offload optimizer state to CPU
+optimizer_offload: false
+
+# Whether to enable activation checkpointing
+activation_checkpointing: false
+
+# Whether to enable FP8 training
+enable_fp8: false
+
+# Whether to enable torch.compile for the model
+enable_compile: false
+
+# Model data type for loading weights ("fp32", "bf16", "fp16")
+model_dtype: fp32
+
+# Attention implementation ("sdpa", "flash_attention_2", "eager", "te")
+attn_implementation: sdpa
+
+# Backend settings (nemo_automodel BackendConfig)
+use_te_backend: false
+rope_fusion: true
+gate_precision: null
+enable_hf_state_dict_adapter: true
+enable_fsdp_optimizations: false
+
+# MoE / Expert Parallelism settings
+enable_deepep: false
+reshard_after_forward: false
+fake_balanced_gate: false
+ignore_router_for_ac: false
+lm_head_precision: null
+wrap_outer_model: true
+
+# Mixed precision policy (FSDP2 MixedPrecisionPolicy)
+mp_param_dtype: bf16
+mp_reduce_dtype: fp32
+mp_output_dtype: bf16
+
+# Random seed for reproducibility
+seed: 42
+
+# Whether to enable full determinism for distributed training, only for debugging
+full_determinism: false
+
+# Whether to use forward only mode
+forward_only: false
+
+# Whether to use torch compile for entropy computation
+use_torch_compile: false
+
+# Whether to use chunked entropy computation
+entropy_from_logits_with_chunking: false
+
+# Whether to use checkpointing for entropy computation
+entropy_checkpointing: false

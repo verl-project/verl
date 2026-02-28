@@ -1,0 +1,47 @@
+# Target class for this configuration
+_target_: verl.workers.config.AutomodelOptimizerConfig
+
+optimizer: AdamW
+
+# Module path to import optimizer from
+optimizer_impl: torch.optim
+
+# Learning rate (maps to max_lr in Automodel's OptimizerParamScheduler)
+lr: 1e-5
+
+# LR warmup steps ratio (used when lr_warmup_steps <= 0)
+lr_warmup_steps_ratio: 0.0
+
+# Total training steps (injected at runtime)
+total_training_steps: -1
+
+# Weight decay
+weight_decay: 0.01
+
+# LR warmup steps (set > 0 to override lr_warmup_steps_ratio)
+lr_warmup_steps: -1
+
+# Betas for Adam optimizer
+betas: [0.9, 0.999]
+
+# Clip gradient norm
+clip_grad: 1.0
+
+# Initial LR ratio for warmup start (init_lr = lr * init_lr_ratio)
+init_lr_ratio: 0.1
+
+# Minimum LR ratio after decay (min_lr = lr * min_lr_ratio)
+min_lr_ratio: 0.01
+
+# LR scheduler type (Automodel OptimizerParamScheduler decay style)
+# Options: "constant", "cosine", "linear", "inverse-square-root"
+lr_scheduler_type: cosine
+
+# Weight decay increment style: "constant", "linear", or "cosine"
+wd_incr_style: constant
+
+# Kept for backward compatibility (unused by Automodel scheduler)
+num_cycles: 0.5
+zero_indexed_step: true
+
+override_optimizer_config: {}
