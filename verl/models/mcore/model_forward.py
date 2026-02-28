@@ -169,6 +169,7 @@ def gptmodel_forward_no_padding(
     pad_token_id=None,
     data_format: str = "thd",
     enable_mtp: bool = False,
+    use_fp8_padding: bool = False,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -188,12 +189,16 @@ def gptmodel_forward_no_padding(
 
     batch_size = input_ids.shape[0]
     if data_format == "thd":
-        input_ids_rmpad, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=pre_process)
+        input_ids_rmpad, packed_seq_params = preprocess_thd_no_padding(
+            input_ids, pre_process=pre_process, use_fp8_padding=use_fp8_padding
+        )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
         if enable_mtp and post_process:
             args = {
-                k: preprocess_thd_no_padding(v, pre_process=True, need_roll=(k == "label" or k == "loss_mask"))[0]
+                k: preprocess_thd_no_padding(
+                    v, pre_process=True, need_roll=(k == "label" or k == "loss_mask"), use_fp8_padding=use_fp8_padding
+                )[0]
                 for k, v in logits_processor_args.items()
             }
             model_kwargs["labels"] = args["label"].contiguous()
@@ -220,7 +225,9 @@ def gptmodel_forward_no_padding(
 
         if post_process and logits_processor is not None:
             args = {
-                k: preprocess_thd_no_padding(v, pre_process=True, need_roll=(k == "label"))[0]
+                k: preprocess_thd_no_padding(
+                    v, pre_process=True, need_roll=(k == "label"), use_fp8_padding=use_fp8_padding
+                )[0]
                 for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)
@@ -242,12 +249,14 @@ def gptmodel_forward_no_padding(
         """
 
         input_ids_bshd, attention_mask_bshd, position_ids_bshd = preprocess_bshd_no_padding(
-            input_ids, pre_process=pre_process
+            input_ids, pre_process=pre_process, use_fp8_padding=use_fp8_padding
         )
 
         if enable_mtp and post_process:
             args = {
-                k: preprocess_bshd_no_padding(v, pre_process=True, need_roll=(k == "label" or k == "loss_mask"))[0]
+                k: preprocess_bshd_no_padding(
+                    v, pre_process=True, need_roll=(k == "label" or k == "loss_mask"), use_fp8_padding=use_fp8_padding
+                )[0]
                 for k, v in logits_processor_args.items()
             }
             model_kwargs["labels"] = args["label"].contiguous()
@@ -263,7 +272,9 @@ def gptmodel_forward_no_padding(
         )
         if post_process and logits_processor is not None:
             args = {
-                k: preprocess_bshd_no_padding(v, pre_process=True, need_roll=(k == "label"))[0]
+                k: preprocess_bshd_no_padding(
+                    v, pre_process=True, need_roll=(k == "label"), use_fp8_padding=use_fp8_padding
+                )[0]
                 for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)

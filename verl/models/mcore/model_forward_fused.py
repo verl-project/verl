@@ -146,11 +146,14 @@ def fused_forward_no_padding_gen(vision_model: bool = False):
         temperature: float,
         calculate_entropy: bool,
         pad_token_id: int,
+        use_fp8_padding: bool = False,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
-        input_ids_rmpad, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=pre_process)
+        input_ids_rmpad, packed_seq_params = preprocess_thd_no_padding(
+            input_ids, pre_process=pre_process, use_fp8_padding=use_fp8_padding
+        )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
         model_kwargs = {}
@@ -172,7 +175,9 @@ def fused_forward_no_padding_gen(vision_model: bool = False):
                 0
             ) < seqlens_in_batch.unsqueeze(1)
 
-        labels_rmpad, _ = preprocess_thd_no_padding(labels, pre_process=True, need_roll=True)
+        labels_rmpad, _ = preprocess_thd_no_padding(
+            labels, pre_process=True, need_roll=True, use_fp8_padding=use_fp8_padding
+        )
         labels_rmpad = labels_rmpad.contiguous()
         output_orig: CausalLMOutputForPPO = model(
             input_ids=input_ids_rmpad,
