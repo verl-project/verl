@@ -22,12 +22,14 @@ from verl.utils.reward_score import gsm8k
 from verl.utils.rollout_trace import rollout_trace_op
 
 from .base_tool import BaseTool
+from .registry import register_tool
 from .schemas import OpenAIFunctionToolSchema, ToolResponse
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+@register_tool("gsm8k")
 class Gsm8kTool(BaseTool):
     """A demo tool for calculating the reward of gsm8k.
 

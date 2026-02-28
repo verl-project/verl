@@ -22,9 +22,10 @@ from enum import Enum
 
 from omegaconf import OmegaConf
 
+from verl.tools.registry import ToolRegistry
 from verl.tools.schemas import OpenAIFunctionToolSchema
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
@@ -66,6 +67,7 @@ async def initialize_mcp_tool(tool_cls, tool_config) -> list:
 
 
 def get_tool_class(cls_name):
+    """Resolve a tool class from a fully-qualified Python class name."""
     module_name, class_name = cls_name.rsplit(".", 1)
     if module_name not in sys.modules:
         spec = importlib.util.find_spec(module_name)
@@ -79,8 +81,62 @@ def get_tool_class(cls_name):
     return tool_cls
 
 
+def _resolve_tool_class(tool_config):
+    """Resolve a tool class from either ``tool_name`` (registry) or ``class_name`` (importlib).
+
+    The ``tool_name`` key takes precedence when both are present.  Using
+    ``tool_name`` requires the target module to have been imported so that its
+    ``@register_tool`` decorator has executed.  To keep things simple we
+    eagerly import the built-in tool modules.
+    """
+    tool_name = tool_config.get("tool_name", None)
+    cls_name = tool_config.get("class_name", None)
+
+    if tool_name is not None:
+        _ensure_builtin_tools_imported()
+        return ToolRegistry.get(tool_name)
+
+    if cls_name is not None:
+        return get_tool_class(cls_name)
+
+    raise ValueError(
+        "Each tool entry must specify either 'tool_name' (registry lookup) or "
+        "'class_name' (fully-qualified Python path). Neither was found."
+    )
+
+
+_builtin_tools_imported = False
+
+
+def _ensure_builtin_tools_imported():
+    """Import built-in tool modules once so their ``@register_tool`` decorators fire."""
+    global _builtin_tools_imported
+    if _builtin_tools_imported:
+        return
+    _builtin_tools_imported = True
+
+    _builtin_modules = [
+        "verl.tools.gsm8k_tool",
+        "verl.tools.geo3k_tool",
+        "verl.tools.search_tool",
+        "verl.tools.sandbox_fusion_tools",
+        "verl.tools.image_zoom_in_tool",
+        "verl.tools.mcp_base_tool",
+        "verl.tools.mcp_search_tool",
+    ]
+    for mod_name in _builtin_modules:
+        try:
+            importlib.import_module(mod_name)
+        except ImportError:
+            logger.debug(f"Optional tool module {mod_name} not available, skipping.")
+
+
 def initialize_tools_from_config(tools_config_file):
     """Initialize tools from config file.
+
+    Each tool entry can specify a tool class via either:
+    - ``tool_name``: a short name registered with ``@register_tool`` (preferred).
+    - ``class_name``: a fully-qualified Python class path (backward-compatible).
 
     Supports both NATIVE and MCP tool types. For MCP tools, a temporary event loop
     is created only when needed and properly closed after use to prevent memory leaks.
@@ -109,9 +165,8 @@ def initialize_tools_from_config(tools_config_file):
 
     try:
         for tool_config in tools_config.tools:
-            cls_name = tool_config.class_name
+            tool_cls = _resolve_tool_class(tool_config)
             tool_type = ToolType(tool_config.config.type)
-            tool_cls = get_tool_class(cls_name)
 
             match tool_type:
                 case ToolType.NATIVE:
