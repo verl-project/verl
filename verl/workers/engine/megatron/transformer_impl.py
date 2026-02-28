@@ -725,6 +725,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
         else:
             raise NotImplementedError(f"Pad mode {pad_mode} is not supported for megatron engine")
 
+        fp8 = self.engine_config.override_transformer_config.get("fp8", None)
+        if fp8 is None and self.tf_config is not None:
+            fp8 = getattr(self.tf_config, "fp8", None)
+        use_fp8_padding = fp8 in ("e4m3", "hybrid")
+
         from verl.models.mcore import get_mcore_forward_no_padding_fn
 
         if use_fused_kernels:
@@ -754,6 +759,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 temperature=temperature_value,
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
+                use_fp8_padding=use_fp8_padding,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -802,6 +808,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 data_format="thd" if self.engine_config.use_remove_padding else "bshd",
                 enable_mtp=self.model_config.mtp.enable_train,
+                use_fp8_padding=use_fp8_padding,
             )
 
         # Router replay: switch to backward replay mode for next backward pass
