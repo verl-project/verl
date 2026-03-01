@@ -852,7 +852,8 @@ class RayPPOTrainer:
 
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
-        # same for teacher loop and teacher policy workers
+        # To stream teacher computation with actor rollout, we instead pass the full manager so that the
+        # teacher loop workers can sleep/wake together with rollout workers
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         teacher_loop_worker_handles = self.teacher_loop_manager.teacher_loop_workers if enable_teacher_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
