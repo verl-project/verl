@@ -43,6 +43,12 @@ from verl.utils.megatron_utils import (
 
 from .checkpoint_manager import BaseCheckpointManager
 
+try:
+    from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+    enable_pp_layout = True
+except ImportError:
+    enable_pp_layout = False
+
 # Setup logging
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -637,6 +643,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 for k in backup:
                     setattr(self.transformer_config, k, backup[k])
                 to_convert_types = {torch.dtype: str, AttnBackend: str}
+                if enable_pp_layout:
+                    to_convert_types[PipelineParallelLayerLayout] = str
                 ignore_types = [Callable]
                 pop_keys = []
                 for key, value in transformer_config_dict.items():
