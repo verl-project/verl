@@ -41,13 +41,13 @@ on:
       - main
       - v0.*
     paths:
-      - "**/*.py"
-      # Other entrypoints
-      - "!verl/trainer/fsdp_sft_trainer.py"
-      # Recipes
-      - "!recipe/**"
-      # FSDP
-      - "!verl/workers/**/*dp_*.py"
+      - "verl/workers/rollout/trtllm_rollout/**"
+      - "tests/workers/rollout/rollout_trtllm/**"
+      - ".github/workflows/e2e_ppo_grpo_trainer_trtllm.yml"
+      - "examples/data_preprocess/gsm8k.py"
+      - "examples/data_preprocess/geo3k.py"
+      - "examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh"
+      - "examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh"
   pull_request:
     branches:
       - main
@@ -68,8 +68,9 @@ on:
       # FSDP
       - "!verl/workers/**/*dp_*.py"
       # Entrypoints
-      - "verl/workers/rollout/trtllm_rollout/*"
-      - ".github/workflows/e2e_ppo_grpo_trainer_trtllm"
+      - "verl/workers/rollout/trtllm_rollout/**"
+      - "tests/workers/rollout/rollout_trtllm/**"
+      - ".github/workflows/e2e_ppo_grpo_trainer_trtllm.yml"
       - "examples/data_preprocess/gsm8k.py"
       - "examples/data_preprocess/geo3k.py"
       # add back when ppo flow is ready
@@ -128,9 +129,11 @@ jobs:
       - name: Run TRTLLM unit tests
         run: |
           export TRTLLM_TEST_MODEL_PATH_ROOT="${HOME}/models"
+          ray stop --force
           pytest -v -s \
             tests/workers/rollout/rollout_trtllm/test_adapter.py \
-            tests/workers/rollout/rollout_trtllm/test_async_server.py
+            tests/workers/rollout/rollout_trtllm/test_async_server.py \
+            tests/workers/rollout/rollout_trtllm/test_trtllm_rollout_utils.py
 
   e2e_grpo_trainer_fsdp-qwen2:
     needs: setup

@@ -14,7 +14,7 @@
 import asyncio
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import ray
 import torch
@@ -89,6 +89,10 @@ class TRTLLMHttpServer:
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
             self.config.load_format = "auto"
 
+        self.is_vlm_model = (
+            self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
+        ) or hasattr(self.model_config, "vision_config")
+
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
@@ -130,7 +134,7 @@ class TRTLLMHttpServer:
             "enable_chunked_prefill": self.config.enable_chunked_prefill,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "orchestrator_type": "ray",
-            "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
+            "ray_worker_extension_cls": "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension",
             "kv_cache_config": kv_cache_config,
             "max_seq_len": self.config.max_model_len,
             "max_batch_size": self.config.max_num_seqs,
@@ -170,7 +174,6 @@ class TRTLLMHttpServer:
             )
 
         self.llm = await AsyncLLM(**llm_kwargs)
-
         trtllm_server = OpenAIServer(
             llm=self.llm,
             model=self.model_config.local_path,
@@ -178,20 +181,18 @@ class TRTLLMHttpServer:
             server_role=None,
             metadata_server_cfg=None,
         )
+
         app = trtllm_server.app
         self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
 
     async def generate(
         self,
-        prompt_ids: list[int],
+        prompt_ids: Union[str, list[int]],
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
-        """Generate sequence with token-in-token-out."""
-        assert image_data is None and video_data is None, "Multimodality is not yet supported in TRTLLMHttpServer."
-
         from tensorrt_llm.llmapi import SamplingParams
 
         max_tokens = min(self.config.response_length, self.config.max_model_len - len(prompt_ids))
@@ -202,14 +203,31 @@ class TRTLLMHttpServer:
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
-        outputs = await self.llm.generate_async(
-            inputs=prompt_ids,
-            sampling_params=trt_llm_sampling_params,
-        )
+        if self.is_vlm_model and (image_data or video_data):
+                org_prompt = self.llm.tokenizer.decode(prompt_ids)
+                input_dict = {
+                    "prompt": org_prompt,
+                    "multi_modal_data": {},
+                    "mm_processor_kwargs": {},
+                }
+                if image_data:
+                    input_dict["multi_modal_data"]["image"] = image_data
+                if video_data:
+                    input_dict["multi_modal_data"]["video"] = video_data
 
+                outputs = await self.llm.generate_async(
+                    inputs=input_dict,
+                    sampling_params=trt_llm_sampling_params,
+                )
+        else:
+            outputs = await self.llm.generate_async(
+                inputs=prompt_ids,
+                sampling_params=trt_llm_sampling_params,
+            )
         token_ids = outputs.outputs[0].token_ids
         log_probs = None
-        if trt_llm_sampling_params.logprobs is not None:
+        if outputs.outputs[0].logprobs is not None:
+            # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position
             log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
         return TokenOutput(token_ids=token_ids, log_probs=log_probs)
 
