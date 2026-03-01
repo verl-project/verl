@@ -17,7 +17,7 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
-TEACHER_MODEL=Qwen2.5-7B-Instruct
+TEACHER_MODEL=Qwen2.5-3B-Instruct
 
 USE_POLICY_GRADIENT=False
 # DISTILLATION_LOSS_MODE="k3"
@@ -34,6 +34,7 @@ EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DIS
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
+MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH ))
 TRAIN_PROMPT_BSZ=128
 STUDENT_MICRO_BATCH_SIZE_PER_GPU=2
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
@@ -86,6 +87,8 @@ DISTILLATION=(
     distillation.teacher_model.inference.name=$ROLLOUT_NAME
     distillation.teacher_model.inference.gpu_memory_utilization=0.3
     distillation.teacher_model.inference.enforce_eager=$ENFORCE_EAGER
+    distillation.teacher_model.inference.max_model_len=$MAX_NUM_TOKENS
+    distillation.teacher_model.inference.max_num_batched_tokens=$MAX_NUM_TOKENS
     distillation.distillation_loss.loss_mode=$DISTILLATION_LOSS_MODE
     distillation.distillation_loss.topk=64
     distillation.distillation_loss.use_task_rewards=False
@@ -113,6 +116,8 @@ ROLLOUT=(
     actor_rollout_ref.rollout.name=$ROLLOUT_NAME
     actor_rollout_ref.rollout.gpu_memory_utilization=0.3
     actor_rollout_ref.rollout.calculate_log_probs=False
+    actor_rollout_ref.rollout.max_model_len=$MAX_NUM_TOKENS
+    actor_rollout_ref.rollout.max_num_batched_tokens=$MAX_NUM_TOKENS
     actor_rollout_ref.rollout.n=1
 )
 
@@ -133,6 +138,7 @@ TRAINER=(
     trainer.val_before_train=True
     trainer.use_legacy_worker_impl=disable
     trainer.resume_mode=disable
+    trainer.log_val_generations=5
 )
 
 

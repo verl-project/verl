@@ -95,9 +95,5 @@ teacher_model:
     disable_log_stats: true
     skip_tokenizer_init: false
 
-    # prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
-    # response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
-    prompt_length: 1
-    response_length: 1
-
-  
+    prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
+    response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
