@@ -86,6 +86,7 @@ from verl.utils.py_functional import convert_to_regular_types
 # QAT support
 from verl.utils.qat import apply_qat, enable_qat_fuse
 from verl.utils.ray_utils import get_event_loop
+from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
@@ -348,11 +349,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             AutoModel,
             AutoModelForCausalLM,
             AutoModelForImageTextToText,
-            AutoModelForVision2Seq,
         )
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
+
+        AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
         assert role in ["actor", "ref"]
 
