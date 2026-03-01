@@ -251,11 +251,27 @@ class RLHFDataset(Dataset):
                         traceback.print_exc()
                         return self.max_prompt_length + 1
 
+            orig_idx_col = "__orig_idx__"
+            if self.num_workers > 1:
+                # dataset.map internally splits data into chunks and assigns them to processes.
+                # When slow samples cluster together, they form a bottleneck,
+                # so the rows are shuffled before filtering and then restored to their original order.
+                num = 0
+                while orig_idx_col in dataframe.column_names:
+                    orig_idx_col = f"__orig_idx_{num}__"
+                    num += 1
+                dataframe = dataframe.add_column(orig_idx_col, list(range(len(dataframe))))
+                dataframe = dataframe.shuffle(seed=42)
+
             dataframe = dataframe.filter(
                 lambda doc: doc2len(doc) <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
+
+            if self.num_workers > 1:
+                dataframe = dataframe.sort(orig_idx_col)
+                dataframe = dataframe.remove_columns(orig_idx_col)
 
             print(f"filter dataset len: {len(dataframe)}")
         return dataframe
