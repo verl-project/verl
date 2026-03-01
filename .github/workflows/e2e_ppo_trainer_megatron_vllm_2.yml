@@ -148,7 +148,7 @@ jobs:
           MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=2 \
           USE_DIST_CKPT=True ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=fp8 bash tests/special_e2e/run_ppo_trainer_megatron.sh
-      - name: Running GSM8K E2E with 3D parallelism, Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507), legacy worker with padding removal and R3
+      - name: Running GSM8K E2E training tests with 3D parallelism with padding removal and R3 routing replay on 8 L20 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
         run: |
           ray stop --force
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
