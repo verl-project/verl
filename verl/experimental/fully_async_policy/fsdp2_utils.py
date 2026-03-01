@@ -21,6 +21,8 @@ from packaging import version
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 
+from verl.utils.device import get_torch_device
+
 if version.parse(torch.__version__) < version.parse("2.6"):
     raise RuntimeError("PyTorch 2.6 or higher is required to use fstp_utils.")
 
@@ -45,8 +47,8 @@ def fsdp2_sharded_save_to_cpu(
     for param_name, param in model.named_parameters():
         # Only process sharded parameters of DTensor type (core parameters of FSDP2)
         if not isinstance(param, DTensor):
-            # Save non-sharded parameters (e.g., running_mean of BatchNorm) as local data
-            cpu_tensor = param.detach().cpu()
+            detached_param = param.detach()
+            cpu_tensor = detached_param.to(torch.device("cpu"), non_blocking=True)
             cpu_sharded_state[param_name] = (cpu_tensor, None)
             continue
 
@@ -56,12 +58,12 @@ def fsdp2_sharded_save_to_cpu(
             assert hasattr(global_spec, "device_mesh"), "DTensorSpec must contain 'device_mesh' attribute"
             assert hasattr(global_spec, "placements"), "DTensorSpec must contain 'placements' attribute"
 
-        # 1. Extract local shard data from the current GPU (_local_tensor)
-        local_gpu_tensor = param._local_tensor  # Local shard attribute defined in your DTensor class
-        # 2. Move to CPU memory and detach from computation graph
-        local_cpu_tensor = local_gpu_tensor.detach().cpu()
-        # 3. Save CPU shard + original DTensorSpec (ensure sharding rules remain unchanged)
+        local_gpu_tensor = param._local_tensor
+        detached_local_tensor = local_gpu_tensor.detach()
+        local_cpu_tensor = detached_local_tensor.to(torch.device("cpu"), non_blocking=True)
         cpu_sharded_state[param_name] = (local_cpu_tensor, param._spec)
+
+    get_torch_device().synchronize()
 
     assert global_spec is not None, "No DTensor-type parameters found in the model. FSDP2 sharding may not be enabled."
     return cpu_sharded_state, global_spec
@@ -109,17 +111,14 @@ def fsdp2_sharded_load_from_cpu(
                 f"Sharding strategy mismatch for parameter {param_name} (conflicts with global rules)!"
             )
 
-            # 2. Move CPU shard data to the current GPU (device of param._local_tensor)
             target_device = param._local_tensor.device
-            local_gpu_tensor = local_cpu_tensor.to(target_device)
+            local_gpu_tensor = local_cpu_tensor.to(target_device, non_blocking=True)
 
-            # 3. Restore to DTensor's local shard (directly copy to _local_tensor, keep spec unchanged)
-            param._local_tensor.copy_(local_gpu_tensor)
-
+            param._local_tensor.copy_(local_gpu_tensor, non_blocking=True)
         else:
-            # Regular parameters: load directly to original device
             target_device = param.device
-            param.data.copy_(local_cpu_tensor.to(target_device))
+            gpu_tensor = local_cpu_tensor.to(target_device, non_blocking=True)
+            param.data.copy_(gpu_tensor, non_blocking=True)
 
-    # Process synchronization: ensure all processes complete loading before proceeding
+    get_torch_device().synchronize()
     dist.barrier()
