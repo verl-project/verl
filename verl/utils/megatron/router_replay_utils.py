@@ -36,6 +36,7 @@ from megatron.core.transformer.transformer_layer import get_transformer_layer_of
 
 from verl.models.mcore.util import (
     postprocess_packed_seqs,
+    postprocess_thd_no_padding,
     preprocess_packed_seqs,
     preprocess_thd_no_padding,
 )
@@ -206,11 +207,18 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
             .contiguous()
         )
 
-        batch_size, seq_len = attention_mask.shape[:2]
-        _, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
-        layers_topk_idx = postprocess_packed_seqs(
-            layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
-        )
+        if input_ids.is_nested:
+            batch_size = input_ids.shape[0]
+            _, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=True)
+            layers_topk_idx = postprocess_thd_no_padding(
+                layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
+            )
+        else:
+            batch_size, seq_len = attention_mask.shape[:2]
+            _, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
+            layers_topk_idx = postprocess_packed_seqs(
+                layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
+            )
         mini_layer_topk_idx_list.append(layers_topk_idx.cpu())
 
 
@@ -307,10 +315,16 @@ def reorder_and_merge_vpp_layers(
     for vidx, (_mb, chunk_id) in enumerate(schedule_table):
         tensor_by_chunk[chunk_id].append(micro_batch_tensor_list[vidx])
 
-    for chunk_id in range(vpp_size):
-        mini_tensor_list.append(torch.cat(tensor_by_chunk[chunk_id], dim=0))
+    if micro_batch_tensor_list[0].is_nested:
+        for chunk_id in range(vpp_size):
+            tensors = [tensor for nt in tensor_by_chunk[chunk_id] for tensor in nt.unbind()]
+            mini_tensor_list.append(torch.nested.as_nested_tensor(tensors, layout=torch.jagged))
+    else:
+        for chunk_id in range(vpp_size):
+            mini_tensor_list.append(torch.cat(tensor_by_chunk[chunk_id], dim=0))
 
     out = torch.cat(mini_tensor_list, dim=2)
+
     return out
 
 
@@ -358,20 +372,24 @@ def pp_gather(local_layers_router_map, tf_config):
     pp_group = mpu.get_pipeline_model_parallel_group()
     world_size = torch.distributed.get_world_size(pp_group)
     local_layers_router_map = local_layers_router_map.to(device_name)
-    layers_topk_idx_global_list = [
-        torch.empty(
-            size=local_layers_router_map.shape,
-            dtype=local_layers_router_map.dtype,
-            device=local_layers_router_map.device,
+    if local_layers_router_map.is_nested:
+        layers_topk_idx_global_list = [None] * world_size
+        torch.distributed.all_gather_object(layers_topk_idx_global_list, local_layers_router_map, pp_group)
+    else:
+        layers_topk_idx_global_list = [
+            torch.empty(
+                size=local_layers_router_map.shape,
+                dtype=local_layers_router_map.dtype,
+                device=local_layers_router_map.device,
+            )
+            for _ in range(world_size)
+        ]
+        torch.distributed.all_gather(
+            tensor=local_layers_router_map,
+            tensor_list=layers_topk_idx_global_list,
+            group=pp_group,
+            async_op=False,
         )
-        for _ in range(world_size)
-    ]
-    torch.distributed.all_gather(
-        tensor=local_layers_router_map,
-        tensor_list=layers_topk_idx_global_list,
-        group=pp_group,
-        async_op=False,
-    )
     vp_size = tf_config.virtual_pipeline_model_parallel_size
     if vp_size is not None:
         vpp_router_map_offset = [[] for _ in range(pp_size)]
@@ -384,7 +402,13 @@ def pp_gather(local_layers_router_map, tf_config):
         for vp_stage in range(vp_size):
             for pp_stage in range(pp_size):
                 piece = slice(vpp_router_map_offset[pp_stage][vp_stage], vpp_router_map_offset[pp_stage][vp_stage + 1])
-                layers_topk_idx_global.append(layers_topk_idx_global_list[pp_stage][:, :, piece, :])
+                if layers_topk_idx_global_list[pp_stage].is_nested:
+                    nested_item = layers_topk_idx_global_list[pp_stage]
+                    sliced_tensors = [t[:, piece, :] for t in nested_item.unbind()]
+                    sliced_nested = torch.nested.as_nested_tensor(sliced_tensors, layout=torch.jagged)
+                    layers_topk_idx_global.append(sliced_nested)
+                else:
+                    layers_topk_idx_global.append(layers_topk_idx_global_list[pp_stage][:, :, piece, :])
         global_router_map = torch.cat(layers_topk_idx_global, dim=2).to("cpu")
     else:
         global_router_map = torch.cat(layers_topk_idx_global_list, dim=2).to("cpu")

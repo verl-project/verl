@@ -1139,12 +1139,18 @@ class RayPPOTrainer:
             # gather output
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
+            routed_experts = tu.get(output, "routed_experts")
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
             entropy = no_padding_2_padding(entropy, batch_td)
             log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
-            old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
+            if routed_experts is not None:
+                old_log_prob = tu.get_tensordict(
+                    {"old_log_probs": log_probs.float(), "entropys": entropy.float(), "routed_experts": routed_experts}
+                )
+            else:
+                old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
             old_log_prob = DataProto.from_tensordict(old_log_prob)
         else:
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
@@ -1409,13 +1415,13 @@ class RayPPOTrainer:
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
                             if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
-                                router_mode = getattr(
-                                    self.config.actor_rollout_ref.actor.router_replay, "mode", "disabled"
+                                raise ValueError(
+                                    "Detected conflicting router replay configuration: "
+                                    "router_replay.mode='R2' and enable_rollout_routing_replay=True "
+                                    "cannot be enabled simultaneously. "
+                                    "The enable_rollout_routing_replay option is only used in R3 mode; "
+                                    "it should not be set when using R2 mode."
                                 )
-                                if router_mode == "R2":
-                                    batch.batch.pop("routed_experts")
-                                else:
-                                    old_log_prob.batch.pop("routed_experts")
                             batch = batch.union(old_log_prob)
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
