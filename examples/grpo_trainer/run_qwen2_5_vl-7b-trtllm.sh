@@ -55,4 +55,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.resume_mode=disable \
-    trainer.total_epochs=10 
+    trainer.total_epochs=10 $@
