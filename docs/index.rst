@@ -62,6 +62,7 @@ verl is fast with:
    examples/ppo_code_architecture
    examples/gsm8k_example
    examples/multi_modal_example
+   examples/atropos_integration
    examples/skypilot_examples
 
 .. toctree::
@@ -164,6 +165,7 @@ verl is fast with:
    :caption: API References
 
    api/data
+   api/atropos.rst
    api/single_controller.rst
    api/trainer.rst
    api/utils.rst

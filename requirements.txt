@@ -21,6 +21,11 @@ wandb
 packaging>=20.0
 uvicorn
 fastapi
+requests>=2.25.0
+# Optional: vLLM for production inference
+# vllm>=0.3.0
+# Optional: SGLang for alternative inference
+# sglang>=0.1.0
 latex2sympy2_extended
 math_verify
 tensorboard
