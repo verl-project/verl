@@ -339,6 +339,7 @@ class SGLangHttpServer:
                 f"({self.config.max_model_len})."
             )
 
+        # Determine max_new_tokens from sampling_params or use configured response_length as default
         if "max_new_tokens" in sampling_params:
             max_new_tokens = sampling_params.pop("max_new_tokens")
         elif "max_tokens" in sampling_params:
