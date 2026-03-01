@@ -188,9 +188,11 @@ class RLHFDataset(Dataset):
             video_key = self.video_key
 
             if processor is not None:
-                from verl.utils.dataset.vision_utils import process_image, process_video
+                # Use the same vision processing function as Agent Loop for consistency
+                from qwen_vl_utils import process_vision_info
 
-                def doc2len(doc) -> int:
+
+                def doc2len(doc) -> int:                
                     try:
                         messages = self._build_messages(doc)
                         # pass tool schemas if available so the processor can format prompts
@@ -198,38 +200,38 @@ class RLHFDataset(Dataset):
                         if self.tool_schemas is not None:
                             apply_kwargs["tools"] = self.tool_schemas
 
+                        # Use the same vision processing as Agent Loop (process_vision_info)
+                        # Use processor's actual patch_size instead of config default
+                        actual_patch_size = self.processor.image_processor.patch_size if hasattr(self.processor, 'image_processor') else self.image_patch_size
+                        images, videos = process_vision_info(
+                            messages, image_patch_size=actual_patch_size, return_video_metadata=True
+                        )
+
+                        # Extract video metadata (same as Agent Loop)
+                        if videos:
+                            videos, video_metadatas = zip(*videos, strict=True)
+                            videos = list(videos)
+                            video_metadatas = list(video_metadatas)
+                        else:
+                            video_metadatas = None
+
                         raw_prompt = self.processor.apply_chat_template(
                             messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
                         )
-                        if image_key in doc and doc[image_key]:
-                            images = [
-                                process_image(image, image_patch_size=self.image_patch_size) for image in doc[image_key]
-                            ]
-                        else:
-                            images = None
 
-                        if video_key in doc and doc[video_key]:
-                            videos, video_metadata = zip(
-                                *[
-                                    process_video(
-                                        video, image_patch_size=self.image_patch_size, return_video_metadata=True
-                                    )
-                                    for video in doc[video_key]
-                                ],
-                                strict=True,
-                            )
-                            videos = list(videos)
-                            video_metadata = list(video_metadata)
-                            videos_kwargs = {"video_metadata": video_metadata, "do_sample_frames": False}
-                        else:
-                            videos = None
-                            videos_kwargs = {}
-
-                        return len(
-                            processor(text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs)[
-                                "input_ids"
-                            ][0]
+                        # Match Agent Loop's processor call exactly
+                        prompt_len = len(
+                            processor(
+                                text=[raw_prompt],
+                                images=images,
+                                videos=videos,
+                                video_metadatas=video_metadatas, 
+                                return_tensors="pt",               
+                                do_sample_frames=False,            
+                            )["input_ids"][0]
                         )
+
+                        return prompt_len
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()
@@ -257,7 +259,6 @@ class RLHFDataset(Dataset):
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
 
-            print(f"filter dataset len: {len(dataframe)}")
         return dataframe
 
     def resume_dataset_state(self):
