@@ -20,8 +20,6 @@ from tensordict import TensorDict
 
 from verl.trainer.distillation import distillation_loss, is_distillation_enabled, prepare_distillation_inputs
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
-from verl.trainer.distillation import get_distillation_loss_fn, prepare_distillation_inputs
-from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
@@ -130,7 +128,7 @@ def ppo_loss(
         policy_loss = 0
 
     # add entropy loss
-    if entropy is not None and not distillation_enabled:
+    if entropy is not None:
         entropy_loss = agg_loss(
             loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
         )
@@ -139,7 +137,7 @@ def ppo_loss(
         metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
 
     # add kl loss
-    if config.use_kl_loss and not distillation_enabled:
+    if config.use_kl_loss:
         ref_log_prob = data["ref_log_prob"]
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
