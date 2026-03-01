@@ -107,6 +107,7 @@ verl is fast with:
    perf/verl_profiler_system.md
    perf/nsight_profiling.md
    perf/torch_profiling.md
+   perf/precision_debugger.md
 
 .. toctree::
    :maxdepth: 1
