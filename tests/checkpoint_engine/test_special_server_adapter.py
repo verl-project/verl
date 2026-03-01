@@ -87,6 +87,8 @@ async def test_server_adapter(init_config):
         resource_pool=rollout_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name()
     )
 
+
+
     # 2.2 create rollout replicas
     rollout_replica_class = get_rollout_replica_class(rollout_config.name)
     rollout_replicas = [

@@ -1,0 +1,28 @@
+pull_request_rules:
+  - name: comment-pre-commit-failure
+    description: Comment on PR when pre-commit check fails
+    conditions:
+      - check-failure=pre-commit / pre-commit (3.12)
+      - -closed
+      - -draft
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, the pre-commit checks have failed. Please run:
+
+          ```bash 
+          pip install pre-commit
+          pre-commit install
+          # for staged changes
+          pre-commit run
+          # for all files in the repo
+          pre-commit run --all-files
+          ```
+
+          Then, commit the changes and push to your branch.
+
+          For future commits, `pre-commit` will run automatically on changed files before each commit.
+      
+      label:
+        add:
+          - pre-commit-failed
