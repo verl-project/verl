@@ -55,7 +55,6 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForTokenClassification,
-    AutoModelForVision2Seq,
     GenerationConfig,
     PretrainedConfig,
 )
@@ -69,6 +68,9 @@ except ImportError:
 from tqdm import tqdm
 
 from verl.utils import hf_processor, hf_tokenizer
+from verl.utils.transformers_compat import get_auto_model_for_vision2seq
+
+AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
 @dataclass

@@ -21,6 +21,7 @@ from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 
+from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode
 from verl.workers.rollout.vllm_rollout.vllm_async_server import (
@@ -72,6 +73,7 @@ class vLLMHttpServerForPartial(vLLMHttpServer):
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
     ):
+        prompt_ids = normalize_token_ids(prompt_ids)
         max_tokens = self.config.max_model_len - len(prompt_ids)
         sampling_params["logprobs"] = 1
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))

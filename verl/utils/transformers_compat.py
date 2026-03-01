@@ -55,3 +55,20 @@ def is_transformers_version_in_range(min_version: Optional[str] = None, max_vers
         upper_bound_check = transformers_version <= version.parse(max_version)
 
     return lower_bound_check and upper_bound_check
+
+
+@lru_cache
+def get_auto_model_for_vision2seq():
+    """Return the available VL auto model class across transformers versions."""
+
+    try:
+        # Prefer the newer class when available. In transformers 4.x this class has
+        # a broader mapping than AutoModelForVision2Seq, and AutoModelForVision2Seq
+        # is deprecated for removal in v5.
+        from transformers import AutoModelForImageTextToText
+    except ImportError:
+        from transformers import AutoModelForVision2Seq
+
+        return AutoModelForVision2Seq
+
+    return AutoModelForImageTextToText
