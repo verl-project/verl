@@ -81,6 +81,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         self.config = config
         self.model_config = self.config.model_config
+        if isinstance(self.model_config, DictConfig):
+            self.model_config = omega_conf_to_dataclass(self.model_config)
+
         self.engine_config = self.config.engine_config
         self.optimizer_config = self.config.optimizer_config
         self.checkpoint_config = self.config.checkpoint_config

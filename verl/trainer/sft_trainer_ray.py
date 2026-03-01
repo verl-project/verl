@@ -112,7 +112,7 @@ class SFTTrainer:
 
         config = TrainingWorkerConfig(
             model_type="language_model",
-            model_config=self.model_config,
+            model_config=self.config.model,
             engine_config=self.engine_config,
             optimizer_config=self.optimizer_config,
             checkpoint_config=self.checkpoint_config,
