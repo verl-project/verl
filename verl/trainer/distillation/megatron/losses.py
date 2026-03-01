@@ -19,6 +19,7 @@ import torch
 
 from verl.workers.config import DistillationConfig
 
+
 def vocab_parallel_log_softmax(
     vp_logits: torch.Tensor,
 ) -> torch.Tensor:

@@ -26,7 +26,7 @@ from tensordict import TensorDict
 import verl.utils.torch_functional as verl_F
 from verl.models.mcore import get_mcore_forward_fused_no_padding_fn, get_mcore_weight_converter
 from verl.trainer.config import CheckpointConfig
-from verl.trainer.distillation import prepare_student_distillation_inputs, is_distillation_enabled
+from verl.trainer.distillation import is_distillation_enabled, prepare_student_distillation_inputs
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from verl.utils.dataset.dataset_utils import DatasetPadMode
