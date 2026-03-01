@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -35,7 +34,6 @@ DistillationLossFn = Callable[
     ],
     tuple[torch.Tensor, dict[str, Any]],
 ]
-
 
 
 @dataclass
@@ -83,41 +81,6 @@ def register_distillation_loss(
     return decorator
 
 
-def use_student_topk_logprobs(loss_name: str) -> bool:
-    """Check if the distillation loss function with the given name uses student top-k log probabilities.
-
-    Args:
-        loss_name (str): The name of the distillation loss function.
-
-    Returns:
-        bool: True if the distillation loss function uses student top-k log probabilities, False otherwise.
-    """
-    return loss_name in USE_STUDENT_TOPK_REGISTRY
-
-
-def use_teacher_topk_logprobs(loss_name: str) -> bool:
-    """Check if the distillation loss function with the given name uses teacher top-k log probabilities.
-
-    Args:
-        loss_name (str): The name of the distillation loss function.
-
-    Returns:
-        bool: True if the distillation loss function uses teacher top-k log probabilities, False otherwise.
-    """
-    return loss_name in USE_TEACHER_TOPK_REGISTRY
-
-
-def use_full_logprobs(loss_name: str) -> bool:
-    """Check if the distillation loss function with the given name uses full log probabilities.
-
-    Args:
-        loss_name (str): The name of the distillation loss function.
-
-    Returns:
-        bool: True if the distillation loss function uses full log probabilities, False otherwise.
-    """
-    return loss_name in USE_FULL_REGISTRY
-
 def get_distillation_loss_fn(loss_name: str) -> DistillationLossFn:
     """Get the distillation loss function with a given name."""
     if loss_name not in DISTILLATION_LOSS_REGISTRY:
@@ -159,8 +122,6 @@ def distillation_loss(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics.
-
-    TODO: add clamping
 
     Args:
         inputs (DistillationLossInputs):
@@ -229,17 +190,6 @@ def distillation_loss(
 
     return distillation_loss, distillation_metrics
 
-        # Log amount of mass in the top-k log probabilities for both student and teacher.
-        student_mass = student_topk_logprobs.exp().sum(dim=-1)[response_mask]
-        teacher_mass = teacher_topk_logprobs.exp().sum(dim=-1)[response_mask]
-        distillation_metrics = {
-            "distillation/student_mass": student_mass.mean().item(),
-            "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
-            "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
-            "distillation/teacher_mass": teacher_mass.mean().item(),
-            "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
-            "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
-        }
 
 @register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
 def compute_forward_kl_topk(
