@@ -84,9 +84,12 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
-        super().__init__(config, server_handles, reward_loop_worker_handles)
+        super().__init__(config, server_handles, reward_loop_worker_handles, teacher_loop_worker_handles)
+        if self.distillation_enabled:
+            raise NotImplementedError("Distillation is not implemented in FullyAsyncAgentLoopWorker yet.")
         # A shared cancellation event for all agent loops running on this worker.
         self.cancellation_event = asyncio.Event()
 

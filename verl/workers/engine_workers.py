@@ -17,6 +17,7 @@ import os
 from contextlib import nullcontext
 from functools import partial
 from itertools import chain
+from typing import Optional
 
 import torch
 from codetiming import Timer
@@ -31,6 +32,7 @@ except ImportError:
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.trainer.distillation import is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, set_expandable_segments
@@ -42,7 +44,13 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import (
+    ActorConfig,
+    DistillationConfig,
+    HFModelConfig,
+    RolloutConfig,
+    TrainingWorkerConfig,
+)
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -84,6 +92,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.engine_config = self.config.engine_config
         self.optimizer_config = self.config.optimizer_config
         self.checkpoint_config = self.config.checkpoint_config
+        self.distillation_config = self.config.get("distillation_config")
         self.device_name = get_device_name()
 
         if self.engine_config is None:
@@ -125,6 +134,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             engine_config=self.engine_config,
             optimizer_config=self.optimizer_config,
             checkpoint_config=self.checkpoint_config,
+            distillation_config=self.distillation_config,
         )
 
         # build dispatch info
@@ -419,9 +429,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     NOTE: ActorRolloutRefWorker no longer support spmd mode and run native server mode.
     """
 
-    def __init__(self, config: DictConfig, role: str, **kwargs):
+    def __init__(
+        self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
+    ):
         Worker.__init__(self)
         self.config = config
+        self.distillation_config = distillation_config
         self.role = role
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
@@ -508,12 +521,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+
+            distillation_config = self.distillation_config
+            if is_distillation_enabled(distillation_config):
+                distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
+
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
+                distillation_config=distillation_config,
             )
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
@@ -538,8 +557,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-
-            self.loss_fn = partial(ppo_loss, config=actor_config)
+            self.loss_fn = partial(ppo_loss, config=actor_config, distillation_config=distillation_config)
             self.actor = TrainingWorker(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)

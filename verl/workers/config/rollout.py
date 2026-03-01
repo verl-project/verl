@@ -136,7 +136,7 @@ class CheckpointEngineConfig(BaseConfig):
 
 @dataclass
 class RolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format"}
+    _mutable_fields = {"max_model_len", "load_format", "engine_kwargs"}
 
     name: Optional[str] = MISSING
     mode: str = "async"
