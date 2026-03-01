@@ -62,7 +62,7 @@ class MCPClientManager:
 
         client = self.get_client_with_tool_name(tool_name)
         async with client:
-            return await client.call_tool_mcp(tool_name, parameters)
+            return await asyncio.wait_for(client.call_tool_mcp(tool_name, parameters), timeout=timeout)
 
     async def fetch_tool_schemas(self, tool_selected_list: list[str]) -> list[dict]:
         tool_schemas = []
