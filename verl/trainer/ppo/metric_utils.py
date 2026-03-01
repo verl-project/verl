@@ -222,6 +222,42 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    # Compute metrics for all numeric fields from reward_extra_info
+    if "reward_extra_info" in batch.non_tensor_batch:
+        reward_extra_info_array = batch.non_tensor_batch["reward_extra_info"]
+        print("Original reward_extra_info_array:", reward_extra_info_array)
+        # Extract all unique keys from the array of dicts
+        all_keys = set()
+        for sample_dict in reward_extra_info_array:
+            if isinstance(sample_dict, dict):
+                all_keys.update(sample_dict.keys())
+
+        # For each key, collect all values and compute metrics
+        for key in all_keys:
+            values = []
+            for sample_dict in reward_extra_info_array:
+                if isinstance(sample_dict, dict) and key in sample_dict:
+                    values.append(sample_dict[key])
+
+            if values:
+                # Convert to numpy array for easier processing
+                values_array = np.array(values)
+
+                # Check if values are numeric
+                if np.issubdtype(values_array.dtype, np.number):
+                    # Convert to tensor
+                    tensor_values = torch.from_numpy(values_array).float()
+
+                    # Only compute if we have valid numeric data
+                    if tensor_values.numel() > 0:
+                        metrics[f"reward_extra/{key}/mean"] = torch.mean(tensor_values).detach().item()
+                        metrics[f"reward_extra/{key}/max"] = torch.max(tensor_values).detach().item()
+                        metrics[f"reward_extra/{key}/min"] = torch.min(tensor_values).detach().item()
+
+                        # Add std if we have more than one value
+                        if tensor_values.numel() > 1:
+                            metrics[f"reward_extra/{key}/std"] = torch.std(tensor_values).detach().item()
+
     return metrics
 
 
