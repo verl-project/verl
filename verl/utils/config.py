@@ -73,7 +73,6 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
 
 def validate_config(
     config: DictConfig,
-    use_distillation_policy: bool,
     use_reference_policy: bool,
     use_critic: bool,
 ) -> None:
@@ -81,7 +80,6 @@ def validate_config(
 
     Args:
         config (DictConfig): The OmegaConf DictConfig to validate.
-        use_distillation_policy (bool): is distillation policy needed
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
@@ -159,14 +157,6 @@ def validate_config(
                 config.actor_rollout_ref.ref.log_prob_micro_batch_size,
                 config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu,
                 "actor_rollout_ref.ref",
-            )
-
-        if use_distillation_policy:
-            # distillation: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
-            check_mutually_exclusive(
-                config.actor_rollout_ref.distillation.log_prob_micro_batch_size,
-                config.actor_rollout_ref.distillation.log_prob_micro_batch_size_per_gpu,
-                "actor_rollout_ref.distillation",
             )
 
         #  The rollout section also has log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu

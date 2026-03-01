@@ -34,11 +34,6 @@ def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
     return config.enabled
 
 
-def distillation_requires_logits(config: DistillationConfig) -> bool:
-    """Check if distillation loss requires logits based on the provided configuration."""
-    distillation_settings: DistillationLossSettings = config.loss_settings
-    return distillation_settings.use_topk or distillation_settings.use_full
-
 def prepare_student_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: Optional[DistillationConfig]
 ) -> dict[str, torch.Tensor]:
