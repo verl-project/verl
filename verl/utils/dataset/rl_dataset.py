@@ -188,6 +188,11 @@ class RLHFDataset(Dataset):
             video_key = self.video_key
 
             if processor is not None:
+                logger.warning(
+                    "Multimodal length filtering currently considers text tokens only; "
+                    "image/video token counts are excluded. "
+                    "Accurate multimodal filtering will be implemented in AgentLoop."
+                )
                 from verl.utils.dataset.vision_utils import process_image, process_video
 
                 def doc2len(doc) -> int:
