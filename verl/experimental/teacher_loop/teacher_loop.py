@@ -25,6 +25,7 @@ from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.distillation.losses import DistillationLossSettings
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.ray_utils import auto_await
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 from .teacher_model import TeacherModelManager
@@ -194,10 +195,12 @@ class TeacherLoopManager:
                 ).remote(self.config, self.teacher_router_address)
             )
 
-    def wake_up(self):
+    @auto_await
+    async def wake_up(self):
         """Wake up all rollout replica instances."""
-        self.teacher_model_manager.wake_up()
+        await self.teacher_model_manager.wake_up()
 
-    def sleep(self):
+    @auto_await
+    async def sleep(self):
         """Sleep all rollout replica instances."""
-        self.teacher_model_manager.sleep()
+        await self.teacher_model_manager.sleep()

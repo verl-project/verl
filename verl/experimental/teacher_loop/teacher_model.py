@@ -17,6 +17,7 @@ import logging
 import os
 
 from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
+from verl.utils.ray_utils import auto_await
 from verl.workers.config import DistillationTeacherModelConfig, HFModelConfig
 from verl.workers.rollout.replica import get_rollout_replica_class
 
@@ -93,16 +94,16 @@ class TeacherModelManager:
     def get_router_address(self):
         return self.router_address
 
-    def wake_up(self):
+    @auto_await
+    async def wake_up(self):
         """Wake up all rollout replica instances."""
-        self._run_all([replica.wake_up() for replica in self.rollout_replicas])
+        await self._run_all([replica.wake_up() for replica in self.rollout_replicas])
 
-    def sleep(self):
+    @auto_await
+    async def sleep(self):
         """Sleep all rollout replica instances."""
-        self._run_all([replica.sleep() for replica in self.rollout_replicas])
+        await self._run_all([replica.sleep() for replica in self.rollout_replicas])
 
-    def _run_all(self, tasks: list[asyncio.Task]):
-        async def run_all():
-            await asyncio.gather(*tasks)
-
-        asyncio.run(run_all())
+    @auto_await
+    async def _run_all(self, tasks: list[asyncio.Task]):
+        await asyncio.gather(*tasks)
