@@ -52,12 +52,8 @@ class BatchRewardManager(AbstractRewardManager):
         prompt_len = prompt_ids.shape[-1]
         valid_response_lengths = attention_mask[:, prompt_len:].sum(dim=-1)
 
-        responses_str = []
-        for i in range(len(data)):
-            valid_len = valid_response_lengths[i]
-            valid_response_ids = response_ids[i][:valid_len]
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            responses_str.append(response_str)
+        all_valid_response_ids = [response_ids[i][:valid_response_lengths[i]] for i in range(len(data))]
+        responses_str = self.tokenizer.batch_decode(all_valid_response_ids, skip_special_tokens=True)
 
         ground_truths = [item.non_tensor_batch["reward_model"].get("ground_truth", None) for item in data]
         data_sources = data.non_tensor_batch[self.reward_fn_key]
