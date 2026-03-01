@@ -26,6 +26,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AsyncLLMServerManager,
     TokenOutput,
 )
+from verl.experimental.teacher_loop import TeacherLoopManager
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
@@ -144,9 +145,12 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_manager: TeacherLoopManager = None,
     ):
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
         super().__init__(config, worker_group, rollout_resource_pool, reward_loop_worker_handles)
+        if self.distillation_enabled:
+            raise NotImplementedError("Distillation is not implemented in FullyAsyncAgentLoopManager yet.")
 
     @auto_await
     async def generate_sequences_single(self, prompts: DataProto) -> DataProto:
