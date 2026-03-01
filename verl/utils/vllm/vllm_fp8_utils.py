@@ -44,6 +44,47 @@ class FP8State:
 
 fp8_state: FP8State = FP8State()
 
+def _copy_custom_parameter_attrs(src: object, dst: object) -> None:
+    """Best-effort copy of custom attrs (e.g., weight_loader) across Parameters."""
+    if src is None or dst is None:
+        return
+    try:
+        base_param_dir = set(dir(torch.nn.Parameter))
+        for attr in dir(src):
+            if attr in base_param_dir or attr.startswith("__"):
+                continue
+            # Skip some common/unsafe attributes.
+            if attr in {"data", "grad"}:
+                continue
+            try:
+                setattr(dst, attr, getattr(src, attr))
+            except Exception:
+                continue
+    except Exception:
+        return
+
+
+def _make_post_load_wrapper(orig_fn, param_names: list[str], *, name: str):
+    """Create a thin wrapper around vLLM post-load processing.
+
+    Motivation:
+    - vLLM may recreate Parameter objects during `process_weights_after_loading`
+      (e.g., for torch.compile compatibility), which can drop custom attrs that
+      verl relies on for refit (e.g., `weight_loader`).
+    - For vLLM>=0.12, the native method also performs Marlin preparation and
+      initializes `layer.workspace`; therefore we must call the original vLLM
+      method and only restore custom attrs afterwards.
+    """
+
+    def _wrapped(self, layer) -> None:
+        old_params = {k: getattr(layer, k, None) for k in param_names}
+        orig_fn(self, layer)
+        for k, old in old_params.items():
+            _copy_custom_parameter_attrs(old, getattr(layer, k, None))
+
+    _wrapped.__name__ = name
+    return _wrapped
+
 
 def is_fp8_model(vllm_config):
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
@@ -424,20 +465,50 @@ def process_weights_after_loading_moe_for_vllm11(self, layer) -> None:
 
 
 def apply_vllm_fp8_patches():
+    # Idempotency: some callsites may invoke this multiple times.
+    if fp8_state.vllm_patches:
+        logger.debug("vLLM FP8 patches already applied; skipping")
+        return
+
     logger.info("Applying vllm fp8 patches for blockwise quantization")
+
+    vllm_ver = version.parse(vllm.__version__)
+    is_vllm_12_or_later = vllm_ver >= version.parse("0.12.0")
     func1_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
-    patcher1 = patch(
-        func1_path,
-        process_weights_after_loading_for_vllm11
-        if version.parse(vllm.__version__) >= version.parse("0.11.0")
-        else process_weights_after_loading_for_vllm10,
-    )
-    patcher1.start()
     func2_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
-    patcher2 = patch(
-        func2_path,
-        process_weights_after_loading_moe_for_vllm11
-        if version.parse(vllm.__version__) >= version.parse("0.11.0")
-        else process_weights_after_loading_moe_for_vllm10,
-    )
+
+    if is_vllm_12_or_later:
+        # vLLM>=0.12: keep vLLM-native behavior (incl. Marlin workspace init),
+        # then restore custom attrs important for verl refit.
+        from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod, Fp8MoEMethod
+
+        linear_patch = _make_post_load_wrapper(
+            Fp8LinearMethod.process_weights_after_loading,
+            ["weight", "weight_scale", "weight_scale_inv", "input_scale"],
+            name="verl_fp8_process_weights_after_loading_vllm12",
+        )
+        moe_patch = _make_post_load_wrapper(
+            Fp8MoEMethod.process_weights_after_loading,
+            [
+                "w13_weight",
+                "w13_weight_scale_inv",
+                "w2_weight",
+                "w2_weight_scale_inv",
+                "weight_scale",
+                "weight_scale_inv",
+            ],
+            name="verl_fp8_process_weights_after_loading_moe_vllm12",
+        )
+    elif vllm_ver >= version.parse("0.11.0"):
+        linear_patch = process_weights_after_loading_for_vllm11
+        moe_patch = process_weights_after_loading_moe_for_vllm11
+    else:
+        linear_patch = process_weights_after_loading_for_vllm10
+        moe_patch = process_weights_after_loading_moe_for_vllm10
+
+    patcher1 = patch(func1_path, linear_patch)
+    patcher1.start()
+    patcher2 = patch(func2_path, moe_patch)
     patcher2.start()
+
+    fp8_state.vllm_patches.extend([patcher1, patcher2])
