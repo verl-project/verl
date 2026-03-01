@@ -244,6 +244,57 @@ class BaseModelMerger(ABC):
                 )
         return model
 
+    def _load_lora_alpha(self, lora_rank: int) -> int | float:
+        import json
+        from pathlib import Path
+
+        if self.config.local_dir is None:
+            print(f"Warning: local_dir is not set. Falling back to lora_rank={lora_rank} for lora_alpha.")
+            return lora_rank
+
+        local_dir = Path(self.config.local_dir).resolve()
+        adapter_config_candidates = [
+            local_dir / "lora_adapter" / "adapter_config.json",
+            local_dir / "adapter_config.json",
+            local_dir / "huggingface" / "lora_adapter" / "adapter_config.json",
+        ]
+
+        for config_path in adapter_config_candidates:
+            # Validate that the resolved path stays within local_dir to prevent path traversal
+            resolved = config_path.resolve()
+            if not str(resolved).startswith(str(local_dir)):
+                continue
+            if not resolved.exists():
+                continue
+
+            try:
+                with open(resolved, encoding="utf-8") as f:
+                    adapter_config = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"Warning: Failed to load LoRA adapter config from {config_path}: {e}")
+                continue
+
+            lora_alpha = adapter_config.get("lora_alpha")
+            if isinstance(lora_alpha, str):
+                try:
+                    lora_alpha = float(lora_alpha)
+                except ValueError:
+                    lora_alpha = None
+
+            if isinstance(lora_alpha, (int, float)) and lora_alpha > 0:
+                return lora_alpha
+
+            print(
+                f"Warning: Invalid lora_alpha in {config_path}: {adapter_config.get('lora_alpha')}. "
+                f"Expected a positive number."
+            )
+
+        print(
+            f"Warning: Could not find a valid lora_alpha under {local_dir}. "
+            f"Falling back to lora_rank={lora_rank}."
+        )
+        return lora_rank
+
     def save_lora_adapter(self, state_dict: dict[str, torch.Tensor]):
         """
         Save lora adapter to safetensors.
@@ -275,9 +326,10 @@ class BaseModelMerger(ABC):
             lora_params[lora_key] = state_dict.pop(name)
 
         lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
+        lora_alpha = self._load_lora_alpha(lora_rank)
         peft_dict = {
             "r": lora_rank,
-            "lora_alpha": 0,  # lora_alpha is not set. An error should be raised to inform the user to set it manually.
+            "lora_alpha": lora_alpha,
             "target_modules": list(target_modules),
         }
         peft_config = peft.LoraConfig(**peft_dict).to_dict()
