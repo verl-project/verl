@@ -33,6 +33,7 @@ from torch.distributed.tensor import DTensor
 import verl.utils.torch_functional as verl_F
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
+from verl.trainer.distillation import is_distillation_enabled, prepare_student_distillation_inputs
 from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -69,7 +70,7 @@ from verl.utils.ulysses import (
     ulysses_pad,
     ulysses_pad_and_slice_inputs,
 )
-from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
+from verl.workers.config import DistillationConfig, FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -94,6 +95,7 @@ class FSDPEngine(BaseEngine):
         engine_config: FSDPEngineConfig,
         optimizer_config: FSDPOptimizerConfig,
         checkpoint_config: CheckpointConfig,
+        distillation_config: Optional[DistillationConfig],
     ):
         """
         Initialize the FSDPEngine.
@@ -109,8 +111,10 @@ class FSDPEngine(BaseEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
+        self.distillation_config = distillation_config
 
         self.mode = None
+        self.distillation_enabled = is_distillation_enabled(distillation_config)
 
         self.rank = torch.distributed.get_rank()
 
@@ -910,6 +914,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             if use_fused_kernels:
                 # temperature is singleton
+                if self.distillation_enabled:
+                    raise NotImplementedError("Distillation with fused kernels is not supported yet")
                 log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
             else:
@@ -946,6 +952,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     unpad_dim=0,
                     padding_size=pad_size,
                 )
+                if self.distillation_enabled:
+                    logits_rmpad = gather_outputs_and_unpad(
+                        logits_rmpad,
+                        gather_dim=0,
+                        unpad_dim=0,
+                        padding_size=pad_size,
+                    )
                 if calculate_entropy:
                     entropy_rmpad = gather_outputs_and_unpad(
                         entropy_rmpad,
@@ -968,7 +981,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if use_fused_kernels:
                 log_probs = output.log_probs[:, -response_length - 1 : -1]
                 entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
-
+                if self.distillation_enabled:
+                    raise NotImplementedError("Distillation with fused kernels is not supported yet")
             else:
                 logits = output.logits  # (bsz, response_length, vocab_size)
                 temperature = output_args["temperature"]  # (bsz,)
@@ -997,6 +1011,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
+        model_output.update(
+            prepare_student_distillation_inputs(
+                logits=logits_rmpad, batch=micro_batch, cu_seqlens=cu_seqlens, config=self.distillation_config
+            )
+        )
 
         model_output["log_probs"] = log_probs
         if calculate_entropy:

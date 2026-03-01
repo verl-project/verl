@@ -782,8 +782,9 @@ class vLLMReplica(RolloutReplica):
         model_config: HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
     ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
         self.server_class = ray.remote(vLLMHttpServer)
 
     async def launch_servers(self):
@@ -822,11 +823,12 @@ class vLLMReplica(RolloutReplica):
                 worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
-            name = (
-                f"vllm_server_{self.replica_rank}_{node_rank}"
-                if not self.is_reward_model
-                else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
-            )
+            if self.is_reward_model:
+                name = f"vllm_server_reward_{self.replica_rank}_{node_rank}"
+            elif self.is_teacher_model:
+                name = f"vllm_server_teacher_{self.replica_rank}_{node_rank}"
+            else:
+                name = f"vllm_server_{self.replica_rank}_{node_rank}"
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,

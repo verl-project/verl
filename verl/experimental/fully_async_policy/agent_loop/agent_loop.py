@@ -31,6 +31,7 @@ from verl.experimental.agent_loop.agent_loop import (
     _get_rollout_and_model_config,
     get_trajectory_info,
 )
+from verl.experimental.teacher_loop import TeacherLoopManager
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
 from verl.utils.rollout_trace import (
@@ -84,9 +85,12 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
-        super().__init__(config, server_handles, reward_loop_worker_handles)
+        super().__init__(config, server_handles, reward_loop_worker_handles, teacher_loop_worker_handles)
+        if self.distillation_enabled:
+            raise NotImplementedError("Distillation is not implemented in FullyAsyncAgentLoopWorker yet.")
         # A shared cancellation event for all agent loops running on this worker.
         self.cancellation_event = asyncio.Event()
 
@@ -221,11 +225,16 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_loop_manager: TeacherLoopManager = None,
     ):
         self.config = config
         self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self.teacher_loop_manager = teacher_loop_manager
+        self.distillation_enabled = self.teacher_loop_manager is not None
+        if self.distillation_enabled:
+            raise NotImplementedError("Distillation is not implemented in FullyAsyncAgentLoopManager yet.")
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
 
         # Select rollout replica class based on rollout name

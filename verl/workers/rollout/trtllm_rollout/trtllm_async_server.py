@@ -249,8 +249,11 @@ class TRTLLMReplica(RolloutReplica):
         model_config: DictConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
     ) -> None:
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        if is_teacher_model:
+            raise NotImplementedError("TRTLLMReplica doesn't support teacher model yet.")
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
 
     def rollout_worker_use_gpu(self) -> bool:
