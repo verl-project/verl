@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ray
+import verl.utils.distributed_backend  # noqa: F401
+
+import ray  # noqa: E402 isort: skip
 
 
 @ray.remote

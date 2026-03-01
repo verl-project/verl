@@ -14,7 +14,6 @@
 
 import os
 
-import ray
 import torch
 
 from verl import DataProto
@@ -27,6 +26,8 @@ from verl.single_controller.ray.base import (
     split_resource_pool,
 )
 from verl.utils.device import get_device_name, get_nccl_backend
+
+import ray  # noqa: E402 isort: skip
 
 
 @ray.remote
