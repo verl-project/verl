@@ -158,9 +158,15 @@ class DistillationConfig(BaseConfig):
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
+        
+        # Prompt + Response from student are fed into teacher as context
+        self.teacher_model.inference.prompt_length = self.teacher_model.inference.prompt_length + self.teacher_model.inference.response_length
+        self.teacher_model.inference.response_length = 1
+
+        # Ensure max log probs is aligned with top-k
         engine_name = self.teacher_model.inference.name
         engine_kwargs = self.teacher_model.inference.engine_kwargs
-        if self.distillation_loss.topk is None or not self.enabled:
+        if not self.distillation_loss.loss_settings.use_topk or self.distillation_loss.topk is None or not self.enabled:
             return
         match engine_name:
             case "vllm":
