@@ -1,0 +1,168 @@
+name: e2e_ppo_grpo_trainer_trtllm_cpu_affinity_test
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch.
+  push:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      - "!recipe/**"
+      - "!verl/workers/**/*dp_*.py"
+      - "verl/workers/rollout/trtllm_rollout/*"
+      - ".github/workflows/e2e_ppo_grpo_trainer_trtllm_cpu_affinity_test.yml"
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      - "!docker/**"
+      - "!**/*.md"
+      - "!docs/**"
+      - "!examples/**"
+      - "!tests/**"
+      - "!verl/trainer/main_*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      - "!recipe/**"
+      - "!verl/workers/**/*dp_*.py"
+      - "verl/workers/rollout/trtllm_rollout/*"
+      - ".github/workflows/e2e_ppo_grpo_trainer_trtllm_cpu_affinity_test.yml"
+  workflow_dispatch:  # Allow manual triggering
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.2.0rc6"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: create-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  e2e_grpo_trainer_trtllm_cpu_affinity_test:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 30
+    env:
+      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      # Ray and TensorRT-LLM environment variables from the bug repro script
+      TOKENIZERS_PARALLELISM: "true"
+      NCCL_DEBUG: "WARN"
+      TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL: "1"
+      RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES: "1"
+      RAY_DEDUP_LOGS: "0"
+      RAY_IGNORE_UNHANDLED_ERRORS: "1"
+      HYDRA_FULL_ERROR: "1"
+      RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE: "1"
+      TRTLLM_LOGGER_LEVEL: "WARNING"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Install the current repository
+        run: |
+          pip3 install ray==2.41.0
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+      - name: Prepare GSM8K dataset
+        run: |
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_save_dir ${PWD}/data/gsm8k
+      - name: Running GRPO E2E training test with TensorRT-LLM async rollout (CPU Affinity Test)
+        run: |
+          ray stop --force
+          DATADIR=${HOME}/data \
+            python3 -m verl.trainer.main_ppo \
+            algorithm.adv_estimator=grpo \
+            algorithm.rollout_correction.rollout_is_threshold=2.0 \
+            data.train_files="['${PWD}/data/gsm8k/train.parquet']" \
+            data.val_files="['${PWD}/data/gsm8k/test.parquet']" \
+            data.train_batch_size=512 \
+            data.max_prompt_length=4096 \
+            data.max_response_length=1024 \
+            data.return_raw_chat=True \
+            data.filter_overlong_prompts=True \
+            data.truncation='error' \
+            actor_rollout_ref.hybrid_engine=True \
+            actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct" \
+            actor_rollout_ref.model.trust_remote_code=True \
+            actor_rollout_ref.actor.optim.lr=1e-6 \
+            actor_rollout_ref.model.use_remove_padding=True \
+            actor_rollout_ref.actor.ppo_mini_batch_size=128 \
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+            actor_rollout_ref.actor.use_kl_loss=True \
+            actor_rollout_ref.actor.kl_loss_coef=0.001 \
+            actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+            actor_rollout_ref.actor.entropy_coeff=0 \
+            actor_rollout_ref.model.enable_gradient_checkpointing=True \
+            actor_rollout_ref.actor.strategy=fsdp2 \
+            actor_rollout_ref.actor.fsdp_config.param_offload=False \
+            actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
+            actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+            actor_rollout_ref.rollout.name=trtllm \
+            actor_rollout_ref.rollout.mode="async" \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+            actor_rollout_ref.rollout.n=5 \
+            actor_rollout_ref.rollout.max_num_seqs=256 \
+            actor_rollout_ref.rollout.max_num_batched_tokens=16384 \
+            +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 \
+            +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5 \
+            actor_rollout_ref.rollout.calculate_log_probs=True \
+            actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
+            actor_rollout_ref.ref.strategy=fsdp2 \
+            actor_rollout_ref.ref.fsdp_config.param_offload=True \
+            algorithm.use_kl_in_reward=False \
+            reward_manager.name=naive \
+            reward_manager.source=register \
+            trainer.critic_warmup=0 \
+            trainer.logger='["console"]' \
+            trainer.project_name="verl_grpo_molecular_transformer" \
+            trainer.experiment_name="qwen2.5-0.5b-trtllm-fsdp2-4gpus-cpu-affinity-test" \
+            trainer.n_gpus_per_node=4 \
+            trainer.nnodes=1 \
+            trainer.save_freq=10 \
+            trainer.test_freq=5 \
+            trainer.resume_mode=disable \
+            trainer.total_training_steps=1
+      - name: clean up
+        run: |
+          rm -rf checkpoints
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [setup, e2e_grpo_trainer_trtllm_cpu_affinity_test]
+    if: always()
+    steps:
+      - id: destroy-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"
+
