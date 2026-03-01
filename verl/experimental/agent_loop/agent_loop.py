@@ -679,14 +679,19 @@ class AgentLoopWorker:
         image_grid_thw = multi_modal_inputs.get("image_grid_thw")
         video_grid_thw = multi_modal_inputs.get("video_grid_thw")
 
-        # Model's get_rope_index has been dynamically bind to the processor.
-        vision_position_ids, _ = self.processor.get_rope_index(
-            input_ids=input_ids,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            attention_mask=attention_mask,
-        )
-        vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
+        vision_position_ids = None
+        if video_grid_thw is not None:  # some models that use cross attention do not need vision position ids
+            # Model's get_rope_index has been dynamically bind to the processor.
+            vision_position_ids, _ = self.processor.get_rope_index(
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                attention_mask=attention_mask,
+            )
+            vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
+
+        if vision_position_ids is None:
+            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
         valid_mask = attention_mask[0].bool()
         text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
