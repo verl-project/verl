@@ -291,6 +291,16 @@ class CheckpointEngineWorker(Worker):
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_replica_rank(self) -> int:
+        """Get replica rank from the underlying rollout server adapter."""
+        return self.server_adapter.replica_rank
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def is_leader_rank(self) -> bool:
+        """Get leader rank flag from the underlying rollout server adapter."""
+        return self.server_adapter.is_leader_rank
+
 
 _worker_cls = ray.remote(CheckpointEngineWorker)
 
