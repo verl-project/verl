@@ -1,7 +1,7 @@
 Ascend Retool Best Practice
 ===================================
 
-Last updated: 02/10/2026.
+Last updated: 03/01/2026.
 
 引言
 ----------------------------------
@@ -99,7 +99,7 @@ https://github.com/bytedance/SandboxFusion
 **沙箱安装**
 
 .. code-block:: bash
-
+  cd SandboxFusion
   conda create -n sandbox -y python=3.11
   conda activate sandbox
   pip install poetry
@@ -135,7 +135,7 @@ https://github.com/bytedance/SandboxFusion
   dapo_math_17k=$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k
   aime_2024=$DATA_ROOT/dataset/Maxwell-Jia/AIME_2024
   #aime_2025=$DATA_ROOT/dataset/yentinglin/aime_2025
-  model_path=$DATA_ROOT/dataset/checkpoint/multiturn-sft-qwen-2.5-7b-instruct/  global_step_372/huggingface
+  model_path=$DATA_ROOT/dataset/checkpoint/multiturn-sft-qwen-2.5-7b-instruct/global_step_372/huggingface
   
   train_files="['$dapo_math_17k']"
   test_files="['$aime_2024']"
