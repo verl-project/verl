@@ -1,0 +1,36 @@
+# Wikipedia Article Creator Environment Configuration
+
+# Environment configuration
+env:
+  group_size: 1  # Set to 1 to process one article at a time
+  use_wandb: true
+  rollout_server_url: "http://localhost:8000"
+  total_steps: 2  # For process mode, generate this many articles
+  batch_size: 512
+  steps_per_eval: 20
+  max_token_length: 16384
+  wandb_name: "wikipedia_article_creator"
+  include_messages: true  # Include message history for HTML rendering and wandb
+  num_rollouts_to_keep: 32
+  data_path_to_save_groups: "data/wikipedia_articles.jsonl"  # Output path
+  ensure_scores_are_not_same: false  # Needed for process mode
+
+  # Wikipedia-specific settings
+  max_steps: 10  # Max research steps per article
+  temperature: 0.7
+  thinking_active: true
+  eval_topics: 5
+  tool_timeout: 15.0
+  min_article_sections: 3
+  max_article_tokens: 2048
+  logging_active: true
+
+# OpenAI API configuration
+openai:
+  model_name: "gpt-4o"  # Or gpt-4-turbo
+  base_url: null  # Use default OpenAI base URL
+  api_key: null  # Will fall back to environment variable
+
+# Server manager configuration
+slurm: false
+testing: false

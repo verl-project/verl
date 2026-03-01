@@ -1,0 +1,6 @@
+wandb
+pydantic
+httpx
+# atroposlib (Optional, if you have it available and want full integration)
+# If atroposlib is a local package, it would not be listed here
+# or would be installed via `pip install -e .` if it's a setuptools project.

@@ -1,0 +1,4 @@
+fire
+flash-attn
+torch>=2.5.0
+xtuner[all]==0.2.0rc0
