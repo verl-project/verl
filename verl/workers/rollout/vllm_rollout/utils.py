@@ -185,6 +185,55 @@ class vLLMColocateWorkerExtension:
         instance._is_qat_model = _is_qat_model
         return instance
 
+    def __init__(self, *args, **kwargs):
+        """vLLM launches worker processes via MP Executor.
+
+        Under Ray + `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1`, the `local_rank` passed to vLLM
+        workers can be inconsistent with vLLM DP expectations (it should be local within TP×PP, while
+        DP adjusts ranks separately).
+        """
+        try:
+            from verl.utils.ray_utils import ray_noset_visible_devices
+
+            if ray_noset_visible_devices():
+                # NOTE: vLLM passes different worker init args across versions/executors.
+                # Try to extract `parallel_config` + `rank` from kwargs first, then fall back to
+                # common positional layouts.
+                parallel_config = kwargs.get("parallel_config")
+                if parallel_config is None:
+                    vllm_config = kwargs.get("vllm_config")
+                    if vllm_config is not None:
+                        parallel_config = getattr(vllm_config, "parallel_config", None)
+                if parallel_config is None and len(args) > 1:
+                    parallel_config = args[1]
+                if parallel_config is None and len(args) > 0:
+                    parallel_config = getattr(args[0], "parallel_config", None)
+
+                rank = kwargs.get("rank")
+                if rank is None:
+                    for idx in (3, 2):
+                        if len(args) > idx and isinstance(args[idx], int):
+                            rank = args[idx]
+                            break
+
+                if parallel_config is not None and rank is not None:
+                    rank = int(rank)
+                    dp_size = getattr(parallel_config, "data_parallel_size", 1)
+                    if int(dp_size or 1) > 1:
+                        tp = getattr(parallel_config, "tensor_parallel_size", 1)
+                        pp = getattr(parallel_config, "pipeline_parallel_size", 1)
+                        tp_pp = int(tp or 1) * int(pp or 1)
+                        if tp_pp > 0:
+                            corrected_local_rank = rank % tp_pp
+                            # vLLM worker reads LOCAL_RANK during initialization.
+                            os.environ["LOCAL_RANK"] = str(corrected_local_rank)
+                            if "local_rank" in kwargs:
+                                kwargs["local_rank"] = corrected_local_rank
+        except Exception as e:
+            logger.debug("Skip vLLM local_rank adjustment: %s", e)
+
+        super().__init__(*args, **kwargs)
+
     def monkey_patch_model(self, vocab_size: int):
         # patch compute_logits to avoid sampling OOV token
         monkey_patch_compute_logits(self.model_runner.model, vocab_size)

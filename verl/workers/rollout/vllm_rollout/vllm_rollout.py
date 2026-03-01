@@ -78,6 +78,7 @@ class ServerAdapter(BaseRollout):
         self.server_handle: ray.actor.ActorHandle = None
 
         rank = int(os.environ["RANK"])
+
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
         rollout_world_size = (
             self.config.tensor_model_parallel_size

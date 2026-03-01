@@ -349,15 +349,15 @@ class vLLMHttpServer:
             }
             args["speculative_config"] = speculative_config
 
-        if self.config.expert_parallel_size > 1:
+        if self.config.data_parallel_size > 1 or self.config.expert_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
                 "gpus_per_node should be divisible by tensor_model_parallel_size"
             )
             data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
             assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
                 f"num workers ({len(self.workers)}) should be equal to dp_size_local "
+                f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
             )
-            f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
 
             args.update(
                 {
