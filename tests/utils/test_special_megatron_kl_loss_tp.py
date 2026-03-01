@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from verl.trainer.distillation.fsdp.losses import compute_forward_kl_topk as compute_forward_kl_topk_ref
 from verl.trainer.distillation.megatron.losses import compute_forward_kl_topk as compute_forward_kl_topk_vp
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
-from verl.workers.config import DistillationConfig
+from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 MAX_TEST_CASES = int(os.environ.get("MAX_TEST_CASES", 4))
 
@@ -91,42 +91,37 @@ class TestVocabParallelKLDivergence:
         full_student_logits = torch.randn(B, S, V, device=self.device) * 0.7
         teacher_full_logits = torch.randn(B, S, V, device=self.device) * 0.9
         teacher_full_logps = F.log_softmax(teacher_full_logits, dim=-1)
-        teacher_topk_logps, teacher_topk_indices = torch.topk(teacher_full_logps, k=topk, dim=-1)
+        teacher_topk_logps, teacher_topk_ids = torch.topk(teacher_full_logps, k=topk, dim=-1)
 
         # Edge case 1: Force index 0 collision on rank 1 (on rank 1, global index shard_size maps to local index 0)
         # 1. When a teacher top-k index is not in the local shard, it's remapped to
         # local index 0 (as a dummy placeholder, with its prob set to 0)
         # 2. But local index 0 might also be a legitimate teacher
         # top-k index (e.g., on rank 1, global index shard_size maps to local index 0)
-        teacher_topk_indices[..., 0] = shard_size
+        teacher_topk_ids[..., 0] = shard_size
         teacher_topk_logps[..., 0] = teacher_full_logps[..., shard_size]
 
         # Edge case 2: Make the colliding token active (high probability, not clamped)
         full_student_logits[..., shard_size] = 3.0
 
         # Edge case 3: Force out-of-shard entries for rank 1 (indices 1 and 2 are in rank 0's shard)
-        teacher_topk_indices[..., -1] = 1
+        teacher_topk_ids[..., -1] = 1
         teacher_topk_logps[..., -1] = teacher_full_logps[..., 1]
-        teacher_topk_indices[..., -2] = 2
+        teacher_topk_ids[..., -2] = 2
         teacher_topk_logps[..., -2] = teacher_full_logps[..., 2]
 
         # Edge case 4: Force some student probs to be clamped (very low logits)
         full_student_logits.scatter_(
-            dim=-1, index=teacher_topk_indices[..., 1:2], src=torch.full((B, S, 1), -50.0, device=self.device)
+            dim=-1, index=teacher_topk_ids[..., 1:2], src=torch.full((B, S, 1), -50.0, device=self.device)
         )
 
-        return full_student_logits, teacher_topk_logps, teacher_topk_indices
+        return full_student_logits, teacher_topk_logps, teacher_topk_ids
 
     def verify_correctness(self, iterations: int = 5):
         self.cleanup()
         self.generate_hyper()
 
-        cfg_megatron = DistillationConfig(
-            strategy="megatron", rollout_n=-1, ppo_micro_batch_size_per_gpu=-1, log_prob_min_clamp=self.clamp
-        )
-        config_fsdp = DistillationConfig(
-            strategy="fsdp", rollout_n=-1, ppo_micro_batch_size_per_gpu=-1, log_prob_min_clamp=self.clamp
-        )
+        cfg = DistillationConfig(distillation_loss=DistillationLossConfig(log_prob_min_clamp=self.clamp))
 
         shard_start = self.local_rank * self.shard_size
         shard_end = shard_start + self.shard_size
@@ -136,30 +131,32 @@ class TestVocabParallelKLDivergence:
                 torch.manual_seed(42 + self.test_case_idx * 100 + i)
 
             # Generate inputs and broadcast to all ranks
-            full_student_logits, teacher_topk_logps, teacher_topk_indices = self.generate_forward_inputs()
+            full_student_logits, teacher_topk_logps, teacher_topk_ids = self.generate_forward_inputs()
             dist.broadcast(full_student_logits, src=0, group=self.group)
             dist.broadcast(teacher_topk_logps, src=0, group=self.group)
-            dist.broadcast(teacher_topk_indices, src=0, group=self.group)
+            dist.broadcast(teacher_topk_ids, src=0, group=self.group)
 
             # VP implementation on sharded logits
             vp_logits = full_student_logits[..., shard_start:shard_end].contiguous().detach().requires_grad_(True)
-            vp_loss, vp_student_mass, vp_teacher_mass = compute_forward_kl_topk_vp(
+            loss_out = compute_forward_kl_topk_vp(
                 student_logits=vp_logits,
                 teacher_topk_log_probs=teacher_topk_logps,
-                teacher_topk_indices=teacher_topk_indices,
-                config=cfg_megatron,
+                teacher_topk_ids=teacher_topk_ids,
+                config=cfg,
             )
+            vp_loss = loss_out["distillation_losses"]
             vp_loss.sum().backward()
             grad_vp = vp_logits.grad.detach().clone()
 
             # Reference implementation on full logits
             full_ref = full_student_logits.detach().clone().requires_grad_(True)
-            ref_loss, ref_student_mass, ref_teacher_mass = compute_forward_kl_topk_ref(
+            fsdp_loss_out = compute_forward_kl_topk_ref(
                 student_logits=full_ref,
                 teacher_topk_log_probs=teacher_topk_logps,
-                teacher_topk_indices=teacher_topk_indices,
-                config=config_fsdp,
+                teacher_topk_ids=teacher_topk_ids,
+                config=cfg,
             )
+            ref_loss = fsdp_loss_out["distillation_losses"]
             ref_loss.sum().backward()
             grad_ref_shard = full_ref.grad[..., shard_start:shard_end].detach().clone()
 
