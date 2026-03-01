@@ -17,8 +17,37 @@ from typing import Optional
 
 import torch
 
-from verl.trainer.distillation.megatron.utils import vocab_parallel_log_softmax
 from verl.workers.config import DistillationConfig
+
+def vocab_parallel_log_softmax(
+    vp_logits: torch.Tensor,
+) -> torch.Tensor:
+    """
+    1. Converts logits to float (in calculate_logits_max)
+    2. Finds max logit across all partitions
+    3. Shifts logits by the max for stability
+    4. Exponentiates the shifted logits
+    5. Computes the sum of exponentiated shifted logits across all partitions
+    """
+    from megatron.core.fusions.fused_cross_entropy import calculate_logits_max
+    from megatron.core.parallel_state import get_tensor_model_parallel_group
+
+    # seq_len, batch_size, top_k = target_topk_logps.size()
+    vp_logits, logits_max = calculate_logits_max(vp_logits)
+
+    torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=get_tensor_model_parallel_group())
+
+    vp_logits = vp_logits - logits_max.unsqueeze(dim=-1)
+    exp_logits = vp_logits.exp()
+    sum_exp_logits = exp_logits.sum(dim=-1)
+
+    torch.distributed.all_reduce(
+        sum_exp_logits,
+        op=torch.distributed.ReduceOp.SUM,
+        group=get_tensor_model_parallel_group(),
+    )
+    log_sum_exp_logits = sum_exp_logits.log()
+    return vp_logits - log_sum_exp_logits.unsqueeze(dim=-1)
 
 
 class _VocabParallelKLDivergence(torch.autograd.Function):
