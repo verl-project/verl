@@ -83,6 +83,7 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
         chunk_size: int = 512,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         ctx.set_materialize_grads(False)
+        output_requires_grad = hidden_states.requires_grad or vocab_weights.requires_grad
 
         # Cast to a 2D tensor of the shape [T, D] for ease of working
         orig_ndim = hidden_states.ndim
@@ -98,7 +99,6 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
         T = hidden_states.shape[0]
 
         # Allocate memory for outputs
-        output_requires_grad = hidden_states.requires_grad or vocab_weights.requires_grad
         log_probs = hidden_states.new_zeros(T, requires_grad=output_requires_grad)
         entropy = hidden_states.new_zeros(T, requires_grad=output_requires_grad)
 
@@ -149,10 +149,10 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
 
         # Allocate memory for outputs
         dhidden_states = None
-        if hidden_states.requires_grad:
+        if ctx.needs_input_grad[0]:
             dhidden_states = torch.zeros_like(hidden_states)
         dvocab_weights = None
-        if vocab_weights.requires_grad:
+        if ctx.needs_input_grad[1]:
             dvocab_weights = torch.zeros_like(vocab_weights)
 
         # Perform backward one chunk at a time
@@ -174,13 +174,13 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
                 temperature=temperature,
             )
 
-            if hidden_states.requires_grad:
+            if ctx.needs_input_grad[0]:
                 dhidden_states[chunk_start:chunk_end] += h
-            if vocab_weights.requires_grad:
+            if ctx.needs_input_grad[1]:
                 dvocab_weights += v
 
         # Cast the output back to the original input dimension
-        if orig_ndim == 3 and hidden_states.requires_grad:
+        if orig_ndim == 3 and ctx.needs_input_grad[0]:
             hidden_size = hidden_states.shape[-1]
             dhidden_states = dhidden_states.view(orig_batch_size, -1, hidden_size)
 
