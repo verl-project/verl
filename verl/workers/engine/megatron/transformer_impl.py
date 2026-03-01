@@ -262,7 +262,10 @@ class MegatronEngine(BaseEngine):
     def _maybe_enable_fused_kernels(self):
         if not self.engine_config.use_fused_kernels:
             return
-
+        if self.distillation_enabled:
+            raise NotImplementedError(
+                "Fused kernels are not supported for distillation in Megatron engine; please disable fused kernels."
+            )
         if self.is_value_model or self.model_config.mtp.enable:
             logger.warning_once(
                 "Fused kernels are not supported for value models or when MTP is enabled in Megatron engine; disabling."
@@ -695,7 +698,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         if calculate_entropy:
             entropy = output["entropy"]
             model_output["entropy"] = entropy
-        logits = output.get("logits")
+        logits = output.pop("logits", None)
         model_output.update(
             prepare_student_distillation_inputs(
                 logits=logits, batch=data, cu_seqlens=None, config=self.distillation_config
@@ -795,7 +798,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     ret["entropy"] = entropy
                 else:
                     logits_bak = logits
-
+                if self.distillation_enabled:
+                    ret["logits"] = logits
                 log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                 ret["log_probs"] = log_probs
                 return ret
