@@ -19,5 +19,5 @@ actor_rollout_ref:
     name: sglang
     multi_turn:
       enable: True
-      max_assistant_turns: 2
-      format: qwen
+      max_assistant_turns: 4
+      format: hermes
