@@ -36,7 +36,7 @@ RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
 
 RUN pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.15.0
 
-RUN pip install git+https://github.com/volcengine/verl.git@v0.6.0 && \
+RUN pip install git+https://github.com/verl-project/verl.git@v0.6.0 && \
     pip uninstall -y verl
 
 # avoid cudnn9.10&torch2.9.1 bug
