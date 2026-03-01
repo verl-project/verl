@@ -73,6 +73,18 @@ DEFAULT_RETRY_DELAY = 2.0
 DEFAULT_MAX_CONNECTIONS = 2000
 DEFAULT_MAX_WAIT_TIME = 300.0
 
+ADMIN_OPTIONAL_ENDPOINTS = {
+    "abort_request",
+    "flush_cache",
+    "load_lora_adapter",
+    "release_memory_occupation",
+    "resume_memory_occupation",
+    "unload_lora_adapter",
+    "update_weights_from_tensor",
+    "update_weights_from_distributed",
+    "update_weights_from_ipc",
+}
+
 
 def _read_response(response: requests.Response):
     if response.status_code == 204 or not response.content:
@@ -287,6 +299,16 @@ class HttpServerAdapter(EngineBase):
             logger.error(f"Failed to register with router: {e}")
             # Don't raise here - server can still work without router
 
+    def _get_request_headers(self, endpoint: str) -> dict[str, str]:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        if endpoint in ADMIN_OPTIONAL_ENDPOINTS:
+            token = getattr(self.server_args, "admin_api_key", None) or getattr(self.server_args, "api_key", None)
+        else:
+            token = getattr(self.server_args, "api_key", None)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
     def _make_request(
         self,
         endpoint: str,
@@ -319,13 +341,14 @@ class HttpServerAdapter(EngineBase):
             return {}
 
         url = f"http://{self.server_args.host}:{self.server_args.port}/{endpoint}"
+        headers = self._get_request_headers(endpoint)
 
         for attempt in range(self.max_attempts):
             try:
                 if method.upper() == "GET":
-                    response = requests.get(url, timeout=self.timeout)
+                    response = requests.get(url, headers=headers, timeout=self.timeout)
                 else:
-                    response = requests.post(url, json=payload or {}, timeout=self.timeout)
+                    response = requests.post(url, json=payload or {}, headers=headers, timeout=self.timeout)
 
                 response.raise_for_status()
                 return _read_response(response)
@@ -335,6 +358,12 @@ class HttpServerAdapter(EngineBase):
             except requests.exceptions.ConnectionError:
                 logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
             except requests.exceptions.HTTPError as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                # SGLang returns 400 when unloading a non-existent adapter. This is expected in
+                # "refresh" flows where we optimistically unload before loading a new adapter.
+                if endpoint == "unload_lora_adapter" and status_code == 400:
+                    logger.warning(f"HTTP 400 for unload_lora_adapter (likely not loaded yet): {e}")
+                    return {}
                 logger.error(f"HTTP error for {endpoint}: {e}")
                 raise
             except Exception as e:
@@ -386,6 +415,24 @@ class HttpServerAdapter(EngineBase):
                 "serialized_named_tensors": serialized_named_tensors,
                 "load_format": load_format,
                 "flush_cache": flush_cache,
+            },
+        )
+
+    def load_lora_adapter(self, lora_name: str, lora_path: str, pinned: bool = False) -> dict[str, Any]:
+        return self._make_request(
+            "load_lora_adapter",
+            {
+                "lora_name": lora_name,
+                "lora_path": lora_path,
+                "pinned": pinned,
+            },
+        )
+
+    def unload_lora_adapter(self, lora_name: str) -> dict[str, Any]:
+        return self._make_request(
+            "unload_lora_adapter",
+            {
+                "lora_name": lora_name,
             },
         )
 
@@ -519,8 +566,11 @@ class HttpServerAdapter(EngineBase):
         # Use retry logic with limited attempts to avoid infinite loops
         for attempt in range(self.max_attempts * 2):  # Allow more retries for cache flush
             try:
+                headers = self._get_request_headers("flush_cache")
                 response = requests.get(
-                    f"http://{self.server_args.host}:{self.server_args.port}/flush_cache", timeout=self.timeout
+                    f"http://{self.server_args.host}:{self.server_args.port}/flush_cache",
+                    headers=headers,
+                    timeout=self.timeout,
                 )
                 if response.status_code == 200:
                     return _read_response(response)
@@ -687,16 +737,19 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             return {}
 
         url = f"http://{self.server_args.host}:{self.server_args.port}/{endpoint}"
+        headers = self._get_request_headers(endpoint)
 
         for attempt in range(self.max_attempts):
             try:
                 async with self._get_session() as session:
                     if method.upper() == "GET":
-                        async with session.get(url, timeout=timeout) as response:
+                        async with session.get(url, timeout=timeout, headers=headers) as response:
                             response.raise_for_status()
                             return await _read_async_response(response)
                     else:
-                        async with session.post(url, json=payload or {}, timeout=timeout) as response:
+                        async with session.post(
+                            url, json=payload or {}, timeout=timeout, headers=headers
+                        ) as response:
                             response.raise_for_status()
                             return await _read_async_response(response)
 
@@ -705,6 +758,11 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             except aiohttp.ClientConnectorError:
                 logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
             except aiohttp.ClientResponseError as e:
+                # SGLang returns 400 when unloading a non-existent adapter. This is expected in
+                # "refresh" flows where we optimistically unload before loading a new adapter.
+                if endpoint == "unload_lora_adapter" and getattr(e, "status", None) == 400:
+                    logger.warning(f"HTTP 400 for unload_lora_adapter (likely not loaded yet): {e}")
+                    return {}
                 logger.error(f"HTTP error for {endpoint}: {e}")
                 raise
             except Exception as e:
@@ -776,6 +834,24 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             },
         )
 
+    async def load_lora_adapter(self, lora_name: str, lora_path: str, pinned: bool = False) -> dict[str, Any]:
+        return await self._make_async_request(
+            "load_lora_adapter",
+            {
+                "lora_name": lora_name,
+                "lora_path": lora_path,
+                "pinned": pinned,
+            },
+        )
+
+    async def unload_lora_adapter(self, lora_name: str) -> dict[str, Any]:
+        return await self._make_async_request(
+            "unload_lora_adapter",
+            {
+                "lora_name": lora_name,
+            },
+        )
+
     async def flush_cache(self) -> dict[str, Any]:
         """Flush the cache of the server asynchronously.
 
@@ -796,9 +872,10 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         # Use retry logic with limited attempts to avoid infinite loops
         for attempt in range(self.max_attempts * 4):  # Allow more retries for cache flush
             try:
+                headers = self._get_request_headers("flush_cache")
                 async with self._get_session() as session:
                     url = f"http://{self.server_args.host}:{self.server_args.port}/flush_cache"
-                    async with session.get(url) as response:
+                    async with session.get(url, headers=headers) as response:
                         if response.status == 200:
                             return await _read_async_response(response)
             except Exception as e:

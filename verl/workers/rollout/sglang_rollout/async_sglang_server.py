@@ -366,6 +366,10 @@ class SGLangHttpServer:
             # video_data=video_data,
         }
 
+        engine_kwargs = (self.config.get("engine_kwargs", {}) or {}).get("sglang", {}) or {}
+        if engine_kwargs.get("enable_lora", False):
+            request["lora_path"] = f"verl_policy_{self.replica_rank}_{self.node_rank}"
+
         if self.config.enable_rollout_routing_replay:
             request.update({"return_routed_experts": True})
 

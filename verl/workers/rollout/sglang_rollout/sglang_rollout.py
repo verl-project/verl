@@ -15,10 +15,14 @@
 # limitations under the License.
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import multiprocessing as mp
 import os
-from typing import Generator
+import shutil
+from pathlib import Path
+from typing import AsyncIterator, Generator
 
 import ray
 import sglang.srt.entrypoints.engine
@@ -38,6 +42,7 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -156,11 +161,19 @@ class ServerAdapter(BaseRollout):
             f"server address: {server_address}, port: {server_port}"
         )
         host = f"[{server_address}]" if is_valid_ipv6_address(server_address) else server_address
+        engine_kwargs = (self.config.get("engine_kwargs", {}) or {}).get("sglang", {}) or {}
+        adapter_kwargs = {}
+        server_args_fields = {f.name for f in dataclasses.fields(ServerArgs)}
+        if "api_key" in server_args_fields:
+            adapter_kwargs["api_key"] = engine_kwargs.get("api_key", None)
+        if "admin_api_key" in server_args_fields:
+            adapter_kwargs["admin_api_key"] = engine_kwargs.get("admin_api_key", None)
         self._engine = AsyncHttpServerAdapter(
             model_path=self.model_config.local_path,
             host=host,
             port=server_port,
             launch_server=False,
+            **adapter_kwargs,
             trust_remote_code=self.model_config.trust_remote_code,
         )
 
@@ -205,16 +218,126 @@ class ServerAdapter(BaseRollout):
                 self.model_config.hf_config.quantization_config,
                 dtype=self.model_config.hf_config.dtype,
             )
+            for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+                await sgl_update_weights(
+                    engine=self._engine,
+                    params_batch=params_batch,
+                    device_mesh_key="infer_tp",
+                    device_mesh=self.device_mesh,
+                )
         else:
-            weights = weights
+            engine_kwargs = (self.config.get("engine_kwargs", {}) or {}).get("sglang", {}) or {}
+            enable_lora = bool(engine_kwargs.get("enable_lora", False))
+            if not enable_lora:
+                async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=params_batch,
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                    )
+            else:
+                lora_items: list[tuple[str, torch.Tensor]] = []
 
-        async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
-            await sgl_update_weights(
-                engine=self._engine,
-                params_batch=params_batch,
-                device_mesh_key="infer_tp",
-                device_mesh=self.device_mesh,
-            )
+                async def _base_weight_iter() -> AsyncIterator[tuple[str, torch.Tensor]]:
+                    async for name, t in ensure_async_iterator(weights):
+                        if "lora_" in name:
+                            lora_items.append((name, t))
+                        else:
+                            yield name, t
+
+                async for params_batch in get_named_tensor_buckets(_base_weight_iter(), update_weights_bucket_bytes):
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=params_batch,
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                    )
+
+                if lora_items:
+                    lora_name = f"verl_policy_{self.replica_rank}_{self.node_rank}"
+                    # Build a PEFT-compatible adapter config for SGLang.
+                    # Note: SGLang needs explicit module names to infer LoRA hidden dims.
+                    target_modules_val = engine_kwargs.get("lora_target_modules", None)
+                    target_modules = None
+                    if target_modules_val:
+                        if isinstance(target_modules_val, str):
+                            try:
+                                target_modules = json.loads(target_modules_val)
+                            except Exception:
+                                s = target_modules_val.strip()
+                                if s.startswith("[") and s.endswith("]"):
+                                    items = [p.strip().strip("\"'") for p in s[1:-1].split(",")]
+                                    items = [p for p in items if p]
+                                    target_modules = items
+                        else:
+                            try:
+                                target_modules = list(target_modules_val)
+                            except Exception:
+                                target_modules = None
+                    if not (
+                        isinstance(target_modules, list)
+                        and target_modules
+                        and all(isinstance(x, str) for x in target_modules)
+                    ):
+                        target_modules = [
+                            "q_proj",
+                            "k_proj",
+                            "v_proj",
+                            "o_proj",
+                            "gate_proj",
+                            "up_proj",
+                            "down_proj",
+                        ]
+                    from peft import LoraConfig, TaskType  # type: ignore
+
+                    peft_cfg = LoraConfig(
+                        r=int(self.model_config.lora_rank),
+                        lora_alpha=int(self.model_config.lora_alpha),
+                        target_modules=target_modules,
+                        bias="none",
+                        task_type=TaskType.CAUSAL_LM,
+                        inference_mode=True,
+                    ).to_dict()
+                    peft_cfg["task_type"] = peft_cfg["task_type"].value if peft_cfg.get("task_type") else None
+                    peft_cfg["peft_type"] = peft_cfg["peft_type"].value if peft_cfg.get("peft_type") else None
+                    peft_cfg["target_modules"] = list(peft_cfg.get("target_modules") or target_modules)
+                    (adapter_dir / "adapter_config.json").write_text(json.dumps(peft_cfg), encoding="utf-8")
+
+                    from safetensors.torch import save_file  # type: ignore
+
+                    lora_state = {k: v.detach().cpu() for k, v in lora_items}
+                    required_bytes = sum(int(v.numel()) * int(v.element_size()) for v in lora_state.values())
+                    safety_margin = 8 * 1024 * 1024  # 8 MiB
+                    adapter_root = Path("/dev/shm")
+                    try:
+                        free_bytes = int(shutil.disk_usage(adapter_root).free)
+                    except Exception:
+                        free_bytes = 0
+                    if free_bytes < required_bytes + safety_margin:
+                        logger.warning(
+                            f"Not enough space in {adapter_root} for LoRA adapter "
+                            f"(need={required_bytes}B free={free_bytes}B); falling back to /tmp."
+                        )
+                        adapter_root = Path("/tmp")
+
+                    adapter_dir = adapter_root / f"verl_sglang_lora_{self.replica_rank}_{self.node_rank}"
+                    adapter_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    try:
+                        adapter_dir.chmod(0o700)
+                    except OSError as e:
+                        logger.warning(f"Failed to chmod LoRA adapter dir '{adapter_dir}' to 0700: {e}")
+                    (adapter_dir / "adapter_config.json").write_text(json.dumps(peft_cfg), encoding="utf-8")
+                    tmp_path = adapter_dir / "adapter_model.safetensors.tmp"
+                    out_path = adapter_dir / "adapter_model.safetensors"
+                    save_file(lora_state, str(tmp_path))
+                    os.replace(tmp_path, out_path)
+
+                    try:
+                        await self._engine.unload_lora_adapter(lora_name)
+                    except Exception as e:
+                        logger.warning(f"Failed to unload LoRA adapter '{lora_name}', proceeding with load: {e}")
+                    await self._engine.load_lora_adapter(lora_name=lora_name, lora_path=str(adapter_dir), pinned=False)
 
         if self.device_mesh["infer_tp"].get_local_rank() == 0:
             await self._engine.flush_cache()
