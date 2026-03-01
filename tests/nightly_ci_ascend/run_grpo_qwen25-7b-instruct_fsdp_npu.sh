@@ -1,15 +1,21 @@
 set -x
 
+# Some models are optimized by vllm ascend. While in some case, e.g. rlhf training, 
+# the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
+
+MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
-    data.train_batch_size=1024 \
+    data.train_batch_size=32 \
     data.max_prompt_length=1024 \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-7B-Instruct \
+    actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.actor.optim.lr=5e-8 \
     actor_rollout_ref.model.use_remove_padding=False \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
@@ -34,9 +40,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=console \
     trainer.project_name='verl_grpo_example_gsm8k' \
-    trainer.experiment_name='qwen2_5_7b_function_rm' \
-    trainer.n_gpus_per_node=16 \
+    trainer.experiment_name='qwen2_5_7b_instruct_fsdp' \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
-    trainer.test_freq=5 \
-    trainer.total_epochs=5 $@
+    trainer.test_freq=-1 \
+    trainer.total_training_steps=15 $@
