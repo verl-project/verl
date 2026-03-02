@@ -267,7 +267,7 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
             score_function=self.score_function,
             expert_bias=self.expert_bias,
             fused=self.config.moe_router_fusion,
-            router_replay=self.router_replay,
+            router_replay=getattr(self, "router_replay", None),
         )
 
     # Apply token dropping to probs and routing_map.
@@ -340,7 +340,9 @@ def apply_router_replay_patch():
     # Step 3: Define the new __init__ method
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-        self.router_replay = RouterReplay()
+        self.router_replay = None
+        if self.config.enable_routing_replay:
+            self.router_replay = RouterReplay()
 
     # Step 4: Patch MoEAlltoAllTokenDispatcher.preprocess to handle router replay
     # When router replay is enabled, duplicate indices in top_indices can cause
