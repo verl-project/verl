@@ -20,7 +20,6 @@ from tensordict import TensorDict
 from verl.protocol import DataProtoFuture, _padding_size_key
 from verl.utils.py_functional import DynamicEnum
 from verl.utils.tensordict_utils import chunk_tensordict, concat_tensordict, contiguous
-from verl.utils.transferqueue_utils import BatchMeta
 
 # here we add a magic number of avoid user-defined function already have this attribute
 MAGIC_ATTR = "attrs_3141562937"
@@ -80,7 +79,7 @@ def _split_args_kwargs_data_proto(chunks, *args, **kwargs):
 
     splitted_args = []
     for arg in args:
-        assert isinstance(arg, DataProto | DataProtoFuture | BatchMeta | TensorDict)
+        assert isinstance(arg, DataProto | DataProtoFuture | TensorDict)
         if isinstance(arg, TensorDict):
             chunked_arg = chunk_tensordict(arg, chunks)
             chunked_arg = _consolidate_tuple_td(chunked_arg)
@@ -91,7 +90,7 @@ def _split_args_kwargs_data_proto(chunks, *args, **kwargs):
 
     splitted_kwargs = {}
     for key, val in kwargs.items():
-        assert isinstance(val, DataProto | DataProtoFuture | BatchMeta | TensorDict)
+        assert isinstance(val, DataProto | DataProtoFuture | TensorDict)
         if isinstance(val, TensorDict):
             chunked_kwarg = chunk_tensordict(val, chunks)
             chunked_kwarg = _consolidate_tuple_td(chunked_kwarg)
@@ -165,8 +164,6 @@ def _concat_data_proto_or_future(output: list):
         return DataProto.concat(output)
     elif isinstance(o, ray.ObjectRef):
         return DataProtoFuture.concat(output)
-    elif isinstance(o, BatchMeta):
-        return BatchMeta.concat(output)
     elif isinstance(o, TensorDict):
         return concat_tensordict(output)
     else:
@@ -288,8 +285,8 @@ def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output)
     from verl.protocol import DataProto
 
     for o in output:
-        assert isinstance(o, DataProto | ray.ObjectRef | BatchMeta | TensorDict), (
-            f"expecting {o} to be DataProto | ray.ObjectRef | BatchMeta | TensorDict, but got {type(o)}"
+        assert isinstance(o, DataProto | ray.ObjectRef | TensorDict), (
+            f"expecting {o} to be DataProto | ray.ObjectRef | TensorDict, but got {type(o)}"
         )
     return _concat_data_proto_or_future(output)
 
@@ -447,14 +444,11 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
         A decorator that wraps the original function with distributed execution
         configuration.
     """
-    from verl.utils.transferqueue_utils import tqbridge
 
     _check_dispatch_mode(dispatch_mode=dispatch_mode)
     _check_execute_mode(execute_mode=execute_mode)
 
     def decorator(func):
-        func = tqbridge(dispatch_mode=dispatch_mode)(func)
-
         @wraps(func)
         def inner(*args, **kwargs):
             if materialize_futures:
