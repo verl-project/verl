@@ -21,9 +21,8 @@ TRAIN_FILES=${HOME}/data/pokemon-gpt4o-captions/train.parquet
 VAL_FILES=${HOME}/data/pokemon-gpt4o-captions/test.parquet
 
 SP_SIZE=${SP_SIZE:-1}
-DATA_PARALLEL_SIZE=${DATA_PARALLEL_SIZE:-8}
-EXPERT_PARALLEL_SIZE=${EXPERT_PARALLEL_SIZE:-2}
-DATA_PARALLEL_MODE=${DATA_PARALLEL_MODE:-fsdp2}
+FSDP_SIZE=${FSDP_SIZE:-8}
+EP_SIZE=${EP_SIZE:-2}
 
 TP_SIZE=${TP_SIZE:-1}
 PP_SIZE=${PP_SIZE:-1}
@@ -48,12 +47,13 @@ VEOMNI_CONFIG="\
     optim.lr_min=1e-6 \
     optim.lr_scheduler_type=cosine \
     engine.ulysses_parallel_size=${SP_SIZE} \
-    engine.data_parallel_mode=${DATA_PARALLEL_MODE} \
-    engine.data_parallel_size=${DATA_PARALLEL_SIZE} \
-    engine.expert_parallel_size=${EXPERT_PARALLEL_SIZE} \
+    engine.fsdp_size=${FSDP_SIZE} \
+    engine.expert_parallel_size=${EP_SIZE} \
     engine.enable_full_shard=True \
     engine.moe_implementation=fused \
-    engine.attn_implementation=flash_attention_2"
+    engine.attn_implementation=flash_attention_2 \
+    engine.param_ofload=True \
+    engine.optimizer_ofload=True"
 
 mkdir -p "${CKPT_HOME}"
 
@@ -70,7 +70,7 @@ $COMMAND \
     data.messages_key=messages \
     model.path=${MODEL_PATH} \
     model.use_remove_padding=True \
-    model.enable_gradient_checkpointing=False \
+    model.enable_gradient_checkpointing=True \
     ${VEOMNI_CONFIG} \
     trainer.test_freq=after_each_epoch \
     trainer.save_freq=1000 \
