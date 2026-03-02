@@ -84,6 +84,9 @@ class VeOmniEngine(FSDPEngine):
         self.data_parallel_mode = "fsdp2"
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
+        self.need_logits_for_distillation = (
+            self.distillation_enabled and self.distillation_config.distillation_loss.loss_settings.use_topk
+        )
         if self.distillation_enabled:
             raise NotImplementedError("Distillation is not supported yet in VeOmniEngine")  # TODO: JacobHelwig
         self.rank = dist.get_rank()
