@@ -18,7 +18,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from tensordict import TensorDict
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
 from torchtitan.components.dataloader import BaseDataLoader
