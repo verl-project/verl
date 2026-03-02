@@ -18,7 +18,7 @@ optimizer_offload: false
 # Only for FSDP2: offload param/grad/optimizer during train
 offload_policy: false
 
-# Offload gradient checkpoint inputs to CPU pinned memory (saves GPU memory)
+# Offload checkpoint inputs to CPU pinned memory (reduces per-layer accumulated GPU activations)
 checkpoint_input_offload: false
 
 # Reshard after forward pass to reduce memory footprint
