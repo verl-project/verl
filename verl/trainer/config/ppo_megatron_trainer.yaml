@@ -15,8 +15,10 @@ defaults:
   - model@actor_rollout_ref.model: hf_model
   # Critic model config.
   - critic@critic: megatron_critic
+  # legacy reward impl config, for backward compatibility
+  - legacy_reward_impl
   # Reward model config.
-  - reward_model@reward_model: reward_model
+  - reward@reward: reward
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_
@@ -111,10 +113,6 @@ actor_rollout_ref:
     layer_name_map:
       qkv_layer_name: qkv
       gate_proj_layer_name: gate_up
-
-custom_reward_function:
-  path: null
-  name: compute_score
 
 algorithm:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs

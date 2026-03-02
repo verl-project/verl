@@ -50,7 +50,7 @@ class TestConfigComparison(unittest.TestCase):
         "worker_nsight_options",
         "controller_nsight_options",
     ]
-    ignored_paths = ["reward_model"]
+    ignored_paths = ["reward_model", "custom_reward_function"]
 
     def _compare_configs_recursively(
         self, current_config, legacy_config, path="", legacy_allow_missing=True, current_allow_missing=False

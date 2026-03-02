@@ -54,7 +54,7 @@ class RemoteRewardManager(RewardManagerBase):
         assert not self.is_async_reward_score, "Async reward score is not supported in remote reward manager. "
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
-        num_reward_workers = config.reward_model.num_workers
+        num_reward_workers = config.reward.num_workers
         # in the rollout & reward parallel mode
         # the sum of final reward workers will be agent_loop_workers * num_reward_workers
         self.reward_worker = [

@@ -231,7 +231,7 @@ class RateLimitedRewardManager(RewardManagerBase):
 
     Example Configuration:
         >>> config = DictConfig({
-        ...     "reward_model": {
+        ...     "reward": {
         ...         "max_concurrent": 10,      # 10 parallel requests
         ...         "max_rpm": 500,            # 500 requests/minute
         ...         "max_tpm": 100000,         # 100k tokens/minute
@@ -271,7 +271,7 @@ class RateLimitedRewardManager(RewardManagerBase):
         # but it can be surprising (and dangerous) when the first initialization happens with default
         # values (often "unlimited") and later code tries to apply limits.
         if cls._class_initialized:
-            rm_cfg = config.get("reward_model") or {}
+            rm_cfg = config.get("reward") or {}
             incoming_max_rpm = rm_cfg.get("max_rpm", None)
             incoming_max_tpm = rm_cfg.get("max_tpm", None)
 
@@ -299,7 +299,7 @@ class RateLimitedRewardManager(RewardManagerBase):
 
         super().init_class(config, tokenizer)
 
-        rm_cfg = config.get("reward_model") or {}
+        rm_cfg = config.get("reward") or {}
 
         # Concurrency limiter
         cls._max_concurrent = rm_cfg.get("max_concurrent", 1)
@@ -353,7 +353,7 @@ class RateLimitedRewardManager(RewardManagerBase):
         # When called via the legacy AbstractRewardManager signature, `config` may be absent.
         # In that case we fall back to an empty config so training can proceed.
         if config is None:
-            config = DictConfig({"reward_model": {}})
+            config = DictConfig({"reward": {}})
         if tokenizer is None:
             raise TypeError("RateLimitedRewardManager requires `tokenizer`.")
 
@@ -362,7 +362,7 @@ class RateLimitedRewardManager(RewardManagerBase):
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
-        self.timeout = config.reward_model.get("timeout", 300.0)
+        self.timeout = config.reward.get("timeout", 300.0)
 
     async def _compute_reward(
         self, data_source: str, solution_str: str, ground_truth: str, extra_info: dict

@@ -72,6 +72,7 @@ class ServerAdapter(BaseRollout):
         config: RolloutConfig,
         model_config: HFModelConfig,
         device_mesh: DeviceMesh,
+        replica_rank: int = -1,
     ):
         super().__init__(config, model_config, device_mesh)
         self.server_handle: ray.actor.ActorHandle = None
@@ -83,7 +84,10 @@ class ServerAdapter(BaseRollout):
             * self.config.data_parallel_size
             * self.config.pipeline_model_parallel_size
         )
-        self.replica_rank = rank // rollout_world_size
+        if replica_rank == -1:
+            self.replica_rank = rank // rollout_world_size
+        else:
+            self.replica_rank = replica_rank
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
 
@@ -169,7 +173,7 @@ class ServerAdapter(BaseRollout):
 
         buffer, shm = None, None
         if not self.use_shm:
-            buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:0")
+            buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
             handle = reduce_tensor(buffer)
             s.send_pyobj(handle)
         else:
@@ -228,6 +232,7 @@ class ServerAdapter(BaseRollout):
         # clean up
         s.close()
         del buffer
+        gc.collect()
         if shm is not None:
             shm.close()
             shm.unlink()

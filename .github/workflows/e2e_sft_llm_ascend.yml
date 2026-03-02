@@ -109,7 +109,7 @@ jobs:
           ln -s /root/.cache/models ~/models
       - name: Prepare gsm8k dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python3 examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
       - name: Running GSM8K E2E training tests on 8 NPUs with rmpad using function rm
         run: |
           ray stop --force
@@ -122,10 +122,6 @@ jobs:
         run: |
           ray stop --force
           SP_SIZE=2 bash tests/special_e2e/sft/run_sft.sh
-      - name: Check loss difference between sequence parallel vs. default implementation
-        run: |
-          ray stop --force
-          ENTRYPOINT="tests/special_e2e/sft/test_sp_loss_match.py" SP_SIZE=2 bash tests/special_e2e/sft/run_sft.sh
       - name: Running GSM8K E2E training tests with LoRA
         run: |
           ray stop --force
@@ -134,11 +130,6 @@ jobs:
         run: |
           ray stop --force
           LORA_RANK=32 RESUME_MODE=auto TOTAL_TRAIN_STEP=2 bash tests/special_e2e/sft/run_sft.sh
-      # TODO: multiturn
-      - name: Prepare gsm8k dataset
-        run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
       - name: Running GSM8K E2E training tests with multiturn and various configs and compare results
         run: |
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM

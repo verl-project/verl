@@ -36,6 +36,7 @@ from verl.utils.chat_template import extract_system_prompt_and_generation
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
+from verl.utils.py_functional import convert_nested_value_to_list_recursive
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -66,19 +67,6 @@ def print_assembled_message(tokenizer, message_list, input_ids, loss_mask, attn_
     str += f"tokenized seperately    :\n{tokenizer.decode(input_ids)}"
 
     logger.debug(str)
-
-
-def convert_nested_value_to_list_recursive(data_item):
-    if isinstance(data_item, dict):
-        return {k: convert_nested_value_to_list_recursive(v) for k, v in data_item.items()}
-    elif isinstance(data_item, list):
-        return [convert_nested_value_to_list_recursive(elem) for elem in data_item]
-    elif isinstance(data_item, np.ndarray):
-        # Convert to list, then recursively process the elements of the new list
-        return convert_nested_value_to_list_recursive(data_item.tolist())
-    else:
-        # Base case: item is already a primitive type (int, str, float, bool, etc.)
-        return data_item
 
 
 class MultiTurnSFTDataset(Dataset):

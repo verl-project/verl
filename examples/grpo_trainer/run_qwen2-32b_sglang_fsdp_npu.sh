@@ -170,8 +170,8 @@ TRAINER_CONFIG=(
 python3 -m verl.trainer.main_ppo \
     --config-path=config \
     --config-name='ppo_trainer.yaml' \
-    custom_reward_function.path=recipe/r1_ascend/deepscaler.py \
-    custom_reward_function.name=compute_score \
+    reward.custom_reward_function.path=recipe/r1_ascend/deepscaler.py \
+    reward.custom_reward_function.name=compute_score \
     "${DATA_CONFIG[@]}" \
     "${MODEL_CONFIG[@]}" \
     "${ACTOR_CONFIG[@]}" \

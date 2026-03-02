@@ -36,7 +36,7 @@ from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from verl.utils.device import get_device_id, get_torch_device
-from verl.utils.py_functional import union_two_dict
+from verl.utils.py_functional import list_of_dict_to_dict_of_list, union_two_dict
 from verl.utils.torch_functional import allgather_dict_tensors
 
 __all__ = ["DataProto", "union_tensor_dict"]
@@ -196,18 +196,6 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
         tensor_dict1[key] = val
 
     return tensor_dict1
-
-
-def list_of_dict_to_dict_of_list(list_of_dict: list[dict]):
-    if len(list_of_dict) == 0:
-        return {}
-    keys = list_of_dict[0].keys()
-    output = {key: [] for key in keys}
-    for data in list_of_dict:
-        for key, item in data.items():
-            assert key in output
-            output[key].append(item)
-    return output
 
 
 def fold_batch_dim(data: "DataProto", new_batch_size):

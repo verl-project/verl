@@ -328,6 +328,10 @@ class ServerAdapter(BaseRollout):
         self._adapter = AsyncTRTLLMHttpAdapter(
             host=host,
             port=server_port,
+            timeout=self.config.server.timeout,
+            max_attempts=self.config.server.max_attempts,
+            retry_delay=self.config.server.retry_delay,
+            max_connections=self.config.server.max_connections,
         )
 
     async def resume(self, tags: list[str]):

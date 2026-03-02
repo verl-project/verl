@@ -75,7 +75,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.use_reference_policy = need_reference_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
-        self.use_reward_loop = self.config.reward_model.use_reward_loop
 
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -298,9 +297,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
             # agent_reward_loop: streaming reward computation with actor rollout
             # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-            enable_agent_reward_loop = self.use_reward_loop and (
-                not self.use_rm or self.config.reward_model.enable_resource_pool
-            )
+            enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+
             # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
             # to stream reward computation with actor rollout
             reward_loop_worker_handles = (
@@ -424,6 +422,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             if batch is None:
                 raise TrainingStopException("Training terminated: queue returned None")
             self._collect_metrics_from_samples(batch, metrics)
+        batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         return batch
 
     def _compute_old_log_prob(self, batch: DataProto):
@@ -563,8 +562,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     def load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
-            # NOTE: while there is no checkpoint to load, we still need to offload the model and optimizer to CPU
-            self.actor_rollout_wg.load_checkpoint(None)
             return 0
 
         # load from hdfs
@@ -580,8 +577,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # find global_step_folder
         if self.config.trainer.resume_mode == "auto":
             if global_step_folder is None:
-                print("[FullyAsyncTrainer] Training from scratch")
-                self.actor_rollout_wg.load_checkpoint(None)
                 return 0
         else:
             if self.config.trainer.resume_mode == "resume_path":

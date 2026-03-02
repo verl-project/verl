@@ -80,7 +80,7 @@ def need_reward_model(
     config: DictConfig,
 ) -> bool:
     """Given the config, do we need reward model."""
-    return config.reward_model.enable
+    return config.reward.reward_model.enable
 
 
 def need_critic(config: DictConfig) -> bool:
