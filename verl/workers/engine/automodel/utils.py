@@ -173,6 +173,7 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
             gate_precision=engine_config.gate_precision,
             enable_hf_state_dict_adapter=engine_config.enable_hf_state_dict_adapter,
             enable_fsdp_optimizations=engine_config.enable_fsdp_optimizations,
+            experts=engine_config.experts_backend,
         )
         kwargs["backend"] = backend_config
 

@@ -35,7 +35,7 @@ enable_compile: false
 model_dtype: fp32
 
 # Attention implementation ("sdpa", "flash_attention_2", "eager", "te")
-attn_implementation: sdpa
+attn_implementation: flash_attention_2
 
 # Backend settings (nemo_automodel BackendConfig)
 use_te_backend: false
@@ -48,6 +48,7 @@ enable_fsdp_optimizations: false
 enable_deepep: false
 reshard_after_forward: false
 fake_balanced_gate: false
+experts_backend: gmm
 ignore_router_for_ac: false
 lm_head_precision: null
 wrap_outer_model: true

@@ -436,7 +436,7 @@ class AutomodelEngineConfig(EngineConfig):
     enable_fp8: bool = False
     enable_compile: bool = False
     model_dtype: str = "fp32"
-    attn_implementation: str = "sdpa"
+    attn_implementation: str = "flash_attention_2"
     # Backend settings (BackendConfig)
     use_te_backend: bool = False
     rope_fusion: bool = True
@@ -447,6 +447,7 @@ class AutomodelEngineConfig(EngineConfig):
     enable_deepep: bool = False
     reshard_after_forward: bool = False
     fake_balanced_gate: bool = False
+    experts_backend: str = "gmm"  # "gmm" (grouped_gemm) or "torch_mm" (torch._grouped_mm)
     ignore_router_for_ac: bool = False
     lm_head_precision: Optional[str] = None
     wrap_outer_model: bool = True
