@@ -1287,6 +1287,8 @@ class BatchData:
         Returns the **original data type** (not BatchData).
         """
         data = self._data
+        if not data:
+            raise ValueError("Cannot concatenate an empty list of data items.")
         sample = data[0]
         if isinstance(sample, ray.ObjectRef):
             return DataProtoFuture.concat(data)
