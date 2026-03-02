@@ -1261,7 +1261,7 @@ class BatchData:
     def is_concatable(self) -> bool:
         """Return True if the wrapped list of data supports concat collect."""
         data = self._data
-        if not isinstance(data, (list, tuple)) or len(data) == 0:
+        if not isinstance(data, list | tuple) or len(data) == 0:
             return False
         return isinstance(data[0], self._concatable_types())
 
