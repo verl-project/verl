@@ -28,6 +28,10 @@ _MODELS = {
         "qwen2",
         ("ParallelQwen2ForCausalLMRmPadPP", "ParallelQwen2ForValueRmPadPP", "ParallelQwen2ForCausalLMRmPad"),
     ),
+    "Qwen3_5ForConditionalGeneration": (
+        "qwen3_5",
+        ("ParallelQwen3_5ForConditionalGenerationRmPadPP", "ParallelQwen3_5ForValueRmPadPP", "ParallelQwen3_5ForConditionalGenerationRmPad"),
+    ),
     "MistralForCausalLM": (
         "mistral",
         ("ParallelMistralForCausalLMRmPadPP", "ParallelMistralForValueRmPadPP", "ParallelMistralForCausalLMRmPad"),

@@ -21,7 +21,7 @@ from typing import Optional
 import torch
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5CausalLMOutputWithPast,
-    Qwen3_5ForCausalLM,
+    Qwen3_5ForConditionalGeneration,
 )
 
 logger = logging.getLogger(__file__)
@@ -35,7 +35,7 @@ class Qwen3_5CausalLMOutputForPPO(Qwen3_5CausalLMOutputWithPast):
 
 
 def forward_with_normal_backend(
-    self: "Qwen3_5ForCausalLM",
+    self: "Qwen3_5ForConditionalGeneration",
     input_ids: torch.LongTensor = None,
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
@@ -52,7 +52,7 @@ def forward_with_normal_backend(
 
 
 def forward_with_torch_backend(
-    self: "Qwen3_5ForCausalLM",
+    self: "Qwen3_5ForConditionalGeneration",
     input_ids: torch.LongTensor = None,
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
@@ -86,7 +86,7 @@ def forward_with_torch_backend(
 
 
 def forward_with_triton_backend(
-    self: "Qwen3_5ForCausalLM",
+    self: "Qwen3_5ForConditionalGeneration",
     input_ids: torch.LongTensor = None,
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,

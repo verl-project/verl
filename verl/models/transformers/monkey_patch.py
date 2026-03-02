@@ -437,10 +437,10 @@ def apply_monkey_patch(
             patch_vlm_for_ulysses_input_slicing(Qwen3VLTextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3VLMoeTextModel)
 
-    elif model.config.model_type == "qwen3_5_text":
+    elif model.config.model_type == "qwen3_5":
         # Step 1: patch model for Qwen3.5 support
         from transformers.models.qwen3_5.modeling_qwen3_5 import (
-            Qwen3_5ForCausalLM,
+            Qwen3_5ForConditionalGeneration,
             Qwen3_5Model,
             Qwen3_5TextModel,
         )
@@ -455,13 +455,13 @@ def apply_monkey_patch(
         # Apply forward function patches based on backend
         if use_fused_kernels:
             if use_triton_kernel:
-                Qwen3_5ForCausalLM.forward = forward_with_triton_backend
+                Qwen3_5ForConditionalGeneration.forward = forward_with_triton_backend
                 print(f"Monkey patch {model.__class__.__name__} with triton backend")
             else:
-                Qwen3_5ForCausalLM.forward = forward_with_torch_backend
+                Qwen3_5ForConditionalGeneration.forward = forward_with_torch_backend
                 print(f"Monkey patch {model.__class__.__name__} with torch backend")
         else:
-            Qwen3_5ForCausalLM.forward = forward_with_normal_backend
+            Qwen3_5ForConditionalGeneration.forward = forward_with_normal_backend
             print(f"Monkey patch {model.__class__.__name__} with normal backend")
 
         # Patch attention for prefix_grouper support if needed
