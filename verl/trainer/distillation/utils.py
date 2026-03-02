@@ -80,3 +80,10 @@ def prepare_distillation_inputs(
         )
     else:
         raise ValueError
+
+
+def fused_kernel_distillation_exception(need_logits_for_distillation: bool):
+    if need_logits_for_distillation:
+        raise NotImplementedError(
+            "Distillation losses that require logits are not compatible with fused linear cross entropy kernels because fused kernels do not return logits."
+        )
