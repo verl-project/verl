@@ -437,6 +437,41 @@ def apply_monkey_patch(
             patch_vlm_for_ulysses_input_slicing(Qwen3VLTextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3VLMoeTextModel)
 
+    elif model.config.model_type == "qwen3_5_text":
+        # Step 1: patch model for Qwen3.5 support
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5ForCausalLM,
+            Qwen3_5Model,
+            Qwen3_5TextModel,
+        )
+
+        from verl.models.transformers.qwen3_5 import (
+            forward_with_normal_backend,
+            forward_with_torch_backend,
+            forward_with_triton_backend,
+            patch_qwen3_5_attention_for_prefix_grouper,
+        )
+
+        # Apply forward function patches based on backend
+        if use_fused_kernels:
+            if use_triton_kernel:
+                Qwen3_5ForCausalLM.forward = forward_with_triton_backend
+                print(f"Monkey patch {model.__class__.__name__} with triton backend")
+            else:
+                Qwen3_5ForCausalLM.forward = forward_with_torch_backend
+                print(f"Monkey patch {model.__class__.__name__} with torch backend")
+        else:
+            Qwen3_5ForCausalLM.forward = forward_with_normal_backend
+            print(f"Monkey patch {model.__class__.__name__} with normal backend")
+
+        # Patch attention for prefix_grouper support if needed
+        if use_prefix_grouper:
+            patch_qwen3_5_attention_for_prefix_grouper()
+
+        # Step 2: patch input for sequence parallelism
+        if ulysses_sp_size > 1:
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
+
     elif model.config.model_type == "glm4v":
         # Step 1: patch model to support image-text mixed data
 
@@ -454,7 +489,7 @@ def apply_monkey_patch(
         print(f"Monkey patch {model.__class__.__name__} model forward")
 
         # Step 2: patch attention to support ulysses parallelism
-        if use_remove_padding or ulysses_sp_size > 1:
+        if use_remove_padding or ulysses_spindow_size > 1:
             from verl.models.transformers.glm4v import glm4v_attn_forward
 
             Glm4vTextAttention.forward = glm4v_attn_forward
