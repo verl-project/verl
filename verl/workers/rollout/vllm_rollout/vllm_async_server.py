@@ -839,6 +839,7 @@ class vLLMReplica(RolloutReplica):
                     }
                 },
                 name=name,
+                max_concurrency=self.max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
