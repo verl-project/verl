@@ -45,7 +45,6 @@ from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
 )
-from verl.utils.transferqueue_utils import tqbridge
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
@@ -399,7 +398,6 @@ class AgentLoopWorker:
             trace_config.get("max_samples_per_step_per_worker", None),
         )
 
-    @tqbridge()
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
 
@@ -814,20 +812,6 @@ class AgentLoopWorker:
             batch=batch,
             non_tensor_batch=non_tensor_batch,
             meta_info=meta_info,
-        )
-
-    def create_transferqueue_client(
-        self,
-    ):
-        """Create a client for data system (TransferQueue)."""
-        from verl.single_controller.ray.base import get_random_string
-        from verl.utils.transferqueue_utils import create_transferqueue_client
-
-        client_name = get_random_string(length=6)
-
-        self.tq_client = create_transferqueue_client(
-            client_id=f"AgentLoopWorker_{client_name}",
-            config=self.config.transfer_queue,
         )
 
 
