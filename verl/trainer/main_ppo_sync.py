@@ -105,8 +105,14 @@ def compute_advantage_for_multi_trajectories(
     norm_adv_by_std_in_grpo: bool = True,
     config: Any = None,
 ) -> DataProto:
-    """Compute GRPO advantages from each session's final output and broadcast within the session. For
-    non-GRPO estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
+    """Compute GRPO advantages from each session's final output. For non-GRPO
+    estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
+
+    For GRPO, only the final output in each ``{uid}_{session_id}`` group participates
+    in advantage computation, and the result is broadcast to the other outputs in
+    the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
+    in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
+    original ``compute_advantage()`` unchanged.
     """
     if adv_estimator != core_algos.AdvantageEstimator.GRPO:
         return compute_advantage(
@@ -119,7 +125,11 @@ def compute_advantage_for_multi_trajectories(
             config=config,
         )
 
+    # Track the final output row that is present for each session:
+    # {uid}_{session_id} -> (row_idx, output_idx).
     session_to_final_row: dict[str, tuple[int, int]] = {}
+    # Record which session each input row belongs to:
+    # row_idx -> {uid}_{session_id}.
     row_to_session: list[str] = []
 
     for row, key in enumerate(batch_keys):
@@ -128,17 +138,20 @@ def compute_advantage_for_multi_trajectories(
             uid, session_id, output_idx = str(key).rsplit("_", 2)
             session_key = f"{uid}_{session_id}"
             output_idx = int(output_idx)
-        except ValueError:
+        except ValueError as err:
             raise ValueError(
                 f"Unexpected batch key format: {key}. Expected format is '{{uid}}_{{session_id}}_{{index}}'."
-            )
+            ) from err
 
         row_to_session.append(session_key)
         prev = session_to_final_row.get(session_key)
         if prev is None or output_idx > prev[1]:
             session_to_final_row[session_key] = (row, output_idx)
 
+    # These are the unique final-output rows that will actually participate in GRPO.
     final_rows = sorted({row for row, _ in session_to_final_row.values()})
+    # Broadcast map from every original row to its session's final-output row:
+    # row_idx -> final_row_idx.
     row_to_final_row = {row: session_to_final_row[row_to_session[row]][0] for row in range(len(batch_keys))}
     data_for_adv = data.select_idxs(final_rows)
     data_for_adv = compute_advantage(
@@ -154,6 +167,8 @@ def compute_advantage_for_multi_trajectories(
     response_mask = data.batch["response_mask"]
     response_lens = response_mask.sum(dim=-1).tolist()
     max_response_len = response_mask.size(-1)
+    # After select_idxs(final_rows), translate the original final row indices to
+    # local row indices in data_for_adv: final_row_idx -> local_idx.
     final_row_to_local = {row: local for local, row in enumerate(final_rows)}
 
     def _expand_from_final(field_name: str) -> torch.Tensor:
@@ -345,7 +360,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         except Exception as e:
             logger.exception(f"Error in _run_prompt: {e}")
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
-        
+
     async def _agent_loop_postprocess(self, output: AgentLoopOutput | list[AgentLoopOutput], **kwargs) -> None:
         """Put agent loop outputs into TransferQueue."""
         uid, session_id = kwargs["uid"], kwargs["session_id"]

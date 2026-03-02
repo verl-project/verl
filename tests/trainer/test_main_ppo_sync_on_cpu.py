@@ -29,6 +29,7 @@ _MAIN_PPO_SYNC = None
 
 
 def _build_grpo_multi_session_batch() -> DataProto:
+    """Build one prompt with two sessions and uneven trajectory counts."""
     return DataProto(
         batch=TensorDict(
             {
@@ -60,6 +61,37 @@ def _build_grpo_multi_session_batch() -> DataProto:
     )
 
 
+def _build_grpo_batch_with_missing_session_output() -> DataProto:
+    """Build one prompt where session 1 has no output and contributes no row."""
+    return DataProto(
+        batch=TensorDict(
+            {
+                "token_level_rewards": torch.tensor(
+                    [
+                        [100.0, 0.0, 0.0],
+                        [1.0, 2.0, 3.0],
+                        [3.0, 3.0, 3.0],
+                        [12.0, 0.0, 0.0],
+                    ],
+                    dtype=torch.float32,
+                ),
+                "values": torch.zeros((4, 3), dtype=torch.float32),
+                "response_mask": torch.tensor(
+                    [
+                        [1.0, 0.0, 0.0],
+                        [1.0, 1.0, 1.0],
+                        [1.0, 1.0, 1.0],
+                        [1.0, 0.0, 0.0],
+                    ],
+                    dtype=torch.float32,
+                ),
+            },
+            batch_size=(4,),
+        ),
+        non_tensor_batch={"uid": np.array(["prompt_a", "prompt_a", "prompt_a", "prompt_a"], dtype=object)},
+    )
+
+
 def _import_main_ppo_sync():
     global _MAIN_PPO_SYNC
     transfer_queue_stub = types.ModuleType("transfer_queue")
@@ -74,6 +106,12 @@ def _import_main_ppo_sync():
 
 
 class TestMainPPOSync(unittest.TestCase):
+    def _assert_allclose(self, actual: torch.Tensor, expected: torch.Tensor) -> None:
+        self.assertTrue(torch.allclose(actual, expected))
+
+    def _assert_zeros(self, tensor: torch.Tensor) -> None:
+        self.assertTrue(torch.equal(tensor, torch.zeros_like(tensor)))
+
     def test_compute_advantage_for_multi_trajectories_delegates_non_grpo_estimators(self):
         """Test that non-GRPO estimators reuse the original compute_advantage path."""
         main_ppo_sync = _import_main_ppo_sync()
@@ -97,8 +135,8 @@ class TestMainPPOSync(unittest.TestCase):
             config={},
         )
 
-        self.assertTrue(torch.allclose(result.batch["advantages"], expected.batch["advantages"]))
-        self.assertTrue(torch.allclose(result.batch["returns"], expected.batch["returns"]))
+        self._assert_allclose(result.batch["advantages"], expected.batch["advantages"])
+        self._assert_allclose(result.batch["returns"], expected.batch["returns"])
 
     def test_compute_advantage_for_multi_trajectories_uses_final_output_per_session_in_grpo(self):
         """Test that GRPO only uses each session's final output to compute advantage."""
@@ -124,28 +162,70 @@ class TestMainPPOSync(unittest.TestCase):
 
         expected_session0_scalar_adv = expected_final.batch["advantages"][0, 2]
         expected_session0_scalar_ret = expected_final.batch["returns"][0, 2]
-        self.assertTrue(torch.allclose(result.batch["advantages"][0, :1], expected_session0_scalar_adv.expand(1)))
-        self.assertTrue(torch.allclose(result.batch["returns"][0, :1], expected_session0_scalar_ret.expand(1)))
-        self.assertTrue(torch.equal(result.batch["advantages"][0, 1:], torch.zeros(2, dtype=result.batch["advantages"].dtype)))
-        self.assertTrue(torch.equal(result.batch["returns"][0, 1:], torch.zeros(2, dtype=result.batch["returns"].dtype)))
-        self.assertTrue(torch.allclose(result.batch["advantages"][1, :3], expected_final.batch["advantages"][0, :3]))
-        self.assertTrue(torch.allclose(result.batch["returns"][1, :3], expected_final.batch["returns"][0, :3]))
+        self._assert_allclose(result.batch["advantages"][0, :1], expected_session0_scalar_adv.expand(1))
+        self._assert_allclose(result.batch["returns"][0, :1], expected_session0_scalar_ret.expand(1))
+        self._assert_zeros(result.batch["advantages"][0, 1:])
+        self._assert_zeros(result.batch["returns"][0, 1:])
+        self._assert_allclose(result.batch["advantages"][1, :3], expected_final.batch["advantages"][0, :3])
+        self._assert_allclose(result.batch["returns"][1, :3], expected_final.batch["returns"][0, :3])
 
         expected_session1_scalar_adv = expected_final.batch["advantages"][1, 1]
         expected_session1_scalar_ret = expected_final.batch["returns"][1, 1]
-        self.assertTrue(torch.allclose(result.batch["advantages"][2, :1], expected_session1_scalar_adv.expand(1)))
-        self.assertTrue(torch.allclose(result.batch["returns"][2, :1], expected_session1_scalar_ret.expand(1)))
-        self.assertTrue(torch.equal(result.batch["advantages"][2, 1:], torch.zeros(2, dtype=result.batch["advantages"].dtype)))
-        self.assertTrue(torch.equal(result.batch["returns"][2, 1:], torch.zeros(2, dtype=result.batch["returns"].dtype)))
-        self.assertTrue(torch.allclose(result.batch["advantages"][3, :2], expected_final.batch["advantages"][1, :2]))
-        self.assertTrue(torch.allclose(result.batch["returns"][3, :2], expected_final.batch["returns"][1, :2]))
-        self.assertTrue(torch.allclose(result.batch["advantages"][4, :2], expected_final.batch["advantages"][1, :2]))
-        self.assertTrue(torch.allclose(result.batch["returns"][4, :2], expected_final.batch["returns"][1, :2]))
-        self.assertTrue(torch.equal(result.batch["advantages"][3:, 2], torch.zeros(2, dtype=result.batch["advantages"].dtype)))
-        self.assertTrue(torch.equal(result.batch["returns"][3:, 2], torch.zeros(2, dtype=result.batch["returns"].dtype)))
+        self._assert_allclose(result.batch["advantages"][2, :1], expected_session1_scalar_adv.expand(1))
+        self._assert_allclose(result.batch["returns"][2, :1], expected_session1_scalar_ret.expand(1))
+        self._assert_zeros(result.batch["advantages"][2, 1:])
+        self._assert_zeros(result.batch["returns"][2, 1:])
+        self._assert_allclose(result.batch["advantages"][3, :2], expected_final.batch["advantages"][1, :2])
+        self._assert_allclose(result.batch["returns"][3, :2], expected_final.batch["returns"][1, :2])
+        self._assert_allclose(result.batch["advantages"][4, :2], expected_final.batch["advantages"][1, :2])
+        self._assert_allclose(result.batch["returns"][4, :2], expected_final.batch["returns"][1, :2])
+        self._assert_zeros(result.batch["advantages"][3:, 2])
+        self._assert_zeros(result.batch["returns"][3:, 2])
 
         self.assertLess(result.batch["advantages"][0, 0], 0)
         self.assertGreater(result.batch["advantages"][2, 0], 0)
+
+    def test_compute_advantage_for_multi_trajectories_skips_sessions_with_none_output(self):
+        """Test that absent AgentLoop outputs simply leave those sessions out of GRPO."""
+        main_ppo_sync = _import_main_ppo_sync()
+        data = _build_grpo_batch_with_missing_session_output()
+
+        result = main_ppo_sync.compute_advantage_for_multi_trajectories(
+            data=data,
+            batch_keys=["prompt_a_0_0", "prompt_a_0_1", "prompt_a_2_0", "prompt_a_3_0"],
+            adv_estimator=AdvantageEstimator.GRPO,
+            num_repeat=1,
+            norm_adv_by_std_in_grpo=True,
+            config={},
+        )
+
+        expected_final = main_ppo_sync.compute_advantage(
+            _build_grpo_batch_with_missing_session_output().select_idxs([1, 2, 3]),
+            adv_estimator=AdvantageEstimator.GRPO,
+            num_repeat=1,
+            norm_adv_by_std_in_grpo=True,
+            config={},
+        )
+
+        expected_session0_scalar_adv = expected_final.batch["advantages"][0, 2]
+        expected_session0_scalar_ret = expected_final.batch["returns"][0, 2]
+        self._assert_allclose(result.batch["advantages"][0, :1], expected_session0_scalar_adv.expand(1))
+        self._assert_allclose(result.batch["returns"][0, :1], expected_session0_scalar_ret.expand(1))
+        self._assert_zeros(result.batch["advantages"][0, 1:])
+        self._assert_zeros(result.batch["returns"][0, 1:])
+        self._assert_allclose(result.batch["advantages"][1, :3], expected_final.batch["advantages"][0, :3])
+        self._assert_allclose(result.batch["returns"][1, :3], expected_final.batch["returns"][0, :3])
+
+        self._assert_allclose(result.batch["advantages"][2, :3], expected_final.batch["advantages"][1, :3])
+        self._assert_allclose(result.batch["returns"][2, :3], expected_final.batch["returns"][1, :3])
+        self._assert_allclose(result.batch["advantages"][3, :1], expected_final.batch["advantages"][2, :1])
+        self._assert_allclose(result.batch["returns"][3, :1], expected_final.batch["returns"][2, :1])
+        self._assert_zeros(result.batch["advantages"][3, 1:])
+        self._assert_zeros(result.batch["returns"][3, 1:])
+
+        self.assertLess(result.batch["advantages"][0, 0], 0)
+        self.assertAlmostEqual(result.batch["advantages"][2, 0].item(), 0.0, places=6)
+        self.assertGreater(result.batch["advantages"][3, 0], 0)
 
     def test_compute_advantage_for_multi_trajectories_fails_for_unexpected_keys(self):
         """Test that invalid key format raises instead of silently falling back."""
