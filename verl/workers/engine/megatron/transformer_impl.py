@@ -84,6 +84,9 @@ class MegatronEngine(BaseEngine):
         self.checkpoint_config = checkpoint_config
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
+        self.need_logits_for_distillation = (
+            self.distillation_enabled and self.distillation_config.distillation_loss.loss_settings.use_topk
+        )
 
         assert self.engine_config.use_mbridge, "use_mbridge must be True"
         self._init_device_mesh()
@@ -267,9 +270,10 @@ class MegatronEngine(BaseEngine):
     def _maybe_enable_fused_kernels(self):
         if not self.engine_config.use_fused_kernels:
             return
-        if self.distillation_enabled:
+        if self.need_logits_for_distillation:
             raise NotImplementedError(
-                "Fused kernels are not supported for distillation in Megatron engine; please disable fused kernels."
+                "Fused kernels are not compatible with distillation losses that require logits because fused linear cross "
+                "entropy avoids materializing logits vector, which is needed for top-k distillation loss."
             )
         if self.is_value_model or self.model_config.mtp.enable:
             logger.warning_once(
@@ -831,7 +835,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     ret["entropy"] = entropy
                 else:
                     logits_bak = logits
-                if self.distillation_enabled:
+                if self.need_logits_for_distillation:
                     ret["logits"] = logits.clone()
                 log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
                 ret["log_probs"] = log_probs
