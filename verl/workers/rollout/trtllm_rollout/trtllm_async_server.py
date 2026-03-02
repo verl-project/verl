@@ -363,7 +363,7 @@ class TRTLLMReplica(RolloutReplica):
         else:
             local_bundle_index = self.world_size * self.replica_rank
 
-        while local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
+        while start_pg_index < len(self.resource_pool.pgs) and local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
             start_pg_index += 1
         assert (
