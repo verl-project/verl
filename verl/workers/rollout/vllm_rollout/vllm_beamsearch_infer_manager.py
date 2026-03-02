@@ -45,10 +45,10 @@ class VLLMBeamSearchInfer:
         return [outputs[i].sequences for i in range(len(outputs))]
 
     def sleep(self):
-        self.llm.sleep()
+        self.llm.sleep(level=1)
     
     def wake_up(self):
-        self.llm.wake_up(tags=["kv_cache", "weights"])
+        self.llm.wake_up()
         self.llm.reset_prefix_cache()
     
 class VLLMBeamSearchManager:
@@ -76,7 +76,7 @@ class VLLMBeamSearchManager:
             end = start + bsz
             if i < remain:
                 end += 1
-            batches.append(batch[start:end])
+            batches.append({batch[start:end]})
             start = end
         
         results = ray.get([worker.generate.remote(batch) for worker, batch in zip(self.workers, batches)])
