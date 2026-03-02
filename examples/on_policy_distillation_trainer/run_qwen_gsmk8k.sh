@@ -4,7 +4,7 @@ conda activate verl
 export PATH=$CONDA_PREFIX/bin:$PATH
 export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=3,4
+export CUDA_VISIBLE_DEVICES=0,2,8,9
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
 export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
@@ -19,18 +19,20 @@ FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
 TEACHER_MODEL=Qwen2.5-3B-Instruct
 
-USE_POLICY_GRADIENT=False
+# USE_POLICY_GRADIENT=False
 # DISTILLATION_LOSS_MODE="k3"
-DISTILLATION_LOSS_MODE="forward_kl_topk"
+# DISTILLATION_LOSS_MODE="forward_kl_topk"
+# USE_FUSED_KERNELS=False
 
-# USE_POLICY_GRADIENT=True
-# DISTILLATION_LOSS_MODE="k1"
+USE_POLICY_GRADIENT=True
+DISTILLATION_LOSS_MODE="k1"
+USE_FUSED_KERNELS=True
 
 DISTILLATION_LOSS_MAX_CLAMP=10.0
 DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
-EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-pg-${USE_POLICY_GRADIENT}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
+EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-pg-${USE_POLICY_GRADIENT}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}-fused_kernels-${USE_FUSED_KERNELS}"
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
@@ -40,7 +42,7 @@ STUDENT_MICRO_BATCH_SIZE_PER_GPU=2
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
 USE_DYNAMIC_BSZ=False
 
-STUDENT_WORLD_SIZE=2
+STUDENT_WORLD_SIZE=4
 
 TEACHER_RESOURCE_POOL=False
 TEACHER_WORLD_SIZE=2
@@ -70,6 +72,7 @@ DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path="${FAMILY}/${STUDENT_MODEL}"
+    actor_rollout_ref.model.use_fused_kernels=$USE_FUSED_KERNELS
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.actor.use_torch_compile=True
@@ -89,6 +92,7 @@ DISTILLATION=(
     distillation.teacher_model.inference.enforce_eager=$ENFORCE_EAGER
     distillation.teacher_model.inference.max_model_len=$MAX_NUM_TOKENS
     distillation.teacher_model.inference.max_num_batched_tokens=$MAX_NUM_TOKENS
+    distillation.teacher_model.inference.max_num_seqs=$MAX_NUM_TOKENS
     distillation.distillation_loss.loss_mode=$DISTILLATION_LOSS_MODE
     distillation.distillation_loss.topk=64
     distillation.distillation_loss.use_task_rewards=False
@@ -118,6 +122,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.calculate_log_probs=False
     actor_rollout_ref.rollout.max_model_len=$MAX_NUM_TOKENS
     actor_rollout_ref.rollout.max_num_batched_tokens=$MAX_NUM_TOKENS
+    actor_rollout_ref.rollout.max_num_seqs=$MAX_NUM_TOKENS
     actor_rollout_ref.rollout.n=1
 )
 
