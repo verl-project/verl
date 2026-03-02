@@ -108,12 +108,20 @@ def hf_processor(name_or_path, **kwargs):
         name_or_path (str): The name of the processor.
 
     Returns:
-        transformers.ProcessorMixin: The pretrained processor.
+        Optional[transformers.ProcessorMixin]: The pretrained multimodal processor.
+        Returns ``None`` for text-only models (including AutoProcessor fallbacks to
+        tokenizer backends such as ``TokenizersBackend``).
     """
-    from transformers import AutoConfig, AutoProcessor
+    from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizerBase
 
     try:
         processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
+        # In newer transformers, AutoProcessor may legitimately fall back to a
+        # tokenizer backend (e.g. TokenizersBackend) for text-only models.
+        # Treat it as "no multimodal processor" and let callers use hf_tokenizer.
+        if isinstance(processor, PreTrainedTokenizerBase):
+            return None
+
         config = AutoConfig.from_pretrained(name_or_path, **kwargs)
 
         # Bind vlm model's get_rope_index method to processor
