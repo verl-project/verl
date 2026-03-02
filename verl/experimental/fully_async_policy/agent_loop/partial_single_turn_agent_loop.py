@@ -30,9 +30,9 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
-        self.response_length = self.config.actor_rollout_ref.rollout.response_length
-        self.apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
+        self.prompt_length = self.rollout_config.prompt_length
+        self.response_length = self.rollout_config.response_length
+        self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         output: Optional[AgentLoopOutput] = kwargs.get("output", None)
@@ -124,6 +124,8 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                 "is_cancel": is_cancel,
                 "param_version_start": param_version_start,
                 "param_version_end": param_version_end,
+                "turn_scores": [],
+                "tool_rewards": [],
             },
             multi_modal_data=multi_modal_data,
             # multi_modal_data={"image": image_data} if image_data is not None else {},

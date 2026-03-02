@@ -68,7 +68,7 @@ on:
       # Entrypoints
       - ".github/workflows/e2e_one_step_off_policy_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
-      - "tests/special_e2e/run_one_step_off_policy.sh"
+      - "tests/special_npu/run_one_step_off_policy.sh"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -122,7 +122,7 @@ jobs:
       - name: Running the E2E test with one_step_off_policy algorithm (FSDP2)
         run: |
           ray stop --force
-          bash tests/special_e2e/run_one_step_off_policy.sh
+          bash tests/special_npu/run_one_step_off_policy.sh
 
   # Test Megatron strategy
   e2e_one_step_off_policy_megatron_ascend:
@@ -167,4 +167,4 @@ jobs:
         run: |
           ray stop --force
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          bash tests/special_e2e/run_one_step_off_policy.sh
+          bash tests/special_npu/run_one_step_off_policy.sh

@@ -25,6 +25,7 @@ from verl.protocol import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
+from verl.utils import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.device import get_device_name
 from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
@@ -97,10 +98,13 @@ def test_agent_reward_loop_standalone():
     )
     actor_rollout_wg.init_model()
 
-    agent_loop_manager = AgentLoopManager(config, worker_group=actor_rollout_wg)
+    agent_loop_manager = AgentLoopManager.create(
+        config=config,
+        worker_group=actor_rollout_wg,
+    )
     # sleep rollout replicas
     checkpoint_manager = CheckpointEngineManager(
-        backend=config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        config=omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine),
         trainer=actor_rollout_wg,
         replicas=agent_loop_manager.rollout_replicas,
     )

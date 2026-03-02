@@ -108,7 +108,7 @@ jobs:
           pip3 install hf_transfer
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install cupy-cuda12x pytest-asyncio
+          pip3 install cupy-cuda12x==13.6.0 pytest-asyncio
           pip3 install --ignore-installed blinker
           pip3 install --ignore-installed mlflow "numpy<2.0"
       - name: Run all GPU unit tests

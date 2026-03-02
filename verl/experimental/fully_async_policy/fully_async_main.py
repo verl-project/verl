@@ -82,45 +82,19 @@ def create_role_worker_mapping(config):
     # Select worker class based on strategy
     use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
     if use_legacy_worker_impl == "disable":
-        from verl.experimental.separation.engine_workers import (
-            DetachActorWorker,
-            DetachAsyncRolloutWorker,
-            TrainingWorker,
-        )
+        from verl.experimental.separation.engine_workers import DetachActorWorker
         from verl.single_controller.ray import RayWorkerGroup
+        from verl.workers.engine_workers import TrainingWorker
 
         ray_worker_group_cls = RayWorkerGroup
 
         CriticWorker = TrainingWorker
     else:
-        if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.experimental.fully_async_policy.fsdp_workers import (
-                CriticWorker,
-                DetachActorWorker,
-                DetachAsyncRolloutWorker,
-            )
-            from verl.single_controller.ray import RayWorkerGroup
-
-            ray_worker_group_cls = RayWorkerGroup
-
-        elif config.actor_rollout_ref.actor.strategy == "megatron":
-            assert config.critic.strategy == "megatron"
-            from verl.experimental.fully_async_policy.megatron_worker import (
-                CriticWorker,
-                DetachActorWorker,
-                DetachAsyncRolloutWorker,
-            )
-            from verl.single_controller.ray import RayWorkerGroup
-
-            ray_worker_group_cls = RayWorkerGroup
-        else:
-            raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
+        raise NotImplementedError("Fully async policy does not support legacy worker implementation")
 
     train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
     role_worker_mapping = {
         train_role: ray.remote(DetachActorWorker),
-        Role.Rollout: ray.remote(DetachAsyncRolloutWorker),
         Role.Critic: ray.remote(CriticWorker),
     }
 
@@ -177,13 +151,13 @@ class FullyAsyncTaskRunner:
 
         print("[ASYNC MAIN] Creating FullyAsyncRollouter and FullyAsyncTrainer in parallel...")
         with ThreadPoolExecutor(max_workers=2) as executor:
+            # TODO: keep _create_rollouter and _create_trainer parallel
+            # Rollouter does not permit continuous allocation, so we allocate trainer first.
+            trainer_future = executor.submit(self._create_trainer, config)
+            trainer_future.result()
+
             rollouter_future = executor.submit(self._create_rollouter, config)
             rollouter_future.result()
-
-            # TODO: keep _create_rollouter and _create_trainer parallel
-            trainer_future = executor.submit(self._create_trainer, config)
-            # Wait for both to complete
-            trainer_future.result()
 
         # sync total_train_steps between rollouter and trainer
         total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
@@ -233,7 +207,7 @@ class FullyAsyncTaskRunner:
         rollouter = FullyAsyncRollouter.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
-            role_worker_mapping={Role.Rollout: self.components["role_worker_mapping"][Role.Rollout]},
+            role_worker_mapping=None,
             resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
             processor=self.components["processor"],
@@ -313,6 +287,9 @@ def main(config):
     from time import time
 
     start_time = time()
+    # TODO: unify rollout config with actor_rollout_ref
+    config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
+    config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node
     run_ppo(config, task_runner_class=FullyAsyncTaskRunner)
     print(f"total time: {time() - start_time:.2f} seconds")
 

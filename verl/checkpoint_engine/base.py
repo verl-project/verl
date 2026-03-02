@@ -23,7 +23,7 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.ray_utils import auto_await
-from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
 
 
@@ -255,20 +255,32 @@ class CheckpointEngineWorker(Worker):
         rollout_config: RolloutConfig,
         model_config: HFModelConfig,
         server_adapter: BaseRollout = None,
+        *args,
+        **kwargs,
     ) -> None:
+        super().__init__()
         self.rollout_config = rollout_config
         self.model_config = model_config
 
+        self.server_adapter: BaseRollout = server_adapter
+        backend = self.rollout_config.checkpoint_engine.backend
+        bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
+        engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
+        self.checkpoint_engine: CheckpointEngine = CheckpointEngineRegistry.new(
+            backend, bucket_size=bucket_size, **engine_kwargs
+        )
+        self.extra_rollout_args = args
+        self.extra_rollout_kwargs = kwargs
+        if self.server_adapter is None:
+            self.server_adapter = get_rollout_class(self.rollout_config.name, self.rollout_config.mode)(
+                *self.extra_rollout_args,
+                config=self.rollout_config,
+                model_config=self.model_config,
+                device_mesh=None,
+                **self.extra_rollout_kwargs,
+            )
         # sglang and trt-llm need device_mesh for internal communication
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
-        self.server_adapter: BaseRollout = server_adapter or get_rollout_class(
-            rollout_config.name, rollout_config.mode
-        )(config=rollout_config, model_config=model_config, device_mesh=None)
-
-        backend = rollout_config.checkpoint_engine.backend
-        bucket_size = rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
-        engine_kwargs = rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
-        self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):
@@ -307,19 +319,20 @@ class CheckpointEngineManager:
     ```
 
     Args:
-        backend: The checkpoint engine backend.
+        config: The checkpoint engine config.
         trainer: The trainer worker group.
         replicas: The list of rollout replicas.
     """
 
     def __init__(
         self,
-        backend: str,
+        config: CheckpointEngineConfig,
         trainer: RayWorkerGroup,
         replicas: list[RolloutReplica],
     ) -> None:
-        self.backend = backend
-        self.backend_cls = CheckpointEngineRegistry.get(backend)
+        self.config = config
+        self.backend = config.backend
+        self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.trainer = trainer
         self.replicas = replicas
 

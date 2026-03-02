@@ -77,7 +77,7 @@ common_params=(
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz}
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.70
     actor_rollout_ref.rollout.temperature=${temperature}
     actor_rollout_ref.rollout.top_p=${top_p}
     actor_rollout_ref.rollout.top_k=${top_k}
@@ -86,9 +86,11 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k}
     actor_rollout_ref.rollout.val_kwargs.do_sample=True
     actor_rollout_ref.rollout.val_kwargs.n=1
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.name=vllm \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE"
     reward.reward_manager.name=dapo
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
     +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
@@ -120,7 +122,7 @@ actor_offload=False
 
 python3 -m verl.experimental.one_step_off_policy.main_ppo \
     "${common_params[@]}" \
-    actor_rollout_ref.actor.strategy=$ACTOR_STRATEGY \
+    actor_rollout_ref.actor.fsdp_config.strategy=$ACTOR_STRATEGY \
     critic.strategy=fsdp2 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.model.use_remove_padding=True \

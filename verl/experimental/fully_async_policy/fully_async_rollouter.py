@@ -32,7 +32,7 @@ from verl.experimental.fully_async_policy.detach_utils import (
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -98,8 +98,20 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        train_dataset = create_rl_dataset(
+            config.data.train_files,
+            config.data,
+            tokenizer,
+            processor,
+            max_samples=config.data.get("train_max_samples", -1),
+        )
+        val_dataset = create_rl_dataset(
+            config.data.val_files,
+            config.data,
+            tokenizer,
+            processor,
+            max_samples=config.data.get("val_max_samples", -1),
+        )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         self._validate_config()
@@ -216,6 +228,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     def get_rollout_wg(self):
         """Get rollout worker group"""
         return self.rollout_wg
+
+    def get_replicas(self):
+        """Get rollout worker group"""
+        return self.async_rollout_manager.rollout_replicas
 
     def get_max_queue_size(self):
         return self.max_queue_size
@@ -402,23 +418,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         2. Worker groups for each role (actor, critic, etc.)
         """
         self._init_async_objects()
-        self._init_resource_pools()
         self._create_worker_classes()
-        self._init_worker_groups()
-        self._init_models()
         self._init_reward_loop()
         await self._init_async_rollout_manager()
 
     def _create_actor_rollout_classes(self):
-        # only create rollout
-        for role in [Role.Rollout]:
-            resource_pool = self.resource_pool_manager.get_resource_pool(role)
-            role_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[role],
-                config=self.config.actor_rollout_ref,
-                role=str(role),
-            )
-            self.resource_pool_to_cls[resource_pool][str(role)] = role_cls
+        # Skip rollout creation and let agentloop handle it
+        pass
 
     def _init_models(self):
         self.rollout_wg = self.all_wg[str(Role.Rollout)]
@@ -755,12 +761,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 await asyncio.gather(*self.active_tasks, return_exceptions=True)
                 self.active_tasks.clear()
                 print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
-
-            # TODO use checkpoint engine for rollout clear_kv_cache
-            # print("[FullyAsyncRollouter][Public][Pause] clear kv cache")
-            # # Always clear KV cache to release GPU memory during weight synchronization,
-            # # regardless of partial_rollout setting.
-            # await self.async_rollout_manager.clear_kv_cache()
+            print("[FullyAsyncRollouter][Public][Pause] Prefix cache reset")
+            # Always clear KV cache to release GPU memory during weight synchronization,
+            # regardless of partial_rollout setting.
+            await self.async_rollout_manager.clear_kv_cache()
             self.monitor_loop_trigger = False
 
     async def resume(self, dependency_ref: ObjectRef = None):

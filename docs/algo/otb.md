@@ -1,18 +1,19 @@
 # Optimal Token Baseline (OTB)
 
-Last updated: 12/25/2025.
+Last updated: 02/23/2026.
 
-Optimal Token Baseline (OTB) is dynamic token-level baseline for variance reduction. It weights updates based on "Realized Energy"—essentially, how much uncertainty has accumulated up to that specific token. It downweights the noisy parts and trusts the clear signals. Read [Optimal Token Baseline blog](https://richardli.xyz/optimal-token-baseline) for more details.
+📝 [ArXiv](https://www.arxiv.org/abs/2602.07078) | 📒 [Blog](https://richardli.xyz/optimal-token-baseline) | 🤗 [Datasets](https://huggingface.co/datasets/Jiawei415/DPAO_filter) 
 
-## The method: OTB
+Optimal Token Baseline (OTB) is a dynamic token-level baseline for gradient variance reduction in policy-gradient reinforcement learning. It weights updates with the "Realized Energy" statistic that tracks how much uncertainty has accumulated up to each token, so noisy regions get downweighted while confident regions carry more weight.
 
-- OTB builds a _dynamic_ baseline that adapts to each token by tracking the “Realized Energy”—the uncertainty that has accumulated up to that token. It downweights the noisy parts and trusts the clear signals.
-- Unlike standard group means (which average over the padding `EOS` token ineffectively), OTB handles this naturally by computing baselines only over valid tokens.
+## Key properties
+
+- _Token-level baselines:_ OTB adapts per token by tracking realized energy, avoiding the padding artifacts that appear when group means dilute the signal with `EOS` tokens.
+- _Forward-only overhead:_ The realized-energy statistic is computed via the **Logit-Gradient Proxy**, so OTB requires no extra backward passes or gradient-norm kernels.
 
 ## Logit-Gradient Proxy
 
-- Computing true uncertainty requires expensive backward passes (calculating gradient norms per token). Instead, OTB introduces the **Logit-Gradient Proxy**: the realized energy can be estimated entirely from forward probabilities.
-- This means zero extra backward calls and effectively no additional runtime overhead.
+Computing true uncertainty per token would normally mandate per-token backward passes. OTB sidesteps this by estimating realized energy entirely from forward probabilities, so it introduces negligible runtime overhead in practice.
 
 ## Mechanics at a glance
 
@@ -38,7 +39,7 @@ The final advantage is `(G_t - B*_t) · mask_t`, so padding tokens stay at zero.
 
 - `actor_rollout_ref.actor.calculate_sum_pi_squared: true` (mandatory).
 - `actor_rollout_ref.model.use_fused_kernels: false` (required until fused kernels emit logits).
-- `algorithm.adv_estimator: optimal_token_baseline`.
+- `algorithm.adv_estimator: optimal_token_baseline` for single-turn RL and `tir_optimal_token_baseline` for multi-turn RL.
 - Group sampling (`actor_rollout_ref.rollout.n > 1`) to unlock OTB’s variance reduction; with `n=1` the baseline collapses to returns.
 
 Example OmegaConf overlay:
@@ -57,7 +58,7 @@ actor_rollout_ref:
 
 ## Example script
 
-- `examples/otb_trainer/run_qwen2_5-7b.sh`.
+See `examples/otb_trainer/run_qwen2_5-7b.sh` for a reference training loop.
 
 ## Gradient Variance Proxy Metrics
 
@@ -96,9 +97,6 @@ where `Ŵ(τ)` is the realized energy built. Given a mini-batch `{τ_i}` of siz
   Var_proxy = (1/(N-1)) · (P_total - S)
   ```
 
-`verl/trainer/ppo/metric_utils.py#L306` implements these diagnostics via `compute_variance_proxy_metrics`, emitting
-`variance_proxy/proxy1_signal_strength`,
-`variance_proxy/proxy2_total_power`, and
-`variance_proxy/proxy3_pure_noise`.
+`verl/trainer/ppo/metric_utils.py#L306` implements these diagnostics via `compute_variance_proxy_metrics`, emitting `variance_proxy/proxy1_signal_strength`, `variance_proxy/proxy2_total_power`, and `variance_proxy/proxy3_pure_noise`.
 
 Tracking these metrics provides a forward-only, low-overhead view of gradient health for any advantage estimator that supplies `sum_pi_squared`.

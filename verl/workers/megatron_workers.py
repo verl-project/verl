@@ -155,7 +155,6 @@ class MegatronWorker(Worker):
         if enable_mtp:
             assert hf_config.num_nextn_predict_layers > 0, "MTP requires at least one nextn_predict_layer"
             assert megatron_config.use_mbridge, "MTP requires use_mbridge to be True"
-            assert megatron_config.vanilla_mbridge, "MTP requires vanilla_mbridge to be True"
             override_transformer_config["mtp_loss_scaling_factor"] = self.config.model.mtp.mtp_loss_scaling_factor
         else:
             if hasattr(hf_config, "num_nextn_predict_layers"):
@@ -198,6 +197,10 @@ class MegatronWorker(Worker):
 
                 # In case of invalid overrides, we need to make sure some critical params are set correctly
                 provider.params_dtype = dtype
+
+                # Ensure dtype settings propagate to Megatron-Bridge/TE
+                provider.fp16 = fp16
+                provider.bf16 = bf16
 
                 # Pass distributed info
                 provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
@@ -670,7 +673,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if not self.config.actor.megatron.use_mbridge:
                 self.weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
 
-        get_torch_device().empty_cache()
+        # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
+        aggressive_empty_cache(force_sync=True)
         log_gpu_memory_usage("After init_model finish", logger=logger)
 
     async def rollout_mode(self):

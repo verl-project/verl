@@ -38,7 +38,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.actor.veomni.data_parallel_size="${FSDP_SIZE}" \
+    actor_rollout_ref.actor.veomni.fsdp_size="${FSDP_SIZE}" \
     actor_rollout_ref.actor.veomni.ulysses_parallel_size="${SP_SIZE}" \
     actor_rollout_ref.actor.veomni.expert_parallel_size="${EP_SIZE}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \

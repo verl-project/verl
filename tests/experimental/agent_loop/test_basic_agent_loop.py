@@ -28,6 +28,8 @@ from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
+from verl.utils.config import omega_conf_to_dataclass
+from verl.workers.config import CheckpointEngineConfig
 
 
 @pytest.fixture
@@ -345,8 +347,11 @@ def test_tool_agent_with_interaction(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path = interaction_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
     agent_loop_manager = init_agent_loop_manager(init_config)
+    checkpoint_engine_config = omega_conf_to_dataclass(
+        init_config.actor_rollout_ref.rollout.checkpoint_engine, CheckpointEngineConfig
+    )
     checkpoint_manager = CheckpointEngineManager(
-        backend=init_config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        config=checkpoint_engine_config,
         trainer=agent_loop_manager.worker_group,
         replicas=agent_loop_manager.rollout_replicas,
     )

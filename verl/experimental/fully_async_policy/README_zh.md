@@ -82,9 +82,6 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 | `async_training.trigger_parameter_sync_step`                     | 表示FullyAsyncTrainer进行多少次本地更新后,进行一次参数同步                          |
 | `async_training.staleness_threshold`                             | 新鲜度控制                                                           |
 | `async_training.partial_rollout`                                 | 是否进行partial_rollout                                             |
-| `async_training.checkpoint_engine.enable`                        | 是否开启checkpoint_engine模式的加速，默认值True                              |
-| `async_training.checkpoint_engine.overlap_broadcast_and_consume` | 启动checkpoint_engine时，是否在参数同步时在broadcast和加载之间使用流水，默认值False       |
-| `async_training.checkpoint_engine.device_buffer_size_M`          | 启动checkpoint_engine时，组装的bucket的大小(MB)，默认为4096                   |
 | `async_training.use_trainer_do_validate`                         | 是否使用Trainer的do_validate方法进行validation，默认值False                  |
 
 **进一步的解释：**
@@ -145,20 +142,6 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
   在流式训练中，require_batches 应该设置为1，表示生产够ppo_mini_batch_size样本后，就进行训练。
   在实际测试中，我们发现，如果单次下发的样本较少，由于数据分发的顺序，会导致训练不稳定，response 长度变长。
   在这里，我们额外提供 require_batches 进行流式分发，单次参与训练的样本数量控制。
-
-* `async_training.checkpoint_engine.enable`
-  
-  开启checkpoint engine后，相较于原始的逐tensor的参数同步方式，同步时间开销普遍可以降低60%以上。但是组装bucket会带来额外的临时显存开销。
-
-* `async_training.checkpoint_engine.overlap_broadcast_and_consume`
-
-  开启参数broadcast和load_weights之间的流水后，会进一步额外申请更多显存。由于目前分析参数同步的主要耗时并非来自broadcast和load_weights阶段，而是在参数生成阶段（由megatron或FSDP），因此该开关默认关闭。
-
-* `async_training.checkpoint_engine.device_buffer_size_M`
-  
-  控制开启checkpoint engine后，用于同步的显存buffer大小。实际的`bucket_size` = `max(device_buffer_size_M, 最大参数tensor size)`
-  * 在开启`overlap_broadcast_and_consume`时，trainer节点的临时额外显存开销为 `3 * bucket_size`, rollout节点的临时额外显存开销为`2 * bucket_size`。
-  * 在关闭`overlap_broadcast_and_consume`时，trainer节点的临时额外显存开销为 `2 * bucket_size`, rollout节点的临时额外显存开销为`1 * bucket_size`。
 
 * `async_training.use_trainer_do_validate`
 

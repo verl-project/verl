@@ -263,6 +263,7 @@ def efficient_entropy_kernel_general_mainloop(
     _accu = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     _entropy_b = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     _logprobs = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    vocab_bound = min((pid_n + 1) * vocab_per_split, vocab_size)
     for n in range(0, num_pid_n):
         start_offs_bn = pid_n * vocab_per_split + n * BLOCK_SIZE_N
         offs_bn = start_offs_bn + tl.arange(0, BLOCK_SIZE_N)
@@ -308,12 +309,14 @@ def efficient_entropy_kernel_general_mainloop(
         # scale logits by temperature
         logits *= rcp_temperature
 
+        logits_for_lse = tl.where(offs_bn[None, :] < vocab_bound, logits, float("-inf"))
+
         # update global maximum
         _max_old = _max
-        m_pid_n = tl.max(logits, axis=1)
+        m_pid_n = tl.max(logits_for_lse, axis=1)
         _max = tl.maximum(_max_old, m_pid_n)
 
-        exp_logits = tl.exp(logits - _max[:, None])
+        exp_logits = tl.exp(logits_for_lse - _max[:, None])
         coeff = tl.exp(_max_old - _max)
         _accu = coeff * _accu + tl.sum(exp_logits, axis=1)
 

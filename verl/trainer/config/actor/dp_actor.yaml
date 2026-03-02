@@ -48,3 +48,35 @@ calculate_sum_pi_squared: False
 
 # Enable gradient checkpointing for sum_pi_squared computation (saves memory)
 sum_pi_squared_checkpointing: False
+
+# QAT (Quantization-Aware Training) configuration
+# When enabled:
+#   - QAT is automatically applied to actor model during training
+#   - Fused scales (QKV/GateUp) are automatically enabled for training-inference consistency
+#   - Fast quantization is used when syncing weights to vLLM rollout
+# Supported modes: "w4a16" (NVFP4 weight-only)
+# Note: "w4a4" mode is included in the code but currently has KL divergence issues and is NOT recommended for use.
+# For usage examples, see: https://github.com/verl-project/verl-recipe/blob/main/qat/README.md
+qat:
+
+  # Whether to enable QAT
+  enable: false
+
+  # Quantization mode: "w4a16" (weight-only). "w4a4" is experimental and not recommended.
+  mode: "w4a16"
+
+  # Quantization group size (NVFP4 requires 16)
+  group_size: 16
+
+  # Patterns to ignore (e.g., lm_head, embed_tokens)
+  ignore_patterns:
+
+    - "lm_head"
+    - "embed_tokens"
+    - "re:.*mlp.gate$"
+
+  # Activation observer for W4A4 mode: "static_minmax", "memoryless_minmax", or "minmax"
+  activation_observer: "static_minmax"
+
+  # Path to vLLM quantization config JSON file
+  quantization_config_path: null

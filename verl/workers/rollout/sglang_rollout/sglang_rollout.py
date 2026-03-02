@@ -98,6 +98,7 @@ class ServerAdapter(BaseRollout):
         config: RolloutConfig,
         model_config: HFModelConfig,
         device_mesh: DeviceMesh,
+        replica_rank: int = -1,
     ):
         if config.get("quantization", None) == "fp8":
             import sglang
@@ -120,7 +121,10 @@ class ServerAdapter(BaseRollout):
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
         rollout_world_size = self.config.tensor_model_parallel_size * self.config.data_parallel_size
-        self.replica_rank = rank // rollout_world_size
+        if replica_rank == -1:
+            self.replica_rank = rank // rollout_world_size
+        else:
+            self.replica_rank = replica_rank
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
         self.local_rank = self.rollout_rank % local_world_size

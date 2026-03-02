@@ -12,6 +12,10 @@ reward_model:
   reward_loop_source: null
   reward_loop_module_path: null
   reward_loop_class_name: null
+  model:
+    path: null
+    external_lib: null
+    trust_remote_code: null
   rollout:
     name: null
     dtype: null

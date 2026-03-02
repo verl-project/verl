@@ -35,8 +35,11 @@ from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import fsdp_version
 from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import log_gpu_memory_usage
+from verl.utils.ulysses import (
+    get_ulysses_sequence_parallel_group,
+    set_ulysses_sequence_parallel_group,
+)
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 from ..base import BaseEngineCtx, EngineRegistry
 from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead
@@ -79,14 +82,27 @@ class VeOmniEngine(FSDPEngine):
         self.data_parallel_mode = "fsdp2"
         self.rank = dist.get_rank()
 
+        fsdp_size = self.engine_config.fsdp_size
+        world_size = dist.get_world_size()
+        dp_size = world_size // self.engine_config.ulysses_parallel_size
+
+        if fsdp_size < 0 or fsdp_size >= dp_size:
+            data_parallel_replicate_size = 1
+            data_parallel_shard_size = dp_size
+        else:
+            if dp_size % fsdp_size != 0:
+                raise ValueError(
+                    f"Data parallel size ({dp_size}) must be divisible by fsdp_size ({fsdp_size}). "
+                    "Please adjust your parallel configuration."
+                )
+            data_parallel_replicate_size = dp_size // fsdp_size
+            data_parallel_shard_size = fsdp_size
+
         parallel_state.init_parallel_state(
-            dp_size=self.engine_config.data_parallel_size,
-            dp_replicate_size=self.engine_config.data_parallel_replicate_size,
-            dp_shard_size=self.engine_config.data_parallel_shard_size,
-            tp_size=self.engine_config.tensor_parallel_size,
+            dp_size=dp_size,
+            dp_replicate_size=data_parallel_replicate_size,
+            dp_shard_size=data_parallel_shard_size,
             ep_size=self.engine_config.expert_parallel_size,
-            pp_size=self.engine_config.pipeline_parallel_size,
-            cp_size=self.engine_config.context_parallel_size,
             ulysses_size=self.engine_config.ulysses_parallel_size,
             dp_mode=self.data_parallel_mode,
         )
@@ -104,9 +120,9 @@ class VeOmniEngine(FSDPEngine):
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_parallel_size
 
         if self.use_ulysses_sp:
-            self.ulysses_sharding_manager = FSDPUlyssesShardingManager(parallel_state.get_parallel_state().device_mesh)
+            self.ulysses_parallel_group = parallel_state.get_parallel_state().device_mesh["sp"].get_group()
         else:
-            self.ulysses_sharding_manager = FSDPUlyssesShardingManager(None)
+            self.ulysses_parallel_group = None
 
         if self.engine_config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
@@ -438,12 +454,13 @@ class EngineEvalModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, VeOmniEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -463,14 +480,15 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, VeOmniEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         # TODO: Switch to eval mode after Integrating the CI environment
         # VeOmni (ref: https://github.com/ByteDance-Seed/VeOmni/pull/421)
         self.engine.module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
         self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
@@ -492,6 +510,19 @@ class OmniSequenceShardCollator:
         metadata={"help": "features to slice sequence dimension."},
     )
 
+    # features to padding sequence dimension
+    padding_features: dict[str, int] = field(
+        default_factory=lambda: {
+            "pixel_values": 0,
+        },
+        metadata={"help": "features to padding sequence dimension."},
+    )
+
+    # padding scale for padding features
+    padding_scale: dict[str, int] = field(
+        default_factory=lambda: {"pixel_values": 4}, metadata={"help": "padding scale for padding features."}
+    )
+
     def __post_init__(self):
         self.sp_size = parallel_state.get_parallel_state().sp_size
         self.sp_rank = parallel_state.get_parallel_state().sp_rank
@@ -501,7 +532,35 @@ class OmniSequenceShardCollator:
         sp_chunk_size = (seq_length + self.sp_size - 1) // self.sp_size
         return feature.narrow(dim, self.sp_rank * sp_chunk_size, sp_chunk_size)
 
+    def sp_padding(
+        self, tensor: "torch.Tensor", dim: int = -1, pad_value: int = 0, pad_scale: int = 1
+    ) -> "torch.Tensor":
+        """
+        Pads a tensor with pad_length to aligns tensor with sp size.
+        """
+        seq_length = tensor.size(dim)
+        scale_sp_size = self.sp_size * pad_scale
+
+        sp_chunk_size = (seq_length + scale_sp_size - 1) // scale_sp_size
+        pad_size = sp_chunk_size * scale_sp_size - seq_length
+        if pad_size == 0:
+            return tensor
+
+        pad_shape = list(tensor.shape)
+        pad_shape[dim] = pad_size
+        pad = torch.full(pad_shape, fill_value=pad_value, dtype=tensor.dtype, device=tensor.device)
+        return torch.cat((tensor, pad), dim=dim)
+
     def __call__(self, batch: Sequence[dict[str, "torch.Tensor"]]) -> dict[str, "torch.Tensor"]:
+        for key in batch.keys():
+            if key in self.padding_features.keys():
+                batch[key] = self.sp_padding(
+                    batch[key],
+                    dim=self.sp_slice_features.get(key, -1),
+                    pad_value=self.padding_features[key],
+                    pad_scale=self.padding_scale.get(key, 1),
+                )
+
         # sp slice
         for key in batch.keys():
             if key in self.sp_slice_features.keys():
