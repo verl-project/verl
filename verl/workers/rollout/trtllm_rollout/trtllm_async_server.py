@@ -14,7 +14,7 @@
 import asyncio
 import logging
 import os
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import ray
 import torch
@@ -184,7 +184,7 @@ class TRTLLMHttpServer:
 
     async def generate(
         self,
-        prompt_ids: Union[str, list[int]],
+        prompt_ids: str | list[int],
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
@@ -201,21 +201,21 @@ class TRTLLMHttpServer:
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
         if self.is_vlm_model and (image_data or video_data):
-                org_prompt = self.llm.tokenizer.decode(prompt_ids)
-                input_dict = {
-                    "prompt": org_prompt,
-                    "multi_modal_data": {},
-                    "mm_processor_kwargs": {},
-                }
-                if image_data:
-                    input_dict["multi_modal_data"]["image"] = image_data
-                if video_data:
-                    input_dict["multi_modal_data"]["video"] = video_data
+            org_prompt = self.llm.tokenizer.decode(prompt_ids)
+            input_dict = {
+                "prompt": org_prompt,
+                "multi_modal_data": {},
+                "mm_processor_kwargs": {},
+            }
+            if image_data:
+                input_dict["multi_modal_data"]["image"] = image_data
+            if video_data:
+                input_dict["multi_modal_data"]["video"] = video_data
 
-                outputs = await self.llm.generate_async(
-                    inputs=input_dict,
-                    sampling_params=trt_llm_sampling_params,
-                )
+            outputs = await self.llm.generate_async(
+                inputs=input_dict,
+                sampling_params=trt_llm_sampling_params,
+            )
         else:
             outputs = await self.llm.generate_async(
                 inputs=prompt_ids,
