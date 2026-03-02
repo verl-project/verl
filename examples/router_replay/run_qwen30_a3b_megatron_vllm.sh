@@ -41,7 +41,7 @@ ppo_mini_batch_size=8
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 
-USE_LEGACY_WORKER_IMPL="enable" # disable, enable
+USE_LEGACY_WORKER_IMPL="disable" # disable, enable
 if [ "$USE_LEGACY_WORKER_IMPL" = "disable" ]; then
     ROUTING_REPLAY_MODE_ARG="actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE}"
     remove_padding=True
