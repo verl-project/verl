@@ -1303,15 +1303,11 @@ class BatchData:
 
     @classmethod
     def _chunkable_types(cls):
-        from verl.utils.transferqueue_utils import BatchMeta
-
-        return (DataProto, DataProtoFuture, BatchMeta, TensorDict)
+        return (DataProto, DataProtoFuture, TensorDict)
 
     @classmethod
     def _concatable_types(cls):
-        from verl.utils.transferqueue_utils import BatchMeta
-
-        return (DataProto, ray.ObjectRef, BatchMeta, TensorDict)
+        return (DataProto, ray.ObjectRef, TensorDict)
 
 
 def all_gather_data_proto(data: DataProto, process_group):
