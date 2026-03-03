@@ -498,6 +498,9 @@ class FSDPEngine(BaseEngine):
             return self.ulysses_device_mesh.get_group(mesh_dim="dp")
         else:
             return torch.distributed.group.WORLD
+    
+    def get_model_parallel_group(self):
+        return None
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp

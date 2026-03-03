@@ -313,6 +313,9 @@ class TorchTitanEngine(BaseEngine):
         if torch.distributed.get_world_size() == self.get_data_parallel_size():
             return torch.distributed.group.WORLD
         return None
+    
+    def get_model_parallel_group(self):
+        return None
 
     def _get_data_parallel_mesh(self):
         """Get the data parallel mesh, handling hybrid/fully/replicate shard modes."""
