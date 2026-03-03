@@ -237,6 +237,15 @@ jobs:
           export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=CUTLASS
           export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/dapo-math-17k/train.parquet AIME_VAL=${PWD}/data/aime-2024/train.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
           bash examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh \
+            reward_model.reward_kwargs.overlong_buffer_cfg.len=258 \
+            reward_model.reward_kwargs.max_resp_len=512 \
+            data.max_prompt_length=512 \
+            data.max_response_length=512 \
+            data.train_batch_size=32 \
+            actor_rollout_ref.rollout.n=4 \
+            actor_rollout_ref.rollout.max_num_seqs=16 \
+            actor_rollout_ref.rollout.max_num_batched_tokens=1024 \
+            actor_rollout_ref.rollout.max_model_len=1024 \
             actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=False \
             actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=False \
             trainer.total_training_steps=1 \

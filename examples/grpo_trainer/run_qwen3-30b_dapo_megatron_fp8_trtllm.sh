@@ -157,4 +157,4 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.total_epochs=1000 \
     trainer.val_before_train=False \
     trainer.log_val_generations=10 \
-    "${@:2}"
+    "${@}"
