@@ -48,16 +48,13 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.name = os.environ.get("ROLLOUT_NAME", "vllm")
     config.actor_rollout_ref.rollout.skip_tokenizer_init = False
     config.actor_rollout_ref.rollout.max_num_seqs = 256
-    config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.8
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.checkpoint_engine.backend = "naive"
-    config.actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes = 256
-    config.actor_rollout_ref.rollout.enforce_eager = True
+    config.actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes = 128
 
     return config
 
 
-@pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
 @pytest.mark.asyncio
 def test_server_adapter_colocated_weight_update(init_config):
     ray.init(
@@ -93,7 +90,7 @@ def test_server_adapter_colocated_weight_update(init_config):
     actor_rollout_wg.init_model()
 
     # 1. create AgentLoopManager
-    agent_loop_manager = AgentLoopManager(
+    agent_loop_manager = AgentLoopManager.create(
         config=init_config,
         worker_group=actor_rollout_wg,
         rollout_resource_pool=resource_pool,

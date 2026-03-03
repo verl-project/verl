@@ -46,6 +46,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.skip_tokenizer_init = False
     config.actor_rollout_ref.rollout.max_num_seqs = 256
     config.actor_rollout_ref.rollout.checkpoint_engine.backend = "nccl" if get_device_name() == "cuda" else "hccl"
+    config.actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes = 128
 
     return config
 

@@ -148,6 +148,9 @@ jobs:
           pip3 install hf_transfer fastmcp pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+      - name: Test vLLM ServerAdapter with Checkpoint Engine (naive)
+        run: |
+          ROLLOUT_NAME=sglang pytest -svvv tests/checkpoint_engine/test_naive_correctness.py
       - name: Test SGLang ServerAdapter with Checkpoint Engine (NCCL)
         run: |
           ROLLOUT_NAME=sglang pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
