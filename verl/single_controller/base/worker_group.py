@@ -19,6 +19,7 @@ import logging
 import signal
 import threading
 import time
+from abc import ABC, abstractmethod
 from typing import Any, Callable
 
 from .decorator import MAGIC_ATTR, Dispatch, get_predefined_dispatch_fn, get_predefined_execute_fn
@@ -126,7 +127,28 @@ class WorkerGroup:
     The class provides methods for worker management, aliveness checking, and method binding.
     """
 
+    backend = None
     fused_worker_execute_fn_name = "_fuw_execute"
+
+    @classmethod
+    def cls_with_init_args(cls):
+        """Return the ClassWithInitArgs class for this backend. Subclasses must implement."""
+        raise NotImplementedError
+
+    @staticmethod
+    def create_colocated_worker_cls(class_dict):
+        """Create a colocated worker class from the class_dict. Subclasses must implement."""
+        raise NotImplementedError
+
+    @staticmethod
+    def get(future):
+        """Resolve a future/ref from this backend. Subclasses must implement."""
+        raise NotImplementedError
+
+    @staticmethod
+    def worker_group_kwargs(config):
+        """Return backend-specific kwargs for WorkerGroup construction."""
+        return {}
 
     def __init__(self, resource_pool: ResourcePool, **kwargs) -> None:
         self._is_init_with_detached_workers = resource_pool is None
@@ -253,3 +275,20 @@ class WorkerGroup:
                     raise ValueError(f"Fail to set method_name {method_name}") from e
 
         return method_names
+
+
+class ResourcePoolManager(ABC):
+    """Interface for resource pool managers. Backend implementations (e.g. RayResourcePoolManager)
+    own all fields and construction logic."""
+
+    @abstractmethod
+    def create_resource_pool(self):
+        """Initialize resource pools."""
+
+    @abstractmethod
+    def get_resource_pool(self, role) -> ResourcePool:
+        """Return the resource pool assigned to the given role."""
+
+    @abstractmethod
+    def get_n_gpus(self) -> int:
+        """Return the total number of GPUs across all resource pools."""

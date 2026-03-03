@@ -24,7 +24,6 @@ from verl.single_controller.ray.base import (
 )
 
 
-@ray.remote
 class Actor(Worker):
     def __init__(self) -> None:
         super().__init__()
@@ -35,7 +34,6 @@ class Actor(Worker):
         return x
 
 
-@ray.remote
 class Critic(Worker):
     def __init__(self, val) -> None:
         super().__init__()
@@ -53,7 +51,6 @@ cls_dict = {"actor": actor_cls, "critic": critic_cls}
 FusedBaseClass = create_colocated_worker_raw_cls(cls_dict)
 
 
-@ray.remote
 class HybridWorker(FusedBaseClass):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def foo(self, x):

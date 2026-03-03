@@ -21,7 +21,6 @@ from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePoo
 from verl.utils.device import get_device_name
 
 
-@ray.remote
 class TestActor(Worker):
     # TODO: pass *args and **kwargs is bug prone and not very convincing
     def __init__(self, cuda_visible_devices=None) -> None:

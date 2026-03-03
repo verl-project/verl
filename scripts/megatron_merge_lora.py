@@ -85,9 +85,7 @@ def main_task(config):
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
 
-    ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(CustomSaveWorker), config=config.actor_rollout_ref, role="actor"
-    )
+    ray_cls_with_init = RayClassWithInitArgs(cls=CustomSaveWorker, config=config.actor_rollout_ref, role="actor")
     resource_pool = RayResourcePool(process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes)
 
     worker = RayWorkerGroup(

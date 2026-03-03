@@ -28,10 +28,36 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, Place
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
-from verl.utils.device import get_device_name
+from verl.single_controller.base.worker_group import ResourcePoolManager as _BaseResourcePoolManager
+from verl.utils.device import get_device_name, get_torch_device, is_npu_available
 from verl.utils.py_functional import temp_env_var
 
-__all__ = ["Worker"]
+__all__ = ["Worker", "RayWorkerMixin"]
+
+
+class RayWorkerMixin:
+    """Ray-specific mixin providing Ray-based implementations for _get_node_ip
+    and the NOSET device setup logic.
+
+    This mixin is automatically injected into Worker subclasses when they are
+    used with RayClassWithInitArgs, so user-defined workers only need to inherit
+    from Worker directly.
+    """
+
+    def _get_node_ip(self):
+        return ray.util.get_node_ip_address()
+
+    def _setup_env_cuda_visible_devices(self):
+        super()._setup_env_cuda_visible_devices()
+
+        from verl.utils.ray_utils import ray_noset_visible_devices
+
+        if ray_noset_visible_devices():
+            device_name = "NPU" if is_npu_available else "GPU"
+            local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
+            os.environ["LOCAL_RANK"] = local_rank
+            get_torch_device().set_device(int(local_rank))
+
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -179,7 +205,7 @@ class SubRayResourcePool(RayResourcePool):
 
 
 @dataclass
-class ResourcePoolManager:
+class RayResourcePoolManager(_BaseResourcePoolManager):
     """
     Define a resource pool specification. Resource pool will be initialized first.
     """
@@ -205,7 +231,6 @@ class ResourcePoolManager:
                 process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
-
         self._check_resource_available()
 
     def get_resource_pool(self, role) -> RayResourcePool:
@@ -233,6 +258,9 @@ class ResourcePoolManager:
             raise ValueError(
                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
             )
+
+
+ResourcePoolManager = RayResourcePoolManager
 
 
 def extract_pg_from_exist(
@@ -337,8 +365,20 @@ class RayClassWithInitArgs(ClassWithInitArgs):
     """
 
     def __init__(self, cls, *args, **kwargs) -> None:
-        # self._options = kwargs.pop('options', dict())
-        super().__init__(cls, *args, **kwargs)
+        if hasattr(cls, "__ray_actor_class__"):
+            raise ValueError(
+                f"Pass the plain class to RayClassWithInitArgs, not a @ray.remote-decorated one. "
+                f"Use update_options() to set Ray actor options. Got: {cls}"
+            )
+
+        # Inject RayWorkerMixin into Worker subclasses so users only need to write
+        # `class Actor(Worker)` without any Ray-specific base classes.
+        raw_cls = cls
+        if isinstance(raw_cls, type) and issubclass(raw_cls, Worker) and not issubclass(raw_cls, RayWorkerMixin):
+            raw_cls = type(raw_cls.__name__, (RayWorkerMixin, raw_cls), {"__module__": raw_cls.__module__})
+
+        ray_cls = ray.remote(raw_cls)
+        super().__init__(ray_cls, *args, **kwargs)
         self._options = {}
         self._additional_resource = {}
 
@@ -416,10 +456,52 @@ class RayWorkerGroup(WorkerGroup):
     and scheduling strategies.
     """
 
+    backend = "ray"
+
+    @classmethod
+    def cls_with_init_args(cls):
+        """Return RayClassWithInitArgs for this backend."""
+        return RayClassWithInitArgs
+
+    @staticmethod
+    def create_colocated_worker_cls(class_dict):
+        """Delegate to the module-level create_colocated_worker_cls."""
+        return create_colocated_worker_cls(class_dict=class_dict)
+
+    @staticmethod
+    def get(future):
+        """Resolve a Ray ObjectRef."""
+        return ray.get(future)
+
+    @staticmethod
+    def worker_group_kwargs(config):
+        """Return Ray-specific kwargs for WorkerGroup construction.
+
+        Extracted from RayPPOTrainer.init_workers() in the original ray_trainer.py.
+        """
+        from omegaconf import OmegaConf
+
+        wg_kwargs = {}
+        if OmegaConf.select(config.trainer, "ray_wait_register_center_timeout") is not None:
+            wg_kwargs["ray_wait_register_center_timeout"] = config.trainer.ray_wait_register_center_timeout
+        if OmegaConf.select(config.global_profiler, "steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.select(config.global_profiler, "steps")
+            # Only require nsight worker options when tool is nsys
+            if OmegaConf.select(config.global_profiler, "tool") == "nsys":
+                assert (
+                    OmegaConf.select(config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                    is not None
+                ), "worker_nsight_options must be set when using nsys with profile_steps"
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
+                    OmegaConf.select(config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                )
+        return wg_kwargs
+
     def __init__(
         self,
         resource_pool: RayResourcePool = None,
         ray_cls_with_init: RayClassWithInitArgs = None,
+        cls_with_init: RayClassWithInitArgs = None,
         bin_pack: bool = True,
         name_prefix: str = None,
         detached=False,
@@ -432,7 +514,8 @@ class RayWorkerGroup(WorkerGroup):
 
         Args:
             resource_pool: Resource pool for worker allocation
-            ray_cls_with_init: Class with initialization arguments for workers
+            ray_cls_with_init: Class with initialization arguments for workers (deprecated, use cls_with_init)
+            cls_with_init: Class with initialization arguments for workers
             bin_pack: Whether to use strict bin packing for resource allocation
             name_prefix: Prefix for worker names
             detached: Whether workers should be detached
@@ -440,6 +523,17 @@ class RayWorkerGroup(WorkerGroup):
             ray_wait_register_center_timeout: Timeout for waiting on register center
             **kwargs: Additional keyword arguments
         """
+        if cls_with_init is None and ray_cls_with_init is not None:
+            import warnings
+
+            warnings.warn(
+                "`ray_cls_with_init` is deprecated and will be removed in a future version. "
+                "Please use `cls_with_init` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            cls_with_init = ray_cls_with_init
+        ray_cls_with_init = cls_with_init
         self._master_addr = kwargs.pop("master_addr", None)
         self._master_port = kwargs.pop("master_port", None)
         self.use_gpu = kwargs.pop("use_gpu", resource_pool.use_gpu if resource_pool is not None else True)
@@ -958,7 +1052,7 @@ def _bind_workers_method_to_parent(cls, key, user_defined_cls):
                 raise ValueError(f"Fail to set method_name {method_name}") from e
 
 
-def _unwrap_ray_remote(cls):
+def unwrap_ray_remote(cls):
     if hasattr(cls, "__ray_actor_class__"):
         cls = cls.__ray_actor_class__
     return cls
@@ -986,7 +1080,7 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
     cls_dict = {}
     init_args_dict = {}
     worker_cls = _determine_fsdp_megatron_base_class(
-        [cls.cls.__ray_actor_class__.__mro__ for cls in class_dict.values()]
+        [unwrap_ray_remote(cls.cls).__mro__ for cls in class_dict.values()]
     )
     assert issubclass(worker_cls, Worker), f"worker_cls {worker_cls} should be a subclass of Worker"
     print(f"colocated worker base class {worker_cls}")
@@ -1003,7 +1097,7 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
             super().__init__()
             self.worker_dict = {}
             for key, user_defined_cls in cls_dict.items():
-                user_defined_cls = _unwrap_ray_remote(user_defined_cls)
+                user_defined_cls = unwrap_ray_remote(user_defined_cls)
                 # directly instantiate the class without remote
                 # in worker class, e.g. <verl.single_controller.base.worker.Worker>
                 # when DISABLE_WORKER_INIT == 1 it will return immediately
@@ -1014,12 +1108,10 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
 
     # now monkey-patch the methods from inner class to WorkerDict
     for key, user_defined_cls in cls_dict.items():
-        user_defined_cls = _unwrap_ray_remote(user_defined_cls)
+        user_defined_cls = unwrap_ray_remote(user_defined_cls)
         _bind_workers_method_to_parent(WorkerDict, key, user_defined_cls)
 
-    remote_cls = ray.remote(WorkerDict)
-    remote_cls = RayClassWithInitArgs(cls=remote_cls)
-    return remote_cls
+    return RayClassWithInitArgs(cls=WorkerDict)
 
 
 FusedWorkerCLSName = "FusedWorker"
@@ -1043,7 +1135,7 @@ def create_colocated_worker_raw_cls(class_dict: dict[str, RayClassWithInitArgs])
         The same as `FusedWorker.fused_worker_dict`, enables underlying class to access other
         underlying classes.
     """
-    raw_cls_dict = {cls_name: _unwrap_ray_remote(cia.cls) for cls_name, cia in class_dict.items()}
+    raw_cls_dict = {cls_name: unwrap_ray_remote(cia.cls) for cls_name, cia in class_dict.items()}
     init_args_dict = {cls_name: cia.args for cls_name, cia in class_dict.items()}
     init_kwargs_dict = {cls_name: cia.kwargs for cls_name, cia in class_dict.items()}
     cls_names = list(class_dict.keys())
@@ -1113,8 +1205,7 @@ def create_colocated_worker_cls_fused(class_dict: dict[str, RayClassWithInitArgs
     """
     raw_colocated_worker_cls = create_colocated_worker_raw_cls(class_dict)
 
-    remote_cls = ray.remote(raw_colocated_worker_cls)
-    cia = RayClassWithInitArgs(cls=remote_cls)
+    cia = RayClassWithInitArgs(cls=raw_colocated_worker_cls)
     cia.fused_worker_used = True
 
     return cia

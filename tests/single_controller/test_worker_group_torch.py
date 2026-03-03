@@ -26,7 +26,6 @@ from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePoo
 from verl.utils.device import get_device_name
 
 
-@ray.remote
 class TestAllGatherActor(Worker):
     def __init__(self, size) -> None:
         super().__init__()
@@ -46,7 +45,6 @@ class TestAllGatherActor(Worker):
         return output
 
 
-@ray.remote
 class TestAllGatherActorV2(Worker):
     def __init__(self, size) -> None:
         super().__init__()

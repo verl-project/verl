@@ -30,7 +30,6 @@ from verl.utils.device import get_device_name
 from verl.utils.ray_utils import parallel_put
 
 
-@ray.remote
 class DummyWorker(Worker):
     def __init__(self):
         super().__init__()

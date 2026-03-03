@@ -15,6 +15,7 @@
 from .base import (
     RayClassWithInitArgs,
     RayResourcePool,
+    RayResourcePoolManager,
     RayWorkerGroup,
     ResourcePoolManager,
     SubRayResourcePool,
@@ -25,6 +26,7 @@ from .base import (
 __all__ = [
     "RayClassWithInitArgs",
     "RayResourcePool",
+    "RayResourcePoolManager",
     "SubRayResourcePool",
     "RayWorkerGroup",
     "ResourcePoolManager",

@@ -84,13 +84,13 @@ def create_role_worker_mapping(config):
     ray_worker_group_cls = RayWorkerGroup
 
     role_worker_mapping = {
-        Role.Actor: ray.remote(DetachActorWorker),
-        Role.Critic: ray.remote(TrainingWorker),
+        Role.Actor: DetachActorWorker,
+        Role.Critic: TrainingWorker,
     }
 
     # Add reference policy (if KL loss or reward is required)
     if need_reference_policy(config):
-        role_worker_mapping[Role.RefPolicy] = ray.remote(DetachActorWorker)
+        role_worker_mapping[Role.RefPolicy] = DetachActorWorker
 
     return role_worker_mapping, ray_worker_group_cls
 

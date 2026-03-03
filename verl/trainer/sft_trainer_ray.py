@@ -125,7 +125,7 @@ class SFTTrainer:
         n_gpus_per_node = self.config.trainer.n_gpus_per_node
         nnodes = self.config.trainer.nnodes
         self.resource_pool = RayResourcePool(process_on_nodes=[n_gpus_per_node] * nnodes)
-        ray_cls_with_init = RayClassWithInitArgs(ray.remote(TrainingWorker), config=config)
+        ray_cls_with_init = RayClassWithInitArgs(TrainingWorker, config=config)
         self.training_client = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=ray_cls_with_init,

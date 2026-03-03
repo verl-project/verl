@@ -36,7 +36,6 @@ def ray_init_shutdown():
 
 
 # Define a simple worker for testing
-@ray.remote
 class DecoratorTestWorker(Worker):
     def __init__(self, initial_value=0):
         super().__init__()

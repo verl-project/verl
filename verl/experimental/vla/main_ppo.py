@@ -114,10 +114,10 @@ def main_task(config):
         raise NotImplementedError
 
     role_worker_mapping = {
-        # Role.Critic: ray.remote(RobActorRolloutRefWorker),
-        Role.ActorRollout: ray.remote(RobActorRolloutRefWorker),
-        # Role.RefPolicy: ray.remote(RobActorRolloutRefWorker),
-        Role.Env: ray.remote(EnvWorker),
+        # Role.Critic: RobActorRolloutRefWorker,
+        Role.ActorRollout: RobActorRolloutRefWorker,
+        # Role.RefPolicy: RobActorRolloutRefWorker,
+        Role.Env: EnvWorker,
     }
 
     train_rollout_pool_id = "train_rollout_pool"

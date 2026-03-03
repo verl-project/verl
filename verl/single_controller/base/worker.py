@@ -20,12 +20,8 @@ import socket
 import warnings
 from dataclasses import dataclass
 
-import ray
-
 from verl.utils.device import (
-    get_torch_device,
     get_visible_devices_keyword,
-    is_npu_available,
 )
 
 from .decorator import Dispatch, Execute, register
@@ -48,12 +44,9 @@ class DistGlobalInfo:
 
 
 class WorkerHelper:
-    @staticmethod
-    def _get_node_ip():
-        if os.getenv("WG_BACKEND", None) == "ray":
-            return ray.util.get_node_ip_address()
-        else:
-            raise NotImplementedError("WG_BACKEND now just support ray mode.")
+    def _get_node_ip(self):
+        """Return the IP address of the current node. Subclasses must implement this."""
+        raise NotImplementedError("Subclasses must implement _get_node_ip()")
 
     @staticmethod
     def _get_free_port():
@@ -229,10 +222,6 @@ class Worker(WorkerHelper):
         return self.fused_worker_dict.get(worker_name, None)
 
     def _setup_env_cuda_visible_devices(self):
-        from verl.utils.ray_utils import ray_noset_visible_devices
-
-        is_ray_noset_visible_devices = ray_noset_visible_devices()
-
         # Prevent use of clashing `{CUDA/HIP/ROCR}_VISIBLE_DEVICES``
         rocr_val = os.environ.get("ROCR_VISIBLE_DEVICES", None)
         hip_val = os.environ.get("HIP_VISIBLE_DEVICES", None)
@@ -269,16 +258,6 @@ class Worker(WorkerHelper):
             cuda_val = os.environ.pop("ROCR_VISIBLE_DEVICES")
             os.environ["CUDA_VISIBLE_DEVICES"] = cuda_val
             rocr_val = None
-
-        if is_ray_noset_visible_devices:
-            # NOTE: Ray will automatically set the *_VISIBLE_DEVICES
-            # environment variable for each actor, unless
-            # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
-            # so we need to set local rank when the flag is set.
-            device_name = "NPU" if is_npu_available else "GPU"
-            local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
-            os.environ["LOCAL_RANK"] = local_rank
-            get_torch_device().set_device(int(local_rank))
 
     def _configure_with_store(self, store: dict):
         """

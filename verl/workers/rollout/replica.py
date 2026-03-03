@@ -18,7 +18,6 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
 
-import ray
 from omegaconf import DictConfig
 from pydantic import BaseModel
 from ray.actor import ActorHandle
@@ -210,10 +209,8 @@ class RolloutReplica(ABC):
         """Get rollout worker actor class for colocated and standalone mode."""
         from verl.checkpoint_engine.base import CheckpointEngineWorker
 
-        rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
-
         return RayClassWithInitArgs(
-            cls=rollout_worker_actor_cls,
+            cls=CheckpointEngineWorker,
             rollout_config=self.config,
             model_config=self.model_config,
             replica_rank=self.replica_rank,

@@ -15,7 +15,7 @@
 # limitations under the License.
 """
 PPO Trainer with Ray-based single controller.
-This trainer supports model-agonistic model initialization with huggingface
+This trainer supports model-agnostic model initialization with huggingface.
 """
 
 import json
@@ -37,8 +37,8 @@ from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
-from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.single_controller.base import WorkerGroup
+from verl.single_controller.ray import RayWorkerGroup, ResourcePoolManager
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
@@ -218,15 +218,18 @@ def compute_advantage(
     return data
 
 
-class RayPPOTrainer:
-    """Distributed PPO trainer using Ray for scalable reinforcement learning.
+class PPOTrainer:
+    """Distributed PPO trainer with injectable backend.
 
     This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
-    managing actor rollouts, critic training, and reward computation with Ray backend.
+    managing actor rollouts, critic training, and reward computation.
     Supports various model architectures including FSDP, Megatron, vLLM, and SGLang integration.
+
+    To use a different backend, replace RayWorkerGroup and RayClassWithInitArgs with the
+    corresponding backend-specific implementations and pass them via worker_group_cls.
     """
 
-    # TODO: support each role have individual ray_worker_group_cls,
+    # TODO: support each role have individual worker_group_cls,
     # i.e., support different backend of different role
     def __init__(
         self,
@@ -234,31 +237,45 @@ class RayPPOTrainer:
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
-        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
+        worker_group_cls: type[WorkerGroup] = None,
         processor=None,
         train_dataset: Optional[Dataset] = None,
         val_dataset: Optional[Dataset] = None,
         collate_fn=None,
         train_sampler: Optional[Sampler] = None,
         device_name=None,
+        ray_worker_group_cls: type[WorkerGroup] = None,
     ):
         """
-        Initialize distributed PPO trainer with Ray backend.
+        Initialize distributed PPO trainer.
         Note that this trainer runs on the driver process on a single CPU/GPU node.
 
         Args:
             config: Configuration object containing training parameters.
             tokenizer: Tokenizer used for encoding and decoding text.
             role_worker_mapping (dict[Role, WorkerType]): Mapping from roles to worker classes.
-            resource_pool_manager (ResourcePoolManager): Manager for Ray resource pools.
-            ray_worker_group_cls (RayWorkerGroup, optional): Class for Ray worker groups. Defaults to RayWorkerGroup.
+            resource_pool_manager (ResourcePoolManager): Manager for resource pools.
+            worker_group_cls: Class for worker groups (backend-agnostic).
             processor: Optional data processor, used for multimodal data
             train_dataset (Optional[Dataset], optional): Training dataset. Defaults to None.
             val_dataset (Optional[Dataset], optional): Validation dataset. Defaults to None.
             collate_fn: Function to collate data samples into batches.
             train_sampler (Optional[Sampler], optional): Sampler for the training dataset. Defaults to None.
             device_name (str, optional): Device name for training (e.g., "cuda", "cpu"). Defaults to None.
+            ray_worker_group_cls: Deprecated. Use worker_group_cls instead.
         """
+        if worker_group_cls is None and ray_worker_group_cls is not None:
+            import warnings
+
+            warnings.warn(
+                "ray_worker_group_cls is deprecated, use worker_group_cls instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            worker_group_cls = ray_worker_group_cls
+
+        self.worker_group_cls = worker_group_cls if worker_group_cls is not None else RayWorkerGroup
+        self.ray_worker_group_cls = self.worker_group_cls
 
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
@@ -280,7 +297,6 @@ class RayPPOTrainer:
         self.use_rm = need_reward_model(self.config)
 
         self.use_critic = need_critic(self.config)
-        self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
             project_name=self.config.trainer.project_name,
@@ -302,8 +318,6 @@ class RayPPOTrainer:
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
-
-        self.checkpoint_manager = None
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -672,12 +686,14 @@ class RayPPOTrainer:
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
     def init_workers(self):
-        """Initialize distributed training workers using Ray backend.
+        """Initialize distributed training workers.
 
         Creates:
-        1. Ray resource pools from configuration
+        1. Resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
+        _ClsWithInitArgs = self.worker_group_cls.cls_with_init_args()
+
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
@@ -686,7 +702,7 @@ class RayPPOTrainer:
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
         if self.hybrid_engine:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
-            actor_rollout_cls = RayClassWithInitArgs(
+            actor_rollout_cls = _ClsWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
                 config=self.config.actor_rollout_ref,
                 role=str(actor_role),
@@ -723,13 +739,13 @@ class RayPPOTrainer:
                     checkpoint_config=orig_critic_cfg.checkpoint,
                 )
 
-            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
+            critic_cls = _ClsWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
         # create reference policy if needed
         if self.use_reference_policy and Role.RefPolicy in self.role_worker_mapping:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
-            ref_policy_cls = RayClassWithInitArgs(
+            ref_policy_cls = _ClsWithInitArgs(
                 self.role_worker_mapping[Role.RefPolicy],
                 config=self.config.actor_rollout_ref,
                 role=str(Role.RefPolicy),
@@ -742,29 +758,16 @@ class RayPPOTrainer:
         # Instead, directly pass different resource pool to different worker groups.
         # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
         all_wg = {}
-        wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
-        if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
-            wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-        if OmegaConf.select(self.config.global_profiler, "steps") is not None:
-            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
-            # Only require nsight worker options when tool is nsys
-            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
-                assert (
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                    is not None
-                ), "worker_nsight_options must be set when using nsys with profile_steps"
-                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                )
+        wg_kwargs = self.worker_group_cls.worker_group_kwargs(self.config)
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if not class_dict:
                 continue
-            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            wg_dict = self.ray_worker_group_cls(
+            worker_dict_cls = self.worker_group_cls.create_colocated_worker_cls(class_dict=class_dict)
+            wg_dict = self.worker_group_cls(
                 resource_pool=resource_pool,
-                ray_cls_with_init=worker_dict_cls,
+                cls_with_init=worker_dict_cls,
                 **wg_kwargs,
             )
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
@@ -1606,3 +1609,6 @@ class RayPPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+
+
+RayPPOTrainer = PPOTrainer

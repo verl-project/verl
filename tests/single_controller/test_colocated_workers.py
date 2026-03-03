@@ -26,7 +26,6 @@ from verl.single_controller.ray.base import (
 from verl.utils.device import get_device_name
 
 
-@ray.remote
 class Actor(Worker):
     def __init__(self) -> None:
         super().__init__()
@@ -37,7 +36,6 @@ class Actor(Worker):
         return data
 
 
-@ray.remote
 class Critic(Worker):
     def __init__(self, config) -> None:
         super().__init__()

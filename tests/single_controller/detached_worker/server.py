@@ -40,7 +40,6 @@ from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_
 from verl.utils.megatron_utils import get_model, mcore_model_parallel_config
 
 
-@ray.remote
 class Trainer(Worker):
     def __init__(self):
         super().__init__()

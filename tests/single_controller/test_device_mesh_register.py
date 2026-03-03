@@ -25,7 +25,6 @@ from verl.single_controller.base.decorator import make_nd_compute_dataproto_disp
 from verl.utils.device import get_device_name, get_nccl_backend
 
 
-@ray.remote
 class TestActor(Worker):
     def __init__(self):
         super().__init__()

@@ -202,14 +202,15 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
     import os
 
     from verl.single_controller.base.worker_group import WorkerGroup
-    from verl.utils.ray_utils import parallel_put
 
     assert isinstance(worker_group, WorkerGroup)
 
-    max_workers = max(1, min(len(args[0]), os.cpu_count()))
+    if worker_group.backend == "ray":
+        from verl.utils.ray_utils import parallel_put
 
-    args = [parallel_put(arg, max_workers=max_workers) for arg in args]
-    kwargs = {k: parallel_put(v, max_workers=max_workers) for k, v in kwargs.items()}
+        max_workers = max(1, min(len(args[0]), os.cpu_count()))
+        args = [parallel_put(arg, max_workers=max_workers) for arg in args]
+        kwargs = {k: parallel_put(v, max_workers=max_workers) for k, v in kwargs.items()}
 
     all_args = []
     for arg in args:

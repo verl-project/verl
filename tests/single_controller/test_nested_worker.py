@@ -47,7 +47,7 @@ def test_nested_worker():
 
     # create 4 workers, each hold a GPU
     resource_pool = RayResourcePool([4], use_gpu=True)
-    class_with_args = RayClassWithInitArgs(cls=ray.remote(TestActor), x=2)
+    class_with_args = RayClassWithInitArgs(cls=TestActor, x=2)
 
     worker_group = RayWorkerGroup(
         resource_pool=resource_pool,
@@ -60,7 +60,7 @@ def test_nested_worker():
 
     assert output == [2, 3, 4, 5]
 
-    class_with_args = RayClassWithInitArgs(cls=ray.remote(TestHighLevelActor), x=2)
+    class_with_args = RayClassWithInitArgs(cls=TestHighLevelActor, x=2)
     high_level_worker_group = RayWorkerGroup(
         resource_pool=resource_pool,
         ray_cls_with_init=class_with_args,

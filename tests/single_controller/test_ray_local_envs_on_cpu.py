@@ -23,7 +23,6 @@ from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 
 
-@ray.remote
 class TestActor(Worker):
     def __init__(self) -> None:
         super().__init__()

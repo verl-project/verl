@@ -302,7 +302,7 @@ class CheckpointEngineWorker(Worker):
         return self.server_adapter.is_leader_rank
 
 
-_worker_cls = ray.remote(CheckpointEngineWorker)
+_worker_cls = CheckpointEngineWorker
 
 
 class CheckpointEngineManager:

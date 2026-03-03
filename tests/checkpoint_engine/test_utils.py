@@ -14,7 +14,6 @@
 import asyncio
 from typing import Generator
 
-import ray
 import torch
 from transformers import AutoModelForCausalLM
 
@@ -130,7 +129,7 @@ def create_trainer_worker_group(
     )
 
     ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(TrainingWorkerTest),
+        cls=TrainingWorkerTest,
         config=trainer_config,
         checkpoint_engine_config=checkpoint_engine_config,
     )
@@ -155,7 +154,7 @@ async def create_rollout_worker_group(
 ) -> tuple[RayWorkerGroup, list[MockReplica]]:
     # create rollout worker group
     ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(CheckpointEngineWorkerTest),
+        cls=CheckpointEngineWorkerTest,
         model_config=model_config,
         rollout_config=rollout_config,
         check_allclose=check_allclose,

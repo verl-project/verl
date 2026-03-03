@@ -80,8 +80,8 @@ def main_task(config):
         raise NotImplementedError
 
     role_worker_mapping = {
-        Role.ActorRollout: ray.remote(RobActorRolloutRefWorker),
-        Role.Env: ray.remote(EnvWorker),
+        Role.ActorRollout: RobActorRolloutRefWorker,
+        Role.Env: EnvWorker,
     }
 
     # setup resource pool manager

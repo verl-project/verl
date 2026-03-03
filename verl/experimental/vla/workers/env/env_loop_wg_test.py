@@ -87,7 +87,7 @@ env_cfg = OmegaConf.create(cfg_dict)
 
 gpu_pool = RayResourcePool([ENV_WORKERS_NUM], use_gpu=True)
 # RayEnvWorker = ray.remote(num_gpus=1)(EnvWorker)
-ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(EnvWorker), config=env_cfg)
+ray_cls_with_init = RayClassWithInitArgs(cls=EnvWorker, config=env_cfg)
 
 env_wg = RayWorkerGroup(gpu_pool, ray_cls_with_init)
 

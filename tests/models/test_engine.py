@@ -120,7 +120,7 @@ def test_actor_engine(strategy):
         device_count=device_count,
         model=get_test_language_model(device_count),
     )
-    ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=config)
+    ray_cls_with_init = RayClassWithInitArgs(cls=TrainingWorker, config=config)
     resource_pool = RayResourcePool(process_on_nodes=[device_count])
     wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
     # init model
@@ -261,7 +261,7 @@ def test_critic_engine(strategy):
     config = create_training_config(
         model_type="value_model", strategy=strategy, device_count=device_count, model=value_model_path
     )
-    ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=config)
+    ray_cls_with_init = RayClassWithInitArgs(cls=TrainingWorker, config=config)
     resource_pool = RayResourcePool(process_on_nodes=[device_count])
     wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
     # init model

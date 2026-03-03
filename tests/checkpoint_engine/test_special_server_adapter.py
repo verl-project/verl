@@ -79,7 +79,7 @@ async def test_server_adapter(init_config):
     # 2.1 create checkpoint engine worker group
     rollout_pool = RayResourcePool(process_on_nodes=[4], max_colocate_count=3)
     ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(CheckpointEngineWorker),
+        cls=CheckpointEngineWorker,
         model_config=model_config,
         rollout_config=rollout_config,
     )

@@ -29,7 +29,6 @@ from verl.single_controller.ray.base import (
 from verl.utils.device import get_device_name, get_nccl_backend
 
 
-@ray.remote
 class Actor(Worker):
     def __init__(self, worker_id) -> None:
         super().__init__()

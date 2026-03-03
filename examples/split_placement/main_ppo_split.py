@@ -148,8 +148,8 @@ def main_task(config):
     from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
     role_worker_mapping = {
-        Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
-        Role.Critic: ray.remote(CriticWorker),
+        Role.ActorRollout: ActorRolloutRefWorker,
+        Role.Critic: CriticWorker,
     }
 
     # NOTE: initialze two resource pool
@@ -173,7 +173,7 @@ def main_task(config):
 
     # use reference model
     if need_reference_policy(config):
-        role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+        role_worker_mapping[Role.RefPolicy] = ActorRolloutRefWorker
         mapping[Role.RefPolicy] = actor_rollout_ref_pool_id
 
     reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0)

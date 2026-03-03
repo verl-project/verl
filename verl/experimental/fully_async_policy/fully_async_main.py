@@ -94,13 +94,13 @@ def create_role_worker_mapping(config):
 
     train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
     role_worker_mapping = {
-        train_role: ray.remote(DetachActorWorker),
-        Role.Critic: ray.remote(CriticWorker),
+        train_role: DetachActorWorker,
+        Role.Critic: CriticWorker,
     }
 
     # Add reference policy (if KL loss or reward is required)
     if need_reference_policy(config):
-        role_worker_mapping[Role.RefPolicy] = ray.remote(DetachActorWorker)
+        role_worker_mapping[Role.RefPolicy] = DetachActorWorker
 
     return role_worker_mapping, ray_worker_group_cls
 

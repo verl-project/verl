@@ -52,7 +52,6 @@ def get_ray_remote_options() -> str:
     return dict(num_cpus=0.1)
 
 
-@ray.remote
 class TestActor(Worker):
     # TODO: pass *args and **kwargs is bug prone and not very convincing
     def __init__(self, x) -> None:

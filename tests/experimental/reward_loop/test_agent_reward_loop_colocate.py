@@ -91,7 +91,7 @@ def test_agent_reward_loop_standalone():
     resource_pool_manager.create_resource_pool()
     resource_pool = resource_pool_manager.resource_pool_dict[global_pool_id]
     actor_rollout_cls = RayClassWithInitArgs(
-        cls=ray.remote(actor_rollout_cls), config=config.actor_rollout_ref, role="actor_rollout"
+        cls=actor_rollout_cls, config=config.actor_rollout_ref, role="actor_rollout"
     )
     actor_rollout_wg = RayWorkerGroup(
         resource_pool=resource_pool, ray_cls_with_init=actor_rollout_cls, device_name=get_device_name()

@@ -26,7 +26,6 @@ from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePoo
 DataProtoConfig.auto_padding = True
 
 
-@ray.remote
 class Actor(Worker):
     def __init__(self) -> None:
         super().__init__()

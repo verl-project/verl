@@ -29,7 +29,6 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 
 
-@ray.remote
 class Actor(Worker):
     @register(Dispatch.ONE_TO_ALL)
     def init(self):
@@ -43,7 +42,6 @@ class Actor(Worker):
         collective.send(tensor=tensor, dst_rank=1, group_name=self.group_name)
 
 
-@ray.remote
 class Rollout(Worker):
     @register(Dispatch.ONE_TO_ALL)
     def init(self):
