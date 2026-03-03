@@ -24,7 +24,7 @@ fi
 # Data
 # -----
 DATADIR=${DATADIR:-$PWD/data}
-MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2-7B-Instruct"}
+MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-VL-3B-Instruct"}
 
 GSM8K_TRAIN_PATH=${DATADIR}/gsm8k/train.parquet
 GSM8K_TEST_PATH=${DATADIR}/gsm8k/test.parquet
