@@ -66,6 +66,7 @@ on:
       # Entrypoints
       - ".github/workflows/nightly_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
+      - "examples/data_preprocess/geo3k.py"
       - "tests/special_npu/nightly_ci_ascend/run_ppo_qwen3-8b_fsdp_npu.sh"
       - "tests/special_npu/nightly_ci_ascend/run_grpo_qwen25-7b-instruct_fsdp_npu.sh"
       - "tests/special_npu/nightly_ci_ascend/run_grpo_qwen25-vl-3b-instruct_fsdp_npu.sh"
