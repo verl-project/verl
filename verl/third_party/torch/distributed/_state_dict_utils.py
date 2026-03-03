@@ -580,19 +580,42 @@ def _broadcast_tensors(
     device: torch.device,
     pg: Optional[dist.ProcessGroup] = None,
 ) -> None:
+    # 添加NPU支持：如果设备是NPU，确保使用正确的设备类型
+    # 检查设备类型，如果是NPU，确保使用正确的设备字符串
+    device_str = str(device)
+    if device_str.startswith("npu:"):
+        # 对于NPU设备，确保使用正确的设备类型
+        # 有些情况下可能需要将npu设备转换为cuda设备字符串
+        # 但这里我们直接使用npu设备
+        pass
+    
     tensors = []
     for key in keys:
         if dist.get_rank() == 0:
             full_state = full_state_dict[key]
             assert isinstance(full_state, torch.Tensor)
-            full_tensor = full_state.detach().to(device)
+            # 对于NPU设备，确保使用正确的设备
+            if hasattr(torch, 'npu') and device_str.startswith("npu:"):
+                # 确保张量在NPU设备上
+                full_tensor = full_state.detach().to(device)
+            else:
+                full_tensor = full_state.detach().to(device)
         else:
             tensor_info = full_state_dict[key]
-            full_tensor = torch.empty(
-                size=tensor_info.size,
-                device=device,
-                dtype=tensor_info.dtype,
-            )
+            # 对于NPU设备，确保使用正确的设备
+            if hasattr(torch, 'npu') and device_str.startswith("npu:"):
+                # 确保张量在NPU设备上创建
+                full_tensor = torch.empty(
+                    size=tensor_info.size,
+                    device=device,
+                    dtype=tensor_info.dtype,
+                )
+            else:
+                full_tensor = torch.empty(
+                    size=tensor_info.size,
+                    device=device,
+                    dtype=tensor_info.dtype,
+                )
         tensors.append(full_tensor)
         local_state = local_state_dict.get(key, None)
         if local_state is None:

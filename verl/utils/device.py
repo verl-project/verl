@@ -77,13 +77,19 @@ def get_device_name() -> str:
     Returns:
         str: Device type string ('cuda', 'npu', or 'cpu').
     """
-    if is_cuda_available:
-        device = "cuda"
-    elif is_npu_available:
-        device = "npu"
-    else:
-        device = "cpu"
-    return device
+    # Check CUDA first
+    if torch.cuda.is_available():
+        return "cuda"
+    
+    # Check NPU dynamically (not using cached is_npu_available)
+    try:
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return "npu"
+    except:
+        pass
+    
+    # Fall back to CPU
+    return "cpu"
 
 
 def get_torch_device():
@@ -117,16 +123,13 @@ def get_nccl_backend() -> str:
     """Get the distributed communication backend based on device type.
 
     Returns the appropriate collective communication backend for the
-    detected accelerator (HCCL for Ascend NPU, NCCL for CUDA).
+    detected accelerator (NCCL for both NPU and CUDA).
 
     Returns:
-        str: Backend name ('hccl' for NPU, 'nccl' for CUDA/default).
+        str: Backend name ('nccl' for both NPU and CUDA).
     """
-    if is_npu_available:
-        return "hccl"
-    else:
-        # default to nccl
-        return "nccl"
+    # Always return nccl for both NPU and CUDA
+    return "nccl"
 
 
 def set_expandable_segments(enable: bool) -> None:

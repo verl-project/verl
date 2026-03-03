@@ -468,10 +468,15 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
     # To broadcast, it needs to be instantiated in the GPU.
+    # Get the correct device string for NPU or CUDA
+    device_name = get_device_name()  # Returns "npu" or "cuda" or "cpu"
+    device_id = get_device_id()  # Returns device index
+    device_str = f"{device_name}:{device_id}" if device_name in ["cuda", "npu"] else device_name
+    
     if dist.get_rank() == 0:
-        model = model.to(device=get_device_id(), non_blocking=True)
+        model = model.to(device=device_str, non_blocking=True)
     else:
-        model = model.to_empty(device=get_device_id())
+        model = model.to_empty(device=device_str)
 
     cpu_offload = cpu_offload is not None
     options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
@@ -484,7 +489,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     if cpu_offload:
         model.to("cpu", non_blocking=True)
         for buf in model.buffers():
-            buf.data = buf.data.to(get_device_id())
+            buf.data = buf.data.to(device_str)
 
 
 @contextmanager

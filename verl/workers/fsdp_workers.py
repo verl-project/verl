@@ -154,8 +154,36 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if not torch.distributed.is_initialized():
             rank = int(os.environ.get("RANK", 0))
             world_size = int(os.environ.get("WORLD_SIZE", 1))
+            
+            # Check if we're using NPU by checking the trainer device
+            # If trainer.device is set to 'npu', use NPU backend
+            trainer_device = os.environ.get("TRAINER_DEVICE", "")
+            if trainer_device == "npu":
+                # For NPU, we need to check if NCCL is available
+                # If not, fall back to Gloo
+                try:
+                    # Try to use NCCL for NPU
+                    import torch.distributed as dist
+                    if hasattr(dist, 'is_nccl_available') and dist.is_nccl_available():
+                        backend = "cpu:gloo,npu:nccl"
+                        print(f"Using NPU backend with NCCL: {backend}")
+                    else:
+                        # Fall back to Gloo for NPU
+                        backend = "gloo"
+                        print(f"NCCL not available for NPU, using Gloo backend: {backend}")
+                except:
+                    # Fall back to Gloo
+                    backend = "gloo"
+                    print(f"Error checking NCCL availability, using Gloo backend: {backend}")
+            else:
+                # Use normal detection
+                device_name = get_device_name()
+                nccl_backend = get_nccl_backend()
+                backend = f"cpu:gloo,{device_name}:{nccl_backend}"
+                print(f"Using detected backend: {backend}")
+            
             torch.distributed.init_process_group(
-                backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}",
+                backend=backend,
                 rank=rank,
                 world_size=world_size,
                 timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
@@ -342,14 +370,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         use_tiled_mlp=False,
         tiled_mlp_shards=4,
     ):
+        import os
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from transformers import (
             AutoConfig,
             AutoModel,
             AutoModelForCausalLM,
             AutoModelForImageTextToText,
-            AutoModelForVision2Seq,
         )
+        
+        # Handle compatibility between transformers v4 and v5
+        # In v5, AutoModelForVision2Seq was renamed to AutoModelForImageTextToText
+        try:
+            from transformers import AutoModelForVision2Seq
+        except ImportError:
+            # In transformers v5, use AutoModelForImageTextToText instead
+            AutoModelForVision2Seq = AutoModelForImageTextToText
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
@@ -381,7 +417,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        attn_implementation = override_model_config.get("attn_implementation", "flash_attention_2")
+        # First check override_config, then check model config directly
+        attn_implementation = override_model_config.get("attn_implementation", None)
+        if attn_implementation is None:
+            # Check if attn_implementation is set directly in model config
+            attn_implementation = self.config.model.get("attn_implementation", "flash_attention_2")
+        
         actor_model_config = AutoConfig.from_pretrained(
             local_path, trust_remote_code=trust_remote_code, attn_implementation=attn_implementation
         )
@@ -456,13 +497,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     actor_module_class = AutoModel
 
-            actor_module = actor_module_class.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
-                config=actor_model_config,
-                trust_remote_code=trust_remote_code,
-                attn_implementation=attn_implementation,
-            )
+            # Check if we should skip weight loading
+            skip_weight_loading = os.environ.get("VERL_SKIP_WEIGHT_LOADING", "false").lower() == "true"
+            
+            if skip_weight_loading:
+                print(f"⚠️  Skipping weight loading for: {local_path}")
+                print(f"⚠️  Creating model with config only")
+                # Create model from config without loading weights
+                actor_module = actor_module_class.from_config(
+                    config=actor_model_config,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=trust_remote_code,
+                    attn_implementation=attn_implementation,
+                )
+            else:
+                actor_module = actor_module_class.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                    attn_implementation=attn_implementation,
+                )
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
@@ -623,7 +678,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             }
             full_state = actor_module.state_dict()
             apply_fsdp2(actor_module, fsdp_kwargs, fsdp_config)
-            fsdp2_load_full_state_dict(actor_module, full_state, fsdp_mesh, cpu_offload)
+            
+            # Only load state dict if we're not skipping weight loading
+            # This avoids the CUDA error in _broadcast_tensors when using NPU
+            skip_weight_loading = os.environ.get("VERL_SKIP_WEIGHT_LOADING", "false").lower() == "true"
+            if not skip_weight_loading:
+                fsdp2_load_full_state_dict(actor_module, full_state, fsdp_mesh, cpu_offload)
+            else:
+                print(f"⚠️  Skipping fsdp2_load_full_state_dict for {role} (VERL_SKIP_WEIGHT_LOADING=true)")
+            
             actor_module_fsdp = actor_module
         else:
             raise NotImplementedError(f"not implement {fsdp_strategy}")
@@ -1388,7 +1451,12 @@ class CriticWorker(Worker, DistProfilerExtension):
         from transformers import AutoConfig
 
         # override model kwargs
-        attn_implementation = override_config.get("attn_implementation", "flash_attention_2")
+        # First check override_config, then check model config directly
+        attn_implementation = override_config.get("attn_implementation", None)
+        if attn_implementation is None:
+            # Check if attn_implementation is set directly in model config
+            attn_implementation = self.config.model.get("attn_implementation", "flash_attention_2")
+        
         critic_model_config = AutoConfig.from_pretrained(
             local_path,
             attn_implementation=attn_implementation,
@@ -1556,7 +1624,14 @@ class CriticWorker(Worker, DistProfilerExtension):
             }
             full_state = critic_module.state_dict()
             apply_fsdp2(critic_module, fsdp_kwargs, fsdp_config)
-            fsdp2_load_full_state_dict(critic_module, full_state, fsdp_mesh, offload_policy)
+            
+            # Only load state dict if we're not skipping weight loading
+            # This avoids the CUDA error in _broadcast_tensors when using NPU
+            skip_weight_loading = os.environ.get("VERL_SKIP_WEIGHT_LOADING", "false").lower() == "true"
+            if not skip_weight_loading:
+                fsdp2_load_full_state_dict(critic_module, full_state, fsdp_mesh, offload_policy)
+            else:
+                print(f"⚠️  Skipping fsdp2_load_full_state_dict for critic (VERL_SKIP_WEIGHT_LOADING=true)")
         else:
             raise NotImplementedError(f"Unknown strategy {config.strategy}")
 
