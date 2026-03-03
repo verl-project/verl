@@ -467,7 +467,7 @@ class MegatronEngine(BaseEngine):
 
     def get_data_parallel_group(self):
         return mpu.get_data_parallel_group()
-    
+
     def get_model_parallel_group(self):
         return mpu.get_model_parallel_group()
 

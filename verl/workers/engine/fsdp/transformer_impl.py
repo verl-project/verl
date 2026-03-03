@@ -498,7 +498,7 @@ class FSDPEngine(BaseEngine):
             return self.ulysses_device_mesh.get_group(mesh_dim="dp")
         else:
             return torch.distributed.group.WORLD
-    
+
     def get_model_parallel_group(self):
         return None
 

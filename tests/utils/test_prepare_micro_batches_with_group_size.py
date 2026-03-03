@@ -93,9 +93,7 @@ def _verify_group_integrity(batch_idx_list: list[list[int]], force_group_size: i
         start = g * force_group_size
         group_indices = list(range(start, start + force_group_size))
         mb_ids = {sample_to_mb[i] for i in group_indices}
-        assert len(mb_ids) == 1, (
-            f"Group {g} (samples {group_indices}) was split across micro-batches {mb_ids}"
-        )
+        assert len(mb_ids) == 1, f"Group {g} (samples {group_indices}) was split across micro-batches {mb_ids}"
 
 
 def test_force_group_size_2_basic():
@@ -119,10 +117,22 @@ def test_force_group_size_4_basic():
     """Test with force_group_size=4 (e.g., 4 responses per prompt in RM training)."""
     # 4 groups of 4 samples each.
     seq_lens = [
-        100, 110, 90, 95,   # group 0
-        200, 210, 190, 205, # group 1
-        50,  55,  45,  60,  # group 2
-        150, 160, 140, 155, # group 3
+        100,
+        110,
+        90,
+        95,  # group 0
+        200,
+        210,
+        190,
+        205,  # group 1
+        50,
+        55,
+        45,
+        60,  # group 2
+        150,
+        160,
+        140,
+        155,  # group 3
     ]
     force_group_size = 4
     batch_size = len(seq_lens)
@@ -182,12 +192,24 @@ def test_force_group_size_large_group():
     """Test with a larger batch and force_group_size=3."""
     # 6 groups of 3 samples each.
     seq_lens = [
-        100, 105, 95,   # group 0
-        200, 205, 195,  # group 1
-        50,  55,  45,   # group 2
-        150, 155, 145,  # group 3
-        80,  85,  75,   # group 4
-        120, 125, 115,  # group 5
+        100,
+        105,
+        95,  # group 0
+        200,
+        205,
+        195,  # group 1
+        50,
+        55,
+        45,  # group 2
+        150,
+        155,
+        145,  # group 3
+        80,
+        85,
+        75,  # group 4
+        120,
+        125,
+        115,  # group 5
     ]
     force_group_size = 3
     batch_size = len(seq_lens)
@@ -217,4 +239,3 @@ def test_force_group_size_1_unchanged():
     # All samples covered exactly once.
     all_indices = [idx for indices in batch_idx_list for idx in indices]
     assert sorted(all_indices) == list(range(len(seq_lens)))
-

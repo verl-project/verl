@@ -308,7 +308,7 @@ class VeOmniEngine(FSDPEngine):
             return parallel_state.get_parallel_state().device_mesh.get_group(mesh_dim="dp")
         else:
             return torch.distributed.group.WORLD
-        
+
     def get_model_parallel_group(self):
         return parallel_state.get_parallel_state().device_mesh.get_group(mesh_dim="mp")
 
