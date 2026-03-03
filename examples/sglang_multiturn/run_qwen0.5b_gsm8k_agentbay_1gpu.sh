@@ -1,36 +1,26 @@
 #!/bin/bash
-# Minimal RL training: Qwen2.5-0.5B + AgentBay code_interpreter on 1x V100 GPU
+# Minimal RL training: Qwen2.5-0.5B + AgentBay code_interpreter on 1 GPU
 #
 # Purpose: Verify the end-to-end pipeline (model → tool call → AgentBay → reward)
 #
-# V100 (sm70) adaptations vs original T4 script:
-#   - vllm instead of sglang (sgl-kernel lacks sm70 support)
-#   - float16 instead of bfloat16 (V100 has no bf16 hardware)
-#   - sdpa attention instead of flash_attention_2
-#   - enforce_eager=True (skip CUDA graph / FlashInfer)
-#   - reduced max_model_len / max_response_length / micro_batch for 16GB VRAM
-#
 # Prerequisites:
-#   1. pip install wuying-agentbay-sdk vllm
-#   2. export AGENTBAY_API_KEY=your_key
+#   1. pip install wuying-agentbay-sdk
+#   2. export AGENTBAY_API_KEY=your_key  (get from https://agentbay.console.aliyun.com)
 #   3. python examples/data_preprocess/gsm8k_agentbay.py --local_save_dir ~/data/gsm8k_agentbay
-#   4. Download model: huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct --local-dir ~/models/Qwen2.5-0.5B-Instruct
+#   4. (Optional) huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct
 #
 # Usage:
 #   bash examples/sglang_multiturn/run_qwen0.5b_gsm8k_agentbay_1gpu.sh
 
 set -x
 
-eval "$(/root/miniconda3/bin/conda shell.bash hook)"
-conda activate verl
-
 ulimit -n 65535
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
 
-MODEL_PATH=${MODEL_PATH:-/root/models/Qwen2.5-0.5B-Instruct}
-DATA_DIR=${DATA_DIR:-/root/data/gsm8k_agentbay}
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen2.5-0.5B-Instruct}
+DATA_DIR=${DATA_DIR:-$HOME/data/gsm8k_agentbay}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-1}
 

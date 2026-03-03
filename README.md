@@ -145,6 +145,7 @@ verl is fast with:
   - [Multi-turn Rollout Support](https://verl.readthedocs.io/en/latest/sglang_multiturn/multiturn.html)
   - [Search Tool Integration](https://verl.readthedocs.io/en/latest/sglang_multiturn/search_tool_example.html)
   - [Sandbox Fusion Integration](https://verl.readthedocs.io/en/latest/examples/sandbox_fusion_example.html)
+  - [AgentBay Sandbox Integration](https://verl.readthedocs.io/en/latest/examples/agentbay_example.html)
   - [Deployment using Separate GPU Resources](https://github.com/volcengine/verl/tree/main/examples/split_placement)
   - [Extend to Other RL(HF) algorithms](https://verl.readthedocs.io/en/latest/advance/dpo_extension.html)
   - [Ray API design tutorial](https://verl.readthedocs.io/en/latest/advance/placement.html)

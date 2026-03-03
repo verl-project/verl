@@ -128,6 +128,7 @@ verl is fast with:
    advance/placement
    advance/dpo_extension
    examples/sandbox_fusion_example
+   examples/agentbay_example
    advance/rollout_trace.rst
    advance/rollout_skip.rst
    advance/one_step_off
