@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import os
 
 import torch
 from transformers import PretrainedConfig
@@ -23,6 +24,9 @@ _DEVICE_FLOPS = {
     "CPU": 448e9,
     "GB200": 2.5e15,
     "B200": 2.25e15,
+    "MI455X": 10e15,  # AMD Instinct MI455X FP16 (10 PFLOPS, CDNA 5)
+    "MI425X": 6e15,   # AMD Instinct MI425X FP16 (estimated, MI400 series)
+    "MI355X": 2516e12,  # AMD Instinct MI355X FP16 matrix (2.516 PFLOPS)
     "MI300X": 1336e12,
     "H100": 989e12,
     "H800": 989e12,
@@ -77,7 +81,11 @@ def get_device_flops(unit="T", device_name=None):
                 device_name = get_torch_device().get_device_name()
             except (AssertionError, RuntimeError):
                 # ROCm or other backends can raise "Invalid device id" from get_device_properties
-                device_name = "MI300X" if is_rocm_visible_devices() else "Unknown"
+                if is_rocm_visible_devices():
+                    # Allow override for MI355X/MI425X/MI455X and later (set VERL_ROCM_DEVICE_FALLBACK=MI355X etc.)
+                    device_name = os.environ.get("VERL_ROCM_DEVICE_FALLBACK", "MI355X")
+                else:
+                    device_name = "Unknown"
 
     flops = float("inf")  # INF flops for unkown gpu type
 

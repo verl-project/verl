@@ -5,8 +5,10 @@ Last updated: 11/13/2025.
 
 Author: `Yang Wang <https://github.com/YangWang92/>`_, `Songlin Jiang <https://github.com/HollowMan6/>`_
 
-Use vLLM Sleep Mode for AMD MI3xx series GPUs
+Use vLLM Sleep Mode for AMD MI3xx / MI355X / MI425X / MI455X and later GPUs
 --------------------------------------------------------------
+
+verl supports AMD Instinct MI300 series, MI355X, MI425X, and MI455X (and later) GPUs. FLOPs for MI355X, MI425X, and MI455X are included for throughput reporting. If device name detection fails on ROCm (e.g. in some container setups), set ``VERL_ROCM_DEVICE_FALLBACK`` to your GPU model (e.g. ``MI355X``, ``MI425X``, ``MI455X``) so the correct FLOPs are used.
 
 By default, verl requires vLLM to enable sleep mode, which allows vLLM to offload GPU memory to CPU memory after rollout. This feature has been merged into the main branch of vLLM for version later than 0.11.0.
 
