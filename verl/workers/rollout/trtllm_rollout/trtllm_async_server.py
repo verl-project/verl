@@ -172,7 +172,7 @@ class TRTLLMHttpServer:
         self.llm = await AsyncLLM(**llm_kwargs)
 
         trtllm_server = OpenAIServer(
-            llm=self.llm,
+            generator=self.llm,
             model=self.model_config.local_path,
             tool_parser=None,
             server_role=None,
@@ -339,6 +339,7 @@ class TRTLLMReplica(RolloutReplica):
             ),
             runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
             name=name,
+            max_concurrency=self.max_concurrency,
         ).remote(
             config=self.config,
             model_config=self.model_config,

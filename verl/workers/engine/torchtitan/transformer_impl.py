@@ -16,6 +16,7 @@ The concrete Engine implementation using PyTorch TorchTitan parallelism (FSDP2 +
 """
 
 import gc
+import importlib
 import logging
 import os
 import re
@@ -27,16 +28,10 @@ import torch.distributed
 from tensordict import TensorDict
 from torch.distributed.checkpoint.state_dict import get_model_state_dict
 from torch.distributed.tensor import DTensor
-from torchtitan.config.job_config import (
-    Checkpoint,
-    Compile,
-    JobConfig,
-    LRScheduler,
-    Model,
-    Optimizer,
-    Parallelism,
-    Training,
-)
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -58,6 +53,7 @@ from verl.utils.model import extract_multi_modal_inputs
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import HFModelConfig, TorchtitanEngineConfig, TorchtitanOptimizerConfig
 from verl.workers.engine.torchtitan.utils import (
+    NoOpDataLoader,
     derive_torchtitan_name_and_flavor,
     enable_fsdp_gradient_division,
     get_attention_masks,
@@ -105,35 +101,19 @@ class TorchTitanEngine(BaseEngine):
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
 
-        # Disable torchtitan's dataloader since verl has its own data loading
-        # Ideally torchtitan trainer init should not initialize dataloader
-        import torchtitan.protocols.train_spec as train_spec_module
-
-        original_get_train_spec = train_spec_module.get_train_spec
-
-        def _get_train_spec_without_dataloader(model_name):
-            train_spec = original_get_train_spec(model_name)
-            train_spec.build_dataloader_fn = None
-            return train_spec
-
-        train_spec_module.get_train_spec = _get_train_spec_without_dataloader
-
         # Derive torchtitan model name and flavor from HF config
         torchtitan_name, torchtitan_flavor = derive_torchtitan_name_and_flavor(self.model_config.hf_config)
 
-        # Get train_spec and directly override model_args before Trainer init
-        train_spec = train_spec_module.get_train_spec(torchtitan_name)
-        model_args = train_spec.model_args.get(torchtitan_flavor)
-        if model_args is not None:
-            if hasattr(model_args, "attn_type"):
-                model_args.attn_type = self.engine_config.attn_type
+        # Get ModelSpec from model registry
+        model_module = importlib.import_module(f"torchtitan.models.{torchtitan_name}")
+        model_spec = model_module.model_registry(torchtitan_flavor)
 
-        model = Model(
-            name=torchtitan_name,
-            flavor=torchtitan_flavor,
-            hf_assets_path=self.model_config.path,
-        )
-        optimizer = Optimizer(
+        # Override attn_backend on the model config if needed
+        attn_type = self.engine_config.attn_type
+        if hasattr(model_spec.model, "layer") and hasattr(model_spec.model.layer, "attention"):
+            model_spec.model.layer.attention.attn_backend = attn_type
+
+        optimizer = OptimizersContainer.Config(
             name=self.optimizer_config.name,
             lr=self.optimizer_config.lr,
             eps=self.optimizer_config.eps,
@@ -147,12 +127,12 @@ class TorchTitanEngine(BaseEngine):
         if lr_warmup_steps is None or lr_warmup_steps <= 0:
             lr_warmup_steps = int(self.optimizer_config.lr_warmup_steps_ratio * total_steps)
 
-        lr_scheduler = LRScheduler(
+        lr_scheduler = LRSchedulersContainer.Config(
             warmup_steps=lr_warmup_steps,
             decay_type=self.optimizer_config.decay_type,
             min_lr_factor=self.optimizer_config.min_lr_factor,
         )
-        parallelism = Parallelism(
+        parallelism = ParallelismConfig(
             data_parallel_replicate_degree=self.engine_config.data_parallel_replicate_size,
             data_parallel_shard_degree=self.engine_config.data_parallel_shard_size,
             fsdp_reshard_after_forward=self.engine_config.reshard_after_forward,
@@ -162,30 +142,33 @@ class TorchTitanEngine(BaseEngine):
             expert_parallel_degree=self.engine_config.expert_parallel_size,
             expert_tensor_parallel_degree=self.engine_config.expert_tensor_parallel_size,
         )
-        checkpoint = Checkpoint(
+        checkpoint = CheckpointManager.Config(
             enable=True,
             initial_load_in_hf=True,
             initial_load_model_only=True,
             initial_load_path=model_config.path,
         )
-        compile = Compile(enable=self.engine_config.use_torch_compile)
+        compile_config = CompileConfig(enable=self.engine_config.use_torch_compile)
         training_kwargs = {}
         if self.engine_config.max_seq_len is not None:
             training_kwargs["seq_len"] = self.engine_config.max_seq_len
         if self.engine_config.offload_policy or self.engine_config.forward_only:
-            training = Training(enable_cpu_offload=True, **training_kwargs)
+            training = TrainingConfig(enable_cpu_offload=True, **training_kwargs)
         else:
-            training = Training(**training_kwargs)
+            training = TrainingConfig(**training_kwargs)
 
-        # Construct Torchtitan's JobConfig
-        self.config = JobConfig(
-            model=model,
+        # Construct Torchtitan's Trainer.Config
+        self.config = Trainer.Config(
+            model_spec=model_spec,
+            hf_assets_path=self.model_config.path,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             parallelism=parallelism,
             checkpoint=checkpoint,
-            compile=compile,
+            compile=compile_config,
             training=training,
+            # Use a no-op dataloader since verl has its own data loading
+            dataloader=NoOpDataLoader.Config(),
         )
         self.trainer = Trainer(self.config)
 
@@ -336,7 +319,9 @@ class TorchTitanEngine(BaseEngine):
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
         micro_batches, indices = prepare_micro_batches(
-            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+            data=data,
+            dp_group=self.get_data_parallel_group(),
+            same_micro_num_in_dp=True,
         )
 
         output_lst = []
@@ -593,7 +578,7 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 position_ids = position_ids.values().unsqueeze(0)
 
             labels = torch.roll(input_ids, shifts=-1, dims=1)
-            attn_type = self.trainer.model_args.attn_type
+            attn_type = self.trainer.model_config.layer.attention.attn_backend
             attention_mask = get_attention_masks(
                 input_batch=input_ids,
                 positions=position_ids,
@@ -639,7 +624,7 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 self.trainer.device,
-                self.trainer.job_config.parallelism.context_parallel_load_balancer,
+                self.trainer.config.parallelism.context_parallel_load_balancer,
             )
 
         # TODO(jessicazhong): multimodal is not yet supported for Torchtitan engine

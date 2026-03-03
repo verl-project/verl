@@ -21,6 +21,7 @@ from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
 from verl.utils import hf_tokenizer
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.tokenizer import normalize_token_ids
 
 
 def create_data_samples(tokenizer) -> DataProto:
@@ -63,8 +64,8 @@ def create_data_samples(tokenizer) -> DataProto:
     pad_token_id = tokenizer.pad_token_id
     prompts, responses, input_ids, attention_masks = [], [], [], []
     for conv in convs:
-        prompt_tokens = tokenizer.apply_chat_template(conv[:1], tokenize=True)
-        response_tokens = tokenizer.apply_chat_template(conv, tokenize=True)[len(prompt_tokens) :]
+        prompt_tokens = normalize_token_ids(tokenizer.apply_chat_template(conv[:1], tokenize=True))
+        response_tokens = normalize_token_ids(tokenizer.apply_chat_template(conv, tokenize=True))[len(prompt_tokens) :]
 
         padded_prompt = [pad_token_id] * (prompt_length - len(prompt_tokens)) + prompt_tokens
         padded_response = response_tokens + [pad_token_id] * (response_length - len(response_tokens))
