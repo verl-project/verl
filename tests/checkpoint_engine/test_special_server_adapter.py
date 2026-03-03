@@ -20,18 +20,15 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizer
 
 from tests.checkpoint_engine.test_utils import create_trainer_worker_group
-from verl.checkpoint_engine import CheckpointEngineManager, CheckpointEngineWorker
-from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+from verl.checkpoint_engine import CheckpointEngineManager
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 from verl.experimental.fully_async_policy.agent_loop.agent_loop import FullyAsyncLLMServerManager
 from verl.single_controller.ray import (
-    RayClassWithInitArgs,
     RayResourcePool,
-    RayWorkerGroup,
 )
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name
-from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import get_rollout_replica_class
+from verl.workers.config import CheckpointEngineConfig, HFModelConfig
 
 
 @pytest.fixture
@@ -46,15 +43,42 @@ def init_config() -> DictConfig:
             ],
         )
 
-    config.trainer.n_gpus_per_node = 8
-    config.trainer.nnodes = 1
     config.actor_rollout_ref.model.path = os.path.expanduser("~/models/Qwen/Qwen3-VL-2B-Instruct")
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.max_num_seqs = 256
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.checkpoint_engine.backend = "nccl" if get_device_name() == "cuda" else "hccl"
+    config.actor_rollout_ref.rollout.nnodes = 1
+    config.trainer.n_gpus_per_node = 4
+    config.trainer.nnodes = 1
 
     return config
+
+
+async def _run_update_weights_with_global_steps_none(
+    server_manager: AsyncLLMServerManager,
+    checkpoint_manager: CheckpointEngineManager,
+    tokenizer: PreTrainedTokenizer,
+):
+    await checkpoint_manager.update_weights(global_steps=None)
+    prompt = [{"role": "user", "content": "How to make a sandwich?"}]
+    prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+    output = await server_manager.generate(
+        request_id="test_0",
+        prompt_ids=prompt_ids,
+        sampling_params={
+            "temperature": 1.0,
+            "logprobs": True,
+        },
+    )
+    assert output.stop_reason not in ("aborted", "abort"), (
+        f"output.stop_reason is {output.stop_reason}, expected not abort"
+    )
+    assert output.extra_info["global_steps"] is None, (
+        f"output.extra_info['global_steps'] is {output.extra_info['global_steps']}, expected None"
+    )
+    print("========== [update_weights with global_steps=None] ==========")
+    print("[RESPONSE]", tokenizer.decode(output.token_ids, skip_special_tokens=True))
 
 
 async def _run_server_manager_without_resume(
@@ -167,41 +191,18 @@ async def test_server_adapter(init_config):
     checkpoint_engine_config: CheckpointEngineConfig = omega_conf_to_dataclass(
         init_config.actor_rollout_ref.rollout.checkpoint_engine
     )
-    trainer_pool = RayResourcePool(process_on_nodes=[4], max_colocate_count=3)
+    trainer_pool = RayResourcePool(process_on_nodes=[init_config.trainer.n_gpus_per_node], max_colocate_count=3)
     trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
     trainer.reset()
 
-    # 2. create rollout replicas
-    rollout_config: RolloutConfig = omega_conf_to_dataclass(init_config.actor_rollout_ref.rollout)
-
-    # 2.1 create checkpoint engine worker group
-    rollout_pool = RayResourcePool(process_on_nodes=[4], max_colocate_count=3)
-    ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(CheckpointEngineWorker),
-        model_config=model_config,
-        rollout_config=rollout_config,
-    )
-    rollout = RayWorkerGroup(
-        resource_pool=rollout_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name()
-    )
-
-    # 2.2 create rollout replicas
-    rollout_replica_class = get_rollout_replica_class(rollout_config.name)
-    rollout_replicas = [
-        rollout_replica_class(
-            replica_rank=replica_rank,
-            config=rollout_config,
-            model_config=model_config,
-        )
-        for replica_rank in range(2)
-    ]
-    await asyncio.gather(*[replica.init_hybrid(rollout) for replica in rollout_replicas])
+    # 2. create standalone rollout with AgentLoopManager
+    agent_loop_manager = await AgentLoopManager.create(config=init_config)
+    server_handles = [server._server_handle for server in agent_loop_manager.rollout_replicas]
 
     # 3. create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(
-        config=checkpoint_engine_config, trainer=trainer, replicas=rollout_replicas
+        config=checkpoint_engine_config, trainer=trainer, replicas=agent_loop_manager.rollout_replicas
     )
-    await checkpoint_manager.update_weights(global_steps=0)
 
     n = 4
     prompts = [
@@ -211,9 +212,17 @@ async def test_server_adapter(init_config):
         [{"role": "user", "content": "Please write an article about the geography of America, at least 1000 words."}],
     ] * n
 
-    # 4. test AsyncLLMServerManager without partial rollout resume
-    server_handles = [server._server_handle for server in rollout_replicas]
     server_manager = AsyncLLMServerManager(config=init_config, server_handles=server_handles)
+
+    # 4. test update_weights with global_steps=None
+    await _run_update_weights_with_global_steps_none(
+        server_manager=server_manager,
+        checkpoint_manager=checkpoint_manager,
+        tokenizer=model_config.tokenizer,
+    )
+
+    # 5. test AsyncLLMServerManager without partial rollout resume
+    await checkpoint_manager.update_weights(global_steps=0)
     await _run_server_manager_without_resume(
         initial_steps=1,
         train_steps=3,
@@ -223,7 +232,7 @@ async def test_server_adapter(init_config):
         tokenizer=model_config.tokenizer,
     )
 
-    # 5. test FullyAsyncLLMServerManager with partial rollout resume
+    # 6. test FullyAsyncLLMServerManager with partial rollout resume
     server_manager = FullyAsyncLLMServerManager(config=init_config, server_handles=server_handles)
     await _run_server_manager_with_resume(
         initial_steps=4,
