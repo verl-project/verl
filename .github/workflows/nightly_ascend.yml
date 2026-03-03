@@ -206,9 +206,9 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
-      - name: Prepare GSM8K dataset
+      - name: Preprocess geo3k dataset
         run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/openai/geo3k
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
       - name: Running nightlyCI_grpo-qwen25-vl-3b-Instruct-fsdp-vllm_ascend
         run: |
           ray stop --force
