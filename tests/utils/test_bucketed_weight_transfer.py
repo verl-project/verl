@@ -24,7 +24,7 @@ import uuid
 import pytest
 import torch
 
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device, is_support_ipc
 
 PROCESS_TIMEOUT = 60
 
@@ -145,7 +145,7 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 # ---------------------------------------------------------------------------
 # Shared memory tests
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(not HAS_ACCELERATOR, reason="Requires CUDA or NPU")
+@pytest.mark.skipif(not (HAS_ACCELERATOR and not HAS_CUDA), reason="Requires (shm only tested)")
 class TestBucketedWeightTransferSHM:
     """Test BucketedWeightSender/Receiver via shared memory path."""
 
@@ -181,7 +181,7 @@ class TestBucketedWeightTransferSHM:
 # ---------------------------------------------------------------------------
 # CUDA IPC tests (CUDA only — IPC is not supported on NPU)
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(not HAS_CUDA, reason="Requires CUDA (IPC not supported on NPU)")
+@pytest.mark.skipif(not is_support_ipc(), reason="Requires IPC support")
 class TestBucketedWeightTransferIPC:
     """Test BucketedWeightSender/Receiver via CUDA IPC path."""
 
