@@ -28,6 +28,9 @@ from transformers import (
 )
 
 from verl.utils import hf_processor, hf_tokenizer
+from verl.utils.transformers_compat import get_auto_model_for_vision2seq
+
+AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
 def parse_args():
@@ -201,20 +204,9 @@ class BaseModelMerger(ABC):
                 case "AutoModelForTokenClassification":
                     return AutoModelForTokenClassification
                 case "AutoModelForVision2Seq":
-                    # Handle different transformers versions for Vision2Seq models
-                    import transformers
-                    from packaging import version
-
-                    if version.parse(transformers.__version__) >= version.parse("4.54.0"):
-                        # transformers >= 4.54.0 uses AutoModelForImageTextToText
-                        from transformers import AutoModelForImageTextToText
-
-                        return AutoModelForImageTextToText
-                    else:
-                        # transformers < 4.54.0 uses AutoModelForVision2Seq
-                        from transformers import AutoModelForVision2Seq
-
-                        return AutoModelForVision2Seq
+                    return AutoModelForVision2Seq
+                case "AutoModelForImageTextToText":
+                    return AutoModelForVision2Seq
                 case _:
                     raise NotImplementedError(f"Unknown auto class {auto_class}")
         else:

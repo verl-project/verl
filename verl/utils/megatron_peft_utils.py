@@ -38,6 +38,10 @@ MEGATRON_TO_HF_MODULES = {
     "linear_q_down_proj": ["q_a_proj"],
     "linear_q_up_proj": ["q_b_proj"],
     "linear_q_proj": ["q_proj"],
+    # DSA indexer mappings
+    "linear_wq_b": ["wq_b"],
+    "linear_wk": ["wk"],
+    "linear_weights_proj": ["weights_proj"],
 }
 
 # Modules with stacked parameters that need .base_layer suffix in vLLM
@@ -60,6 +64,9 @@ STACKED_PARAMS = [
     ".kv_b_proj.weight",
     ".q_a_proj.weight",
     ".q_b_proj.weight",
+    ".wq_b.weight",
+    ".wk.weight",
+    ".weights_proj.weight",
 ]
 
 
