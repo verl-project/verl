@@ -41,13 +41,13 @@ on:
       - main
       - v0.*
     paths:
-      - "verl/workers/rollout/trtllm_rollout/**"
-      - "tests/workers/rollout/rollout_trtllm/**"
-      - ".github/workflows/e2e_ppo_grpo_trainer_trtllm.yml"
-      - "examples/data_preprocess/gsm8k.py"
-      - "examples/data_preprocess/geo3k.py"
-      - "examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh"
-      - "examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh"
+      - "**/*.py"
+      # Other entrypoints
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      # Recipes
+      - "!recipe/**"
+      # FSDP
+      - "!verl/workers/**/*dp_*.py"
   pull_request:
     branches:
       - main
