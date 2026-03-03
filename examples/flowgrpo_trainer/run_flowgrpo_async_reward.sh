@@ -10,12 +10,8 @@ REWARD_ENGINE=vllm
 reward_path=tests/experimental/reward_loop/reward_fn.py
 reward_model_name=$HOME/models/Qwen/Qwen3-VL-8B-Instruct
 
-# launch vllm reward server seperately
-# NOTE: temporal usage
-CUDA_VISIBLE_DEVICES=0 vllm serve $reward_model_name --host localhost --port 9529
-reward_router_address=localhost:9529
 
-CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo --config-path=config \
+python3 -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_diffusion_trainer.yaml' \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \
@@ -57,11 +53,16 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo --config-path=conf
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     reward.num_workers=4 \
     reward.reward_manager.name=image \
-    reward.reward_model.enable=False \
+    reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
+    reward.reward_model.enable_resource_pool=True \
+    reward.reward_model.nnodes=1 \
+    reward.reward_model.n_gpus_per_node=1 \
+    reward.reward_model.rollout.gpu_memory_utilization=0.9 \
+    reward.reward_model.rollout.free_cache_engine=False \
+    reward.reward_model.rollout.tensor_model_parallel_size=1 \
     reward.reward_model.rollout.enforce_eager=False \
-    +reward.reward_model.reward_router_address=$reward_router_address \
     reward.custom_reward_function.path=$reward_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.use_legacy_worker_impl=disable \
