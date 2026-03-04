@@ -361,11 +361,7 @@ def apply_router_replay_patch():
     for attr in ext_attrs:
         if attr not in native_params:
             if sig:
-                new_param = inspect.Parameter(
-                    attr,
-                    inspect.Parameter.KEYWORD_ONLY,
-                    default=False
-                )
+                new_param = inspect.Parameter(attr, inspect.Parameter.KEYWORD_ONLY, default=False)
                 if params and params[-1].kind == inspect.Parameter.VAR_KEYWORD:
                     params.insert(-1, new_param)
                 else:
@@ -376,7 +372,6 @@ def apply_router_replay_patch():
             TransformerConfig.__init__.__signature__ = sig.replace(parameters=params)
         except Exception as e:
             print(f"Failed to update signature metadata: {e}")
-
 
     if not hasattr(TransformerConfig, "_verl_router_patched"):
         # Store original __init__ method
