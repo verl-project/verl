@@ -77,12 +77,18 @@ jobs:
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
-      options: >-
-        --shm-size 16g
+      #options: >-
+      #  --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
     steps:
+      - name: Debug - Keep Alive on Failure
+        if: failure()
+        run: |
+          echo "Job failed! Sleeping for 300 seconds to allow debugging..."
+          sleep 300
+        shell: bash
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
