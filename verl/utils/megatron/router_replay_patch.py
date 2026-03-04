@@ -298,7 +298,7 @@ def patched_routing(self, logits: torch.Tensor, *args, **kwargs):
             scaling_factor=self.config.moe_router_topk_scaling_factor,
             score_function=self.score_function,
             expert_bias=self.expert_bias,
-            fused=self.config.moe_router_fusion,
+            fused=moe_router_fusion,
             router_replay=getattr(self, "router_replay", None),
         )
 
