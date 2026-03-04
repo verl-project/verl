@@ -7,9 +7,9 @@ done
 
 export RAY_DEDUP_LOGS=0
 
-# -----
-# Config
-# -----
+# ----------------------
+# Config for GB200 node
+# ----------------------
 TP=${INFER_TP:-4}
 ACTOR_TP=${ACTOR_TP:-4}
 ACTOR_PP=${ACTOR_PP:-2}
