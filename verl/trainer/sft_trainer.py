@@ -125,9 +125,14 @@ class SFTTrainer:
                     log_only_rank_0=True,
                 )
 
+        task_type = self.config.model.get("task_type", None)
+        if task_type is None:
+            task_type = "CAUSAL_LM"
+
         return {
             "r": lora_rank,
             "lora_alpha": int(lora_alpha or 0),
+            "task_type": str(task_type),
         }
 
     def _build_config(self):

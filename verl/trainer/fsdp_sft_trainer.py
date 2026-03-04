@@ -566,9 +566,16 @@ class FSDPSFTTrainer:
             dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
 
             if self.lora:
+                task_type = "CAUSAL_LM"
+                peft_config = getattr(self.model, "peft_config", {}).get("default")
+                if peft_config is not None and getattr(peft_config, "task_type", None) is not None:
+                    peft_task_type = peft_config.task_type
+                    task_type = peft_task_type.value if hasattr(peft_task_type, "value") else str(peft_task_type)
+
                 lora_meta = {
                     "r": int(getattr(self.config.model, "lora_rank", 0) or 0),
                     "lora_alpha": int(getattr(self.config.model, "lora_alpha", 0) or 0),
+                    "task_type": task_type,
                 }
                 lora_meta_path = os.path.join(local_global_step_folder, "lora_train_meta.json")
                 with open(lora_meta_path, "w", encoding="utf-8") as f:

@@ -245,7 +245,7 @@ class BaseModelMerger(ABC):
                 )
         return model
 
-    def _load_lora_train_meta(self) -> Optional[dict[str, int]]:
+    def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
         if not self.config.local_dir:
             return None
 
@@ -274,6 +274,15 @@ class BaseModelMerger(ABC):
                 result["lora_alpha"] = int(lora_meta["lora_alpha"])
             except (TypeError, ValueError):
                 warnings.warn(f"Invalid lora_alpha in {meta_path}: {lora_meta['lora_alpha']}", stacklevel=2)
+
+        if "task_type" in lora_meta:
+            task_type = lora_meta["task_type"]
+            if task_type is None:
+                pass
+            elif isinstance(task_type, str):
+                result["task_type"] = task_type
+            else:
+                warnings.warn(f"Invalid task_type in {meta_path}: {task_type}", stacklevel=2)
 
         return result if len(result) > 0 else None
 
@@ -312,6 +321,7 @@ class BaseModelMerger(ABC):
 
         lora_rank = inferred_lora_rank
         lora_alpha = 0
+        task_type = None
 
         if lora_meta is not None:
             meta_rank = lora_meta.get("r")
@@ -328,6 +338,10 @@ class BaseModelMerger(ABC):
             if meta_alpha is not None:
                 lora_alpha = meta_alpha
 
+            meta_task_type = lora_meta.get("task_type")
+            if meta_task_type is not None:
+                task_type = meta_task_type
+
         if lora_alpha == 0:
             warnings.warn(
                 "LoRA alpha metadata is missing or equals 0; falling back to lora_alpha=0. "
@@ -340,6 +354,8 @@ class BaseModelMerger(ABC):
             "lora_alpha": lora_alpha,
             "target_modules": list(target_modules),
         }
+        if task_type is not None:
+            peft_dict["task_type"] = task_type
         peft_config = peft.LoraConfig(**peft_dict).to_dict()
         peft_config["task_type"] = peft_config["task_type"].value if peft_config["task_type"] else None
         peft_config["peft_type"] = peft_config["peft_type"].value if peft_config["peft_type"] else None
