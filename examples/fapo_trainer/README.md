@@ -1,9 +1,7 @@
 <p align="center">
 <h1 align="center">FAPO: Flawed-Aware Policy Optimization for Efficient and Reliable Reasoning</h1>
 
-This example include a runnable and fully reproducible example that demonstrates how to:
-1. Train a generative reward model.
-2. Use the trained generative reward model to optimize a policy.
+This example include a runnable and fully reproducible example that demonstrates how to use reward model to optimize a policy.
 
 <p align="center">
     <a href="https://fapo-rl.github.io/"><img alt="Project Page" src="https://img.shields.io/badge/📒-Project Page-blue"></a>
@@ -13,34 +11,13 @@ This example include a runnable and fully reproducible example that demonstrates
     <a href="https://github.com/yyDing1/FAPO"><img alt="Code" src="https://img.shields.io/badge/💻-Code-blueviolet"></a>
 </p>
 
-The core infra design part of this work has been merged into the main branch, please refer to the [Reward Loop](https://verl.readthedocs.io/en/latest/advance/reward_loop.html) document for more details.
-
 ![fapo-result](https://fapo-rl.github.io/_astro/intro_main.DKe72RHX_1Us2HB.webp)
 
-## Step 1: Train FAPO-GenRM-4B (Generative Reward Model)
 
-We provide our training and evaluation datasets [here](https://huggingface.co/datasets/dyyyyyyyy/FAPO-Critic).
-Directly download them to `${RAY_DATA_HOME}/data/`.
-
-Then, submit the training job to the ray cluster:
+First construct the training and evaluation datasets by:
 
 ```bash
-cd verl # Repo root
-export RAY_ADDRESS="..." # The Ray cluster address to connect to
-export RAY_DATA_HOME="..." # The directory to store the data
-export WORKING_DIR="${PWD}" # The local directory to package to the Ray cluster
-bash examples/fapo_trainer/run_genrm_train_qwen_4b.sh
-```
-
-You can skip this step if you want to use the pre-trained FAPO-GenRM-4B model available [here](https://huggingface.co/dyyyyyyyy/FAPO-GenRM-4B).
-
-## Step 2: Integrate the GRM into the Final Training
-
-The training data is identical to that of DAPO-Math-17K, except that we replace the instruction with "Put the final answer in \boxed{}".
-
-You can construct the training and evaluation datasets by:
-```bash
-python examples/fapo_trainer/prepare_fapo_data.py --local_dir ${RAY_DATA_HOME}/data/
+python examples/fapo_trainer/prepare_data.py --local_dir ${RAY_DATA_HOME}/data/
 ```
 
 Or you can directly use the data available [here](https://huggingface.co/datasets/dyyyyyyyy/FAPO-Reasoning-Dataset).
@@ -81,7 +58,7 @@ reward:
 
 ![](https://github.com/yyDing1/verl-materials/blob/main/reward_loop.svg)
 
-### Choice 1: Colocate Reward Model
+## Choice 1: Colocate Reward Model
 
 ```bash
 cd verl # Repo root
@@ -93,7 +70,7 @@ bash examples/fapo_trainer/run_qwen_7b_rm_colocate.sh  # 7b fapo model
 bash examples/fapo_trainer/run_qwen_32b_rm_colocate.sh  # 32b fapo model
 ```
 
-### Choice 2: Standalone Reward Model
+## Choice 2: Standalone Reward Model
 
 ```bash
 cd verl # Repo root
