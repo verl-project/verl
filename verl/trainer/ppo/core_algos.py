@@ -270,6 +270,7 @@ def compute_grpo_outcome_advantage(
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
+    token_level_advantages: Optional[torch.Tensor] = None,
     config: Optional[AlgoConfig] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -287,6 +288,9 @@ def compute_grpo_outcome_advantage(
             small value to avoid division by zero
         norm_adv_by_std_in_grpo: `(bool)`
             whether to scale the GRPO advantage
+        token_level_advantages: `(Optional[torch.Tensor])`
+            optional per-token advantages from external systems (e.g., Atropos).
+            When provided, these override default GRPO score-based computation.
         config: `(Optional[AlgoConfig])`
             algorithm configuration object
 
@@ -300,6 +304,16 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
+    if token_level_advantages is not None:
+        with torch.no_grad():
+            if token_level_advantages.shape != response_mask.shape:
+                raise ValueError(
+                    "token_level_advantages must have the same shape as response_mask, "
+                    f"got {token_level_advantages.shape} vs {response_mask.shape}"
+                )
+            advantages = token_level_advantages.to(response_mask.device) * response_mask
+        return advantages, advantages
+
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)

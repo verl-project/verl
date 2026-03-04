@@ -17,7 +17,8 @@ repos:
       - id: autogen-trainer-cfg
         name: Generate and verify verl/trainer/config/_generated_*.yaml
         entry: scripts/generate_trainer_config.sh
-        language: script
+        language: python
+        additional_dependencies: ["hydra-core"]
         pass_filenames: false
 
   - repo: local

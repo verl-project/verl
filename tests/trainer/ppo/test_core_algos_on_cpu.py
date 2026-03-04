@@ -313,5 +313,32 @@ def test_grpo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+def test_grpo_token_level_advantage_override():
+    token_level_rewards = torch.tensor(
+        [[0.1, 0.2, 0.3, 0.4], [0.2, 0.1, 0.0, 0.3]],
+        dtype=torch.float32,
+    )
+    response_mask = torch.tensor(
+        [[1.0, 1.0, 0.0, 0.0], [1.0, 0.0, 1.0, 0.0]],
+        dtype=torch.float32,
+    )
+    token_level_advantages = torch.tensor(
+        [[1.0, 2.0, 3.0, 4.0], [0.5, 0.6, 0.7, 0.8]],
+        dtype=torch.float32,
+    )
+    index = np.array([0, 0], dtype=np.int64)
+
+    advantages, returns = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        token_level_advantages=token_level_advantages,
+    )
+
+    expected = token_level_advantages * response_mask
+    assert torch.allclose(advantages, expected)
+    assert torch.allclose(returns, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
