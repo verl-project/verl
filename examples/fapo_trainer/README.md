@@ -1,8 +1,6 @@
 <p align="center">
 <h1 align="center">FAPO: Flawed-Aware Policy Optimization for Efficient and Reliable Reasoning</h1>
 
-This example include a runnable and fully reproducible example that demonstrates how to use reward model to optimize a policy.
-
 <p align="center">
     <a href="https://fapo-rl.github.io/"><img alt="Project Page" src="https://img.shields.io/badge/📒-Project Page-blue"></a>
     <a href="https://verl.readthedocs.io/en/latest/advance/reward_loop.html"><img alt="Infra Design" src="https://img.shields.io/badge/🏗️-Infra Design-teal">
@@ -11,8 +9,9 @@ This example include a runnable and fully reproducible example that demonstrates
     <a href="https://github.com/yyDing1/FAPO"><img alt="Code" src="https://img.shields.io/badge/💻-Code-blueviolet"></a>
 </p>
 
-![fapo-result](https://fapo-rl.github.io/_astro/intro_main.DKe72RHX_1Us2HB.webp)
+This example include a runnable and fully reproducible example that demonstrates how to use reward model to optimize a policy.
 
+## Quick start
 
 First construct the training and evaluation datasets by:
 
@@ -82,6 +81,12 @@ export RM_NODES=xxx  # for standalone reward model
 bash examples/fapo_trainer/run_qwen_7b_rm_standalone.sh  # 7b fapo model
 bash examples/fapo_trainer/run_qwen_32b_rm_standalone.sh  # 32b fapo model
 ```
+
+## Results
+
+Compared with baseline (no reward model), FAPO significantly improves the reasoning ability of the model.
+
+![fapo-result](https://fapo-rl.github.io/_astro/intro_main.DKe72RHX_1Us2HB.webp)
 
 ## Use discriminative reward model
 
