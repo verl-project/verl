@@ -19,7 +19,12 @@ from collections import Counter
 
 
 def match_score(list1, list2):
-    """Compute a similarity score considering element frequency, ignoring order."""
+    """Compute a similarity score considering element frequency, ignoring order.
+
+    Reference: Liu S Y, Dong X, Lu X, et al. "Gdpo: Group reward-decoupled normalization policy
+    optimization for multi-reward rl optimization."
+    arXiv preprint arXiv:2601.05242, 2026.
+    """
     if list1 == list2:
         return 1.0
 
