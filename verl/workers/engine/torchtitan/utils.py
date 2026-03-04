@@ -11,16 +11,50 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import logging
+from collections.abc import Iterator
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
-from torchtitan.models.attention import VarlenMetadata, create_attention_mask, get_causal_mask_mod
-from torchtitan.protocols.model import AttentionMasksType
+from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    VarlenMetadata,
+    create_attention_mask,
+    get_causal_mask_mod,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class NoOpDataLoader(BaseDataLoader):
+    """A no-op dataloader for use when verl manages its own data loading.
+
+    Satisfies the BaseDataLoader interface required by torchtitan's Trainer
+    but does nothing. Its __iter__ yields nothing, and state_dict /
+    load_state_dict are no-ops.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseDataLoader.Config):
+        pass
+
+    def __init__(self, **kwargs):
+        pass
+
+    def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        return iter([])
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
 
 # Mapping from HuggingFace model_type to torchtitan model name.
 # Torchtitan models not mapped here:
@@ -43,7 +77,7 @@ def derive_torchtitan_name_and_flavor(hf_config) -> tuple[str, str]:
 
     The name is mapped from ``hf_config.model_type``. The flavor is found by
     matching architecture parameters (dim, n_layers, vocab_size) against the
-    known flavors registered in the torchtitan TrainSpec.
+    known flavors registered in the torchtitan model package.
 
     Args:
         hf_config: A HuggingFace AutoConfig object.
@@ -54,8 +88,6 @@ def derive_torchtitan_name_and_flavor(hf_config) -> tuple[str, str]:
     Raises:
         ValueError: If model_type is unsupported or no matching flavor is found.
     """
-    import torchtitan.protocols.train_spec as train_spec_module
-
     model_type = getattr(hf_config, "model_type", None)
     if model_type is None:
         raise ValueError("HuggingFace config does not have 'model_type' field")
@@ -67,17 +99,30 @@ def derive_torchtitan_name_and_flavor(hf_config) -> tuple[str, str]:
             f"Supported types: {list(_HF_MODEL_TYPE_TO_TORCHTITAN_NAME.keys())}."
         )
 
-    train_spec = train_spec_module.get_train_spec(name)
+    # Import the model package and find the configs dict
+    model_module = importlib.import_module(f"torchtitan.models.{name}")
+    model_configs = None
+    for attr in dir(model_module):
+        obj = getattr(model_module, attr)
+        if isinstance(obj, dict) and attr.endswith("_configs"):
+            model_configs = obj
+            break
+
+    if model_configs is None:
+        raise ValueError(
+            f"Could not find model configs dict in torchtitan.models.{name}. "
+            f"Expected a dict attribute ending with '_configs'."
+        )
 
     hidden_size = hf_config.hidden_size
     num_layers = hf_config.num_hidden_layers
     vocab_size = hf_config.vocab_size
 
-    for flavor_name, model_args in train_spec.model_args.items():
+    for flavor_name, model_cfg in model_configs.items():
         if (
-            getattr(model_args, "dim", None) == hidden_size
-            and getattr(model_args, "n_layers", None) == num_layers
-            and getattr(model_args, "vocab_size", None) == vocab_size
+            getattr(model_cfg, "dim", None) == hidden_size
+            and getattr(model_cfg, "n_layers", None) == num_layers
+            and getattr(model_cfg, "vocab_size", None) == vocab_size
         ):
             logger.info(
                 f"Auto-derived torchtitan name='{name}', flavor='{flavor_name}' from HF model_type='{model_type}'"
@@ -88,7 +133,7 @@ def derive_torchtitan_name_and_flavor(hf_config) -> tuple[str, str]:
         f"No matching torchtitan flavor found for model_type='{model_type}' "
         f"(hidden_size={hidden_size}, num_hidden_layers={num_layers}, "
         f"vocab_size={vocab_size}). "
-        f"Available flavors for '{name}': {list(train_spec.model_args.keys())}."
+        f"Available flavors for '{name}': {list(model_configs.keys())}."
     )
 
 
