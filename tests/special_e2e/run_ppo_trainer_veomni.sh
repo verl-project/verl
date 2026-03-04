@@ -2,18 +2,18 @@
 set -xeuo pipefail
 
 # Download model if not exists
-MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-VL-2B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 #huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
-TRAIN_FILES=${TRAIN_FILES:-${HOME}/data/gsm8k/train.parquet}
-VAL_FILES=${VAL_FILES:-${HOME}/data/gsm8k/test.parquet}
-VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
+TRAIN_FILES=${TRAIN_FILES:-${HOME}/data/geo3k/train.parquet}
+VAL_FILES=${VAL_FILES:-${HOME}/data/geo3k/test.parquet}
+VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-True}
 NUM_GPUS=${NUM_GPUS:-8}
 FSDP_SIZE=${FSDP_SIZE:-4}
 SP_SIZE=${SP_SIZE:-2}
-EP_SIZE=${EP_SIZE:-2}
-VERL_EXP_NAME=${VERL_EXP_NAME:-qwen2.5-0.5b-function-reward-minimal-fsdp-size8}
+EP_SIZE=${EP_SIZE:-1}
+VERL_EXP_NAME=${VERL_EXP_NAME:-qwen3-2b-vl-function-reward-minimal-fsdp-size8}
 
 python3 -m verl.trainer.main_ppo \
     model_engine=veomni \
