@@ -119,6 +119,8 @@ You can enable this computation method by not specifying a custom reward functio
 Both GenRM and DisRM can obtain reward scores via HTTP requests in the custom reward function.
 This allows users to flexibly combine rule-based rewards with reward models to construct more sophisticated reward logic.
 
+For more detailed usage instructions and infrastructure design, please refer to the [Reward Loop](https://verl.readthedocs.io/en/latest/advance/reward_loop.html) document.
+
 ## Citation
 
 If you find our works useful for your research, please consider citing:

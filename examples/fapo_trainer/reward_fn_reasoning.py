@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
+import asyncio
 import logging
 import os
 
-import asyncio
 import aiohttp
 from transformers import PreTrainedTokenizer
 
@@ -92,6 +91,7 @@ FLAWED_REWARD_PENALTY = 1.0
 #     finally:
 #         await session.close()
 
+
 async def post_request(router_address: str, payload: dict, endpoint: str, max_retries: int = 5):
     url = f"http://{router_address}/{endpoint}"
     last_exception = None
@@ -110,8 +110,7 @@ async def post_request(router_address: str, payload: dict, endpoint: str, max_re
                 raise
             last_exception = e
             logger.warning(
-                f"[Attempt {attempt + 1}/{max_retries}] Request to {url} failed with HTTP {e.status}: {e}. "
-                "Retrying..."
+                f"[Attempt {attempt + 1}/{max_retries}] Request to {url} failed with HTTP {e.status}: {e}. Retrying..."
             )
         except (asyncio.TimeoutError, aiohttp.ClientConnectorError) as e:
             last_exception = e
@@ -119,8 +118,7 @@ async def post_request(router_address: str, payload: dict, endpoint: str, max_re
         except Exception as e:
             last_exception = e
             logger.warning(
-                f"[Attempt {attempt + 1}/{max_retries}] Request to {url} failed with unexpected error: {e}. "
-                "Retrying..."
+                f"[Attempt {attempt + 1}/{max_retries}] Request to {url} failed with unexpected error: {e}. Retrying..."
             )
 
         if attempt < max_retries - 1:
@@ -131,7 +129,6 @@ async def post_request(router_address: str, payload: dict, endpoint: str, max_re
     logger.error(f"Max retries ({max_retries}) reached for request to {url}.")
     if last_exception:
         raise last_exception
-
 
 
 async def compute_score_fapo(
