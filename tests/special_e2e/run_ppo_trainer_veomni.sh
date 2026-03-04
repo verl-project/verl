@@ -13,7 +13,7 @@ NUM_GPUS=${NUM_GPUS:-8}
 FSDP_SIZE=${FSDP_SIZE:-4}
 SP_SIZE=${SP_SIZE:-2}
 EP_SIZE=${EP_SIZE:-1}
-VERL_EXP_NAME=${VERL_EXP_NAME:-qwen3-2b-vl-function-reward-minimal-fsdp-size8}
+VERL_EXP_NAME=${VERL_EXP_NAME:-qwen3-2b-vl-function-reward-minimal-veomni-size8}
 
 python3 -m verl.trainer.main_ppo \
     model_engine=veomni \
@@ -59,7 +59,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger=console \
-    trainer.project_name='verl_grpo_example_gsm8k' \
+    trainer.project_name='verl_veomni_test' \
     trainer.experiment_name="${VERL_EXP_NAME}" \
     trainer.n_gpus_per_node="${NUM_GPUS}" \
     trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
