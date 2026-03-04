@@ -138,9 +138,6 @@ class TRTLLMHttpServer:
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
 
-        moe_ep = getattr(self.config, "moe_ep_size", None) or self.config.expert_parallel_size
-        moe_tp = getattr(self.config, "moe_tp_size", None)
-
         llm_kwargs = {
             "model": self.model_config.local_path,
             "backend": "pytorch",
@@ -155,8 +152,8 @@ class TRTLLMHttpServer:
             "max_num_tokens": self.config.max_num_batched_tokens,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "pipeline_parallel_size": self.config.pipeline_model_parallel_size,
-            "moe_expert_parallel_size": moe_ep,
-            "moe_tensor_parallel_size": moe_tp,
+            "moe_expert_parallel_size": self.config.expert_parallel_size,
+            "moe_tensor_parallel_size": self.config.moe_tensor_parallel_size,
             "load_format": self.config.load_format,
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
