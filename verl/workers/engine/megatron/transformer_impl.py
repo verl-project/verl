@@ -673,7 +673,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         loss_mask = batch["loss_mask"].to(bool)
         multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
 
-        routed_experts = batch.get("routed_experts", [])
+        routed_experts = batch.get("routed_experts", None)
 
         return {
             "input_ids": input_ids,
