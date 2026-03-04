@@ -50,7 +50,9 @@ def save_dist_checkpointing(
     if content_metadata is not None:
         if mcore_ge_014:
             save_kwargs["content_metadata"] = content_metadata
+    from verl.models.mcore.patch import apply_patch_012megatron_with_28torch
 
+    apply_patch_012megatron_with_28torch()
     return dist_checkpointing.save(sharded_state_dict, ckpt_path, **save_kwargs)
 
 
