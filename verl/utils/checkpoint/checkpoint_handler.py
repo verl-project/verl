@@ -15,10 +15,10 @@
 
 # TODO: add unit tests
 
+import json
 import logging
 import os
 import re
-import json
 from enum import Enum
 
 import torch
