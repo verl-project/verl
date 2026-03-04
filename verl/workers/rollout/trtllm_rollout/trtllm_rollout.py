@@ -408,11 +408,11 @@ class ServerAdapter(BaseRollout):
         total_available_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) * 1024 * 1024
 
         if self.config.get("quantization", None) == "fp8":
-            from verl.utils.trtllm.trtllm_fp8_utils import quant_weights_by_name
+            from verl.utils.trtllm.trtllm_fp8_utils import TRTLLMFP8QuantizerHelper
 
-            weights = quant_weights_by_name(
+            fp8_quantizer_helper = TRTLLMFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+            weights = fp8_quantizer_helper.quant_weights_by_name(
                 weights,
-                self.model_config.hf_config.quantization_config,
                 dtype=self.model_config.hf_config.dtype,
             )
 
