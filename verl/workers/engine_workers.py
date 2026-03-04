@@ -668,8 +668,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
-        # 3. offload model to cpu and release weight sync references
-        del per_tensor_param  # Release generator which holds refs to GPU tensors
+        # 3. offload model to cpu
         self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
         aggressive_empty_cache(force_sync=True)
 

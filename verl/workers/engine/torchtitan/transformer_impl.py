@@ -731,11 +731,3 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
             }
 
             return loss, output
-
-            output = {
-                "model_output": model_output,
-                "loss": loss.detach().item(),
-                "metrics": metrics,
-            }
-
-            return loss, output
