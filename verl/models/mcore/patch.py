@@ -365,7 +365,7 @@ def apply_patch_mbridge():
 
 
 def apply_patch_megatron_v012_with_torch_v28():
-    # Error due to missing serialization_format in _write_item of megatron v012; 
+    # Error due to missing serialization_format in _write_item of megatron v012;
     # resolved by using megatron v013's implementation.
     import inspect
     import logging
