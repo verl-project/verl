@@ -592,7 +592,9 @@ def convert_hf_to_mcore(
 
     # save megatron model
     if len(os.listdir(output_path)) == 0:
-        dist_checkpointing.save(megatron_state_dict, output_path, sharded_strategy=None, async_sharded_save=False)
+        from verl.models.mcore.patch import apply_patch_012megatron_with_28torch
+
+        apply_patch_012megatron_with_28torch()
     if test:
         test_conversion(megatron_model_provider, tfconfig, output_path, model)
 
