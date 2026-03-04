@@ -64,7 +64,7 @@ jobs:
     runs-on: linux-aarch64-a2-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.5.rc1-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:

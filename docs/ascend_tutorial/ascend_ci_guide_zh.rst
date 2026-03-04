@@ -134,7 +134,6 @@ NPU 相关的工作流主要包括：
 
 **Note**
 
-   若使用 Megatron-LM，请添加 ``export PYTHONPATH=$PYTHONPATH:/Megatron-LM``。
 
    ${HOME}/.cache/文件夹内一旦添加新内容，不会因CI跑完容器销毁而删除，请避免往该文件夹添加内容。
 
