@@ -19,6 +19,7 @@ from uuid import uuid4
 from verl.experimental.agent_loop import AgentLoopBase
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
 from verl.utils.profiler import simple_timer
+from verl.utils.tokenizer import normalize_token_ids
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -30,9 +31,9 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
-        self.response_length = self.config.actor_rollout_ref.rollout.response_length
-        self.apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
+        self.prompt_length = self.rollout_config.prompt_length
+        self.response_length = self.rollout_config.response_length
+        self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         output: Optional[AgentLoopOutput] = kwargs.get("output", None)
@@ -75,12 +76,13 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                     videos=videos,
                 )
             else:
-                prompt_ids = await self.loop.run_in_executor(
+                tokenized_prompt = await self.loop.run_in_executor(
                     None,
                     lambda: self.tokenizer.apply_chat_template(
                         messages, add_generation_prompt=True, tokenize=True, **self.apply_chat_template_kwargs
                     ),
                 )
+                prompt_ids = normalize_token_ids(tokenized_prompt)
         else:
             if output.extra_fields.get("is_cancel", False):
                 # Resume the paused sample,
@@ -124,6 +126,8 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                 "is_cancel": is_cancel,
                 "param_version_start": param_version_start,
                 "param_version_end": param_version_end,
+                "turn_scores": [],
+                "tool_rewards": [],
             },
             multi_modal_data=multi_modal_data,
             # multi_modal_data={"image": image_data} if image_data is not None else {},

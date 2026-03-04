@@ -258,13 +258,19 @@ def apply_patch():
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         # query: [96, 1, 16, 128], key:[96, 1, 16, 128], value:[96, 1, 16, 128]
-        query, key, value = self.get_query_key_value_tensors(
+        qkv = self.get_query_key_value_tensors(
             hidden_states,
             key_value_states,
             position_ids,
             packed_seq_params,
             inference_context=inference_context,
         )
+        query, key, value = qkv[:3]
+        q_compressed = None
+        # kv_compressed = None
+        if len(qkv) > 4:
+            q_compressed = qkv[3]
+            # kv_compressed = qkv[4]
 
         # ===================================================
         # Adjust key, value for inference
@@ -288,9 +294,13 @@ def apply_patch():
         # core attention computation
         # ==================================
         # Need corresponding TE change
-        thd_qkv_format = packed_seq_params and packed_seq_params.qkv_format == "thd"
+        non_dsa_thd_qkv_format = (
+            packed_seq_params
+            and packed_seq_params.qkv_format == "thd"
+            and getattr(self.config, "experimental_attention_variant", None) is None
+        )
         v_dim = value.shape[-1]
-        if thd_qkv_format and query.shape[-1] != v_dim:
+        if non_dsa_thd_qkv_format and query.shape[-1] != v_dim:
             value = F.pad(value, [0, query.shape[-1] - v_dim])
             self.core_attention.hidden_size_per_attention_head_v = value.shape[-1]
         if self.checkpoint_core_attention and self.training:
@@ -298,6 +308,12 @@ def apply_patch():
                 query, key, value, attention_mask, packed_seq_params=packed_seq_params
             )
         else:
+            extra_kwargs = {}
+            if getattr(self.config, "experimental_attention_variant", None) == "dsa":
+                # For dsa we need to pass in the original hidden states and the compressed
+                # query representation.
+                extra_kwargs["x"] = hidden_states
+                extra_kwargs["qr"] = q_compressed
             core_attn_out = self.core_attention(
                 query,
                 key,
@@ -305,8 +321,9 @@ def apply_patch():
                 attention_mask,
                 packed_seq_params=packed_seq_params,
                 attn_mask_type=attn_mask_type,
+                **extra_kwargs,
             )
-        if thd_qkv_format:
+        if non_dsa_thd_qkv_format:
             if core_attn_out.ndim == 2:
                 core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-1], -1, value.shape[-1])
             if query.shape[-1] != v_dim:
@@ -329,7 +346,11 @@ def apply_patch():
 
         return output, bias
 
-    MLASelfAttention.get_query_key_value_tensors = patch_get_query_key_value_tensors
+    # This patch targets mcore 0.12 MLA behavior only.
+    # For newer mcore, upstream MLA already has packed-seq + CP handling and
+    # overriding it with the legacy implementation can break RoPE shapes.
+    if not mcore_ge_013:
+        MLASelfAttention.get_query_key_value_tensors = patch_get_query_key_value_tensors
 
     MultiLatentAttention.forward = patch_forward
 

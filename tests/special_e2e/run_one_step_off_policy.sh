@@ -88,14 +88,16 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k}
     actor_rollout_ref.rollout.val_kwargs.do_sample=True
     actor_rollout_ref.rollout.val_kwargs.n=1
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.name=vllm \
-    reward_model.reward_manager=dapo
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length}
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    reward.reward_manager.name=dapo
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False
+    +reward.reward_kwargs.max_resp_len=${max_response_length}
     trainer.logger=['console']
     trainer.project_name='verl-test'
     trainer.experiment_name="${exp_name}"
@@ -130,7 +132,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
 
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
-        actor_rollout_ref.actor.strategy=fsdp2 \
+        actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
         critic.strategy=fsdp2 \
         actor_rollout_ref.actor.grad_clip=1.0 \
         actor_rollout_ref.model.use_remove_padding=True \

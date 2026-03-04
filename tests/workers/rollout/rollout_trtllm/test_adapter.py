@@ -175,9 +175,9 @@ class TestTRTLLMServerAdapter:
 
             worker0 = replica.workers[0]
             worker1 = replica.workers[1]
-            replica_rank = ray.get(worker0._get_attribute.remote("replica_rank"))
-            is_leader_rank_0 = ray.get(worker0._get_attribute.remote("is_leader_rank"))
-            is_leader_rank_1 = ray.get(worker1._get_attribute.remote("is_leader_rank"))
+            replica_rank = ray.get(worker0.get_replica_rank.remote())
+            is_leader_rank_0 = ray.get(worker0.is_leader_rank.remote())
+            is_leader_rank_1 = ray.get(worker1.is_leader_rank.remote())
 
             assert replica_rank == 0
             assert is_leader_rank_0 is True

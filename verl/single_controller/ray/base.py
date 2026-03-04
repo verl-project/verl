@@ -87,11 +87,25 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
 
 
 @ray.remote
-def get_master_addr_port() -> tuple[str, str]:
+def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
     addr = ray.util.get_node_ip_address().strip("[]")
-    with socket.socket() as sock:
-        sock.bind(("", 0))
-        port = sock.getsockname()[1]
+
+    if master_port_range is None:
+        with socket.socket() as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+    else:
+        port = master_port_range[0]
+        while port < master_port_range[1]:
+            try:
+                with socket.socket() as s:
+                    s.bind(("", port))
+                    break
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d", port - 1, port)
+        else:
+            raise RuntimeError(f"Could not find a free port in range {master_port_range}")
     return addr, str(port)
 
 
@@ -429,6 +443,7 @@ class RayWorkerGroup(WorkerGroup):
         self._master_addr = kwargs.pop("master_addr", None)
         self._master_port = kwargs.pop("master_port", None)
         self.use_gpu = kwargs.pop("use_gpu", resource_pool.use_gpu if resource_pool is not None else True)
+        self._ray_master_port_range = kwargs.pop("master_port_range", None)
         super().__init__(resource_pool=resource_pool, **kwargs)
         self.ray_cls_with_init = ray_cls_with_init
         self.name_prefix = get_random_string(length=6) if name_prefix is None else name_prefix
@@ -495,7 +510,7 @@ class RayWorkerGroup(WorkerGroup):
         self._workers = workers
         self._world_size = len(workers)
 
-    def _get_master_addr_port(self, pg, bundle_index=0):
+    def _get_master_addr_port(self, pg, bundle_index=0, master_port_range=None):
         """Get master addr and port for this worker group"""
         if self._master_addr is None and self._master_port is None:
             self._master_addr, self._master_port = ray.get(
@@ -503,7 +518,7 @@ class RayWorkerGroup(WorkerGroup):
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg, placement_group_bundle_index=bundle_index
                     ),
-                ).remote()
+                ).remote(master_port_range=master_port_range)
             )
         elif self._master_addr is not None and self._master_port is not None:
             logger.debug(f"{self._master_addr=} {self._master_port=}")
@@ -513,7 +528,14 @@ class RayWorkerGroup(WorkerGroup):
                 "or neither should be provided to use Ray's default assignment."
             )
 
-    def _init_with_resource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None):
+    def _init_with_resource_pool(
+        self,
+        resource_pool,
+        ray_cls_with_init,
+        bin_pack,
+        detached,
+        worker_env=None,
+    ):
         """Initialize the worker group by creating new workers from a resource pool.
 
         Args:
@@ -523,7 +545,6 @@ class RayWorkerGroup(WorkerGroup):
             detached: Whether workers should be detached
         """
         self.resource_pool = resource_pool
-
         strategy = "PACK"
         if bin_pack:
             strategy = "STRICT_PACK"
@@ -537,7 +558,7 @@ class RayWorkerGroup(WorkerGroup):
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
             if pg_idx == 0:
-                self._get_master_addr_port(pg)
+                self._get_master_addr_port(pg, bundle_index=0, master_port_range=self._ray_master_port_range)
 
             for local_rank in range(local_world_size):
                 rank += 1
@@ -571,7 +592,8 @@ class RayWorkerGroup(WorkerGroup):
         local_world_size = resource_pool.store[0]
         self._get_master_addr_port(
             pgs[resource_pool.start_bundle_index // local_world_size],
-            resource_pool.start_bundle_index % local_world_size,
+            bundle_index=resource_pool.start_bundle_index % local_world_size,
+            master_port_range=self._ray_master_port_range,
         )
         for curr_rank in range(resource_pool.start_bundle_index, resource_pool.start_bundle_index + world_size):
             pg_idx = curr_rank // local_world_size

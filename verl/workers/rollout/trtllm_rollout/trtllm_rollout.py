@@ -328,6 +328,10 @@ class ServerAdapter(BaseRollout):
         self._adapter = AsyncTRTLLMHttpAdapter(
             host=host,
             port=server_port,
+            timeout=self.config.server.timeout,
+            max_attempts=self.config.server.max_attempts,
+            retry_delay=self.config.server.retry_delay,
+            max_connections=self.config.server.max_connections,
         )
 
     async def resume(self, tags: list[str]):
@@ -336,6 +340,10 @@ class ServerAdapter(BaseRollout):
         Args:
             tag: weights or kv_cache.
         """
+        # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
+        # have completed actor offloading to CPU, preventing OOM issue.
+        if "kv_cache" in tags and self.config.free_cache_engine:
+            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
@@ -376,7 +384,9 @@ class ServerAdapter(BaseRollout):
 
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
-    async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
+    async def update_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+    ):
         assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
 
         """Update the weights of the rollout model.
@@ -425,6 +435,8 @@ class ServerAdapter(BaseRollout):
         if self.is_leader_rank:
             # Finalize update weights
             await self._adapter.update_weights(None)
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
         gc.collect()

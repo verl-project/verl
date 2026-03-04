@@ -80,6 +80,8 @@ class AgentLoopConfig(BaseConfig):
 
 @dataclass
 class TraceConfig(BaseConfig):
+    project_name: Optional[str] = None
+    experiment_name: Optional[str] = None
     backend: Optional[str] = None
     token2text: bool = False
     max_samples_per_step_per_worker: Optional[int] = None
@@ -125,7 +127,7 @@ class CheckpointEngineConfig(BaseConfig):
     """
 
     # Backend for checkpoint engine: naive, nccl, nixl, hccl
-    backend: Optional[str] = MISSING
+    backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
     # Additional keyword arguments for checkpoint engine
@@ -138,6 +140,8 @@ class RolloutConfig(BaseConfig):
 
     name: Optional[str] = MISSING
     mode: str = "async"
+    nnodes: int = 0
+    n_gpus_per_node: int = 8
 
     temperature: float = 1.0
     top_k: int = -1
@@ -237,6 +241,8 @@ class RolloutConfig(BaseConfig):
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
+
+    qat: Optional[dict] = None
 
     def __post_init__(self):
         """Validate the rollout config"""

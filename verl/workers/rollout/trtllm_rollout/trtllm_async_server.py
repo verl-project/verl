@@ -23,13 +23,13 @@ from ray.actor import ActorHandle
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
 
-from verl.single_controller.ray import RayClassWithInitArgs, SubRayResourcePool
+from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
-from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -84,6 +84,8 @@ class TRTLLMHttpServer:
         self.max_colocate_count = max_colocate_count
         self.pgs = pgs
         self.bundle_indices = bundle_indices
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -110,12 +112,14 @@ class TRTLLMHttpServer:
 
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
-        from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig
+        from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
         from tensorrt_llm.serve import OpenAIServer
+
+        assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
         kv_cache_config = KvCacheConfig(
-            enable_block_reuse=True,
+            enable_block_reuse=self.config.enable_prefix_caching,
             free_gpu_memory_fraction=self.config.gpu_memory_utilization,
         )
 
@@ -124,6 +128,9 @@ class TRTLLMHttpServer:
         llm_kwargs = {
             "model": self.model_config.local_path,
             "backend": "pytorch",
+            "dtype": self.config.dtype,
+            "enable_chunked_prefill": self.config.enable_chunked_prefill,
+            "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "orchestrator_type": "ray",
             "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
             "kv_cache_config": kv_cache_config,
@@ -131,11 +138,13 @@ class TRTLLMHttpServer:
             "max_batch_size": self.config.max_num_seqs,
             "max_num_tokens": self.config.max_num_batched_tokens,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
+            "pipeline_parallel_size": self.config.pipeline_model_parallel_size,
+            "moe_expert_parallel_size": self.config.expert_parallel_size,
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
             "per_worker_gpu_share": per_worker_gpu_share,
-            "enable_sleep": True,
+            "enable_sleep": self.config.enable_sleep_mode,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,
@@ -155,21 +164,24 @@ class TRTLLMHttpServer:
                         enable_padding=True,
                         batch_sizes=self.config.cudagraph_capture_sizes,
                         max_batch_size=0 if self.config.cudagraph_capture_sizes else self.config.max_num_seqs,
-                    )
+                    ),
+                    "scheduler_config": SchedulerConfig(
+                        capacity_scheduler_policy=CapacitySchedulerPolicy.MAX_UTILIZATION,
+                    ),
                 }
             )
 
         self.llm = await AsyncLLM(**llm_kwargs)
 
         trtllm_server = OpenAIServer(
-            llm=self.llm,
+            generator=self.llm,
             model=self.model_config.local_path,
             tool_parser=None,
             server_role=None,
             metadata_server_cfg=None,
         )
         app = trtllm_server.app
-        self._server_port, self._server_task = await run_unvicorn(app, None, self._server_address)
+        self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
 
     async def generate(
         self,
@@ -201,7 +213,17 @@ class TRTLLMHttpServer:
         log_probs = None
         if trt_llm_sampling_params.logprobs is not None:
             log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs)
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, extra_info={"global_steps": self.global_steps})
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
+
+    async def abort_all_requests(self):
+        raise NotImplementedError
+
+    async def resume_generation(self):
+        raise NotImplementedError
 
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:
@@ -231,9 +253,6 @@ class TRTLLMHttpServer:
         )
 
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
-
-
 class TRTLLMReplica(RolloutReplica):
     def __init__(
         self,
@@ -245,17 +264,6 @@ class TRTLLMReplica(RolloutReplica):
     ) -> None:
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
-
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        """Get rollout worker actor class for colocated and standalone mode."""
-        worker_dict_cls = RayClassWithInitArgs(
-            cls=_rollout_worker_actor_cls,
-            config=self.config,
-            model_config=self.model_config,
-            device_mesh=None,
-            replica_rank=self.replica_rank,
-        )
-        return worker_dict_cls
 
     def rollout_worker_use_gpu(self) -> bool:
         return False
@@ -343,6 +351,7 @@ class TRTLLMReplica(RolloutReplica):
             ),
             runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
             name=name,
+            max_concurrency=self.max_concurrency,
         ).remote(
             config=self.config,
             model_config=self.model_config,

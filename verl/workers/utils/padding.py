@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
-from verl.utils.attention_utils import unpad_input
+from verl.utils.attention_utils import index_first_axis, unpad_input
 
 
 def left_right_2_no_padding(data: TensorDict) -> TensorDict:
@@ -70,6 +70,16 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     data["position_ids"] = position_ids_nested
     data["loss_mask"] = data["response_mask"]
 
+    routed_experts = data.get("routed_experts", None)
+    if routed_experts is not None and not routed_experts.is_nested:
+        if routed_experts.max() <= 255:
+            routed_experts = routed_experts.to(torch.uint8)
+        routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
+        routed_experts_nested = torch.nested.nested_tensor_from_jagged(
+            routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
+        data["routed_experts"] = routed_experts_nested
+
     return data
 
 
@@ -95,7 +105,7 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
         prompt_lens = prompt_ids.offsets().diff()
         response_lens = response_ids.offsets().diff()
         if max_response_len < 0:
-            max_response_len = response_ids.offsets().diff().max().item()
+            max_response_len = response_lens.max().item()
     else:
         assert not attention_mask.is_nested
         prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
