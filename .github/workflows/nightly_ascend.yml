@@ -49,29 +49,8 @@ on:
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
       - "examples/ppo_trainer**"
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - "!**/*.md"
-      - "!**/*.sh"
-      # Other entrypoints
-      - "!examples/**"
-      - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py"
-      # Home
-      - "examples/ppo_trainer"
-      # Entrypoints
-      - ".github/workflows/nightly_ascend.yml"
-      - "examples/data_preprocess/gsm8k.py"
-      - "examples/data_preprocess/geo3k.py"
-      - "tests/special_npu/nightly_ci_ascend/run_ppo_qwen3-8b_fsdp_npu.sh"
-      - "tests/special_npu/nightly_ci_ascend/run_grpo_qwen25-7b-instruct_fsdp_npu.sh"
-      - "tests/special_npu/nightly_ci_ascend/run_grpo_qwen25-vl-3b-instruct_fsdp_npu.sh"
-  # schedule:
-  #   - cron: "0 17 * * *"
+  schedule:
+    - cron: "0 17 * * *"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -87,7 +66,7 @@ jobs:
   nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2-8
-    timeout-minutes: 120 # Increase this timeout value as needed
+    timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
       options: >-
@@ -130,7 +109,7 @@ jobs:
   nightlyCI_grpo-qwen25-7b-Instruct-fsdp-vllm_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2-8
-    timeout-minutes: 120 # Increase this timeout value as needed
+    timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
       options: >-
@@ -173,7 +152,7 @@ jobs:
   nightlyCI_grpo-qwen25-vl-3b-Instruct-fsdp-vllm_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2-8
-    timeout-minutes: 120 # Increase this timeout value as needed
+    timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
       options: >-
