@@ -10,6 +10,7 @@ VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
 NUM_GPUS=${NUM_GPUS:-1}
 FSDP_SIZE=${FSDP_SIZE:-1}
 TP_SIZE=${TP_SIZE:-1}
+CP_SIZE=${CP_SIZE:-1}
 EP_SIZE=${EP_SIZE:-1}
 VERL_EXP_NAME=${VERL_EXP_NAME:-Titan_Qwen3_30B_A3B_DP8_EP8}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
@@ -33,6 +34,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1  \
     actor_rollout_ref.actor.torchtitan.data_parallel_shard_size="${FSDP_SIZE}" \
     actor_rollout_ref.actor.torchtitan.tensor_parallel_size="${TP_SIZE}" \
+    actor_rollout_ref.actor.torchtitan.context_parallel_size="${CP_SIZE}" \
     actor_rollout_ref.actor.torchtitan.expert_parallel_size="${EP_SIZE}" \
     actor_rollout_ref.actor.torchtitan.attn_type=flex \
     actor_rollout_ref.actor.torchtitan.use_torch_compile=False \
