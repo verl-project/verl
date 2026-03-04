@@ -364,8 +364,9 @@ def apply_patch_mbridge():
         megatron.core.utils.get_tensor_model_parallel_group_if_none = get_tensor_model_parallel_group_if_none
 
 
-
-def apply_patch_012megatron_with_28torch():
+def apply_patch_megatron_v012_with_torch_v28():
+    # Error due to missing serialization_format in _write_item of megatron v012; 
+    # resolved by using megatron v013's implementation.
     import inspect
     import logging
     import os
@@ -419,6 +420,7 @@ def apply_patch_012megatron_with_28torch():
         try:
             file_name, storage_key, (bytes_data, tensor_data) = write_bucket
             extra_kwargs = {}
+            # 
             if "serialization_format" in inspect.signature(_write_item).parameters:
                 from torch.distributed.checkpoint.filesystem import SerializationFormat
 
