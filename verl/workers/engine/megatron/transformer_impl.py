@@ -319,6 +319,8 @@ class MegatronEngine(BaseEngine):
         if self.engine_config.forward_only:
             self.optimizer = None
             self.lr_scheduler = None
+            self.to(device="cpu", model=self._is_offload_param, optimizer=False, grad=False)
+            log_gpu_memory_usage("After offload model during init (forward_only)", logger=logger)
             return
 
         self.optimizer = self._build_optimizer()
@@ -602,12 +604,14 @@ class MegatronEngine(BaseEngine):
             return {}
 
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
-        load_megatron_model_to_gpu(self.module, load_grad=False)
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
+        adapter_only = base_sync_done and non_merge_lora_sync
+        # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
+        load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
-        elif base_sync_done and non_merge_lora_sync:
+        elif adapter_only:
             # Only export adapter weights
             peft_config = build_peft_config_for_vllm(self.model_config.lora)
             per_tensor_param = self.bridge.export_adapter_weights(self.module)

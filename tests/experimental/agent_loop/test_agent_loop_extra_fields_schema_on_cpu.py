@@ -147,7 +147,10 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     # Minimal config surface used by the agent loops.
     config = OmegaConf.create(
         {
-            "actor_rollout_ref": {"rollout": {"prompt_length": 16, "response_length": 16}},
+            "actor_rollout_ref": {
+                "rollout": {"prompt_length": 16, "response_length": 16, "multi_turn": {"tool_config_path": None}},
+                "model": {},
+            },
             "data": {
                 "tool_config_path": None,
                 "apply_chat_template_kwargs": {},
@@ -160,7 +163,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     processor = None
 
     trainer_config = DictConfigWrap(config)
-    dataset_config = DictConfigWrap(config.data)
+    data_config = DictConfigWrap(config.data)
 
     single_turn = SingleTurnAgentLoop(
         trainer_config=trainer_config,
@@ -168,7 +171,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
         tokenizer=tokenizer,
         processor=processor,
         dataset_cls=RLHFDataset,
-        dataset_config=dataset_config,
+        data_config=data_config,
     )
     partial_single_turn = PartialSingleTurnAgentLoop(
         trainer_config=trainer_config,
@@ -176,7 +179,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
         tokenizer=tokenizer,
         processor=processor,
         dataset_cls=RLHFDataset,
-        dataset_config=dataset_config,
+        data_config=data_config,
     )
 
     raw_prompt = [{"role": "user", "content": "hi"}]

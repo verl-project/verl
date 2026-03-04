@@ -216,6 +216,8 @@ actor_rollout_ref:
     _target_: verl.workers.config.RolloutConfig
     name: ???
     mode: async
+    nnodes: 0
+    n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
     temperature: 1.0
     top_k: -1
     top_p: 1
@@ -290,6 +292,8 @@ actor_rollout_ref:
       engine_kwargs: {}
     trace:
       _target_: verl.workers.config.TraceConfig
+      project_name: ${oc.select:trainer.project_name,null}
+      experiment_name: ${oc.select:trainer.experiment_name,null}
       backend: null
       token2text: false
       max_samples_per_step_per_worker: null
