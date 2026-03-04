@@ -29,9 +29,9 @@ RUN ARCH=$(uname -m) && \
 RUN ARCH=$(uname -m) && \
     # Export and source env
     if [ "$ARCH" = "aarch64" ]; then \
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-8.5.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
     elif [ "$ARCH" = "x86_64" ]; then \
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-8.5.0/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
     fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
