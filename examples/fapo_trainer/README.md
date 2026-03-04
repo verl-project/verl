@@ -5,7 +5,7 @@
     <a href="https://fapo-rl.github.io/"><img alt="Project Page" src="https://img.shields.io/badge/📒-Project Page-blue"></a>
     <a href="https://verl.readthedocs.io/en/latest/advance/reward_loop.html"><img alt="Infra Design" src="https://img.shields.io/badge/🏗️-Infra Design-teal">
     <a href="https://huggingface.co/collections/dyyyyyyyy/fapo"><img alt="Resources" src="https://img.shields.io/badge/🤗 HuggingFace-Data & Models-green"></a>
-    <a href=""><img alt="Paper" src="https://img.shields.io/badge/📄-Arxiv Paper-orange"></a>
+    <a href="https://arxiv.org/abs/2510.22543"><img alt="Paper" src="https://img.shields.io/badge/📄-Arxiv Paper-orange"></a>
     <a href="https://github.com/yyDing1/FAPO"><img alt="Code" src="https://img.shields.io/badge/💻-Code-blueviolet"></a>
 </p>
 
