@@ -40,29 +40,39 @@ The training data is identical to that of DAPO-Math-17K, except that we replace 
 
 You can construct the training and evaluation datasets by:
 ```bash
-python recipe/fapo/prepare_fapo_data.py --local_dir ${RAY_DATA_HOME}/data/
+python examples/fapo_trainer/prepare_fapo_data.py --local_dir ${RAY_DATA_HOME}/data/
 ```
 
 Or you can directly use the data available [here](https://huggingface.co/datasets/dyyyyyyyy/FAPO-Reasoning-Dataset).
 
 To integrate the GRM into the final training, we provide two options:
 
-1. **Colocate Mode:** 
-2. **Standalone Mode:** split 一个另外的resource pool 专门用来部署GenRM
+1. **Colocate Mode:** The reward model is colocated with the trainer and runs synchronously.
+2. **Standalone Mode:** A separate resource pool is allocated to deploy the GenRM, which runs asynchronously.
 
-This can be configured by
+The following list the most-relevant parameters in the config file:
 
 ```yaml
 reward:
   reward_model: 
-    model_path: "dyyyyyyyy/FAPO-GenRM-4B" # your reward model path
-    enable_resource_pool: True  # whether to enable resource pool for the reward model (True -> Standalone Mode, False -> Colocate Mode)
-    nnodes: 1  # the number of nodes to deploy the reward model (only effective when enable_resource_pool is True)
-    n_gpus_per_node: 8  # the number of GPUs to deploy the reward model on each node (only effective when enable_resource_pool is True)
+    model_path: "/path/to/your/reward_model" # your reward model path
+    # whether to enable resource pool for the reward model
+    # True -> Standalone Mode, False -> Colocate Mode
+    enable_resource_pool: True
+    # the number of nodes to deploy the reward model
+    # only effective when enable_resource_pool is True
+    nnodes: 1
+    # the number of GPUs to deploy the reward model on each node
+    # only effective when enable_resource_pool is True
+    n_gpus_per_node: 8
+    # inference engine configs, similar to those in rollout configs
     rollout:
-      gpu_memory_utilization: 0.9
-      # ... (inference engine configs, similar to those in rollout configs)
-  # customized reward function, where you should implement the invocation logic of the specified reward model
+      # set to True in colocate mode, False in standalone mode
+      free_cache_engine: True
+      # ... (ommitted)
+
+  # customized reward function, where user should implement the invocation logic
+  # of the specified reward model (both generative and discriminative)
   custom_reward_function:
     path: null
     name: compute_score
@@ -71,33 +81,47 @@ reward:
 
 ![](https://github.com/yyDing1/verl-materials/blob/main/reward_loop.svg)
 
+### Choice 1: Colocate Reward Model
+
 ```bash
 cd verl # Repo root
 export RAY_ADDRESS="..." # The Ray cluster address to connect to
 export WORKING_DIR="${PWD}" # The local directory to package to the Ray cluster
-# Set the runtime environment like env vars and pip packages for the Ray cluster in yaml
-export RUNTIME_ENV="./recipe/fapo/runtime_env.yaml" # This sets environment variables for the Ray cluster
+export NNODES=xxx
 
-# run Baseline Models
-bash recipe/fapo/run_baseline_7b.sh  # 7b baseline model
-bash recipe/fapo/run_baseline_32b.sh  # 32b baseline model
-
-# run FAPO Models (with external GRM service)
-# Note that you should launch the external GRM service first,
-# and specify the router address in the compute_score function
-bash recipe/fapo/run_fapo_7b_remote.sh  # 7b fapo model
-bash recipe/fapo/run_fapo_32b_remote.sh  # 32b fapo model
-
-# run FAPO Models (single controller mode)
-bash recipe/fapo/run_fapo_7b.sh  # 7b fapo model
-bash recipe/fapo/run_fapo_32b.sh  # 32b fapo model
+bash examples/fapo_trainer/run_qwen_7b_rm_colocate.sh  # 7b fapo model
+bash examples/fapo_trainer/run_qwen_32b_rm_colocate.sh  # 32b fapo model
 ```
 
-## Infrastructure Design
+### Choice 2: Standalone Reward Model
 
-We implement RewardLoop to enable efficient and flexible reward computation.
-The core implementation can be found in `verl/experimental/reward/`.
-Refer to [this official document](https://verl.readthedocs.io/en/latest/advance/reward_loop.html) for more implementation details.
+```bash
+cd verl # Repo root
+export RAY_ADDRESS="..." # The Ray cluster address to connect to
+export WORKING_DIR="${PWD}" # The local directory to package to the Ray cluster
+export NNODES=xxx  # for actor/rollout/trainer
+export RM_NODES=xxx  # for standalone reward model
+
+bash examples/fapo_trainer/run_qwen_7b_rm_standalone.sh  # 7b fapo model
+bash examples/fapo_trainer/run_qwen_32b_rm_standalone.sh  # 32b fapo model
+```
+
+## Use discriminative reward model
+
+If you would like to use discriminative reward models, the usage is essentially similar to GenRM. You only need to replace the "/v1/chat/completions" endpoint in the custom reward function with the reward model's endpoint.
+
+We provide a standard way to compute the DisRM reward score, with the implementation in `RewardLoopWorker::compute_score_disrm`.
+
+You can enable this computation method by not specifying a custom reward function.
+
+## More complex reward model scenarios
+
+Both GenRM and DisRM can obtain reward scores via HTTP requests in the custom reward function.
+This allows users to flexibly combine rule-based rewards with reward models to construct more sophisticated reward logic.
+
+## Citation
+
+If you find our works useful for your research, please consider citing:
 
 ```bibtex
 @article{ding2025fapo,

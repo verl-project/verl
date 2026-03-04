@@ -69,9 +69,7 @@ FAPO_GENRM_TEMPLATE = (
     "Otherwise, return the index of -1 (which typically denotes 'not found').\n\n"
     "Please reason step by step, put your final answer (i.e., the index) in \\boxed{{}}."
 )
-GRM_SAMPLING_PARAMS = {
-    "max_new_tokens": 16384,
-}
+MAX_TOKENS = 16384
 FLAWED_REWARD_PENALTY = 1.0
 
 
@@ -161,34 +159,23 @@ async def compute_score_fapo(
         ground_truth=ground_truth,
         solution=solution_str,
     )
-    grm_prompt_ids = await loop.run_in_executor(
-        None,
-        lambda: reward_model_tokenizer.apply_chat_template(
-            [{"role": "user", "content": grm_prompt}],
-            tokenize=True,
-            add_generation_prompt=True,
-        ),
-    )
+    messages = [{"role": "user", "content": grm_prompt}]
     grm_outputs = await post_request(
         router_address=reward_router_address,
         payload={
-            "input_ids": grm_prompt_ids,
-            "sampling_params": GRM_SAMPLING_PARAMS,
+            "messages": messages,
+            "max_tokens": MAX_TOKENS,
         },
-        endpoint="generate",
+        endpoint="v1/chat/completions",
     )
-    grm_response_ids = grm_outputs.get("output_ids", None)
-    if grm_response_ids is not None:
-        grm_response = await loop.run_in_executor(
-            None, lambda: reward_model_tokenizer.decode(grm_response_ids, skip_special_tokens=True)
-        )
-        try:
-            err_location = remove_boxed(last_boxed_only_string(grm_response))
-            is_flawed_positive = int(err_location) != -1
-        except Exception:
-            is_flawed_positive = False
+    grm_response = grm_outputs["choices"][0]["message"]["content"]
+    try:
+        err_location = remove_boxed(last_boxed_only_string(grm_response))
+        is_flawed_positive = int(err_location) != -1
+    except Exception:
+        is_flawed_positive = False
 
-        if is_flawed_positive:
-            reward_score -= FLAWED_REWARD_PENALTY
+    if is_flawed_positive:
+        reward_score -= FLAWED_REWARD_PENALTY
 
     return {"score": reward_score, "acc": correct, "pred": pred, "is_flawed_positive": is_flawed_positive}

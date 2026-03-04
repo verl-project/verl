@@ -30,16 +30,16 @@ train_prompt_mini_bsz=32
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-2}
-RM_NODES=${RM_NODES:-2}
+NNODES=${NNODES:-4}
+
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 # very important! please modify the max_position_embeddings in config.json to 32768 after downloading from huggingface
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen2.5-Math-7B"}
 GRM_PATH=${GRM_PATH:-"${RAY_DATA_HOME}/models/FAPO-GenRM-4B"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k-boxed.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/dapo-test-full-boxed.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/fapo-train-boxed.parquet"}
+TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/fapo-test-full-boxed.parquet"}
 
 # Algorithm
 temperature=1.0
@@ -57,6 +57,7 @@ gen_tp=1
 fsdp_size=8
 
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
+    --address "${RAY_ADDRESS}" \
     --working-dir "${WORKING_DIR}" \
     -- python3 -m verl.trainer.main_ppo \
     data.train_files="${TRAIN_FILE}" \
@@ -117,14 +118,12 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
     reward.reward_model.enable=True \
-    reward.reward_model.enable_resource_pool=True \
-    reward.reward_model.n_gpus_per_node=8 \
-    reward.reward_model.nnodes=${RM_NODES} \
+    reward.reward_model.enable_resource_pool=False \
     reward.reward_model.model_path=${GRM_PATH} \
     reward.reward_model.rollout.name=vllm \
     reward.reward_model.rollout.gpu_memory_utilization=0.90 \
     reward.reward_model.rollout.tensor_model_parallel_size=1 \
-    reward.reward_model.rollout.free_cache_engine=False \
+    reward.reward_model.rollout.free_cache_engine=True \
     reward.reward_manager.name=dapo \
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
     +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
