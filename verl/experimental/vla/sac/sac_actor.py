@@ -341,7 +341,12 @@ class RobDataParallelSACActor(BaseSACActor):
                 "positive_sample_mask"
             ]).batch)
 
-        batch = self.replay_pool.sample_batch(self.config.ppo_mini_batch_size)
+        replay_positive_sample_ratio = float(self.sac_config.get("replay_positive_sample_ratio", 0.5))
+        batch, replay_sample_info = self.replay_pool.sample_batch(
+            self.config.ppo_mini_batch_size,
+            positive_sample_ratio=replay_positive_sample_ratio,
+            return_sample_info=True,
+        )
         micro_batches = batch.split(self.config.ppo_micro_batch_size_per_gpu)
         global_steps = data.meta_info["global_steps"]
         grad_accum_steps = len(micro_batches) * torch.distributed.get_world_size()
@@ -427,6 +432,9 @@ class RobDataParallelSACActor(BaseSACActor):
             "data/reward_mean": valid_mean(batch["rewards"], batch["valids"]).detach().item(),
             "data/valid_ratio": batch["valids"].float().mean().item(),
             "data/positive_sample_ratio": valid_mean(batch["positive_sample_mask"].float(), batch["valids"]).detach().item(),
+            "sac/replay_sampled_positive_ratio_actual": replay_sample_info["actual_positive_sample_ratio"],
+            "sac/replay_sampled_positive_count": replay_sample_info["sampled_positive_count"],
+            "sac/replay_sampled_negative_count": replay_sample_info["sampled_negative_count"],
 
             "sac/alpha": self._get_alpha().detach().item(),
             "sac/replay_pool_size": len(self.replay_pool),
@@ -455,7 +463,7 @@ class RobDataParallelSACActor(BaseSACActor):
                 "actor/qvalue_mean": valid_mean(torch.cat(actor_qvalues_list), batch["valids"]).detach().item(),
 
                 "sac/alpha_lr": self.alpha_optimizer.param_groups[0]["lr"] if self.auto_entropy else 0.0,
-                "sac/alpha_loss": sum(alpha_loss_list) / len(alpha_loss_list),
+                "sac/alpha_loss": sum(alpha_loss_list) / len(alpha_loss_list) if self.auto_entropy else 0.0,
                 "sac/alpha_grad_norm": alpha_grad_norm.detach().item() if self.auto_entropy else 0.0,
             })
 
