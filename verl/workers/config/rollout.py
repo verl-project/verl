@@ -261,12 +261,12 @@ class RolloutConfig(BaseConfig):
                 stacklevel=2,
             )
 
-        if self.expert_parallel_size > 1 and self.name != "trtllm":
+        if self.name != "trtllm" and self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"
             )
 
-        if self.moe_tensor_parallel_size > 1:
+        if self.moe_tensor_parallel_size is not None and self.moe_tensor_parallel_size > 1:
             assert self.name == "trtllm", "moe_tensor_parallel_size is only supported for trtllm"
 
         if self.name == "trtllm":
@@ -274,9 +274,9 @@ class RolloutConfig(BaseConfig):
             # convert to None so TensorRT-LLM treats it as unspecified.
             # When both unspecified: moe_ep_size=1, moe_tp_size=moe_world_size (no EP, all TP).
             # When only one set: the other is auto-derived from tensor_model_parallel_size.
-            if self.expert_parallel_size == 1:
+            if self.expert_parallel_size is not None and self.expert_parallel_size == 1:
                 self.expert_parallel_size = None
-            if self.moe_tensor_parallel_size == 1:
+            if self.moe_tensor_parallel_size is not None and self.moe_tensor_parallel_size == 1:
                 self.moe_tensor_parallel_size = None
             if self.expert_parallel_size is not None and self.moe_tensor_parallel_size is not None:
                 assert self.moe_tensor_parallel_size * self.expert_parallel_size == self.tensor_model_parallel_size, (
