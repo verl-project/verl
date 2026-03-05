@@ -340,3 +340,69 @@ def test_group_balanced_partitions_equal_size():
         for uid in uids_in_partition:
             uid_indices = [i for i, u in enumerate(uid_list) if u == uid]
             assert all(i in partition for i in uid_indices)
+
+
+def test_truncate_padding_jagged_matches_dense():
+    """get_truncate_padding_micro_batches_jagged produces the same packing as the dense version."""
+    from tensordict import TensorDict
+
+    from verl.utils.seqlen_balancing import (
+        get_truncate_padding_micro_batches_jagged,
+    )
+
+    import torch
+
+    lengths = [50, 10, 45, 5, 40, 8, 30, 20]
+    max_token_len = 120
+
+    # Build jagged batch
+    nested_ids = torch.nested.nested_tensor([torch.randint(1, 100, (l,)) for l in lengths])
+    batch = TensorDict({"input_ids": nested_ids}, batch_size=[len(lengths)])
+
+    jagged_partitions = get_truncate_padding_micro_batches_jagged(batch, max_token_len)
+
+    # Verify constraints
+    for partition in jagged_partitions:
+        max_len = max(lengths[i] for i in partition)
+        assert len(partition) * max_len <= max_token_len
+
+    # All indices covered
+    all_indices = sorted(idx for part in jagged_partitions for idx in part)
+    assert all_indices == list(range(len(lengths)))
+
+
+def test_truncate_padding_jagged_single_sequence():
+    """Single sequence edge case."""
+    from tensordict import TensorDict
+
+    from verl.utils.seqlen_balancing import get_truncate_padding_micro_batches_jagged
+
+    import torch
+
+    nested_ids = torch.nested.nested_tensor([torch.randint(1, 100, (42,))])
+    batch = TensorDict({"input_ids": nested_ids}, batch_size=[1])
+
+    partitions = get_truncate_padding_micro_batches_jagged(batch, max_token_len=100)
+    assert len(partitions) == 1
+    assert partitions[0] == [0]
+
+
+def test_truncate_padding_jagged_all_same_length():
+    """Equal-length sequences should pack maximally."""
+    from tensordict import TensorDict
+
+    from verl.utils.seqlen_balancing import get_truncate_padding_micro_batches_jagged
+
+    import torch
+
+    n = 8
+    seq_len = 10
+    max_token_len = 40  # fits 4 sequences per micro-batch
+
+    nested_ids = torch.nested.nested_tensor([torch.randint(1, 100, (seq_len,)) for _ in range(n)])
+    batch = TensorDict({"input_ids": nested_ids}, batch_size=[n])
+
+    partitions = get_truncate_padding_micro_batches_jagged(batch, max_token_len)
+    assert len(partitions) == 2  # 8 sequences / 4 per batch = 2
+    for partition in partitions:
+        assert len(partition) == 4

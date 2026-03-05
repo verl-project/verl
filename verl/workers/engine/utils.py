@@ -23,7 +23,12 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.device import is_npu_available
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import rearrange_micro_batches, restore_dynamic_batch
+from verl.utils.seqlen_balancing import (
+    get_truncate_padding_micro_batches_jagged,
+    rearrange_micro_batches,
+    restore_dynamic_batch,
+    synchronize_micro_batches_num_across_ranks,
+)
 
 
 def enable_full_determinism(seed: int):
@@ -68,9 +73,22 @@ def prepare_micro_batches(
     Prepare micro batches from data.
     """
     use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
+    truncate_padding = tu.get_non_tensor_data(data=data, key="truncate_padding", default=False)
     sp_size = tu.get_non_tensor_data(data=data, key="sp_size", default=1)
 
-    if use_dynamic_bsz:
+    if truncate_padding:
+        assert "max_token_len_per_gpu" in data.keys(), "max_token_len_per_gpu must be set when truncate_padding is True"
+        max_token_len_per_gpu = data["max_token_len_per_gpu"]
+        max_token_len = max_token_len_per_gpu * sp_size
+        micro_batches_idx = get_truncate_padding_micro_batches_jagged(
+            batch=data, max_token_len=max_token_len, dp_group=dp_group, same_micro_num_in_dp=same_micro_num_in_dp,
+        )
+        micro_batches = []
+        for partition in micro_batches_idx:
+            curr_micro_batch = tu.index_select_tensor_dict(data, partition)
+            micro_batches.append(curr_micro_batch)
+        batch_idx_list = micro_batches_idx
+    elif use_dynamic_bsz:
         assert "max_token_len_per_gpu" in data.keys(), "max_token_len_per_gpu must be set when use_dynamic_bsz is True"
         max_token_len_per_gpu = data["max_token_len_per_gpu"]
         max_token_len = max_token_len_per_gpu * sp_size

@@ -122,6 +122,10 @@ class FSDPEngine(BaseEngine):
         # build device mesh for Ulysses Sequence Parallel
 
         self.use_remove_padding = self.model_config.use_remove_padding
+        if self.model_config.truncate_padding and self.use_remove_padding:
+            raise ValueError("Cannot enable both truncate_padding and use_remove_padding")
+        if self.model_config.truncate_padding and self.engine_config.ulysses_sequence_parallel_size > 1:
+            raise ValueError("truncate_padding is not compatible with Ulysses sequence parallelism")
 
         self._init_device_mesh()
 
@@ -510,6 +514,7 @@ class FSDPEngine(BaseEngine):
         )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+        tu.assign_non_tensor(data, truncate_padding=self.model_config.truncate_padding)
 
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True

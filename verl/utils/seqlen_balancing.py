@@ -19,9 +19,9 @@ from itertools import chain
 from typing import Optional
 
 import torch
-from tensordict import TensorDict
 from torch import distributed as dist
 
+from tensordict import TensorDict
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
@@ -703,6 +703,75 @@ def restore_dynamic_batch(data: torch.Tensor, batch_idx_list: list[list[int]]) -
         reverted_data = data[revert_indices]
 
     return reverted_data
+
+
+def synchronize_micro_batches_num_across_ranks(
+    micro_batches_idx: list[list[int]],
+    batch_size: int,
+    dp_group: Optional[dist.ProcessGroup] = None,
+) -> list[list[int]]:
+    """Ensure all DP ranks have the same number of micro-batches by padding with empty batches."""
+    local_num = torch.tensor([len(micro_batches_idx)], dtype=torch.long, device="cuda")
+    world_num = [torch.zeros_like(local_num) for _ in range(dist.get_world_size(dp_group))]
+    dist.all_gather(world_num, local_num, group=dp_group)
+    max_num = max(t.item() for t in world_num)
+    while len(micro_batches_idx) < max_num:
+        micro_batches_idx.append(list(range(batch_size)))
+    return micro_batches_idx
+
+
+def get_truncate_padding_micro_batches_jagged(
+    batch: TensorDict,
+    max_token_len: int,
+    dp_group: Optional[dist.ProcessGroup] = None,
+    same_micro_num_in_dp: bool = True,
+) -> list[list[int]]:
+    """Create micro-batch index lists that minimize padding for jagged (nested) tensors.
+
+    Same greedy algorithm as get_truncate_padding_micro_batches, but extracts
+    sequence lengths from nested tensor offsets instead of attention_mask.
+
+    Args:
+        batch: TensorDict containing nested "input_ids" with jagged layout.
+        max_token_len: Maximum number of tokens per micro-batch.
+        dp_group: torch.distributed group for data-parallel sync.
+        same_micro_num_in_dp: If True, ensure same micro-batch count across DP ranks.
+
+    Returns:
+        List of index lists, one per micro-batch.
+    """
+    input_ids = batch["input_ids"]
+    assert input_ids.is_nested, "get_truncate_padding_micro_batches_jagged requires nested input_ids"
+    sequence_lengths = input_ids.offsets().diff().cpu().tolist()
+
+    sorted_sequence_lengths_with_idx = sorted(
+        [(length, idx) for idx, length in enumerate(sequence_lengths)], key=lambda x: x[0], reverse=True
+    )
+
+    micro_batches_idx = []
+    current_micro_batch = []
+    current_max_len = 0
+
+    for length, idx in sorted_sequence_lengths_with_idx:
+        new_max_len = max(current_max_len, length)
+        new_batch_size = len(current_micro_batch) + 1
+        if current_micro_batch and new_batch_size * new_max_len > max_token_len:
+            micro_batches_idx.append(current_micro_batch)
+            current_micro_batch = [idx]
+            current_max_len = length
+        else:
+            current_micro_batch.append(idx)
+            current_max_len = new_max_len
+
+    if current_micro_batch:
+        micro_batches_idx.append(current_micro_batch)
+
+    if same_micro_num_in_dp and dist.is_initialized():
+        micro_batches_idx = synchronize_micro_batches_num_across_ranks(
+            micro_batches_idx, batch_size=len(sequence_lengths), dp_group=dp_group
+        )
+
+    return micro_batches_idx
 
 
 def get_group_balanced_partitions(
