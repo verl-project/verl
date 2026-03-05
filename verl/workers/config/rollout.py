@@ -31,6 +31,7 @@ __all__ = [
     "PrometheusConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
+    "SpeculativeConfig",
 ]
 
 
@@ -133,6 +134,20 @@ class CheckpointEngineConfig(BaseConfig):
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
 
+@dataclass
+class SpeculativeConfig(BaseConfig):
+    """
+    Configuration for speculative rollout
+    """
+
+    # whether enable speculative in rollout
+    enable: bool = False
+    # The speculative decoding method to use
+    method: str = "eagle3"
+    # Number of draft tokens to generate in one speculative step
+    num_speculative_tokens: int = 1
+    # Path to the draft model checkpoint; if empty, default path is used
+    draft_model_path: Optional[str] = ""
 
 @dataclass
 class RolloutConfig(BaseConfig):
@@ -241,6 +256,8 @@ class RolloutConfig(BaseConfig):
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
+
+    speculative: SpeculativeConfig = field(default_factory=SpeculativeConfig)
 
     qat: Optional[dict] = None
 
