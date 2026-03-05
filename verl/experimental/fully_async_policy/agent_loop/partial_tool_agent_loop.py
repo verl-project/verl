@@ -33,9 +33,9 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
 
     """
 
-    def __init__(self, trainer_config, **kwargs):
-        super().__init__(trainer_config, **kwargs)
-        self.enable_partial_rollout = trainer_config.config.async_training.get("partial_rollout", False)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enable_partial_rollout = self.config.async_training.get("partial_rollout", False)
 
     # async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
     async def run(

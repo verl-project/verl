@@ -2027,9 +2027,9 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
         return forward_score
 
     """
-    The expectation of k1 and k3 estimator is the expectaed value of KL, but the expected gradient of k1 and k3
-    estimator is not the expectaed gradient of KL. On the other hand k2 estimator gives right gradient estimator, 
-    so we use a straight through trick here if the kl_penalty method ends with '+', .e.g., k3+. 
+    The expectation of k1 and k3 estimator is the expected value of KL, but the expected gradient of k1 and k3
+    estimator is not the expected gradient of KL. On the other hand k2 estimator gives right gradient estimator, 
+    so we use a straight through trick here if the kl_penalty method ends with '+', e.g., k3+. 
     """
     backward_score = 0.5 * (logprob - ref_logprob).square()
 
