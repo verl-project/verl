@@ -45,6 +45,17 @@ actor_rollout_ref:
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
+      qat:
+        _target_: verl.workers.config.QATEngineConfig
+        enable: false
+        mode: w4a16
+        group_size: 16
+        ignore_patterns:
+        - lm_head
+        - embed_tokens
+        - re:.*mlp.gate$
+        activation_observer: static_minmax
+        quantization_config_path: null
     _target_: verl.workers.config.FSDPActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: fsdp
@@ -196,6 +207,17 @@ actor_rollout_ref:
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
+      qat:
+        _target_: verl.workers.config.QATEngineConfig
+        enable: false
+        mode: w4a16
+        group_size: 16
+        ignore_patterns:
+        - lm_head
+        - embed_tokens
+        - re:.*mlp.gate$
+        activation_observer: static_minmax
+        quantization_config_path: null
     _target_: verl.workers.config.FSDPActorConfig
     ulysses_sequence_parallel_size: ${oc.select:actor_rollout_ref.actor.ulysses_sequence_parallel_size,1}
     entropy_from_logits_with_chunking: false
@@ -316,7 +338,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.qat,null}
+    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,null}
     layered_summon: false
   model:
     _target_: verl.workers.config.HFModelConfig
@@ -440,6 +462,17 @@ critic:
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
+      qat:
+        _target_: verl.workers.config.QATEngineConfig
+        enable: false
+        mode: w4a16
+        group_size: 16
+        ignore_patterns:
+        - lm_head
+        - embed_tokens
+        - re:.*mlp.gate$
+        activation_observer: static_minmax
+        quantization_config_path: null
     path: ~/models/deepseek-llm-7b-chat
     tokenizer_path: ${oc.select:actor_rollout_ref.model.path,"~/models/deepseek-llm-7b-chat"}
     override_config: {}

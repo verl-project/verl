@@ -13,12 +13,17 @@
 # limitations under the License.
 import importlib
 import logging
-from collections.abc import Iterator
+import re
+from collections import defaultdict
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import torch
+import torch.distributed
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.models.common.attention import (
@@ -256,3 +261,91 @@ def _create_varlen_metadata_for_document(input_batch: torch.Tensor, positions: t
         max_q=max_seqlen,
         max_k=max_seqlen,
     )
+
+
+# Regex to parse: model.layers.{L}.mlp.experts.{E}.{weight_suffix}
+_EXPERT_PATTERN = re.compile(r"\.layers\.(\d+)\..*\.experts\.(\d+)\.(.*)")
+
+
+def _parse_expert_name(name: str) -> tuple[int, int, str] | None:
+    """Parse layer_id, expert_id, weight_suffix from expert param name."""
+    match = _EXPERT_PATTERN.search(name)
+    if match:
+        return int(match.group(1)), int(match.group(2)), match.group(3)
+    return None
+
+
+def _make_expert_name_template(name: str) -> str:
+    """Convert 'model.layers.0.mlp.experts.3.w1' -> 'model.layers.0.mlp.experts.{}.w1'"""
+    return _EXPERT_PATTERN.sub(lambda m: f".layers.{m.group(1)}.mlp.experts.{{}}.{m.group(3)}", name)
+
+
+def iter_per_tensor_params_ep(
+    params: dict[str, Any],
+    device: int,
+    ep_group: torch.distributed.ProcessGroup,
+    ep_size: int,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Yield (name, tensor) pairs for weight sync with Expert Parallel.
+
+    Gathers expert weights across EP ranks one (layer, weight_type) group
+    at a time to avoid OOM from materializing all experts simultaneously.
+
+    Non-expert params are yielded first (with FSDP full_tensor() if needed),
+    then expert params are all-gathered per group and yielded individually.
+
+    Args:
+        params: HF-format state dict with per-expert keys. Expert keys must
+            follow the pattern ``model.layers.{L}.mlp.experts.{E}.{suffix}``.
+        device: device ID to place tensors on.
+        ep_group: The EP process group for all-gather.
+        ep_size: Number of EP ranks.
+    """
+    expert_params: dict[tuple[int, str], dict[int, tuple[str, Any]]] = defaultdict(dict)
+    non_expert_params: list[tuple[str, Any]] = []
+
+    for name, param in params.items():
+        parsed = _parse_expert_name(name) if "mlp.experts." in name else None
+        if parsed is None:
+            non_expert_params.append((name, param))
+        else:
+            layer_id, expert_id, weight_suffix = parsed
+            expert_params[(layer_id, weight_suffix)][expert_id] = (name, param)
+
+    params.clear()
+
+    # Yield non-expert params
+    for name, param in non_expert_params:
+        if isinstance(param, DTensor):
+            yield name, param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+        else:
+            yield name, param
+    del non_expert_params
+
+    # Yield expert params with all-gather
+    for (layer_id, weight_suffix), experts_dict in sorted(expert_params.items()):
+        sorted_expert_ids = sorted(experts_dict.keys())
+
+        # Stack local expert weights
+        local_weights = []
+        for eid in sorted_expert_ids:
+            _, param = experts_dict[eid]
+            if isinstance(param, DTensor):
+                param = param.to(device, non_blocking=True).full_tensor()
+            else:
+                param = param.to(device, non_blocking=True)
+            local_weights.append(param)
+
+        name_template = _make_expert_name_template(experts_dict[sorted_expert_ids[0]][0])
+        local_stacked = torch.stack(local_weights, dim=0)
+
+        # All-gather across EP ranks
+        gathered_list = [torch.empty_like(local_stacked) for _ in range(ep_size)]
+        torch.distributed.all_gather(gathered_list, local_stacked, group=ep_group)
+        all_experts = torch.cat(gathered_list, dim=0)
+
+        for expert_id in range(all_experts.shape[0]):
+            yield name_template.format(expert_id), all_experts[expert_id].to(torch.bfloat16).clone()
+
+        del local_weights, local_stacked, gathered_list, all_experts
+        torch.cuda.empty_cache()

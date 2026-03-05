@@ -57,6 +57,7 @@ from verl.workers.engine.torchtitan.utils import (
     derive_torchtitan_name_and_flavor,
     enable_fsdp_gradient_division,
     get_attention_masks,
+    iter_per_tensor_params_ep,
 )
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
@@ -505,16 +506,27 @@ class TorchTitanEngine(BaseEngine):
             params["lm_head.weight"] = params["model.embed_tokens.weight"]
 
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-        # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-        per_tensor_param = (
-            (
-                name,
-                param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                if isinstance(param, DTensor)
-                else param,
+
+        # When Expert Parallel (EP) is used, sd_adapter.to_hf() only produces
+        # individual expert weights for the locally-owned experts (e.g., 16 out of
+        # 128 with EP=8). vLLM needs ALL experts. We gather the missing experts
+        # by all-gathering each expert weight across the EP process group.
+        if self.parallel_dims.ep_enabled:
+            ep_mesh = self.parallel_dims.get_optional_mesh("ep")
+            ep_group = ep_mesh.get_group()
+            ep_size = self.parallel_dims.ep
+            per_tensor_param = iter_per_tensor_params_ep(params, device, ep_group, ep_size)
+        else:
+            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
+            per_tensor_param = (
+                (
+                    name,
+                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    if isinstance(param, DTensor)
+                    else param,
+                )
+                for name, param in params.items()
             )
-            for name, param in params.items()
-        )
         # TODO: support Torchtitan PEFT
         return per_tensor_param, None
 
