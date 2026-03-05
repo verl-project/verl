@@ -196,6 +196,8 @@ class RolloutConfig(BaseConfig):
 
     val_kwargs: SamplingConfig = field(default_factory=SamplingConfig)
 
+    seed: int = 0
+
     max_model_len: Optional[int] = None
     max_num_seqs: int = 1024
 
