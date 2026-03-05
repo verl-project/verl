@@ -86,8 +86,6 @@ class AgentData:
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
 
-        self.routed_experts = None
-
         # Extra fields for dynamic addition, e.g., tool session data
         self.extra_fields: dict[str, Any] = {}
 
@@ -191,9 +189,11 @@ class ToolAgentLoop(AgentLoopBase):
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
             else None,
+            routed_experts=agent_data.routed_experts[: len(prompt_ids) + self.response_length]
+            if agent_data.routed_experts is not None
+            else None,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
-            routed_experts=agent_data.routed_experts,
             extra_fields={},
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
