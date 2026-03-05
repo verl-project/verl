@@ -125,37 +125,29 @@ def compute_advantage_for_multi_trajectories(
             config=config,
         )
 
-    # Track the final output row that is present for each session:
-    # {uid}_{session_id} -> (row_idx, output_idx).
-    session_to_final_row: dict[str, tuple[int, int]] = {}
-    # Record which session each input row belongs to:
-    # row_idx -> {uid}_{session_id}.
-    row_to_session: list[str] = []
+    # final session of each agent loop: {uid}_{session_id} => (index, row_index)
+    final_sessions: dict[str, tuple[int, int]] = {}
+    row_session_keys = []
+    for i, key in enumerate(batch_keys):
+        fields = key.rsplit("_", 2)
+        assert len(fields) == 3, f"Unexpected key format: {key}"
+        uid, session_id, index = fields[0], fields[1], int(fields[2])
+        session_key = f"{uid}_{session_id}"
+        row_session_keys.append(session_key)
+        if session_key not in final_sessions or final_sessions[session_key][0] < index:
+            final_sessions[session_key] = (index, i)
 
-    for row, key in enumerate(batch_keys):
-        try:
-            # key format: {uid}_{session_id}_{index}
-            uid, session_id, output_idx = str(key).rsplit("_", 2)
-            session_key = f"{uid}_{session_id}"
-            output_idx = int(output_idx)
-        except ValueError as err:
-            raise ValueError(
-                f"Unexpected batch key format: {key}. Expected format is '{{uid}}_{{session_id}}_{{index}}'."
-            ) from err
+    # final session indices in batch data
+    final_indices = []
+    session_key_to_local_index = {}
+    for session_key, (_, row_index) in final_sessions.items():
+        final_indices.append(row_index)
+        session_key_to_local_index[session_key] = len(final_indices) - 1
+    row_to_local_index = [session_key_to_local_index[session_key] for session_key in row_session_keys]
 
-        row_to_session.append(session_key)
-        prev = session_to_final_row.get(session_key)
-        if prev is None or output_idx > prev[1]:
-            session_to_final_row[session_key] = (row, output_idx)
-
-    # These are the unique final-output rows that will actually participate in GRPO.
-    final_rows = sorted({row for row, _ in session_to_final_row.values()})
-    # Broadcast map from every original row to its session's final-output row:
-    # row_idx -> final_row_idx.
-    row_to_final_row = {row: session_to_final_row[row_to_session[row]][0] for row in range(len(batch_keys))}
-    data_for_adv = data.select_idxs(final_rows)
-    data_for_adv = compute_advantage(
-        data_for_adv,
+    # select final sessions from batch data for group relative advantage computation
+    final_data = compute_advantage(
+        data.select_idxs(final_indices),
         adv_estimator=adv_estimator,
         gamma=gamma,
         lam=lam,
@@ -163,34 +155,14 @@ def compute_advantage_for_multi_trajectories(
         norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         config=config,
     )
+    final_scores = final_data.batch["advantages"][:, 0]
 
-    response_mask = data.batch["response_mask"]
-    response_lens = response_mask.sum(dim=-1).tolist()
-    max_response_len = response_mask.size(-1)
-    # After select_idxs(final_rows), translate the original final row indices to
-    # local row indices in data_for_adv: final_row_idx -> local_idx.
-    final_row_to_local = {row: local for local, row in enumerate(final_rows)}
+    # scatter final scores to all rows in batch data
+    scores = final_scores[row_to_local_index]
+    scores = scores.unsqueeze(-1) * data.batch["response_mask"]
 
-    def _expand_from_final(field_name: str) -> torch.Tensor:
-        src = data_for_adv.batch[field_name]
-        expanded = torch.zeros((len(batch_keys), max_response_len), dtype=src.dtype, device=src.device)
-        for row, final_row in row_to_final_row.items():
-            final_local = final_row_to_local[final_row]
-            src_len = int(response_lens[final_row])
-            tgt_len = int(response_lens[row])
-            if src_len == 0 or tgt_len == 0:
-                continue
-
-            src_tokens = src[final_local, :src_len]
-            if tgt_len == src_len:
-                expanded[row, :tgt_len] = src_tokens
-            else:
-                # For variable-length outputs in one session, reuse the final scalar outcome.
-                expanded[row, :tgt_len] = src_tokens[-1].expand(tgt_len)
-        return expanded
-
-    data.batch["advantages"] = _expand_from_final("advantages")
-    data.batch["returns"] = _expand_from_final("returns")
+    data.batch["advantages"] = scores
+    data.batch["returns"] = scores
     return data
 
 
