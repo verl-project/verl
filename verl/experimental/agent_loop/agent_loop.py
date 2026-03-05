@@ -540,11 +540,52 @@ class AgentLoopWorker:
         #   e.g., [0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0]
 
         # TODO(wuxibin): remove padding and use tensordict.
+        max_prompt_len = self.rollout_config.prompt_length
+        max_response_len = self.rollout_config.response_length
+
+        # [fix] "Sizes of tensors must match except in dimension 0"
+        # max_prompt_len tokens (right portion) to preserve the most recent context.
+        prompt_ids = output.prompt_ids
+        if isinstance(prompt_ids, list):
+            if len(prompt_ids) > max_prompt_len:
+                logger.warning(
+                    f"prompt_ids length {len(prompt_ids)} exceeds max_prompt_len {max_prompt_len}, truncating."
+                )
+                prompt_ids = prompt_ids[-max_prompt_len:]
+        elif isinstance(prompt_ids, torch.Tensor):
+            prompt_ids = prompt_ids.flatten()
+            if prompt_ids.numel() > max_prompt_len:
+                logger.warning(
+                    f"prompt_ids length {prompt_ids.numel()} exceeds max_prompt_len {max_prompt_len}, truncating."
+                )
+                prompt_ids = prompt_ids[-max_prompt_len:]
+
+        response_ids = output.response_ids
+        if isinstance(response_ids, list):
+            if len(response_ids) > max_response_len:
+                logger.warning(
+                    f"response_ids length {len(response_ids)} exceeds max_response_len {max_response_len}, truncating."
+                )
+                response_ids = response_ids[:max_response_len]
+        elif isinstance(response_ids, torch.Tensor):
+            response_ids = response_ids.flatten()
+            if response_ids.numel() > max_response_len:
+                logger.warning(
+                    f"response_ids length {response_ids.numel()} exceeds max_response_len {max_response_len}, truncating."
+                )
+                response_ids = response_ids[:max_response_len]
+
+        response_mask_ids = output.response_mask
+        if isinstance(response_mask_ids, list):
+            response_mask_ids = response_mask_ids[:max_response_len]
+        elif isinstance(response_mask_ids, torch.Tensor):
+            response_mask_ids = response_mask_ids.flatten()[:max_response_len]
+
         self.tokenizer.padding_side = "left"
         prompt_output = self.tokenizer.pad(
-            {"input_ids": output.prompt_ids},
+            {"input_ids": prompt_ids},
             padding="max_length",
-            max_length=self.rollout_config.prompt_length,
+            max_length=max_prompt_len,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -554,9 +595,9 @@ class AgentLoopWorker:
 
         self.tokenizer.padding_side = "right"
         response_output = self.tokenizer.pad(
-            {"input_ids": output.response_ids},
+            {"input_ids": response_ids},
             padding="max_length",
-            max_length=self.rollout_config.response_length,
+            max_length=max_response_len,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -565,9 +606,9 @@ class AgentLoopWorker:
             response_output["attention_mask"] = response_output["attention_mask"].unsqueeze(0)
 
         response_mask_output = self.tokenizer.pad(
-            {"input_ids": output.response_mask},
+            {"input_ids": response_mask_ids},
             padding="max_length",
-            max_length=self.rollout_config.response_length,
+            max_length=max_response_len,
             return_tensors="pt",
             return_attention_mask=False,
         )
@@ -576,8 +617,9 @@ class AgentLoopWorker:
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            pad_size = self.rollout_config.response_length - len(output.response_logprobs)
-            response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
+            truncated_logprobs = output.response_logprobs[:max_response_len]
+            pad_size = max_response_len - len(truncated_logprobs)
+            response_logprobs = torch.tensor(truncated_logprobs + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
         attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)
@@ -595,8 +637,10 @@ class AgentLoopWorker:
                 raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
             routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
 
-            # Calculate start position: left padding means original prompt starts at the end
-            start_pos = prompt_output["input_ids"].shape[1] - len(output.prompt_ids)
+            # Calculate start position: left padding means original prompt starts at the end.
+            # Use the (possibly truncated) prompt_ids length, not the original output.prompt_ids.
+            actual_prompt_len = len(prompt_ids) if isinstance(prompt_ids, list) else prompt_ids.numel()
+            start_pos = prompt_output["input_ids"].shape[1] - actual_prompt_len
             end_pos = min(start_pos + length, total_length)
 
             # Add boundary checks for robustness
