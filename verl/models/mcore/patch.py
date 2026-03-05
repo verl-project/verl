@@ -420,7 +420,6 @@ def apply_patch_megatron_v012_with_torch_v28():
         try:
             file_name, storage_key, (bytes_data, tensor_data) = write_bucket
             extra_kwargs = {}
-            # 
             if "serialization_format" in inspect.signature(_write_item).parameters:
                 from torch.distributed.checkpoint.filesystem import SerializationFormat
 
