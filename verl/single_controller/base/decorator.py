@@ -134,7 +134,6 @@ def collect_all_to_all(worker_group, output):
     return output
 
 
-# TODO: merge with changes proposed in https://github.com/verl-project/verl/pull/5450
 def _concat_data_proto_or_future(output: list):
     from verl.protocol import BatchData
 
@@ -395,12 +394,7 @@ def _materialize_futures(*args, **kwargs):
     return new_args, kwargs
 
 
-def register(
-    dispatch_mode=Dispatch.ALL_TO_ALL,
-    execute_mode=Execute.ALL,
-    blocking=True,
-    materialize_futures=True,
-):
+def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocking=True, materialize_futures=True):
     """Register a function with distributed execution configuration.
 
     This decorator registers a function with specific dispatch and execution modes

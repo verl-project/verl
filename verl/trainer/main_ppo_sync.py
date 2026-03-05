@@ -1149,7 +1149,7 @@ class PPOTrainer:
     def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
         # 1. collect necessary fields from TransferQueue for computing metrics
         fields = [
-            "attention_mask",
+            "prompts",
             "responses",
             "response_mask",
             "values",
@@ -1160,11 +1160,15 @@ class PPOTrainer:
             "num_turns",
         ]
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+        prompt_length = data["prompts"].offsets().diff()
+        response_length = data["responses"].offsets().diff()
+        global_token_num = (prompt_length + response_length).tolist()
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]
         if "token_level_rewards" not in data:
             data["token_level_rewards"] = data["rm_scores"]
-        global_token_num = torch.sum(data["attention_mask"], dim=-1).tolist()
+        data["prompt_length"] = prompt_length.float()
+        data["response_length"] = response_length.float()
         batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
 
         # 2. compute metrics

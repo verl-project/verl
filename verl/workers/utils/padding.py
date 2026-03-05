@@ -97,7 +97,6 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     values = tensor.values() if tensor.is_nested else tensor
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
-    attention_mask = data["attention_mask"]
 
     max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
 
@@ -107,6 +106,7 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
         if max_response_len < 0:
             max_response_len = response_lens.max().item()
     else:
+        attention_mask = data["attention_mask"]
         assert not attention_mask.is_nested
         prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
         response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
