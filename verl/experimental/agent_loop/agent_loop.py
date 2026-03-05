@@ -571,7 +571,8 @@ class AgentLoopWorker:
             response_ids = response_ids.flatten()
             if response_ids.numel() > max_response_len:
                 logger.warning(
-                    f"response_ids length {response_ids.numel()} exceeds max_response_len {max_response_len}, truncating."
+                    f"response_ids length {response_ids.numel()} exceeds "
+                    f"max_response_len {max_response_len}, truncating."
                 )
                 response_ids = response_ids[:max_response_len]
 
