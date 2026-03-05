@@ -32,6 +32,10 @@ SP_SIZE=${SP_SIZE:-1}
 TP_SIZE=${TP_SIZE:-4}
 PP_SIZE=${PP_SIZE:-1}
 CP_SIZE=${CP_SIZE:-1}
+USE_MBRIDGE=${USE_MBRIDGE:-True}
+
+DEBUG_MODE=${DEBUG_MODE:-0}
+DEBUG_SINGLE_GPU=${DEBUG_SINGLE_GPU:-0}
 
 FSDP_ENGINE_CONFIG="
     engine=${BACKEND} \
@@ -61,7 +65,38 @@ MEGATRON_ENGINE_CONFIG="
     engine.tensor_model_parallel_size=${TP_SIZE} \
     engine.pipeline_model_parallel_size=${PP_SIZE} \
     engine.context_parallel_size=${CP_SIZE} \
-    engine.use_mbridge=True"
+    engine.use_mbridge=${USE_MBRIDGE}"
+
+if [ "${DEBUG_MODE}" = "1" ]; then
+    export HYDRA_FULL_ERROR=1
+    export TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG:-DETAIL}
+    export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
+    export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
+    export NCCL_ASYNC_ERROR_HANDLING=${NCCL_ASYNC_ERROR_HANDLING:-1}
+    export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-1}
+fi
+
+if [ "${DEBUG_SINGLE_GPU}" = "1" ]; then
+    export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    NPROC_PER_NODE=1
+    NNODES=1
+    NODE_RANK=0
+    MASTER_ADDR=127.0.0.1
+    TP_SIZE=1
+    PP_SIZE=1
+    CP_SIZE=1
+    TRAIN_BATCH_SIZE=${DEBUG_TRAIN_BATCH_SIZE:-1}
+    MAX_TOKEN_LEN_PER_GPU=${DEBUG_MAX_TOKEN_LEN_PER_GPU:-2048}
+    echo "DEBUG_SINGLE_GPU=1, forcing single-process settings."
+fi
+
+if [ "${BACKEND}" = "megatron" ]; then
+    if (( TP_SIZE * PP_SIZE * CP_SIZE > NPROC_PER_NODE )); then
+        echo "Invalid Megatron parallel config: TP*PP*CP > NPROC_PER_NODE"
+        echo "TP=${TP_SIZE}, PP=${PP_SIZE}, CP=${CP_SIZE}, NPROC_PER_NODE=${NPROC_PER_NODE}"
+        exit 1
+    fi
+fi
 
 if [ "$BACKEND" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
@@ -78,6 +113,13 @@ export WANDB_API_KEY=${WANDB_API_KEY:-}
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export PYTHONPATH=${PYTHONPATH:-}:/llm-align/liuchonghan/verl_lao
 mkdir -p "${WANDB_DIR}"
+
+echo "Launch config:"
+echo "BACKEND=${BACKEND} NNODES=${NNODES} NPROC_PER_NODE=${NPROC_PER_NODE} NODE_RANK=${NODE_RANK}"
+echo "MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}"
+echo "TP=${TP_SIZE} PP=${PP_SIZE} CP=${CP_SIZE} USE_MBRIDGE=${USE_MBRIDGE}"
+echo "TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU}"
+echo "DEBUG_MODE=${DEBUG_MODE} DEBUG_SINGLE_GPU=${DEBUG_SINGLE_GPU}"
 
 torchrun \
     --nnodes=${NNODES} \
