@@ -19,13 +19,14 @@ env:
     simulator_type: libero
     max_episode_steps: 512
     reward_coef: 1.0
+    step_penalty: 0.0001
     only_eval: False
     video_cfg:
       save_video: True
       video_base_dir: /tmp/videos
     num_envs: 16
     seed: 42
-    task_suite_name: libero_10
+    task_suite_name: libero_spatial
     init_params:
       camera_depths: False
       camera_heights: 256
@@ -45,10 +46,11 @@ actor_rollout_ref:
       double_q: True
   actor:
     sac:
-      gamma: 0.95
-      tau: 0.95
-      initial_alpha: -10
-      auto_entropy: true 
+      gamma: 0.99
+      tau: 0.4
+      initial_alpha: 0
+      replay_positive_sample_ratio: 0.9
+      auto_entropy: False
       alpha_type: exp
       alpha_lr: 0.0003
       target_entropy: -64.0

@@ -352,13 +352,16 @@ class RobRaySACTrainer(RayPPOTrainer):
                             dones_step = complete_any.clone()
                             dones_step[:, -2] = True
                             batch.batch["dones"] = dones_step.float()
-                            batch.batch["rewards"] = complete_any.float()
+                            sparse_rewards = complete_any.float()
                             batch.batch["valids"] = (~batch.batch["complete"]).any(dim=-1).float()
-                            batch.batch["positive_sample_mask"] = batch.batch["rewards"].any(dim=-1).unsqueeze(-1).repeat_interleave(
+                            step_penalty = float(self.config.env.train.get("step_penalty", 0.0))
+                            batch.batch["rewards"] = sparse_rewards - step_penalty * batch.batch["valids"]
+                            batch.batch["rewards"][:, -2] = -1.0
+                            batch.batch["positive_sample_mask"] = sparse_rewards.any(dim=-1).unsqueeze(-1).repeat_interleave(
                                 batch.batch["action"].shape[1], dim=-1
                             )
 
-                            average_reward = batch.batch["rewards"].any(dim=-1).mean(dtype=torch.float32).item()
+                            average_reward = sparse_rewards.any(dim=-1).mean(dtype=torch.float32).item()
                             metrics["data/trajectory_avg_reward"] = average_reward
                             metrics["data/avg_positive_trajectory_length"] = compute_avg_positive_trajectory_length(batch)
 
