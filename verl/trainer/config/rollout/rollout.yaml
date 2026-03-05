@@ -275,6 +275,24 @@ checkpoint_engine:
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
 
+# Configuration for speculative decoding
+speculative:
+
+  # Target class for speculative config
+  _target_: verl.workers.config.SpeculativeConfig
+
+  # whether enable speculative in rollout
+  enable: false
+
+  # The speculative decoding method to use (e.g., "eagle3")
+  method: eagle3
+
+  # Number of draft tokens to generate in one speculative step
+  num_speculative_tokens: 1
+
+  # Path to the draft model checkpoint; if empty, default path is used
+  draft_model_path: ""
+
 # trace rollout data
 trace:
 

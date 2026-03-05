@@ -205,6 +205,14 @@ class vLLMColocateWorkerExtension:
             model_config = self.model_runner.vllm_config.model_config
             process_weights_after_loading(model, model_config, self.device)
 
+        # draft model weight is reset so that require reload weight
+        if self.vllm_config.speculative_config:
+            from vllm.model_executor.model_loader import get_model_loader
+            loader = get_model_loader(self.model_runner.vllm_config.load_config)
+            loader.load_weights(self.model_runner.drafter.model, self.vllm_config.speculative_config.draft_model_config)
+            process_weights_after_loading(self.model_runner.drafter.model,
+                                          self.vllm_config.speculative_config.draft_model_config, self.device)
+
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
             weights = dict(weights)
