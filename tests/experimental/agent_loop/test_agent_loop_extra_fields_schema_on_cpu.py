@@ -219,7 +219,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     )
 
     # Mimic two "worker chunks" and concatenate as in training.
-    dummy_worker = type("_DummyWorker", (), {"reward_loop_worker_handles": None})()
+    dummy_worker = type("_DummyWorker", (), {"reward_loop_worker_handles": None, "distillation_enabled": False})()
     chunk_a = AgentLoopWorker._postprocess(
         dummy_worker,
         inputs=[internal_a],

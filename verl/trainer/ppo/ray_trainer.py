@@ -50,7 +50,14 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import (
+    Role,
+    WorkerType,
+    need_critic,
+    need_reference_policy,
+    need_reward_model,
+    need_teacher_policy,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -60,6 +67,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.stages import Stage
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
@@ -276,6 +284,7 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
+        self.use_teacher_policy = need_teacher_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
 
@@ -689,6 +698,7 @@ class RayPPOTrainer:
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
                 config=self.config.actor_rollout_ref,
+                distillation_config=self.config.get("distillation"),
                 role=str(actor_role),
             )
             self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
@@ -816,6 +826,18 @@ class RayPPOTrainer:
         # Note: mode is always "async" since sync mode is deprecated
         self.async_rollout_mode = True
 
+        # initialize teacher loop manager
+        if self.use_teacher_policy:
+            from verl.experimental.teacher_loop import TeacherLoopManager
+
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            self.teacher_loop_manager = TeacherLoopManager(
+                config=self.config,
+                teacher_resource_pool=teacher_resource_pool,
+            )
+        else:
+            self.teacher_loop_manager = None
+
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
@@ -830,12 +852,15 @@ class RayPPOTrainer:
 
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
+        # To stream teacher computation with actor rollout, we instead pass the full manager so that the
+        # teacher loop workers can sleep/wake together with rollout workers
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
+            teacher_loop_manager=self.teacher_loop_manager,
         )
 
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -1106,7 +1131,7 @@ class RayPPOTrainer:
             # step 2: convert from padding to nopadding
             batch_td = left_right_2_no_padding(batch_td)
             # step 3: add meta info
-            metadata = {"calculate_entropy": False, "compute_loss": False}
+            metadata = {"calculate_entropy": False, "compute_loss": False, "stage": Stage.REF_LOG_PROB}
             if self.ref_in_actor:
                 metadata["no_lora_adapter"] = True
             tu.assign_non_tensor(batch_td, **metadata)
@@ -1134,7 +1159,7 @@ class RayPPOTrainer:
             # step 2: convert from padding to nopadding
             batch_td = left_right_2_no_padding(batch_td)
             # step 3: add meta info
-            tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+            tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False, stage=Stage.OLD_LOG_PROB)
             output = self.actor_rollout_wg.compute_log_prob(batch_td)
             # gather output
             entropy = tu.get(output, "entropy")
@@ -1175,8 +1200,8 @@ class RayPPOTrainer:
                 epochs=ppo_epochs,
                 seed=seed,
                 dataloader_kwargs={"shuffle": shuffle},
+                stage=Stage.ACTOR_UPDATE,
             )
-
             actor_output = self.actor_rollout_wg.update_actor(batch_td)
             actor_output = tu.get(actor_output, "metrics")
             actor_output = rename_dict(actor_output, "actor/")
