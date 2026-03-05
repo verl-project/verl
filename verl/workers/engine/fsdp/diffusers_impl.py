@@ -183,6 +183,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 device_name, mesh_shape=(dp_size, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
             )
             self.ulysses_parallel_group = self.ulysses_device_mesh["sp"].get_group()
+            raise NotImplementedError("Ulysses sequence parallel is not supported yet.")
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
@@ -391,6 +392,7 @@ class DiffusersFSDPEngine(BaseEngine):
         lr_scheduler_type = optim_config.lr_scheduler_type
         min_lr_ratio = optim_config.min_lr_ratio
         num_cycles = optim_config.num_cycles
+        zero_indexed_step = optim_config.zero_indexed_step
         if num_warmup_steps <= 0:
             num_warmup_steps_ratio = optim_config.lr_warmup_steps_ratio
             num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
@@ -407,6 +409,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 num_training_steps=total_steps,
                 min_lr_ratio=min_lr_ratio,
                 num_cycles=num_cycles,
+                zero_indexed_step=zero_indexed_step,
             )
         else:
             raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")

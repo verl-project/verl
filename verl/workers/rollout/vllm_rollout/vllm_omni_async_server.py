@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import asdict
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -344,22 +345,16 @@ class vLLMOmniHttpServer:
 
     async def run_server(self, args: argparse.Namespace):
         engine_args = AsyncOmniEngineArgs.from_cli_args(args)
-
-        kwargs = {
-            "model": engine_args.model,
-            "enable_sleep_mode": engine_args.enable_sleep_mode,
-            "worker_extension_cls": engine_args.worker_extension_cls,
-            "enforce_eager": engine_args.enforce_eager,
-        }
+        engine_args = asdict(engine_args)
 
         # TODO (mike): read custom_pipeline from CLI
         custom_pipeline = self.config.engine_kwargs.get("vllm_omni", {}).get("custom_pipeline", None)
         if custom_pipeline is not None:
-            kwargs["enable_dummy_pipeline"] = True
-            kwargs["custom_pipeline_args"] = {"pipeline_class": custom_pipeline}
+            engine_args["enable_dummy_pipeline"] = True
+            engine_args["custom_pipeline_args"] = {"pipeline_class": custom_pipeline}
 
         # TODO (mike): support parsing engine config from CLI
-        engine_client = AsyncOmni(**kwargs)
+        engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, None, app.state, args)
 
