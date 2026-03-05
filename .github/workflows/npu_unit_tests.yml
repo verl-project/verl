@@ -61,6 +61,7 @@ on:
       # Ignore CPU tests
       - "!tests/*_on_cpu.py"
 
+
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
