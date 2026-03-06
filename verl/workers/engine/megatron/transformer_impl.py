@@ -470,6 +470,9 @@ class MegatronEngine(BaseEngine):
 
     def get_model_parallel_group(self):
         return mpu.get_model_parallel_group()
+    
+    def get_context_parallel_group(self):
+        return mpu.get_context_parallel_group()
 
     def save_checkpoint(
         self,
