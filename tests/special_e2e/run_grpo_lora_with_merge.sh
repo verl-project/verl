@@ -9,7 +9,7 @@ MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 if [ ! -d "$MODEL_PATH" ]; then
     echo "Downloading model to ${MODEL_PATH}..."
-#    huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#    hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 else
     echo "Model directory ${MODEL_PATH} already exists, skip downloading."
 fi

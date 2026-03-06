@@ -15,6 +15,4 @@ _target_: verl.workers.config.McoreActorConfig
 
 strategy: megatron
 
-data_loader_seed: 42
-
 load_weight: True

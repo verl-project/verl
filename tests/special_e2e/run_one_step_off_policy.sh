@@ -11,7 +11,7 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 # Algorithm parameters
 adv_estimator=grpo
@@ -88,19 +88,20 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k}
     actor_rollout_ref.rollout.val_kwargs.do_sample=True
     actor_rollout_ref.rollout.val_kwargs.n=1
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.mode=sync \
-    reward_model.reward_manager=dapo
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length}
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    reward.reward_manager.name=dapo
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False
+    +reward.reward_kwargs.max_resp_len=${max_response_length}
     trainer.logger=['console']
     trainer.project_name='verl-test'
     trainer.experiment_name="${exp_name}"
-    trainer.val_before_train=False
+    trainer.val_before_train=True
     trainer.test_freq=-1
     trainer.save_freq=-1
     trainer.total_epochs=2
@@ -113,6 +114,13 @@ common_params=(
 
 )
 
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     echo "Running with FSDP2 strategy..."
     # FSDP2 specific parameters
@@ -122,9 +130,9 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m recipe.one_step_off_policy.main_ppo \
+    python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
-        actor_rollout_ref.actor.strategy=fsdp2 \
+        actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
         critic.strategy=fsdp2 \
         actor_rollout_ref.actor.grad_clip=1.0 \
         actor_rollout_ref.model.use_remove_padding=True \
@@ -149,7 +157,16 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m recipe.one_step_off_policy.main_ppo \
+    extra_flash_args=()
+
+    if [ "$device_name" == "npu" ]; then
+        echo "Detect NPU device, enabling FlashAttention..."
+        extra_flash_args+=(
+            ++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+        )
+    fi
+
+    python3 -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
         --config-name='one_step_off_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \
@@ -166,6 +183,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
+        "${extra_flash_args[@]}" \
         actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"

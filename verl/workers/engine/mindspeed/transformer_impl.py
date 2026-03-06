@@ -15,7 +15,10 @@
 import logging
 import os
 
-from mindspeed.megatron_adaptor import repatch
+try:
+    from mindspeed.megatron_adaptor import repatch
+except ImportError:
+    repatch = None
 
 from verl.trainer.config import CheckpointConfig
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig

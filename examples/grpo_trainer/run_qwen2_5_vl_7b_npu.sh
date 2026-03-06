@@ -48,5 +48,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
-    trainer.total_epochs=15 \
-    trainer.device=npu $@
+    trainer.total_epochs=15 $@

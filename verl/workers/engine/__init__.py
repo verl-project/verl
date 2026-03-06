@@ -14,7 +14,28 @@
 from .base import BaseEngine, EngineRegistry
 from .fsdp import FSDPEngine, FSDPEngineWithLMHead
 
-__all__ = ["BaseEngine", "EngineRegistry", "FSDPEngine", "FSDPEngineWithLMHead"]
+__all__ = [
+    "BaseEngine",
+    "EngineRegistry",
+    "FSDPEngine",
+    "FSDPEngineWithLMHead",
+]
+
+try:
+    from .torchtitan import TorchTitanEngine, TorchTitanEngineWithLMHead
+
+    __all__ += ["TorchTitanEngine", "TorchTitanEngineWithLMHead"]
+except ImportError:
+    TorchTitanEngine = None
+    TorchTitanEngineWithLMHead = None
+
+try:
+    from .veomni import VeOmniEngine, VeOmniEngineWithLMHead
+
+    __all__ += ["VeOmniEngine", "VeOmniEngineWithLMHead"]
+except ImportError:
+    VeOmniEngine = None
+    VeOmniEngineWithLMHead = None
 
 # Mindspeed must be imported before Megatron to ensure the related monkey patches take effect as expected
 try:

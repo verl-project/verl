@@ -152,7 +152,7 @@ Chat completion vs Token in token out
 Almost all agent frameworks (LangGraph, CrewAI, LlamaIndex, etc) call LLM with OpenAI chat completion api, and 
 keep chat history as messages. So user may expect that we should use the chat completion api in multi-turn rollout.
 
-But based on our recent experience on single-turn training on DAPO and multi-turn training on `retool <https://github.com/volcengine/verl/tree/main/recipe/retool>`_,
+But based on our recent experience on single-turn training on DAPO and multi-turn training on `retool <https://github.com/volcengine/verl-recipe/tree/main/retool>`_,
 we found the token_ids from apply the final messages may not equal to the token_ids by concat prompt_ids and response_ids in each turn.
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/multi_turn.png?raw=true
@@ -234,5 +234,5 @@ Next
 ----
 
 - :doc:`Agentic RL Training<../start/agentic_rl>`: Quick start agentic RL training with gsm8k dataset.
-- `LangGraph MathExpression <https://github.com/volcengine/verl/tree/main/recipe/langgraph_agent/example>`_: Demonstrate how to use LangGraph to build agent loop.
-- `Retool <https://github.com/volcengine/verl/tree/main/recipe/retool>`_: End-to-end retool paper reproduction using tool agent.
+- `LangGraph MathExpression <https://github.com/volcengine/verl-recipe/tree/main/langgraph_agent/example>`_: Demonstrate how to use LangGraph to build agent loop.
+- `Retool <https://github.com/volcengine/verl-recipe/tree/main/retool>`_: End-to-end retool paper reproduction using tool agent.

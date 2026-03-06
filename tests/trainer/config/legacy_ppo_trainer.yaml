@@ -165,7 +165,7 @@ actor_rollout_ref:
     enable_activation_offload: false
 
     # Whether to remove padding tokens in inputs during training
-    use_remove_padding: false
+    use_remove_padding: true
 
     # Set to positive value to enable LoRA (e.g., 32)
     lora_rank: 0
@@ -254,8 +254,12 @@ actor_rollout_ref:
     # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
     clip_ratio_c: 3.0
 
-    # Loss aggregation mode: "token-mean", "seq-mean-token-sum", or "seq-mean-token-mean"
+    # Loss aggregation mode: "token-mean", "seq-mean-token-sum", "seq-mean-token-mean", or "seq-mean-token-sum-norm"
     loss_agg_mode: token-mean
+
+    # Scale factor for "seq-mean-token-sum-norm" loss aggregation mode.
+    # If null, uses response_length. Set to a constant to ensure consistent normalization.
+    loss_scale_factor: null
 
     # Entropy regularization coefficient in PPO loss
     entropy_coeff: 0
@@ -1011,7 +1015,7 @@ trainer:
       roles: ["all"]
 
       # Collection level, optional values: level_none, level0, level1, level2.
-      level: level1
+      level: level0
 
       # Whether to enable memory analysis.
       with_memory: False

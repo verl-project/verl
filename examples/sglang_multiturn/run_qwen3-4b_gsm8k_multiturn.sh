@@ -36,7 +36,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.over_sample_rate=0.1 \
-    actor_rollout_ref.rollout.mode=sync \
+    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \

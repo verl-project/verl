@@ -23,6 +23,7 @@ from split_monkey_patch import fit
 
 from verl import DataProto
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.reward_score import gsm8k, math_reward
 
 
@@ -171,25 +172,9 @@ def main_task(config):
     }
 
     # use reference model
-    if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+    if need_reference_policy(config):
         role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
         mapping[Role.RefPolicy] = actor_rollout_ref_pool_id
-
-    # we should adopt a multi-source reward function here
-    # - for rule-based rm, we directly call a reward score
-    # - for model-based rm, we call a model
-    # - for code related prompt, we send to a sandbox if there are test cases
-    # - finally, we combine all the rewards together
-    # - The reward type depends on the tag of the data
-    if config.reward_model.enable:
-        if config.reward_model.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import RewardModelWorker
-        elif config.reward_model.strategy == "megatron":
-            from verl.workers.megatron_workers import RewardModelWorker
-        else:
-            raise NotImplementedError
-        role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
-        mapping[Role.RewardModel] = critic_pool_id
 
     reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0)
 

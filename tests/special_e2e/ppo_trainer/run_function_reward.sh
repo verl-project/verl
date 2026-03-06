@@ -5,7 +5,7 @@ NUM_GPUS=${NUM_GPUS:-8}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 TRAIN_FILES=${TRAIN_FILES:-$HOME/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-$HOME/data/gsm8k/test.parquet}
@@ -13,16 +13,15 @@ MAX_PROMPT_LEN=${MAX_PROMPT_LEN:-512}
 MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-512}
 
 ENGINE=${ENGINE:-vllm}
-ROLLOUT_MODE=${ROLLOUT_MODE:-sync}
-
-RETURN_RAW_CHAT="False"
-SKIP_TOKENIZER_INIT=${SKIP_TOKENIZER_INIT:-False}
-if [ "$ROLLOUT_MODE" = "async" ]; then
-    RETURN_RAW_CHAT="True"
-    SKIP_TOKENIZER_INIT="True"
+if [ "$ENGINE" = "vllm" ]; then
+    export VLLM_USE_V1=1
 fi
+ROLLOUT_MODE="async"
 
-GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
+RETURN_RAW_CHAT="True"
+SKIP_TOKENIZER_INIT="True"
+
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
 ACTOR_FSDP_PARAM_OFFLOAD=${ACTOR_FSDP_PARAM_OFFLOAD:-False}
 ACTOR_FSDP_OPTIMIZER_OFFLOAD=${ACTOR_FSDP_OPTIMIZER_OFFLOAD:-False}
 REF_FSDP_PARAM_OFFLOAD=${REF_FSDP_PARAM_OFFLOAD:-True}
@@ -134,8 +133,8 @@ python3 -m verl.trainer.main_ppo \
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.optimizer_offload=False \
-    custom_reward_function.path="${reward_fn_file_path}"\
-    custom_reward_function.name="${reward_fn_name}"\
+    reward.custom_reward_function.path="${reward_fn_file_path}"\
+    reward.custom_reward_function.name="${reward_fn_name}"\
     algorithm.use_kl_in_reward="${USE_KL}" \
     algorithm.kl_penalty=kl \
     algorithm.kl_ctrl.kl_coef=0.001 \

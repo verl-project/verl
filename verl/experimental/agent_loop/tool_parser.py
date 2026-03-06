@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
 import logging
 import os
@@ -20,6 +19,7 @@ from abc import ABC, abstractmethod
 import regex
 from pydantic import BaseModel
 
+from verl.utils.ray_utils import get_event_loop
 from verl.utils.rollout_trace import rollout_trace_op
 
 logger = logging.getLogger(__file__)
@@ -85,7 +85,7 @@ class HermesToolParser(ToolParser):
 
     @rollout_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
-        loop = asyncio.get_running_loop()
+        loop = get_event_loop()
         text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
         if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
             return text, []
@@ -132,7 +132,7 @@ class GptOssToolParser(ToolParser):
 
     @rollout_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
-        loop = asyncio.get_running_loop()
+        loop = get_event_loop()
         # We need to keep special tokens for gpt-oss model for better tool call extraction.
         text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
         # Need to remove padding tokens for better tool call extraction.

@@ -21,14 +21,16 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from verl.utils.logger import print_rank_0
 
 
-def init_megatron_optim_config(optim_config: dict, fp16: bool = False) -> OptimizerConfig:
+def init_megatron_optim_config(
+    optim_config: dict, use_distributed_optimizer: bool = True, fp16: bool = False
+) -> OptimizerConfig:
     optim_args = {
         "optimizer": optim_config.optimizer,
         "lr": optim_config.lr,
         "min_lr": optim_config.min_lr,
         "clip_grad": optim_config.clip_grad,
         "weight_decay": optim_config.weight_decay,
-        "use_distributed_optimizer": True,
+        "use_distributed_optimizer": use_distributed_optimizer,
     }
     if fp16:
         optim_args.update(
@@ -63,17 +65,11 @@ def init_megatron_optim_config(optim_config: dict, fp16: bool = False) -> Optimi
 def get_megatron_optimizer(
     model,
     config: OptimizerConfig,
-    no_weight_decay_cond=None,
-    scale_lr_cond=None,
-    lr_mult=1.0,
 ):
     # Base optimizer.
     return get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
-        no_weight_decay_cond=no_weight_decay_cond,
-        scale_lr_cond=scale_lr_cond,
-        lr_mult=lr_mult,
     )
 
 

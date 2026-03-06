@@ -42,7 +42,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.project_name='gsm8k_async_rl' \
     trainer.experiment_name='qwen2.5-3b_function_rm-gsm8k-sgl-multi-w-tool-verify-n16' \
-    trainer.device=npu \
     trainer.n_gpus_per_node=16 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
@@ -51,7 +50,6 @@ python3 -m verl.trainer.main_ppo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
     trainer.total_epochs=15 \
-    actor_rollout_ref.rollout.update_weights_bucket_megabytes=512 \
     actor_rollout_ref.rollout.trace.token2text=False \
     actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.multi_turn.enable=true \

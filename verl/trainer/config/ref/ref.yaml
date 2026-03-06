@@ -67,7 +67,7 @@ profiler:
       contents: []
 
       # Collection level, optional values: level_none, level0, level1, level2.
-      level: "level1"
+      level: "level0"
 
       # Whether to automatically parse the data.
       analysis: True
@@ -81,13 +81,12 @@ profiler:
       # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
       _target_: verl.utils.profiler.config.TorchProfilerToolConfig
 
-      # start profile mini-batch in training
-      # NOTICE: different with global steps config which refers to iteration
-      # This field only related with mini-batch
-      step_start: 0
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: []
 
-      # stop profile mini-batch in training
-      step_end: null
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: false
 
     # torch memory profiler config
     torch_memory:
@@ -100,3 +99,22 @@ profiler:
 
       # Stack trace depth for memory allocations
       stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+# Router replay configuration for MoE models
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.RouterReplayConfig
+
+  # Router replay mode: disabled, R2, R3
+  # - R2: Use R2 routing strategy (record mode)
+  # - R3: Use R3 routing strategy (record mode)
+  mode: disabled
+
+  # File path to save recorded routing decisions
+  # Required when mode is 'record', 'R2', or 'R3'
+  record_file: null
+
+  # File path to load recorded routing decisions for replay
+  # Required when mode is 'replay'
+  replay_file: null

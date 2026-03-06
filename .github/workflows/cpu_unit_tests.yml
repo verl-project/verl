@@ -12,7 +12,7 @@
 # - `special_sanity`: a suite of quick sanity tests
 # - `special_standalone`: a set of test that are designed to run in dedicated environments
 
-# Accelerators for tests 
+# Accelerators for tests
 # - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
 # - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
 
@@ -28,7 +28,6 @@
 #   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
-
 
 name: cpu_unit_tests
 
@@ -46,7 +45,6 @@ on:
     paths:
       - "**/*.py"
       - .github/workflows/cpu_unit_tests.yml
-      - "!recipe/**/*.py"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -57,10 +55,29 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+
 jobs:
+  setup:
+    if: github.repository_owner == 'verl-project'
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: create-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
   cpu_unit_tests:
-    if: github.repository_owner == 'volcengine'
-    runs-on: [L20x8]
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
       HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
@@ -70,21 +87,32 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TORCH_COMPILE_DISABLE: 1
       TORCHINDUCTOR_DISABLE: 1
-    container:
-      image: verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm011.dev7
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip install -e .[test,geo]
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install --upgrade "transformers<5.0.0"
       - name: Download datasets
         run: |
-          huggingface-cli download verl-team/gsm8k-v0.4.1 --repo-type dataset --local-dir ~/verl-data/gsm8k
-          python3 examples/data_preprocess/geo3k.py
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k
       - name: Running CPU unit tests
         run: |
           echo '[pytest]' > pytest.ini
           echo 'python_files = *_on_cpu.py' >> pytest.ini
           pytest -s -x --asyncio-mode=auto tests/
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [setup, cpu_unit_tests]
+    if: always()
+    steps:
+      - id: destroy-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"

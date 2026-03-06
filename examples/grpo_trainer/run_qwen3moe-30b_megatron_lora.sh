@@ -3,9 +3,11 @@ set -xeuo pipefail
 
 # Need to install Megatron-Bridge
 # NOTE: Make sure you use Megatron-Bridge later than 0.2.0 
-# (after https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/36302b7ca1305f0690e17cf4e4019ac822746872)
-# for MoE LoRA When you want to set ETP and ETP!=TP.
-# https://github.com/NVIDIA-NeMo/Megatron-Bridge/issues/1363
+# (Recommend https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/83a7c1134c562d8c6decd10a1f0a6e6a7a8a3a44 or later)
+# for proper MoE LoRA support.
+
+# For Megatron communication/computation overlapping
+export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 ########################### Quick Config ###########################
 
@@ -41,9 +43,17 @@ DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path=Qwen/Qwen3-30B-A3B-Instruct-2507
-    actor_rollout_ref.model.lora.rank=16
-    actor_rollout_ref.model.lora.alpha=32
     actor_rollout_ref.model.use_fused_kernels=True
+    actor_rollout_ref.model.lora.rank=32
+    actor_rollout_ref.model.lora.alpha=64
+    actor_rollout_ref.model.lora.lora_A_init_method=kaiming
+    # # Optional: Use canonical LoRA
+    # actor_rollout_ref.model.lora.type="canonical_lora"
+    # actor_rollout_ref.model.lora.target_modules='["linear_q","linear_k","linear_v","linear_proj","linear_fc1_up","linear_fc1_gate","linear_fc2"]'
+
+    # # Optional: Add dropout to LoRA layers
+    # actor_rollout_ref.model.lora.dropout=0.05
+    # actor_rollout_ref.model.lora.dropout_position=pre
 )
 
 ACTOR=(

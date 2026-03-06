@@ -22,6 +22,7 @@ from typing import Any, Callable
 import numpy as np
 import torch
 
+import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.utils.import_utils import deprecated
 
@@ -302,6 +303,120 @@ def compute_throughout_metrics(batch: DataProto, timing_raw: dict[str, float], n
     }
 
 
+def compute_variance_proxy_metrics(batch: DataProto, gradient_norm: float = None) -> dict[str, float]:
+    """
+    Compute variance proxy metrics using the simplified expected squared norm approach.
+
+    This metric provides a computationally efficient way to monitor gradient variance
+    during training. It works for any advantage estimator as long as sum_pi_squared
+    is available from the actor.
+
+    Theory:
+    - Full variance: Var(g̃) = E[||g̃||²] - ||g_true||²
+    - Simplified proxy (when ||g_true||² ≈ 0): Var(g̃) ≈ E[||g̃||²]
+    - Using W-score approximation: E[||g̃||²] ≈ E[A² × W(τ)]
+
+    Where W(τ) = Σ_t[1 - 2π_t(y_t) + Σπ²] is the score-norm proxy.
+    """
+    metrics = {}
+
+    # Check if we have the necessary data (sum_pi_squared is required for W-score)
+    if "sum_pi_squared" not in batch.batch or "old_log_probs" not in batch.batch or "advantages" not in batch.batch:
+        return metrics
+
+    # Compute W(τ) = Σ_t[1 - 2π_t(y_t) + Σπ²]
+    pi_t = torch.exp(batch.batch["old_log_probs"])
+    w_per_timestep = 1 - 2 * pi_t + batch.batch["sum_pi_squared"]
+
+    # Get response mask to only consider valid tokens
+    response_mask = batch.batch["response_mask"]
+
+    # Use pre-computed rollout IS weights from batch (for variance proxy consistency with training loss)
+    # IS weights are computed centrally in ray_trainer.py to avoid duplication
+    rollout_is_weights = None
+    if "rollout_is_weights" in batch.batch:
+        # Extract pre-computed IS weights from batch (already computed in trainer)
+        rollout_is_weights = batch.batch["rollout_is_weights"]
+
+        # Scale W by (rollout IS weight)² for optimal baseline under biased estimation
+        w_per_timestep = w_per_timestep * (rollout_is_weights**2).detach()
+
+        # Note: IS weight statistics and mismatch metrics are logged in ray_trainer.py
+
+    # Get scalar advantages (mean over timesteps)
+    advantages = batch.batch["advantages"]
+    # Compute mean advantage per trajectory using masked_mean
+    advantages_scalar = verl_F.masked_mean(advantages, response_mask, axis=-1)
+
+    # Compute W values (sum over timesteps)
+    w_values = verl_F.masked_sum(w_per_timestep, response_mask, axis=-1)
+
+    # ====== COMPUTE VARIANCE PROXIES ======
+    # Variance proxy should match the actual gradient computation:
+    # - If IS weights were computed/applied: use them in variance proxy calculation
+    # - Otherwise: compute on-policy variance proxy
+
+    # ====== PROXY 1: Signal Strength ||ḡ||² ======
+    # The squared norm of the mean gradient (provided from training loop)
+    proxy1_signal_strength = gradient_norm**2 if gradient_norm is not None else None
+
+    # ====== PROXY 2: Total Power E[||ĝ_τ||²] ======
+    # Measures the average of squared gradient norms (Signal + Noise)
+    if rollout_is_weights is not None:
+        # Off-policy with IS correction applied: use clamped weights consistently with actual gradient computation
+        rollout_is_weights_scalar = verl_F.masked_mean(rollout_is_weights, response_mask, axis=-1)
+        # Recover original W (before IS correction was applied in line 657)
+        # Clamp to avoid division by zero when IS weights are zero
+        w_original = verl_F.masked_sum(
+            w_per_timestep / torch.clamp((rollout_is_weights**2).detach(), min=1e-10), response_mask, axis=-1
+        )
+        # Clamp W to avoid negative values (which would cause NaN in sqrt)
+        w_original = torch.clamp(w_original, min=0.0)
+        # Proxy 2 for off-policy: E[ρ̄² × A² × W]
+        proxy2_total_power = ((rollout_is_weights_scalar**2) * (advantages_scalar**2) * w_original).mean()
+
+    else:
+        # On-policy Proxy 2: E[A² × W]
+        # Clamp W to avoid negative values (which would cause NaN in sqrt)
+        w_values_clamped = torch.clamp(w_values, min=0.0)
+        proxy2_total_power = (advantages_scalar**2 * w_values_clamped).mean()
+
+    # ====== PROXY 3: Pure Noise - Variance of Mean Vector ======
+    # Requires ||ḡ||² from actual batch gradient
+    # Formula: (1/(N-1)) × (Proxy2 - Proxy1)
+    proxy3_pure_noise = None
+    if proxy1_signal_strength is not None:
+        batch_size = advantages_scalar.shape[0]
+        if batch_size > 1:
+            proxy3_pure_noise = (1.0 / (batch_size - 1)) * (proxy2_total_power - proxy1_signal_strength)
+            # Ensure non-negative (can be negative due to numerical errors)
+            proxy3_pure_noise = max(
+                0.0, proxy3_pure_noise.item() if torch.is_tensor(proxy3_pure_noise) else proxy3_pure_noise
+            )
+
+    # Decompose into components for analysis
+    expected_a_squared = (advantages_scalar**2).mean()
+    expected_w = w_values.mean()
+
+    metrics.update(
+        {
+            # Proxy 1: Signal Strength ||ḡ||²
+            "variance_proxy/proxy1_signal_strength": (
+                proxy1_signal_strength if proxy1_signal_strength is not None else 0.0
+            ),
+            # Proxy 2: Total Power E[||ĝ_τ||²]
+            "variance_proxy/proxy2_total_power": proxy2_total_power.detach().item(),
+            # Proxy 3: Pure Noise - Variance of Mean Vector
+            "variance_proxy/proxy3_pure_noise": proxy3_pure_noise if proxy3_pure_noise is not None else 0.0,
+            # Component metrics for debugging
+            "variance_proxy/expected_a_squared": expected_a_squared.detach().item(),
+            "variance_proxy/expected_w": expected_w.detach().item(),
+        }
+    )
+
+    return metrics
+
+
 def bootstrap_metric(
     data: list[Any],
     subset_size: int,
@@ -333,14 +448,28 @@ def bootstrap_metric(
         [(3.0, 0.5), (4.5, 0.3)]  # Example values
     """
     np.random.seed(seed)
+    data_np = np.array(data, dtype=object)
+    n_data = len(data_np)
 
-    bootstrap_metric_lsts = [[] for _ in range(len(reduce_fns))]
-    for _ in range(n_bootstrap):
-        bootstrap_idxs = np.random.choice(len(data), size=subset_size, replace=True)
-        bootstrap_data = [data[i] for i in bootstrap_idxs]
-        for i, reduce_fn in enumerate(reduce_fns):
-            bootstrap_metric_lsts[i].append(reduce_fn(bootstrap_data))
-    return [(np.mean(lst), np.std(lst)) for lst in bootstrap_metric_lsts]
+    # generate bootstrap indices, shape: (n_bootstrap, subset_size)
+    bootstrap_idxs = np.random.choice(n_data, size=(n_bootstrap, subset_size), replace=True)
+
+    # pre-allocate result array, shape: (n_fns, n_bootstrap)
+    n_fns = len(reduce_fns)
+    metric_results = np.empty((n_fns, n_bootstrap), dtype=np.float64)
+
+    # compute metric results for each bootstrap sample
+    for fn_idx, reduce_fn in enumerate(reduce_fns):
+        # bootstrap sample and compute metric
+        for boot_idx in range(n_bootstrap):
+            sample = data_np[bootstrap_idxs[boot_idx]]
+            metric_results[fn_idx, boot_idx] = reduce_fn(sample)
+
+    # compute mean and std for each metric function
+    result = [
+        (float(np.mean(metric_results[fn_idx])), float(np.std(metric_results[fn_idx]))) for fn_idx in range(n_fns)
+    ]
+    return result
 
 
 def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> float:
@@ -431,47 +560,88 @@ def process_validation_metrics(
         for var_name, var_vals in infos_dict.items():
             var2vals[var_name].append(var_vals[sample_idx])
 
-    # Calculate metrics for each group
-    data_src2uid2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    np_mean = np.mean
+    np_std = np.std
+    reduce_fns_best_worst = [np.max, np.min]
+    n_bootstrap = 1000
+
+    # 2. cache ns list
+    def gen_ns(n_resps: int) -> list[int]:
+        if n_resps <= 1:
+            return []
+        ns = []
+        n = 2
+        while n < n_resps:
+            ns.append(n)
+            n *= 2
+        ns.append(n_resps)
+        return ns
+
+    ns_cache = {}
+
+    # 3. cache metric results
+    data_src2uid2var2metric = {}
+
+    # 4. flatten loop
     for data_source, uid2var2vals in data_src2uid2var2vals.items():
+        # create uid dict
+        uid_dict = data_src2uid2var2metric.setdefault(data_source, {})
+
         for uid, var2vals in uid2var2vals.items():
+            pred_vals = var2vals.get("pred")
+            has_pred = pred_vals is not None
+            var_dict = uid_dict.setdefault(uid, {})
+
             for var_name, var_vals in var2vals.items():
-                if isinstance(var_vals[0], str):
+                # skip empty or string values
+                if not var_vals or isinstance(var_vals[0], str):
                     continue
 
-                metric = {}
+                # compute mean and std
                 n_resps = len(var_vals)
-                metric[f"mean@{n_resps}"] = np.mean(var_vals)
+                metric = {f"mean@{n_resps}": float(np_mean(var_vals))}
 
                 if n_resps > 1:
-                    metric[f"std@{n_resps}"] = np.std(var_vals)
+                    metric[f"std@{n_resps}"] = float(np_std(var_vals))
 
-                    ns = []
-                    n = 2
-                    while n < n_resps:
-                        ns.append(n)
-                        n *= 2
-                    ns.append(n_resps)
+                    # cache ns list
+                    if n_resps not in ns_cache:
+                        ns_cache[n_resps] = gen_ns(n_resps)
+                    ns = ns_cache[n_resps]
 
+                    # compute best/worst metrics
                     for n in ns:
-                        [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(
-                            data=var_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed
+                        # compute best/worst metrics
+                        (bon_mean, bon_std), (won_mean, won_std) = bootstrap_metric(
+                            data=var_vals,
+                            subset_size=n,
+                            reduce_fns=reduce_fns_best_worst,
+                            n_bootstrap=n_bootstrap,
+                            seed=seed,
                         )
-                        metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
-                        metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
-                        if var2vals.get("pred", None) is not None:
+                        metric[f"best@{n}/mean"] = bon_mean
+                        metric[f"best@{n}/std"] = bon_std
+                        metric[f"worst@{n}/mean"] = won_mean
+                        metric[f"worst@{n}/std"] = won_std
+
+                        # compute maj metrics
+                        if has_pred:
+                            # create vote_data
                             vote_data = [
-                                {"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"], strict=True)
+                                {"val": val, "pred": pred} for val, pred in zip(var_vals, pred_vals, strict=True)
                             ]
+                            # compute maj metrics
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
                                 data=vote_data,
                                 subset_size=n,
                                 reduce_fns=[partial(calc_maj_val, vote_key="pred", val_key="val")],
+                                n_bootstrap=n_bootstrap,
                                 seed=seed,
                             )
-                            metric[f"maj@{n}/mean"], metric[f"maj@{n}/std"] = maj_n_mean, maj_n_std
+                            metric[f"maj@{n}/mean"] = maj_n_mean
+                            metric[f"maj@{n}/std"] = maj_n_std
 
-                data_src2uid2var2metric[data_source][uid][var_name] = metric
+                var_dict[var_name] = metric
 
     # Aggregate metrics across uids
     data_src2var2metric2uid_vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -486,5 +656,4 @@ def process_validation_metrics(
         for var_name, metric2uid_vals in var2metric2uid_vals.items():
             for metric_name, uid_vals in metric2uid_vals.items():
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(uid_vals)
-
     return data_src2var2metric2val

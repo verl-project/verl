@@ -49,18 +49,19 @@ class DAPORewardManager(AbstractRewardManager):
             assert self.max_resp_len >= self.overlong_buffer_cfg.len, (
                 "max_resp_len must be larger than overlong_buffer.len"
             )
+            assert not self.overlong_buffer_cfg.enable or self.overlong_buffer_cfg.len > 0, (
+                "overlong_buffer.len must be positive when overlong penalty is enabled,"
+                f"but got {self.overlong_buffer_cfg.len}."
+                "To disable the overlong penalty, set overlong_buffer.enable = False"
+            )
 
     def __call__(self, data: DataProto, return_dict: bool = False):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
-        if "rm_scores" in data.batch.keys():
-            if return_dict:
-                reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
-                reward_extra_info = {key: data.non_tensor_batch[key] for key in reward_extra_keys}
-                return {"reward_tensor": data.batch["rm_scores"], "reward_extra_info": reward_extra_info}
-            else:
-                return data.batch["rm_scores"]
+        reward_from_rm_scores = self._extract_reward_from_rm_scores(data, return_dict)
+        if reward_from_rm_scores is not None:
+            return reward_from_rm_scores
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)

@@ -69,6 +69,8 @@ def should_check_type(arg_name: str) -> bool:
 def has_type_annotations(node: ast.AST, debug: bool = False) -> int:
     if isinstance(node, ast.FunctionDef):
         is_private = node.name.startswith("_")
+        if node.args.vararg is not None or node.args.kwarg is not None:
+            return CHECK_SUCCESS
         has_ann = (
             all(arg.annotation is not None for arg in node.args.args if should_check_type(arg.arg))
             and node.returns is not None

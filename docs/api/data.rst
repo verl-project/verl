@@ -51,7 +51,7 @@ One can also index a tensordict along its batch_size. The contents of the Tensor
 
 For more about :class:`tensordict.TensorDict` usage, see the official tensordict_ documentation.
 
-.. _tensordict: https://pytorch.org/tensordict/overview.html
+.. _tensordict: https://pytorch.org/tensordict/stable/overview.html
 
 
 Core APIs

@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import ipaddress
 import logging
-import os
-import socket
 
 import uvicorn
 from fastapi import FastAPI
@@ -23,46 +20,63 @@ from fastapi import FastAPI
 logger = logging.getLogger(__file__)
 
 
-def is_valid_ipv6_address(address: str) -> bool:
-    try:
-        ipaddress.IPv6Address(address)
-        return True
-    except ValueError:
-        return False
+def get_max_position_embeddings(hf_config) -> int:
+    max_len = getattr(hf_config, "max_position_embeddings", None)
+    if max_len is None:
+        text_config = getattr(hf_config, "text_config", None)
+        if text_config is not None:
+            max_len = getattr(text_config, "max_position_embeddings", None)
+
+    if max_len is None:
+        raise ValueError("max_position_embeddings not found in HFModelConfig!")
+    return int(max_len)
 
 
-def get_free_port(address: str) -> tuple[int, socket.socket]:
-    family = socket.AF_INET
-    if is_valid_ipv6_address(address):
-        family = socket.AF_INET6
+class _UvicornServerAutoPort(uvicorn.Server):
+    """Uvicorn Server that reports the system-assigned port when port=0."""
 
-    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind((address, 0))
+    def __init__(self, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self.actual_port: int | None = None
+        self._startup_done: asyncio.Event = asyncio.Event()
 
-    port = sock.getsockname()[1]
-    return port, sock
-
-
-async def run_unvicorn(app: FastAPI, server_args, server_address, max_retries=5) -> tuple[int, asyncio.Task]:
-    server_port, server_task = None, None
-
-    for i in range(max_retries):
+    async def startup(self, sockets=None) -> None:
         try:
-            server_port, sock = get_free_port(server_address)
-            app.server_args = server_args
-            config = uvicorn.Config(app, host=server_address, port=server_port, log_level="warning")
-            server = uvicorn.Server(config)
-            server.should_exit = True
-            await server.serve()
-            server_task = asyncio.create_task(server.main_loop())
-            break
-        except (OSError, SystemExit) as e:
-            logger.error(f"Failed to start HTTP server on port {server_port} at try {i}, error: {e}")
-    else:
-        logger.error(f"Failed to start HTTP server after {max_retries} retries, exiting...")
-        os._exit(-1)
+            await super().startup(sockets=sockets)
+            if self.servers and self.config.port == 0:
+                sock = self.servers[0].sockets[0]
+                self.actual_port = sock.getsockname()[1]
+            else:
+                self.actual_port = self.config.port
+        finally:
+            self._startup_done.set()
 
+    async def get_port(self) -> int | None:
+        await self._startup_done.wait()
+        return self.actual_port
+
+
+async def run_uvicorn(app: FastAPI, server_args, server_address) -> tuple[int, asyncio.Task]:
+    app.server_args = server_args
+    config = uvicorn.Config(app, host=server_address, port=0, log_level="warning")
+    server = _UvicornServerAutoPort(config)
+    server_task = asyncio.create_task(server.serve())
+    server_port = await server.get_port()
+    if server_port is None:
+        # server.startup() failed. await the task to re-raise exception from server.serve()
+        await server_task
+
+        # Fails on unexpected situation.
+        raise RuntimeError("Unexpected: HTTP server started without reporting listened port")
     logger.info(f"HTTP server started on port {server_port}")
     return server_port, server_task
+
+
+async def ensure_async_iterator(iterable):
+    """Convert an iterable to an async iterator."""
+    if hasattr(iterable, "__aiter__"):
+        async for item in iterable:
+            yield item
+    else:
+        for item in iterable:
+            yield item

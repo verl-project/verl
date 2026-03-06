@@ -43,6 +43,13 @@ dist_checkpointing_path: null
 # distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
 dist_checkpointing_prefix: ''
 
+# Make optimizer distributed checkpoint fully reshardable (TP/PP/EP/DP) as opposed to plain DP reshardability
+dist_ckpt_optim_fully_reshardable: True
+
+# Use as little memory as possible during save and load by using Gloo.
+# Has effect only when `dist_ckpt_optim_fully_reshardable` is enabled
+distrib_optim_fully_reshardable_mem_efficient: False
+
 # oc.select: default val for ref.megatron.seed
 seed: 42
 
@@ -75,13 +82,35 @@ override_transformer_config:
 override_mcore_model_config: {}
 
 # oc.select: default val for ref.megatron.use_mbridge
-use_mbridge: False
+use_mbridge: True
 
 # oc.select: default val for ref.megatron.vanilla_mbridge
 vanilla_mbridge: True
+
+# whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
+use_remove_padding: True
 
 # whether to use forward only
 forward_only: False
 
 # Mixed precision training param dtype
 dtype: bfloat16 # ["bfloat16", "float16"]
+
+# Router replay configuration for MoE models
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.EngineRouterReplayConfig
+
+  # Router replay mode: disabled, R2, R3
+  # - R2: Use R2 routing strategy (record mode)
+  # - R3: Use R3 routing strategy (record mode)
+  mode: disabled
+
+  # File path to save recorded routing decisions
+  # Required when mode is 'record', 'R2', or 'R3'
+  record_file: null
+
+  # File path to load recorded routing decisions for replay
+  # Required when mode is 'replay'
+  replay_file: null

@@ -2,7 +2,8 @@ set -x
 export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
-
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 # WORKSPACE_HOME and DATA_HOME support custom path configuration.
 WORKSPACE_HOME=$pwd
 DATA_HOME=$pwd
@@ -67,5 +68,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=5 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
-    trainer.device=npu $@
+    actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} $@

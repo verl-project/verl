@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Need to install Megatron-Bridge
+# NOTE: Make sure you use Megatron-Bridge later than 0.2.0 
+# (Recommend https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/83a7c1134c562d8c6decd10a1f0a6e6a7a8a3a44 or later)
+# for proper MoE LoRA support.
+
 # For Megatron communication/computation overlapping
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
@@ -41,8 +46,16 @@ DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path=Qwen/Qwen2-7B-Instruct
-    actor_rollout_ref.model.lora.rank=16
-    actor_rollout_ref.model.lora.alpha=32
+    actor_rollout_ref.model.lora.rank=256
+    actor_rollout_ref.model.lora.alpha=512
+    actor_rollout_ref.model.lora.lora_A_init_method=kaiming
+    # # Optional: Use canonical LoRA
+    # actor_rollout_ref.model.lora.type="canonical_lora"
+    # actor_rollout_ref.model.lora.target_modules='["linear_q","linear_k","linear_v","linear_proj","linear_fc1_up","linear_fc1_gate","linear_fc2"]'
+
+    # # Optional: Add dropout to LoRA layers
+    # actor_rollout_ref.model.lora.dropout=0.05
+    # actor_rollout_ref.model.lora.dropout_position=pre
 )
 
 ACTOR=(
@@ -58,6 +71,9 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_coef=0.001
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
 )
 
 ROLLOUT=(

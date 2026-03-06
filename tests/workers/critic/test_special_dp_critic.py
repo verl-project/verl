@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -60,7 +60,8 @@ class TestCriticWorker(unittest.TestCase):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.temp_dir = tempfile.mkdtemp()
 
-        config = AutoConfig.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+        model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-0.5B-Instruct")
+        config = AutoConfig.from_pretrained(model_path)
         config.save_pretrained(self.temp_dir)
 
         self.config = FSDPCriticConfig(
@@ -76,8 +77,8 @@ class TestCriticWorker(unittest.TestCase):
             rollout_n=1,
             optim=FSDPOptimizerConfig(lr=1e-6),
             model=FSDPCriticModelCfg(
-                path="Qwen/Qwen2.5-0.5B-Instruct",
-                tokenizer_path="Qwen/Qwen2.5-0.5B-Instruct",
+                path=model_path,
+                tokenizer_path=model_path,
                 fsdp_config=FSDPEngineConfig(fsdp_size=-1),
                 use_remove_padding=False,
             ),

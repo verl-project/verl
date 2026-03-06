@@ -11,7 +11,7 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+# hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 
 rollout_mode="async"
@@ -109,12 +109,12 @@ common_params=(
     actor_rollout_ref.rollout.name=${rollout_name}
     actor_rollout_ref.rollout.mode=${rollout_mode}
     actor_rollout_ref.rollout.disable_log_stats=False
-    reward_model.reward_manager=dapo
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length}
+    reward.reward_manager.name=dapo
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False
+    +reward.reward_kwargs.max_resp_len=${max_response_length}
     trainer.logger=['console']
     trainer.project_name='verl-test-fully-async'
     trainer.experiment_name="${exp_name}"
@@ -123,6 +123,7 @@ common_params=(
     trainer.resume_mode=disable
     trainer.nnodes=1
     trainer.n_gpus_per_node=${n_gpus_training}
+    trainer.log_val_generations=10
     rollout.nnodes=1
     rollout.n_gpus_per_node=${n_gpus_rollout}
     rollout.total_rollout_steps=${total_rollout_steps}
@@ -132,6 +133,9 @@ common_params=(
     async_training.staleness_threshold=${staleness_threshold}
     async_training.partial_rollout="${partial_rollout}"
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
+    # GPU specific configurations
+    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )
 
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
@@ -143,10 +147,10 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m recipe.fully_async_policy.fully_async_main \
+    python3 -m verl.experimental.fully_async_policy.fully_async_main \
         "${common_params[@]}" \
         actor_rollout_ref.model.enable_gradient_checkpointing=True \
-        actor_rollout_ref.actor.strategy=fsdp2 \
+        actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
         critic.strategy=fsdp2 \
         actor_rollout_ref.actor.grad_clip=1.0 \
         actor_rollout_ref.model.use_remove_padding=True \
@@ -170,7 +174,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m recipe.fully_async_policy.fully_async_main \
+    python3 -m verl.experimental.fully_async_policy.fully_async_main \
         --config-path=config \
         --config-name='fully_async_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \

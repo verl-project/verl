@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import megatron.core
 import torch
 from megatron.core import dist_checkpointing, mpu
 from megatron.core.dist_checkpointing.serialization import (
@@ -22,9 +23,15 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
+from packaging import version
 
 
-def save_dist_checkpointing(sharded_state_dict, ckpt_path, async_save=False):
+def save_dist_checkpointing(
+    sharded_state_dict,
+    ckpt_path,
+    async_save=False,
+    content_metadata=None,
+):
     validate_sharding_integrity = True
     # Get checkpointing strategies
     save_strategy = get_default_save_sharded_strategy("torch_dist")
@@ -32,16 +39,19 @@ def save_dist_checkpointing(sharded_state_dict, ckpt_path, async_save=False):
         save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
     )
 
+    # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.14.0/megatron/core/optimizer/distrib_optimizer.py#L1109-L1123
+    mcore_ge_014 = version.parse(megatron.core.__version__) >= version.parse("0.14.0")
     # Save model sharded state dicts
-    async_save_request = dist_checkpointing.save(
-        sharded_state_dict,
-        ckpt_path,
+    save_kwargs = dict(
         sharded_strategy=save_strategy,
         async_sharded_save=async_save,
         validate_access_integrity=validate_sharding_integrity,
     )
+    if content_metadata is not None:
+        if mcore_ge_014:
+            save_kwargs["content_metadata"] = content_metadata
 
-    return async_save_request
+    return dist_checkpointing.save(sharded_state_dict, ckpt_path, **save_kwargs)
 
 
 def load_dist_checkpointing(sharded_state_dict, ckpt_dir):

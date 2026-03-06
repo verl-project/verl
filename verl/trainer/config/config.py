@@ -36,6 +36,7 @@ class CheckpointConfig(BaseConfig):
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
+    mbridge_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -77,3 +78,18 @@ class BaseModelConfig(BaseConfig):
     external_lib: Optional[str] = None
     trust_remote_code: bool = False
     lora: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ModuleConfig(BaseConfig):
+    """Configuration for external Python module, which can be loaded, executed (and optionally, ``import``ed).
+
+    Args:
+        path (str, optional): Path to the module file to load and execute.
+        name (str, optional): Name of the module to ``import``. Format: ``"import.path.to.module"``.
+            If ``None``, the module will be loaded with a hased name and
+                will not be added to ``sys.modules``, thus can not be ``import``ed as ``name``.
+    """
+
+    path: Optional[str] = None
+    name: Optional[str] = None

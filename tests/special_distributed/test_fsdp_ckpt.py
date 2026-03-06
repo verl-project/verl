@@ -23,16 +23,19 @@ from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2Config
 
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
+from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.fsdp_utils import MixedPrecisionPolicy, apply_fsdp2
 
 
 def create_random_input_ids(batch_size, seq_len, vocab_size):
-    from flash_attn.bert_padding import unpad_input
-
+    if get_device_name() == "cuda":
+        from flash_attn.bert_padding import unpad_input
+    elif get_device_name() == "npu":
+        from verl.utils.attention_utils import unpad_input
     from verl.utils.model import compute_position_id_with_mask, create_random_mask
 
-    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device="cuda")
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=get_device_name())
 
     attention_mask = create_random_mask(
         input_ids, max_ratio_of_left_padding=0.1, min_ratio_of_valid_token=0.5, max_ratio_of_valid_token=0.7
@@ -45,18 +48,18 @@ def create_random_input_ids(batch_size, seq_len, vocab_size):
 
 
 def test_fsdp_ckpt(strategy="fsdp"):
-    assert torch.cuda.device_count() >= 2, "need at least 2 gpus for test"
+    assert get_torch_device().device_count() >= 2, "need at least 2 gpus for test"
     local_rank, rank, world_size = initialize_global_process_group()
-    device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=("dp",))
+    device_mesh = init_device_mesh(get_device_name(), mesh_shape=(world_size,), mesh_dim_names=("dp",))
 
     model_name = os.path.expanduser("~/models/Qwen/Qwen2.5-0.5B-Instruct")
     config = Qwen2Config(num_hidden_layers=1)
 
-    with torch.device("cuda"):
+    with torch.device(get_device_name()):
         model = AutoModelForCausalLM.from_config(
             config=config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
         )
-        model = model.to(device="cuda")
+        model = model.to(device=get_device_name())
 
     # Wrap model with FSDP
     if strategy == "fsdp":
@@ -67,7 +70,7 @@ def test_fsdp_ckpt(strategy="fsdp"):
         model = FSDP(
             model,
             use_orig_params=False,
-            device_id=torch.cuda.current_device(),
+            device_id=get_torch_device().current_device(),
             sharding_strategy=ShardingStrategy.FULL_SHARD,
             mixed_precision=mixed_precision,
             device_mesh=device_mesh,

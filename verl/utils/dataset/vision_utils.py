@@ -17,10 +17,11 @@ from typing import Optional
 
 import torch
 from PIL import Image
-from qwen_vl_utils import fetch_image, fetch_video
 
 
 def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Image.Image:
+    from qwen_vl_utils import fetch_image
+
     if isinstance(image, Image.Image):
         return image.convert("RGB")
 
@@ -28,7 +29,11 @@ def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Imag
         assert "image" not in image, "Cannot have both `bytes` and `image`"
         image["image"] = Image.open(BytesIO(image["bytes"]))
 
-    return fetch_image(image, image_patch_size=image_patch_size)
+    try:
+        ans = fetch_image(image, image_patch_size=image_patch_size)
+    except Exception:
+        ans = fetch_image(image)
+    return ans
 
 
 VIDEO_FORMAT_HELP = """Currently, we only support the video formats introduced in qwen2-vl.
@@ -73,6 +78,7 @@ def process_video(
 
     Add video sample FPS in a future MR
     """
+    from qwen_vl_utils import fetch_video
 
     if not isinstance(video, dict) or "video" not in video:
         raise NotImplementedError(VIDEO_FORMAT_HELP)

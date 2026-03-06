@@ -117,6 +117,9 @@ class Worker(WorkerHelper):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def _query_collect_info(self, mesh_name: str):
+        return self.query_collect_info(mesh_name)
+
+    def query_collect_info(self, mesh_name: str):
         """Query the collect info for a given mesh name.
 
         Args:
@@ -161,16 +164,6 @@ class Worker(WorkerHelper):
             self.__dispatch_dp_rank[mesh_name] = dp_rank
         for is_collect in collect_dp_rank.values():
             self.__collect_dp_rank[mesh_name] = is_collect
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def create_transferqueue_client(self, controller_info, config):
-        from verl.utils.transferqueue_utils import create_transferqueue_client
-
-        create_transferqueue_client(
-            client_id=f"worker_{self.rank}",
-            controller_info=controller_info,
-            config=config,
-        )
 
     @classmethod
     def env_keys(cls):

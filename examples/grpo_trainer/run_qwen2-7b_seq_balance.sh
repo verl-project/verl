@@ -4,9 +4,9 @@ set -x
 # For async rollout mode, dataset should return raw chat.
 rollout_mode="async"
 rollout_name="sglang" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
+return_raw_chat="True"
+if [ "$rollout_name" = "vllm" ]; then
     export VLLM_USE_V1=1
-    return_raw_chat="True"
 fi
 
 python3 -m verl.trainer.main_ppo \

@@ -41,10 +41,11 @@ RUN ARCH=$(uname -m) && \
     cd vllm-ascend && pip install -v -e . && cd .. && \
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
-    echo "export PYTHONPATH=\$PYTHONPATH:/Megatron-LM" >> ~/.bashrc && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
+
+ENV PYTHONPATH="/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Prepare and install verl (update frequently)
 RUN git clone --depth 1 https://github.com/volcengine/verl.git && \

@@ -17,6 +17,7 @@ megatron:
   override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
   use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
   vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
+  use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
   tensor_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.tensor_model_parallel_size,1}
   pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.pipeline_model_parallel_size,1}
   virtual_pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size,null}

@@ -1,2 +1,0 @@
-# requirements.txt records the full set of dependencies for development
-TransferQueue==0.1.2.dev0

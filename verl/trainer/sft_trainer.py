@@ -16,6 +16,8 @@
 import os
 from functools import partial
 
+from tensordict.tensorclass import NonTensorData
+
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -24,7 +26,6 @@ import logging
 import hydra
 import torch
 import torch.distributed
-from codetiming import Timer
 from omegaconf import OmegaConf
 from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -34,16 +35,13 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
-from verl.utils.device import get_device_name, is_cuda_available, is_npu_available
+from verl.utils.device import auto_set_device, get_device_name
 from verl.utils.distributed import destroy_global_process_group
-from verl.utils.flops_counter import FlopsCounter
 from verl.utils.logger import log_with_rank
+from verl.utils.memory_utils import aggressive_empty_cache
+from verl.utils.profiler import log_gpu_memory_usage
 from verl.utils.tracking import Tracking
-
-if is_cuda_available:
-    pass
-elif is_npu_available:
-    pass
+from verl.workers.engine_workers import TrainingWorker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
@@ -55,6 +53,8 @@ class SFTTrainer:
         config,
     ):
         self.config = config
+
+        log_gpu_memory_usage(f"rank {torch.distributed.get_rank()}: Before SFTTrainer init", logger=logger)
 
         self.rank = torch.distributed.get_rank()
 
@@ -74,20 +74,17 @@ class SFTTrainer:
 
         self.device_name = self.config.trainer.device
 
-        from verl.workers.roles.utils.losses import sft_loss
-
-        self.loss_fn = partial(sft_loss, config=None)
-
-        self.flops_counter = FlopsCounter(self.model_config.hf_config)
-
         if self.rank == 0:
             print(self.config)
+
+        log_gpu_memory_usage(f"rank {self.rank}: After SFTTrainer init", logger=logger)
 
     def _build_ckpt_handler(self):
         resume_mode = getattr(self.config.trainer, "resume_mode", "auto")
         resume_from_path = getattr(self.config.trainer, "resume_from_path", None)
         max_ckpt_to_keep = getattr(self.config.trainer, "max_ckpt_to_keep", None)
         default_hdfs_dir = getattr(self.config.trainer, "default_hdfs_dir", None)
+        lora_train_meta = self._get_lora_train_meta()
 
         self.ckpt_handler = CheckpointHandler(
             engine=self.engine,
@@ -97,7 +94,46 @@ class SFTTrainer:
             default_hdfs_dir=default_hdfs_dir,
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
+            lora_train_meta=lora_train_meta,
         )
+
+    def _get_lora_train_meta(self):
+        lora_adapter_path = self.config.model.get("lora_adapter_path", None)
+        lora_rank = int(getattr(self.config.model, "lora_rank", 0) or 0)
+
+        if lora_adapter_path is None and lora_rank <= 0:
+            return None
+
+        raw_lora_alpha = self.config.model.get("lora_alpha", None)
+        if raw_lora_alpha is None:
+            log_with_rank(
+                "LoRA is enabled but `model.lora_alpha` is not set; fallback to 0 in checkpoint metadata.",
+                logger=logger,
+                rank=self.rank,
+                level=logging.WARNING,
+                log_only_rank_0=True,
+            )
+            lora_alpha = 0
+        else:
+            lora_alpha = int(raw_lora_alpha)
+            if lora_alpha == 0:
+                log_with_rank(
+                    "LoRA is enabled but `model.lora_alpha` is 0; this may lead to ineffective LoRA scaling.",
+                    logger=logger,
+                    rank=self.rank,
+                    level=logging.WARNING,
+                    log_only_rank_0=True,
+                )
+
+        task_type = self.config.model.get("task_type", None)
+        if task_type is None:
+            task_type = "CAUSAL_LM"
+
+        return {
+            "r": lora_rank,
+            "lora_alpha": int(lora_alpha or 0),
+            "task_type": str(task_type),
+        }
 
     def _build_config(self):
         from verl.utils.config import omega_conf_to_dataclass
@@ -106,18 +142,39 @@ class SFTTrainer:
         self.engine_config = omega_conf_to_dataclass(self.config.engine)
         self.optimizer_config = omega_conf_to_dataclass(self.config.optim)
         self.checkpoint_config = omega_conf_to_dataclass(self.config.checkpoint)
+        self.profiler_config = omega_conf_to_dataclass(self.config.profiler)
+
+        # check profile interval
+        self.profiler_interval = self.config.trainer.profile_interval
+        self._validate_profiler_interval()
+
+    def _validate_profiler_interval(self):
+        assert len(self.profiler_interval) == 2
+        self.start_profile_step = self.profiler_interval[0]
+        self.end_profile_step = self.profiler_interval[1]
+        assert self.end_profile_step >= self.start_profile_step
+        if self.start_profile_step < 0:
+            assert self.end_profile_step < 0
 
     def _build_engine(self):
-        from verl.workers.engine import BaseEngine, EngineRegistry
+        from verl.workers.engine_workers import TrainingWorkerConfig
+        from verl.workers.utils.losses import sft_loss
 
-        self.engine: BaseEngine = EngineRegistry.new(
+        self.loss_fn = partial(sft_loss, config=None)
+
+        config = TrainingWorkerConfig(
             model_type="language_model",
-            backend=self.engine_config.strategy,
             model_config=self.model_config,
             engine_config=self.engine_config,
             optimizer_config=self.optimizer_config,
             checkpoint_config=self.checkpoint_config,
+            profiler_config=self.profiler_config,
         )
+
+        self.training_client = TrainingWorker(config=config)
+        self.training_client.set_loss_fn(loss_fn=self.loss_fn)
+        # Note that in SPMD world, this abstraction has to break
+        self.engine = self.training_client.engine
 
     def _init_engine(self):
         # patch optimizer config
@@ -138,17 +195,26 @@ class SFTTrainer:
         if self.test_freq == "after_each_epoch":
             self.test_freq = self.steps_per_epoch
 
-        self.engine.initialize()
+        self.training_client.reset()
 
     def _build_dataset(self):
         config = self.config
         tokenizer = self.model_config.tokenizer
+        processor = self.model_config.processor
         train_dataset = create_sft_dataset(
-            config.data.train_files, config.data, tokenizer, max_samples=config.data.get("train_max_samples", -1)
+            config.data.train_files,
+            config.data,
+            tokenizer,
+            processor,
+            max_samples=config.data.get("train_max_samples", -1),
         )
         if config.data.val_files:
             val_dataset = create_sft_dataset(
-                config.data.val_files, config.data, tokenizer, max_samples=config.data.get("val_max_samples", -1)
+                config.data.val_files,
+                config.data,
+                tokenizer,
+                processor,
+                max_samples=config.data.get("val_max_samples", -1),
             )
         else:
             val_dataset = None
@@ -180,8 +246,8 @@ class SFTTrainer:
             batch_size=self.train_batch_size_per_dp,
             sampler=self.train_sampler,
             collate_fn=self.collate_fn,
-            num_workers=8,
-            pin_memory=True,
+            num_workers=self.config.data.num_workers,
+            pin_memory=False,
             drop_last=True,
             pin_memory_device=device_name,
         )
@@ -195,13 +261,43 @@ class SFTTrainer:
                 batch_size=self.train_batch_size_per_dp,
                 sampler=self.val_sampler,
                 collate_fn=self.collate_fn,
-                num_workers=8,
-                pin_memory=True,
+                num_workers=self.config.data.num_workers,
+                pin_memory=False,
                 drop_last=True,
                 pin_memory_device=device_name,
             )
         else:
             self.val_dataloader = None
+
+    def _get_batch_seqlens(self, data):
+        # mean over dp group
+        is_nested = data["input_ids"].is_nested
+        if is_nested:
+            batch_seqlens: torch.Tensor = data["input_ids"].offsets().diff()
+        else:
+            batch_seqlens: torch.Tensor = data["attention_mask"].sum(dim=-1)
+        batch_seqlens = batch_seqlens.to(self.device_name)  # (global_bsz // dp)
+
+        dp_group = self.engine.get_data_parallel_group()
+        dp_size = self.engine.get_data_parallel_size()
+
+        if dp_size == 1 or dp_group is None:
+            return batch_seqlens.tolist()
+
+        output_tensor = torch.empty(
+            (batch_seqlens.shape[0] * dp_size,),
+            dtype=batch_seqlens.dtype,
+            device=self.device_name,
+        )  # (global_bsz,)
+
+        torch.distributed.all_gather_into_tensor(
+            output_tensor=output_tensor,
+            input_tensor=batch_seqlens,
+            group=dp_group,
+        )
+
+        batch_seqlens = output_tensor.tolist()
+        return batch_seqlens
 
     def fit(self):
         is_logging = self.engine.is_mp_src_rank_with_outputs() and self.engine.get_data_parallel_rank() == 0
@@ -254,6 +350,9 @@ class SFTTrainer:
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             self.train_sampler.set_epoch(epoch=epoch)
 
+            aggressive_empty_cache(force_sync=True)
+            log_gpu_memory_usage(f"rank {self.rank}: At start of epoch {epoch}", logger=logger)
+
             for step_in_epoch, data in enumerate(
                 tqdm(
                     self.train_dataloader,
@@ -267,56 +366,35 @@ class SFTTrainer:
 
                 # construct tensordict
                 data = tu.get_tensordict(tensor_dict=data, non_tensor_dict=meta_info)
+                batch_seqlens = self._get_batch_seqlens(data=data)
+                # this is necessary. Otherwise, it is interpreted as NonTensorStack
+                batch_seqlens_ntd = NonTensorData(batch_seqlens)
 
-                with self.engine.train_mode():
-                    with Timer(name="update_policy", logger=None) as timer:
-                        output = self.engine.train_batch(data=data, loss_function=self.loss_fn)
-                lr = self.engine.lr_scheduler_step()
+                tu.assign_non_tensor(data, update_lr_scheduler=True, global_token_num=batch_seqlens_ntd)
+
+                # start profile in SPMD mode
+                if global_step == self.start_profile_step:
+                    self.training_client.start_profile()
+                # train for on batch
+                output = self.training_client.train_batch(data=data)
+
+                if global_step == self.end_profile_step:
+                    self.training_client.stop_profile()
 
                 if self.engine.is_mp_src_rank_with_outputs():
-                    metrics = output["metrics"]
-
-                    loss = torch.sum(torch.tensor(metrics["loss"], device=self.device_name))
-
-                    # mean over dp group
-                    is_nested = data["input_ids"].is_nested
-                    if is_nested:
-                        batch_seqlens: torch.Tensor = data["input_ids"].offsets().diff()
-                    else:
-                        batch_seqlens: torch.Tensor = data["attention_mask"].sum(dim=-1)
-                    batch_seqlens = batch_seqlens.to(self.device_name)  # (global_bsz // dp)
-
-                    output_tensor = torch.randint(
-                        0,
-                        100,
-                        (batch_seqlens.shape[0] * self.engine.get_data_parallel_size(),),
-                        device=self.device_name,
-                    )  # (global_bsz,)
-
-                    torch.distributed.all_gather_into_tensor(
-                        output_tensor=output_tensor,
-                        input_tensor=batch_seqlens,
-                        group=self.engine.get_data_parallel_group(),
-                    )
-                    torch.distributed.all_reduce(
-                        loss, op=torch.distributed.ReduceOp.AVG, group=self.engine.get_data_parallel_group()
-                    )
-
-                    batch_seqlens = output_tensor.tolist()
-                    loss = loss.item()
+                    metrics = tu.get(output, "metrics")
 
                     # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
-                    metrics["loss"] = loss
-                    metrics["train/loss"] = metrics.pop("loss")
-                    metrics["train/grad_norm"] = metrics.pop("grad_norm")
-                    metrics["train/lr"] = lr
-                    metrics["train/global_tokens"] = output_tensor.sum().item()
+                    for k in ["loss", "grad_norm", "lr", "mfu"]:
+                        if k in metrics.keys():
+                            value = metrics.pop(k)
+                            metrics[f"train/{k}"] = value
+
+                    metrics["train/global_tokens"] = torch.sum(
+                        torch.tensor(batch_seqlens, device=self.device_name)
+                    ).item()
                     total_tokens += metrics["train/global_tokens"]
                     metrics["train/total_tokens(B)"] = total_tokens / 1e9
-                    # mfu
-                    delta_time = timer.last
-                    estimated_flops, promised_flops = self.flops_counter.estimate_flops(batch_seqlens, delta_time)
-                    metrics["train/mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
 
                     if self.engine.get_data_parallel_rank() == 0:
                         tracking.log(data=metrics, step=global_step)
@@ -330,19 +408,19 @@ class SFTTrainer:
                     # Perform validation
                     val_losses = []
                     for val_data in self.val_dataloader:
-                        with self.engine.eval_mode():
-                            # construct tensordict
-                            val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
-                            output = self.engine.infer_batch(data=val_data, loss_function=self.loss_fn)
-                            if self.engine.is_mp_src_rank_with_outputs():
-                                val_losses.extend(output["metrics"]["loss"])
+                        val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
+                        output = self.training_client.infer_batch(val_data)
+
+                        if self.engine.is_mp_src_rank_with_outputs():
+                            metrics = tu.get(output, "metrics")
+                            val_losses.append(metrics["loss"])
 
                     if self.engine.is_mp_src_rank_with_outputs():
                         val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
                         # average over data parallel group
-                        torch.distributed.all_reduce(
-                            val_loss, op=torch.distributed.ReduceOp.AVG, group=self.engine.get_data_parallel_group()
-                        )
+                        dp_group = self.engine.get_data_parallel_group()
+                        if dp_group is not None:
+                            torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
 
                     if is_logging:
                         metric = {"val/loss": val_loss.detach().item()}
@@ -351,6 +429,7 @@ class SFTTrainer:
                     torch.distributed.barrier()
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
+                    aggressive_empty_cache(force_sync=True)
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
                 if is_last_step:
@@ -371,23 +450,27 @@ def run_sft(config):
 
 @hydra.main(config_path="config", config_name="sft_trainer_engine", version_base=None)
 def main(config):
+    # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
+    auto_set_device(config)
     run_sft(config)
 
 
-def create_sft_dataset(data_paths, data_config, tokenizer, max_samples=-1):
+def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_samples=-1):
     """Create a dataset."""
     # build dataset
     # First check if a custom dataset class is specified
     if data_config.custom_cls.get("path", None):
-        from verl.utils.import_utils import load_extern_type
+        from verl.utils.import_utils import load_extern_object
 
-        dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
+        dataset_cls = load_extern_object(data_config.custom_cls.path, data_config.custom_cls.name)
     else:
         # Default to multi-turn dataset
         dataset_cls = MultiTurnSFTDataset
 
     # Create datasets based on the selected class
-    dataset = dataset_cls(parquet_files=data_paths, tokenizer=tokenizer, config=data_config, max_samples=max_samples)
+    dataset = dataset_cls(
+        parquet_files=data_paths, tokenizer=tokenizer, config=data_config, processor=processor, max_samples=max_samples
+    )
     return dataset
 
 

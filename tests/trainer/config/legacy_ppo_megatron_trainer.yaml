@@ -62,8 +62,9 @@ actor_rollout_ref:
     clip_ratio_low: 0.2
     clip_ratio_high: 0.2
     clip_ratio_c: 3.0 # lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729
-    loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean"
+    loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean" / "seq-mean-token-sum-norm"
     # NOTE: "token-mean" is the default behavior
+    loss_scale_factor: null  # Scale factor for "seq-mean-token-sum-norm" mode. If null, uses response_length.
     entropy_coeff: 0
     use_kl_loss: False # True for GRPO
     kl_loss_coef: 0.001 # for grpo
@@ -110,7 +111,7 @@ actor_rollout_ref:
       dist_checkpointing_path: null
       seed: 42
       override_transformer_config: {} # additional transformer config like: num_layers_in_first(/last)_pipeline_stage
-      use_mbridge: False
+      use_mbridge: True
       vanilla_mbridge: True
     profile: # profile the actor model in `update_policy`
       use_profile: False # open it when you want to profile the actor model
@@ -455,7 +456,7 @@ trainer:
     options:
       save_path: ./profiler_data
       roles: ["all"]
-      level: level1
+      level: level0
       with_memory: False
       record_shapes: False
       with_npu: True

@@ -17,8 +17,8 @@ test_files="['$gsm8k_test_path', '$math_test_path']"
 
 
 # prepare model ckpt
-huggingface-cli download Qwen/Qwen2-7B-Instruct --local-dir $HOME/models/Qwen2-7B-Instruct &
-huggingface-cli download sfairXC/FsfairX-LLaMA3-RM-v0.1 --local-dir $HOME/models/FsfairX-LLaMA3-RM-v0.1 &
+hf download Qwen/Qwen2-7B-Instruct --local-dir $HOME/models/Qwen2-7B-Instruct &
+hf download sfairXC/FsfairX-LLaMA3-RM-v0.1 --local-dir $HOME/models/FsfairX-LLaMA3-RM-v0.1 &
 wait
 
 python3 -m verl.trainer.main_ppo \
@@ -53,11 +53,14 @@ python3 -m verl.trainer.main_ppo \
     critic.ppo_micro_batch_size_per_gpu=32 \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.optimizer_offload=False \
-    reward_model.enable=True \
-    reward_model.model.path="$HOME/models/FsfairX-LLaMA3-RM-v0.1" \
-    reward_model.model.use_remove_padding=True \
-    reward_model.model.fsdp_config.param_offload=True \
-    reward_model.micro_batch_size_per_gpu=32 \
+    reward.num_workers=8 \
+    reward.reward_model.enable=True \
+    reward.reward_model.model_path="$HOME/models/FsfairX-LLaMA3-RM-v0.1" \
+    reward.reward_model.rollout.name=vllm \
+    reward.reward_model.rollout.gpu_memory_utilization=0.8 \
+    reward.reward_model.rollout.tensor_model_parallel_size=1 \
+    reward.reward_model.rollout.prompt_length=2048 \
+    reward.reward_model.rollout.response_length=1024 \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \

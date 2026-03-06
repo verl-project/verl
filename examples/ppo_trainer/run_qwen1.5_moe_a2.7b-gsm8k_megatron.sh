@@ -3,7 +3,7 @@ set -x
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
 
 # 0. download the model
-#huggingface-cli download Qwen/Qwen1.5-MoE-A2.7B-Chat
+#hf download Qwen/Qwen1.5-MoE-A2.7B-Chat
 
 # 1. convert the model to mcore format
 # change the HF_MODEL_PATH and DIST_CKPT_PATH to your own path

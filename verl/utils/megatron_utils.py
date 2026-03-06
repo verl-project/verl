@@ -18,6 +18,7 @@
 
 import gc
 import inspect
+import logging
 import os
 import warnings
 from dataclasses import dataclass
@@ -30,8 +31,10 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.enums import ModelType
 from megatron.core.optimizer import ChainedOptimizer
-from megatron.core.transformer import TransformerConfig
+from megatron.core.parallel_state import get_global_memory_buffer
+from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
 
@@ -40,6 +43,10 @@ from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
+from verl.workers.config import HFModelConfig, McoreEngineConfig
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def get_model_config(model):
@@ -192,7 +199,10 @@ def make_megatron_module(
         else:
             from verl.models.mcore.bridge import freeze_moe_router, make_value_model
 
-            value_model_hook = make_value_model(hf_config.hidden_size, provider.sequence_parallel)
+            hidden_size = (
+                hf_config.text_config.hidden_size if hasattr(hf_config, "text_config") else hf_config.hidden_size
+            )
+            value_model_hook = make_value_model(hidden_size, provider.sequence_parallel)
 
         post_model_creation_callbacks = []
         if wrap_config.is_value_model:
@@ -259,6 +269,8 @@ def make_megatron_module(
             model = provider.provide_distributed_model(
                 wrap_with_ddp=wrap_config.wrap_with_ddp,
                 ddp_config=ddp_config,
+                fp16=provider.fp16,
+                bf16=provider.bf16,
             )
 
             # Extract TransformerConfig from the created model
@@ -271,6 +283,12 @@ def make_megatron_module(
                 bf16=tf_config.bf16,
                 ddp_config=override_ddp_config,
             )
+
+        if isinstance(tf_config, MLATransformerConfig):
+            # Keep the same behavior as hf_to_mcore_config_dpskv3
+            from verl.models.mcore.patch import apply_patch
+
+            apply_patch()
     else:
 
         def megatron_model_provider(pre_process, post_process, vp_stage=None):
@@ -424,6 +442,11 @@ def offload_megatron_model_to_cpu(models):
                         # if the grad_data size is already zero, we assume that it is already offloaded
                         buffer.grad_data_size = buffer.grad_data.storage().size()
                         buffer.grad_data.storage().resize_(0)
+            # Offload frozen parameters not in DDP buffers (e.g. base model in LoRA/PEFT)
+            # DDP buffers only contain requires_grad=True params, so frozen params must be offloaded separately.
+            for param in model_chunk.module.parameters():
+                if not param.requires_grad and param.device.type != "cpu":
+                    param.data = param.data.to("cpu", non_blocking=True)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
@@ -435,14 +458,21 @@ def offload_megatron_model_to_cpu(models):
 
 
 @torch.no_grad()
-def load_megatron_model_to_gpu(models, load_grad=True):
+def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
+    """
+    Load megatron model to GPU.
+    Args:
+        models: The model to load.
+        load_grad: Whether to load gradients.
+        load_frozen_params: Whether to load frozen parameters.
+    """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
                     # sometimes, we don't want to load grad for pure inference
-                    if load_grad:
+                    if load_grad and hasattr(buffer, "grad_data_size"):
                         buffer.grad_data.storage().resize_(buffer.grad_data_size)
                         buffer.grad_data.zero_()
 
@@ -450,6 +480,13 @@ def load_megatron_model_to_gpu(models, load_grad=True):
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+
+            # Load frozen parameters that were offloaded (e.g. base model in LoRA/PEFT)
+            if load_frozen_params:
+                device_id = get_device_id()
+                for param in model_chunk.module.parameters():
+                    if not param.requires_grad and param.device.type == "cpu":
+                        param.data = param.data.to(device_id, non_blocking=True)
         else:
             # we need this for ref module
             device_id = get_device_id()
@@ -554,12 +591,37 @@ def offload_megatron_optimizer(optimizers):
         offload_megatron_copy_params(_opt)
         ## worker may hold zero parameter when enabling custom pipeline layout
         if _opt.optimizer is not None:
-            opt_state_dict_values = _opt.optimizer.state.values()
-            for v in opt_state_dict_values:
-                if "exp_avg" in v:
-                    v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
-                if "exp_avg_sq" in v:
-                    v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+            # HybridDeviceOptimizer: offload all sub-optimizer states to CPU
+            # TODO: this should be a method in Megatron-LM's HybridDeviceOptimizer
+            hdo = _opt.optimizer
+            if all(hasattr(hdo, attr) for attr in ("sub_optimizers", "inner_param_to_orig_param", "state")):
+                for optimizer in hdo.sub_optimizers:
+                    for param, state in optimizer.state.items():
+                        for k, v in state.items():
+                            if not isinstance(v, torch.Tensor):
+                                continue
+                            orig_param = hdo.inner_param_to_orig_param.get(param, param)
+                            hdo.state[orig_param][k] = state[k] = v.to("cpu")
+            else:
+                opt_state_dict_values = _opt.optimizer.state.values()
+                for v in opt_state_dict_values:
+                    if "exp_avg" in v:
+                        v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
+                    if "exp_avg_sq" in v:
+                        v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+
+        try:
+            # Free TransformerEngine's dummy weight gradients cache
+            # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.10/transformer_engine/pytorch/module/base.py#L64
+            from transformer_engine.pytorch.module.base import _dummy_wgrads
+
+            _dummy_wgrads.clear()
+        except ImportError:
+            pass
+
+        # Free Megatron-LM's global memory buffer
+        get_global_memory_buffer().buffer.clear()
+
         gc.collect()
         get_torch_device().empty_cache()
 
@@ -1217,3 +1279,92 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
             config.param_sync_func = [model_chunk.start_param_sync for model_chunk in model]
             if len(model) == 1:
                 config.param_sync_func = config.param_sync_func[0]
+
+
+def mapping_string_to_attn_backend(args: dict) -> dict:
+    if "attention_backend" in args and isinstance(args["attention_backend"], str):
+        from megatron.core.transformer.enums import AttnBackend
+
+        args["attention_backend"] = AttnBackend[args["attention_backend"]]
+    return args
+
+
+def get_megatron_mtp_loss(n_micro_batch):
+    # Calculate MTP loss scale similar to Megatron-LM implementation
+    mtp_loss_scale = 1.0 / n_micro_batch
+
+    # Create a dummy total_loss_dict to collect MTP metrics
+    total_loss_dict = {}
+
+    # Track MTP metrics - this will populate total_loss_dict with MTP losses
+    MTPLossLoggingHelper.track_mtp_metrics(
+        loss_scale=mtp_loss_scale, iteration=0, writer=None, wandb_writer=None, total_loss_dict=total_loss_dict
+    )
+    # Add MTP metrics to losses_reduced if any were collected
+    # total_loss_dict: {'mtp_1 loss': tensor(value, device='cuda:0')}
+    output = {}
+    if total_loss_dict:
+        for key, value in total_loss_dict.items():
+            # Convert key to have proper prefix and format
+            formatted_key = f"mtp_losses/{key.replace(' ', '_')}"
+            # only added to the 0th batch, the MTP loss obtained is a global value, and will be the same for every batch
+            output[formatted_key] = value.cpu().item()
+    return output
+
+
+def get_megatron_module_device(models: list[Any]) -> str:
+    if not models:
+        return "cpu"
+
+    model_chunk = models[0]
+    if not model_chunk.buffers:
+        try:
+            return next(model_chunk.module.parameters()).device.type
+        except StopIteration:
+            return "cpu"
+
+    buffer = model_chunk.buffers[0]
+    if buffer.param_data.storage().size() == 0:
+        return "cpu"
+    else:
+        return get_device_name()
+
+
+def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConfig):
+    has_mtp = (
+        model_config.hf_config.num_nextn_predict_layers > 0
+        if hasattr(model_config.hf_config, "num_nextn_predict_layers")
+        else False
+    )
+    enable_mtp = model_config.mtp.enable
+
+    if "mtp_loss_scaling_factor" not in engine_config.override_transformer_config:
+        engine_config.override_transformer_config["mtp_loss_scaling_factor"] = model_config.mtp.mtp_loss_scaling_factor
+
+    if enable_mtp and not model_config.mtp.enable_train:
+        # disable parameter update by configure the loss scale to 0
+        engine_config.override_transformer_config["mtp_loss_scaling_factor"] = 0
+
+    # Modify the hf_config before initialization, and apply patch after innitialization
+    if enable_mtp and not has_mtp:
+        logger.error("enable mtp while model has no mtp layer, ignore model.mtp.enable")
+        model_config.mtp.enable = False
+        model_config.mtp.enable_train = False
+    elif has_mtp and not enable_mtp:
+        model_config.hf_config.num_nextn_predict_layers = 0
+
+
+def patch_engine_mtp(module, model_config):
+    logger.warning("Applying mtp patch...")
+    from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings, patch_postprocess
+
+    print(module)
+    if isinstance(module, list):
+        for m in module:
+            patch_postprocess(m)
+            if model_config.mtp.detach_encoder:
+                patch_mtp_layer_get_embeddings(m)
+    else:
+        patch_postprocess(module)
+        if model_config.mtp.detach_encoder:
+            patch_mtp_layer_get_embeddings(module)

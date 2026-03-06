@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -27,6 +29,7 @@ class NsightToolConfig(BaseConfig):
 
     "True for each task has its own database, False for all tasks in one training step share one database."
     discrete: bool = False
+    name: str = "nsight"
 
     def __post_init__(self) -> None:
         pass
@@ -34,20 +37,21 @@ class NsightToolConfig(BaseConfig):
 
 @dataclass
 class TorchProfilerToolConfig(BaseConfig):
-    """Torch profiler tool config.
+    """Torch profiler tool config."""
 
-    Args:
-        step_start (int): Start step in update_policy.
-        step_end (int): End step.
-    """
-
-    step_start: int = -1
-    step_end: int = -1
+    # options: cuda, cpu, memory, shapes, stack
+    contents: list[str] = field(default_factory=list)
+    discrete: bool = False
+    name: str = "torch"
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
-        warnings.warn("Torch profiler tool config is not fully supported now.", stacklevel=1)
-        assert isinstance(self.step_start, int), f"Profiler step_start must be of type int, got {type(self.step_start)}"
+        __support_contents = ["cuda", "cpu", "memory", "shapes", "stack"]
+        for content in self.contents:
+            assert content in __support_contents, (
+                f"Profiler contents only supports {__support_contents}, but gets {content}"
+            )
+        assert isinstance(self.contents, list), f"Profiler contents must be of type list, got {type(self.contents)}"
 
 
 @dataclass
@@ -61,6 +65,7 @@ class TorchMemoryToolConfig(BaseConfig):
 
     trace_alloc_max_entries: int = 100_000
     stack_depth: int = 32
+    name: str = "torch_memory"
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
@@ -82,10 +87,12 @@ class NPUToolConfig(NsightToolConfig):
     contents: list[str] = field(default_factory=list)
 
     # Collection level, optional values: level_none, level0, level1, level2.
-    level: str = "level1"
+    level: str = "level0"
 
     # Whether to automatically parse the data.
     analysis: bool = False
+
+    name: str = "npu"
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
@@ -154,3 +161,75 @@ class ProfilerConfig(BaseConfig):
         assert isinstance(self.ranks, set | list | tuple), (
             f"Profiler ranks must be of type list, got {type(self.ranks)}"
         )
+
+
+def build_vllm_profiler_args(profiler_config: ProfilerConfig, tool_config: BaseConfig, rank: int) -> dict:
+    """
+    Build arguments and environment variables for vLLM profiler.
+
+    Acts as an adapter to bridge verl's unified profiler config and vLLM's specific requirements.
+    It sets environment variables for compatibility and constructs arguments for vLLM >= 0.13.0.
+
+    Args:
+        profiler_config (ProfilerConfig): The unified profiler configuration.
+        tool_config (BaseConfig): The tool configuration.
+        rank (int): The rank of the replica.
+
+    Returns:
+        dict: A dictionary of arguments to be passed to vLLM's start_profile method.
+    """
+    if not profiler_config or not tool_config or not hasattr(tool_config, "contents"):
+        return {}
+
+    contents = tool_config.contents
+    with_stack = True if "stack" in contents or "module" in contents else False
+    record_shapes = True if "shapes" in contents else False
+    with_memory = True if "memory" in contents else False
+    save_path = os.path.join(profiler_config.save_path, f"agent_loop_rollout_replica_{rank}")
+
+    # vLLM < 0.13.0 supports controlling profiler via environment variables
+    os.environ["VLLM_TORCH_PROFILER_DIR"] = save_path
+    os.environ["VLLM_TORCH_PROFILER_WITH_STACK"] = "1" if with_stack else "0"
+    os.environ["VLLM_TORCH_PROFILER_RECORD_SHAPES"] = "1" if record_shapes else "0"
+    os.environ["VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY"] = "1" if with_memory else "0"
+
+    # vLLM >= 0.13.0 supports controlling profiler via arguments.
+    # While it maintains backward compatibility with environment variables,
+    # we provide arguments explicitly to align with the new API style.
+    return {
+        "profiler_config": json.dumps(
+            {
+                "profiler": "torch",
+                "torch_profiler_dir": save_path,
+                "torch_profiler_with_memory": with_memory,
+                "torch_profiler_with_stack": with_stack,
+                "torch_profiler_record_shapes": record_shapes,
+            }
+        )
+    }
+
+
+def build_sglang_profiler_args(profiler_config: ProfilerConfig, tool_config: BaseConfig, rank: int) -> dict:
+    """
+    Build arguments for SGLang profiler.
+
+    Args:
+        profiler_config (ProfilerConfig): The unified profiler configuration.
+        tool_config (BaseConfig): The tool configuration.
+        rank (int): The rank of the replica.
+
+    Returns:
+        dict: A dictionary of arguments suitable for starting the SGLang profiler.
+    """
+    if not profiler_config or not tool_config or not hasattr(tool_config, "contents"):
+        return {}
+
+    contents = tool_config.contents
+    if "memory" in contents:
+        warnings.warn("SGLang profiler does not support memory profiling. Ignoring memory content.", stacklevel=2)
+
+    return {
+        "output_dir": os.path.join(profiler_config.save_path, f"agent_loop_rollout_replica_{rank}"),
+        "with_stack": "stack" in contents or "module" in contents,
+        "record_shapes": "shapes" in contents,
+    }

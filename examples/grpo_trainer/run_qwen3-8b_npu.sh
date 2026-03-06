@@ -47,7 +47,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.default_local_dir=${CKPTS_DIR} \
-    trainer.device=npu \
     trainer.resume_mode=auto \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
     actor_rollout_ref.ref.fsdp_config.forward_prefetch=True \

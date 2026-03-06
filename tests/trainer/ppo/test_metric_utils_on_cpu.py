@@ -32,6 +32,10 @@ from verl.trainer.ppo.metric_utils import (
 from verl.utils.metric import (
     reduce_metrics,
 )
+from verl.utils.metric.utils import (
+    AggregationType,
+    Metric,
+)
 
 
 class TestReduceMetrics(unittest.TestCase):
@@ -65,6 +69,224 @@ class TestReduceMetrics(unittest.TestCase):
         result = reduce_metrics(metrics)
 
         self.assertEqual(result["single"], 5.0)
+
+
+class TestMetric(unittest.TestCase):
+    """Tests for the Metric class."""
+
+    def test_init_with_string_aggregation(self):
+        """Test Metric initialization with string aggregation type."""
+        metric = Metric(aggregation="mean")
+        self.assertEqual(metric.aggregation, AggregationType.MEAN)
+        self.assertEqual(metric.values, [])
+
+    def test_init_with_enum_aggregation(self):
+        """Test Metric initialization with AggregationType enum."""
+        metric = Metric(aggregation=AggregationType.SUM)
+        self.assertEqual(metric.aggregation, AggregationType.SUM)
+        self.assertEqual(metric.values, [])
+
+    def test_init_with_value(self):
+        """Test Metric initialization with an initial value."""
+        metric = Metric(aggregation="mean", value=5.0)
+        self.assertEqual(metric.values, [5.0])
+
+    def test_init_with_invalid_aggregation(self):
+        """Test Metric initialization with invalid aggregation type."""
+        with self.assertRaises(ValueError):
+            Metric(aggregation="invalid")
+
+    def test_append_float(self):
+        """Test appending float values."""
+        metric = Metric(aggregation="mean")
+        metric.append(1.0)
+        metric.append(2.0)
+        self.assertEqual(metric.values, [1.0, 2.0])
+
+    def test_append_int(self):
+        """Test appending int values."""
+        metric = Metric(aggregation="mean")
+        metric.append(1)
+        metric.append(2)
+        self.assertEqual(metric.values, [1, 2])
+
+    def test_append_tensor(self):
+        """Test appending scalar tensor values."""
+        metric = Metric(aggregation="mean")
+        metric.append(torch.tensor(3.0))
+        metric.append(torch.tensor(4.0))
+        self.assertEqual(metric.values, [3.0, 4.0])
+
+    def test_append_non_scalar_tensor_raises(self):
+        """Test that appending non-scalar tensor raises ValueError."""
+        metric = Metric(aggregation="mean")
+        with self.assertRaises(ValueError):
+            metric.append(torch.tensor([1.0, 2.0]))
+
+    def test_append_metric(self):
+        """Test appending another Metric extends values."""
+        metric1 = Metric(aggregation="mean", value=1.0)
+        metric1.append(2.0)
+
+        metric2 = Metric(aggregation="mean", value=3.0)
+        metric2.append(metric1)
+
+        self.assertEqual(metric2.values, [3.0, 1.0, 2.0])
+
+    def test_extend_with_list(self):
+        """Test extending with a list of values."""
+        metric = Metric(aggregation="mean")
+        metric.extend([1.0, 2.0, 3.0])
+        self.assertEqual(metric.values, [1.0, 2.0, 3.0])
+
+    def test_extend_with_metric(self):
+        """Test extending with another Metric."""
+        metric1 = Metric(aggregation="mean")
+        metric1.extend([1.0, 2.0])
+
+        metric2 = Metric(aggregation="mean")
+        metric2.extend([3.0, 4.0])
+        metric2.extend(metric1)
+
+        self.assertEqual(metric2.values, [3.0, 4.0, 1.0, 2.0])
+
+    def test_extend_aggregation_mismatch_raises(self):
+        """Test that extending with mismatched aggregation raises ValueError."""
+        metric1 = Metric(aggregation="mean")
+        metric2 = Metric(aggregation="sum")
+
+        with self.assertRaises(ValueError):
+            metric1.extend(metric2)
+
+    def test_aggregate_mean(self):
+        """Test aggregation with mean."""
+        metric = Metric(aggregation="mean")
+        metric.extend([1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(metric.aggregate(), 2.5)
+
+    def test_aggregate_sum(self):
+        """Test aggregation with sum."""
+        metric = Metric(aggregation="sum")
+        metric.extend([1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(metric.aggregate(), 10.0)
+
+    def test_aggregate_min(self):
+        """Test aggregation with min."""
+        metric = Metric(aggregation="min")
+        metric.extend([3.0, 1.0, 4.0, 2.0])
+        self.assertEqual(metric.aggregate(), 1.0)
+
+    def test_aggregate_max(self):
+        """Test aggregation with max."""
+        metric = Metric(aggregation="max")
+        metric.extend([3.0, 1.0, 4.0, 2.0])
+        self.assertEqual(metric.aggregate(), 4.0)
+
+    def test_aggregate_dp_sum_mean(self):
+        """Test aggregate_dp with SUM and MEAN aggregations."""
+        # Test with SUM: mean over DP ranks, then sum
+        metric1 = Metric(aggregation="sum")
+        metric1.extend([1.0, 2.0])
+
+        metric2 = Metric(aggregation="sum")
+        metric2.extend([3.0, 4.0])
+
+        result = Metric.aggregate_dp([metric1, metric2])
+
+        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
+        # mean over axis 0 = [2.0, 3.0]
+        # sum = 5.0
+        self.assertEqual(result, 5.0)
+
+        # Test with MEAN: mean over DP ranks, then mean
+        metric4 = Metric(aggregation="mean")
+        metric4.extend([1.0, 2.0])
+
+        metric5 = Metric(aggregation="mean")
+        metric5.extend([3.0, 4.0])
+
+        result = Metric.aggregate_dp([metric4, metric5])
+
+        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
+        # mean over axis 0 = [2.0, 3.0]
+        # mean = 2.5
+        self.assertEqual(result, 2.5)
+
+    def test_aggregate_dp_min_max(self):
+        """Test aggregate_dp with MIN and MAX aggregations."""
+        # Test with MAX: flatten, then max
+        metric1 = Metric(aggregation="max")
+        metric1.extend([1.0, 2.0])
+
+        metric2 = Metric(aggregation="max")
+        metric2.extend([3.0, 4.0])
+
+        result = Metric.aggregate_dp([metric1, metric2])
+
+        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
+        # flatten = [1.0, 2.0, 3.0, 4.0]
+        # max = 4.0
+        self.assertEqual(result, 4.0)
+
+        # Test with MIN: flatten, then min
+        metric4 = Metric(aggregation="min")
+        metric4.extend([1.0, 2.0])
+
+        metric5 = Metric(aggregation="min")
+        metric5.extend([3.0, 4.0])
+
+        result = Metric.aggregate_dp([metric4, metric5])
+
+        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
+        # flatten = [1.0, 2.0, 3.0, 4.0]
+        # min = 1.0
+        self.assertEqual(result, 1.0)
+
+    def test_aggregate_dp_mismatched_lengths(self):
+        """Test aggregate_dp raises error with mismatched value lengths."""
+        metric1 = Metric(aggregation="sum")
+        metric1.extend([1.0, 2.0])
+
+        metric2 = Metric(aggregation="sum")
+        metric2.extend([3.0, 4.0, 5.0])  # Different length
+
+        with self.assertRaises(ValueError):
+            Metric.aggregate_dp([metric1, metric2])
+
+    def test_from_dict(self):
+        """Test from_dict creates Metrics from dictionary."""
+        data = {"loss": 1.0, "accuracy": 0.9}
+        metrics = Metric.from_dict(data, aggregation="mean")
+
+        self.assertIn("loss", metrics)
+        self.assertIn("accuracy", metrics)
+        self.assertEqual(metrics["loss"].values, [1.0])
+        self.assertEqual(metrics["accuracy"].values, [0.9])
+        self.assertEqual(metrics["loss"].aggregation, AggregationType.MEAN)
+
+    def test_init_list(self):
+        """Test init_list creates new empty Metric with same aggregation."""
+        metric = Metric(aggregation="max")
+        metric.extend([1.0, 2.0])
+
+        new_metric = metric.init_list()
+
+        self.assertEqual(new_metric.aggregation, AggregationType.MAX)
+        self.assertEqual(new_metric.values, [])
+
+    def test_reduce_metrics_with_metric(self):
+        """Test reduce_metrics correctly handles Metric objects."""
+        metric = Metric(aggregation="mean")
+        metric.extend([1.0, 2.0, 3.0])
+
+        metrics = {
+            "custom_metric": metric,
+            "list_metric": [4.0, 5.0, 6.0],
+        }
+        result = reduce_metrics(metrics)
+
+        self.assertEqual(result["custom_metric"], 2.0)
+        self.assertEqual(result["list_metric"], 5.0)
 
 
 class TestComputeDataMetrics(unittest.TestCase):

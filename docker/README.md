@@ -4,9 +4,11 @@ We provide pre-built Docker images for quick setup. And from this version, we ut
 
 Start from v0.6.0, we use vllm and sglang release image as our base image.
 
+Start from v0.7.0, since vllm/vllm-openai:v0.12.0 is a minimal image without some essential libraries, we use nvidia/cuda:12.9.1-devel-ubuntu22.04 as our base image for vllm.
+
 ## Base Image
 
-- vLLM: https://hub.docker.com/r/vllm/vllm-openai
+- vLLM: https://hub.docker.com/r/nvidia/cuda
 - SGLang: https://hub.docker.com/r/lmsysorg/sglang
 
 ## Application Image
@@ -22,7 +24,7 @@ Latest docker file:
 - [Dockerfile.stable.vllm](https://github.com/volcengine/verl/blob/main/docker/Dockerfile.stable.vllm)
 - [Dockerfile.stable.sglang](https://github.com/volcengine/verl/blob/main/docker/Dockerfile.stable.sglang)
 
-All pre-built images are available in dockerhub: https://hub.docker.com/r/verlai/verl. For example, `verlai/verl:sgl055.latest`, `verlai/verl:vllm011.latest`.
+All pre-built images are available in dockerhub: https://hub.docker.com/r/verlai/verl. For example, `verlai/verl:sgl056.latest`, `verlai/verl:vllm012.dev3`.
 
 You can find the latest images used for development and ci in our github workflows:
 - [.github/workflows/vllm.yml](https://github.com/volcengine/verl/blob/main/.github/workflows/vllm.yml)
@@ -57,3 +59,10 @@ git clone https://github.com/volcengine/verl && cd verl
 pip3 install -e .[vllm]
 pip3 install -e .[sglang]
 ```
+
+## Release History
+
+- 2026/01/17: update vllm stable image to torch==2.9.1, cudnn==9.16, deepep==1.2.1
+- 2025/12/23: update vllm stable image to vllm==0.12.0; update sglang stable image to sglang==0.5.6
+- 2025/11/18: update vllm stable image to vllm==0.11.1; update sglang stable image to sglang==0.5.5
+

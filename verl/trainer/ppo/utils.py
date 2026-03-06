@@ -70,17 +70,17 @@ class Role(Enum):
 
 
 def need_reference_policy(
-    role_worker_mapping: dict[Role, WorkerType],
+    config: DictConfig,
 ) -> bool:
-    """Given a role worker mapping, do we need ref policy."""
-    return Role.RefPolicy in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping
+    """Given the config, do we need ref policy."""
+    return config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss
 
 
 def need_reward_model(
-    role_worker_mapping: dict[Role, WorkerType],
+    config: DictConfig,
 ) -> bool:
-    """Given a role worker mapping, do we need reward model."""
-    return Role.RewardModel in role_worker_mapping
+    """Given the config, do we need reward model."""
+    return config.reward.reward_model.enable
 
 
 def need_critic(config: DictConfig) -> bool:

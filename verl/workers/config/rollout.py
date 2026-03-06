@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -19,6 +19,7 @@ from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
@@ -29,6 +30,7 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
+    "CheckpointEngineConfig",
 ]
 
 
@@ -71,10 +73,15 @@ class AgentLoopConfig(BaseConfig):
     default_agent_loop: str = "single_turn_agent"
     agent_loop_config_path: Optional[str] = None
     custom_async_server: CustomAsyncServerConfig = field(default_factory=CustomAsyncServerConfig)
+    # Fully qualified class name for custom AgentLoopManager (e.g., "mypackage.module.MyManager").
+    # Security: This class will be dynamically imported via importlib. Only use trusted class paths.
+    agent_loop_manager_class: Optional[str] = None
 
 
 @dataclass
 class TraceConfig(BaseConfig):
+    project_name: Optional[str] = None
+    experiment_name: Optional[str] = None
     backend: Optional[str] = None
     token2text: bool = False
     max_samples_per_step_per_worker: Optional[int] = None
@@ -114,18 +121,34 @@ class PrometheusConfig(BaseConfig):
 
 
 @dataclass
+class CheckpointEngineConfig(BaseConfig):
+    """
+    Configuration for checkpoint engine to update weights from trainer to rollout
+    """
+
+    # Backend for checkpoint engine: naive, nccl, nixl, hccl
+    backend: Optional[str] = "naive"
+    # Bucket size in MB to transfer multiple weights at one time
+    update_weights_bucket_megabytes: int = 2048
+    # Additional keyword arguments for checkpoint engine
+    engine_kwargs: dict = field(default_factory=dict)
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format"}
+    _mutable_fields = {"max_model_len", "load_format", "expert_parallel_size", "moe_tensor_parallel_size"}
 
     name: Optional[str] = MISSING
-    mode: str = "sync"
-    skip_tokenizer_init: bool = True
+    mode: str = "async"
+    nnodes: int = 0
+    n_gpus_per_node: int = 8
 
     temperature: float = 1.0
     top_k: int = -1
     top_p: float = 1.0
     do_sample: bool = True
     n: int = 1
+    repetition_penalty: float = 1.0
 
     # Early termination threshold for multi-turn rollout in sglang.
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
@@ -144,7 +167,10 @@ class RolloutConfig(BaseConfig):
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
     pipeline_model_parallel_size: int = 1
+    moe_tensor_parallel_size: int = 1
     max_num_batched_tokens: int = 8192
+    logprobs_mode: Optional[str] = "processed_logprobs"
+    scheduling_policy: Optional[str] = "fcfs"
 
     # TODO: enable train_kwargs
     # train_sampling_config: SamplingConfig = field(default_factory=SamplingConfig)
@@ -179,7 +205,11 @@ class RolloutConfig(BaseConfig):
     # Use Prometheus to collect and monitor rollout statistics
     prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
 
-    update_weights_bucket_megabytes: int = 512
+    # Extension point for custom configurations
+    custom: Optional[dict] = None
+
+    # Checkpoint Engine config for update weights from trainer to rollout
+    checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
 
     skip_rollout: bool = False
 
@@ -205,15 +235,59 @@ class RolloutConfig(BaseConfig):
 
     quantization: Optional[str] = None
 
+    quantization_config_file: Optional[str] = None
+
+    enable_rollout_routing_replay: bool = False
+
+    enable_sleep_mode: bool = True
+
+    mtp: MtpConfig = field(default_factory=MtpConfig)
+
+    qat: Optional[dict] = None
+
     def __post_init__(self):
         """Validate the rollout config"""
-        if self.expert_parallel_size > 1:
+        # Deprecation warning for mode field - only async mode is supported
+        if self.mode == "sync":
+            raise ValueError(
+                "Rollout mode 'sync' has been removed. Please set "
+                "`actor_rollout_ref.rollout.mode=async` or remove the mode setting entirely."
+            )
+        if self.mode != "async":
+            warnings.warn(
+                f"Unknown rollout mode '{self.mode}'. Only 'async' mode is supported. "
+                "The 'mode' field is deprecated and will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        if self.name != "trtllm" and self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"
             )
 
+        if self.moe_tensor_parallel_size is not None and self.moe_tensor_parallel_size > 1:
+            assert self.name == "trtllm", "moe_tensor_parallel_size is only supported for trtllm"
+
+        if self.name == "trtllm":
+            # If either expert_parallel_size or moe_tensor_parallel_size is at default 1,
+            # convert to None so TensorRT-LLM treats it as unspecified.
+            # When both unspecified: moe_ep_size=1, moe_tp_size=moe_world_size (no EP, all TP).
+            # When only one set: the other is auto-derived from tensor_model_parallel_size.
+            if self.expert_parallel_size is not None and self.expert_parallel_size == 1:
+                self.expert_parallel_size = None
+            if self.moe_tensor_parallel_size is not None and self.moe_tensor_parallel_size == 1:
+                self.moe_tensor_parallel_size = None
+            if self.expert_parallel_size is not None and self.moe_tensor_parallel_size is not None:
+                assert self.moe_tensor_parallel_size * self.expert_parallel_size == self.tensor_model_parallel_size, (
+                    "moe_tensor_parallel_size * expert_parallel_size must equal tensor_model_parallel_size "
+                    f"(got {self.moe_tensor_parallel_size} * {self.expert_parallel_size} = "
+                    f"{self.moe_tensor_parallel_size * self.expert_parallel_size}, "
+                    f"tensor_model_parallel_size={self.tensor_model_parallel_size})"
+                )
+
         if self.pipeline_model_parallel_size > 1:
-            if self.name == "vllm" or self.name == "sglang":
+            if self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )

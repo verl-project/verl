@@ -1,6 +1,6 @@
 # Rollout Correction: corrects off-policy distribution shifts
 # See documentation: docs/algo/rollout_corr.md
-# Use presets: RolloutCorrectionConfig.decoupled_seq_is(), .pg_is(), etc.
+# Use presets: RolloutCorrectionConfig.decoupled_seq_is(), .bypass_pg_is(), etc.
 
 # IS aggregation level: null (disabled), "token" (per-token), "sequence" (per-sequence)
 rollout_is: null
@@ -8,23 +8,19 @@ rollout_is: null
 # Upper threshold for IS weight truncation (typical: 2.0-5.0)
 rollout_is_threshold: 2.0
 
-# RS aggregation level: null (disabled), "token", "sequence", "geometric"
+# RS aggregation level: null (disabled), e.g. "token_k1", "seq_sum_k1", "seq_mean_k3"
 rollout_rs: null
 
-# Upper threshold for rejection sampling (null = use rollout_is_threshold)
+# Threshold for rejection sampling (string or float; see code docs)
 rollout_rs_threshold: null
-
-# Lower threshold for rejection sampling (null = auto-compute as 1/upper)
-rollout_rs_threshold_lower: null
-
-# Per-token veto threshold for catastrophic outliers (null = disabled)
-rollout_token_veto_threshold: null
 
 # Operating mode: false = Decoupled (3 policies), true = Bypass (2 policies)
 bypass_mode: false
 
-# Loss function: false = PPO with clipping, true = Policy gradient (no clipping)
-use_policy_gradient: false
+# Loss type in bypass mode (bypass_mode=true):
+# - "ppo_clip": PPO clipped objective (IS handled by ratio, default)
+# - "reinforce": REINFORCE with explicit IS weights (no PPO clipping)
+loss_type: ppo_clip
 
 # Batch normalize IS weights: false = raw weights, true = normalize to mean=1.0
 rollout_is_batch_normalize: false
