@@ -192,7 +192,7 @@ jobs:
         run: |
           pip install -r requirements-npu.txt
           pip install --no-deps -e .
-          pip install trl
+          pip install trl==0.26.0
       - name: Check final pip list
         run: |
           pip list

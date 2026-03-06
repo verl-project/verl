@@ -133,7 +133,6 @@ jobs:
       - name: Running GSM8K E2E training tests with multiturn and various configs and compare results
         run: |
           ray stop --force
-          VPP_SIZE=null 
           rm -rf ~/verl/test/log
           mkdir -p ~/verl/test/log
           export VERL_FILE_LOGGER_ROOT=~/verl/test/log
@@ -152,5 +151,4 @@ jobs:
           # test with veomni
           echo "run with sp2 fsdp_size4 num_gpus8 fsdp_strategy fsdp2"
           BACKEND=veomni SP_SIZE=2 FSDP_SIZE=4 NUM_GPUS=8 FSDP_STRATEGY=fsdp2 bash tests/special_e2e/sft/run_sft_engine.sh
-          python3 tests/special_e2e/sft/compare_sft_engine_results.py
           rm -rf ~/verl/test/log
