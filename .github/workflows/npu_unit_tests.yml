@@ -61,6 +61,12 @@ on:
       # Ignore CPU tests
       - "!tests/*_on_cpu.py"
 
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -104,9 +110,9 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
-          pip install --no-deps -e .[test]
-          pip install mlflow pytest-asyncio
+          uv pip install -r requirements-npu.txt
+          uv pip install --no-deps -e .[test]
+          uv pip install mlflow pytest-asyncio
       - name: Check final pip list
         run: |
           pip list
