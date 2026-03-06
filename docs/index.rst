@@ -158,6 +158,7 @@ verl is fast with:
    ascend_tutorial/examples/dapo_multi_model_optimization_practice.md
    ascend_tutorial/examples/ascend_sglang_best_practices.rst
    ascend_tutorial/examples/ascend_retool_best_pratice.rst
+   ascend_tutorial/features/ascend_backend_features.md
 
 .. toctree::
    :maxdepth: 1

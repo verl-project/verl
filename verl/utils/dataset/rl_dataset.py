@@ -32,6 +32,7 @@ from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.import_utils import load_extern_object
+from verl.utils.tokenizer import normalize_token_ids
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ class RLHFDataset(Dataset):
             # read files and cache
             if parquet_file.endswith(".parquet"):
                 dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
-            elif parquet_file.endswith(".json"):
+            elif parquet_file.endswith(".json") or parquet_file.endswith(".jsonl"):
                 dataframe = datasets.load_dataset("json", data_files=parquet_file)["train"]
             else:
                 raise ValueError(f"Unsupported file format: {parquet_file}")
@@ -243,9 +244,15 @@ class RLHFDataset(Dataset):
                         if self.tool_schemas is not None:
                             apply_kwargs["tools"] = self.tool_schemas
 
-                        return len(
-                            tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, **apply_kwargs)
+                        # Keep explicit tokenization to avoid transformers version default changes.
+                        apply_kwargs.pop("tokenize", None)
+                        apply_kwargs.pop("return_dict", None)
+                        apply_kwargs.pop("return_tensors", None)
+
+                        tokenized_prompt = tokenizer.apply_chat_template(
+                            doc[prompt_key], add_generation_prompt=True, tokenize=True, **apply_kwargs
                         )
+                        return len(normalize_token_ids(tokenized_prompt))
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()

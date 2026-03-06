@@ -16,7 +16,44 @@
 import types
 import warnings
 
-__all__ = ["hf_tokenizer", "hf_processor"]
+__all__ = ["hf_tokenizer", "hf_processor", "normalize_token_ids"]
+
+
+def normalize_token_ids(tokenized_output) -> list[int]:
+    """Normalize tokenizer outputs into a flat ``list[int]``.
+
+    This handles Transformers 4/5 differences where ``apply_chat_template(tokenize=True)``
+    may return either ``list[int]`` or a ``BatchEncoding``/mapping with ``input_ids``.
+    """
+
+    token_ids = tokenized_output
+    if isinstance(tokenized_output, dict):
+        if "input_ids" in tokenized_output:
+            token_ids = tokenized_output["input_ids"]
+    elif hasattr(tokenized_output, "input_ids"):
+        token_ids = tokenized_output.input_ids
+
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+
+    if isinstance(token_ids, tuple):
+        token_ids = list(token_ids)
+
+    if isinstance(token_ids, list) and len(token_ids) == 1 and isinstance(token_ids[0], list | tuple):
+        token_ids = list(token_ids[0])
+
+    if not isinstance(token_ids, list):
+        raise TypeError(f"token_ids must be list-like token ids, got {type(token_ids).__name__}: {token_ids!r}")
+
+    normalized_ids = []
+    for idx, token_id in enumerate(token_ids):
+        if hasattr(token_id, "item"):
+            token_id = token_id.item()
+        try:
+            normalized_ids.append(int(token_id))
+        except (TypeError, ValueError) as e:
+            raise TypeError(f"token_id must be int-convertible, got {type(token_id).__name__}: {token_id!r}") from e
+    return normalized_ids
 
 
 def set_pad_token_id(tokenizer):
@@ -71,12 +108,20 @@ def hf_processor(name_or_path, **kwargs):
         name_or_path (str): The name of the processor.
 
     Returns:
-        transformers.ProcessorMixin: The pretrained processor.
+        Optional[transformers.ProcessorMixin]: The pretrained multimodal processor.
+        Returns ``None`` for text-only models (including AutoProcessor fallbacks to
+        tokenizer backends such as ``TokenizersBackend``).
     """
-    from transformers import AutoConfig, AutoProcessor
+    from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizerBase
 
     try:
         processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
+        # In newer transformers, AutoProcessor may legitimately fall back to a
+        # tokenizer backend (e.g. TokenizersBackend) for text-only models.
+        # Treat it as "no multimodal processor" and let callers use hf_tokenizer.
+        if isinstance(processor, PreTrainedTokenizerBase):
+            return None
+
         config = AutoConfig.from_pretrained(name_or_path, **kwargs)
 
         # Bind vlm model's get_rope_index method to processor

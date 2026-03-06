@@ -109,6 +109,7 @@ https://github.com/bytedance/SandboxFusion
   mkdir -p docs/build
   cd runtime/python
   bash install-python-runtime.sh
+  cd ../../
   make run-online
 
 3.训练
