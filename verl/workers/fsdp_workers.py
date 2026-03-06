@@ -910,11 +910,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
                 log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
 
-        dp_group = (
-            self.ulysses_device_mesh.get_group(mesh_dim="dp")
-            if self.ulysses_device_mesh is not None
-            else torch.distributed.group.WORLD
-        )
+        if self.ulysses_device_mesh is not None:
+            dp_group = self.ulysses_device_mesh.get_group(mesh_dim="dp")
+        elif "ddp" in self.device_mesh.mesh_dim_names:
+            dp_group = self.device_mesh.get_group(mesh_dim="ddp")
+        else:
+            dp_group = torch.distributed.group.WORLD
 
         if self._is_actor:
             actor_cfg = omega_conf_to_dataclass(self.config.actor)
@@ -1631,11 +1632,12 @@ class CriticWorker(Worker, DistProfilerExtension):
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
             log_gpu_memory_usage("After offload critic optimizer during init", logger=logger)
 
-        dp_group = (
-            self.ulysses_device_mesh.get_group(mesh_dim="dp")
-            if self.ulysses_device_mesh is not None
-            else torch.distributed.group.WORLD
-        )
+        if self.ulysses_device_mesh is not None:
+            dp_group = self.ulysses_device_mesh.get_group(mesh_dim="dp")
+        elif "ddp" in self.device_mesh.mesh_dim_names:
+            dp_group = self.device_mesh.get_group(mesh_dim="ddp")
+        else:
+            dp_group = torch.distributed.group.WORLD
         self.critic = DataParallelPPOCritic(
             config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer,
             dp_group=dp_group,
