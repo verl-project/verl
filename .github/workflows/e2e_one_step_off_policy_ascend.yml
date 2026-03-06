@@ -154,14 +154,6 @@ jobs:
         run: |
           pip install -r requirements-npu.txt
           pip install --no-deps -e .
-      - name: Install the mbridge
-        run: |
-          git clone --depth 1 --branch v0.15.1 https://github.com/ISEEKYAN/mbridge/
-          cd mbridge
-          git checkout v0.15.1
-          pip install -e .
-          cd ..
-          pip install tomllib
       - name: Check final pip list
         run: |
           pip list
