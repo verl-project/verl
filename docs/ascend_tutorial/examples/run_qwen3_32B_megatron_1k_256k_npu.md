@@ -93,7 +93,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=console \
     trainer.n_gpus_per_node=16 \
-    trainer.logger="console" \
     trainer.nnodes=2 \
     trainer.save_freq=100 \
     trainer.test_freq=-1 \
