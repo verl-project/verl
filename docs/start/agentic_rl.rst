@@ -122,7 +122,7 @@ System Components
 +==========================+===============================================================================================+
 | ChatModel                | LLM object of LangChain, used to adapt to the “generate” api provided by AsyncLLMServerManager|
 +--------------------------+-----------------------------------------------------------------------------------------------+
-| RectAgentLoop            | Agent adaptation layer, which by default supports a naive LangGraph Agentic.                  |
+| ReactAgentLoop           | Agent adaptation layer, which by default supports a naive LangGraph Agentic.                  |
 |                          | New classes can be derived to support user-defined Agents, and the run function needs to be   |
 |                          | implemented to complete Agent calls.                                                          |
 +--------------------------+-----------------------------------------------------------------------------------------------+
