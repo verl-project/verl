@@ -24,7 +24,6 @@ math_test_path=$HOME/datasets/gsm8k/test.parquet
 train_files="['$math_train_path']"
 test_files="['$math_test_path']"
 
-offload=True
 use_dynamic_bsz=False
 enable_chunked_prefill=True
 tp_size=8
