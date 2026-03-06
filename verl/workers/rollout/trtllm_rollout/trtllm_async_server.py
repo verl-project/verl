@@ -125,6 +125,21 @@ class TRTLLMHttpServer:
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
 
+        quantization = self.config.quantization
+        if quantization is not None:
+            if quantization == "fp8":
+                FP8_BLOCK_QUANT_KWARGS = {
+                    "activation_scheme": "dynamic",
+                    "fmt": "e4m3",
+                    "quant_method": "fp8",
+                    "weight_block_size": [128, 128],
+                }
+                engine_kwargs["model_kwargs"] = {"quantization_config": FP8_BLOCK_QUANT_KWARGS}
+                if self.config.load_format != "dummy":
+                    raise ValueError("FP8 quantization is only supported for dummy load format")
+            else:
+                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+
         llm_kwargs = {
             "model": self.model_config.local_path,
             "backend": "pytorch",
@@ -140,6 +155,8 @@ class TRTLLMHttpServer:
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "pipeline_parallel_size": self.config.pipeline_model_parallel_size,
             "moe_expert_parallel_size": self.config.expert_parallel_size,
+            "moe_tensor_parallel_size": self.config.moe_tensor_parallel_size,
+            "load_format": self.config.load_format,
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,

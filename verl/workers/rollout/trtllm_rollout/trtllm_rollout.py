@@ -71,8 +71,9 @@ _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
 
 
-def get_device_uuid(id: int) -> str:
+def get_device_uuid(id: str | int) -> str:
     """Get the UUID of a CUDA device using NVML."""
+    id = int(id)  # pynvml expects int; ray.get_gpu_ids() may return str
     global _NVML_INITIALIZED
     with _NVML_LOCK:
         if not _NVML_INITIALIZED:
@@ -276,6 +277,15 @@ class ServerAdapter(BaseRollout):
     def __init__(
         self, config: RolloutConfig, model_config: HFModelConfig, device_mesh: DeviceMesh, replica_rank: int = -1
     ):
+        if config.get("quantization", None) == "fp8":
+            FP8_BLOCK_QUANT_KWARGS = {
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "quant_method": "fp8",
+                "weight_block_size": [128, 128],
+            }
+            fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+            model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         super().__init__(config, model_config, device_mesh)
         self._adapter = None
         self.hybrid_device_mesh = None
@@ -399,6 +409,15 @@ class ServerAdapter(BaseRollout):
 
         total_available_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) * 1024 * 1024
 
+        if self.config.get("quantization", None) == "fp8":
+            from verl.utils.trtllm.trtllm_fp8_utils import TRTLLMFP8QuantizerHelper
+
+            fp8_quantizer_helper = TRTLLMFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+            weights = fp8_quantizer_helper.quant_weights_by_name(
+                weights,
+                dtype=self.model_config.hf_config.dtype,
+            )
+
         try:
             device_uuid = get_device_uuid(self.gpu_id)
         except Exception as e:
@@ -439,6 +458,7 @@ class ServerAdapter(BaseRollout):
                 await self.server_actor.set_global_steps.remote(global_steps)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
+        del weights
         gc.collect()
         get_torch_device().empty_cache()
 
