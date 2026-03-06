@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer"}
 MODEL_ID=${MODEL_ID:-/llm-align/open_models/Qwen3/Qwen3-8B-Base}
-TRAIN_FILES=${TRAIN_FILES:-/llm-align/liuchonghan/verl_parquet_merged/all_merged_to_eng.parquet}
+TRAIN_FILES=${TRAIN_FILES:-"[/llm-align/liuchonghan/verl_parquet_merged/all_merged_to_eng.parquet,/llm-align/liuchonghan/ins_dataset/ins_dataset/tulu3_34999.parquet]"}
 
 PROJECT_NAME=${PROJECT_NAME:-nips2026_qwen3_8b_base_sft}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-all_merged_to_eng}
