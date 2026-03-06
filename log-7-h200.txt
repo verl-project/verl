@@ -1,0 +1,31 @@
+++ env
+++ awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print $1}'
++ for v in $(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print $1}')
++ unset OMPI_MCA_coll_hcoll_enable
++ export RAY_DEDUP_LOGS=0
++ RAY_DEDUP_LOGS=0
++ TP=4
++ PROJECT_NAME=verl_grpo_example_gsm8k_math
++ EXP_NAME=trtllm-qwen2-7b-tp4-8gpus
++ '[' 4 -eq 4 ']'
++ MAX_BATCH_SIZE=1024
++ DATADIR=/workspace/verl/data
++ MODEL_PATH=Qwen/Qwen2-7B-Instruct
++ GSM8K_TRAIN_PATH=/workspace/verl/data/gsm8k/train.parquet
++ GSM8K_TEST_PATH=/workspace/verl/data/gsm8k/test.parquet
++ MATH_TRAIN_PATH=/workspace/verl/data/math/train.parquet
++ MATH_TEST_PATH=/workspace/verl/data/math/test.parquet
++ TRAIN_FILES='['\''/workspace/verl/data/gsm8k/train.parquet'\'', '\''/workspace/verl/data/math/train.parquet'\'']'
++ TEST_FILES='['\''/workspace/verl/data/gsm8k/test.parquet'\'', '\''/workspace/verl/data/math/test.parquet'\'']'
++ python3 -m verl.trainer.main_ppo algorithm.adv_estimator=grpo algorithm.rollout_correction.rollout_is_threshold=2.0 'data.train_files=['\''/workspace/verl/data/gsm8k/train.parquet'\'', '\''/workspace/verl/data/math/train.parquet'\'']' 'data.val_files=['\''/workspace/verl/data/gsm8k/test.parquet'\'', '\''/workspace/verl/data/math/test.parquet'\'']' data.train_batch_size=1024 data.max_prompt_length=2048 data.max_response_length=1024 data.return_raw_chat=True data.filter_overlong_prompts=True data.truncation=error actor_rollout_ref.hybrid_engine=True actor_rollout_ref.model.path=Qwen/Qwen2-7B-Instruct actor_rollout_ref.actor.optim.lr=1e-6 actor_rollout_ref.model.use_remove_padding=True actor_rollout_ref.actor.ppo_mini_batch_size=256 actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 actor_rollout_ref.actor.use_kl_loss=True actor_rollout_ref.actor.kl_loss_coef=0.001 actor_rollout_ref.actor.kl_loss_type=low_var_kl actor_rollout_ref.actor.entropy_coeff=0 actor_rollout_ref.model.enable_gradient_checkpointing=True actor_rollout_ref.actor.fsdp_config.param_offload=False actor_rollout_ref.actor.fsdp_config.optimizer_offload=False actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 actor_rollout_ref.rollout.tensor_model_parallel_size=4 actor_rollout_ref.rollout.name=trtllm actor_rollout_ref.rollout.mode=async actor_rollout_ref.rollout.gpu_memory_utilization=0.6 actor_rollout_ref.rollout.n=5 actor_rollout_ref.rollout.max_num_seqs=1024 actor_rollout_ref.rollout.max_num_batched_tokens=32768 +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5 actor_rollout_ref.rollout.calculate_log_probs=True actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 actor_rollout_ref.ref.fsdp_config.param_offload=True actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 algorithm.use_kl_in_reward=False trainer.critic_warmup=0 'trainer.logger=["console","tensorboard"]' trainer.project_name=verl_grpo_example_gsm8k_math trainer.experiment_name=trtllm-qwen2-7b-tp4-8gpus trainer.n_gpus_per_node=8 trainer.nnodes=1 trainer.save_freq=-1 trainer.test_freq=5 trainer.resume_mode=disable trainer.total_epochs=15
+/usr/local/lib/python3.12/dist-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /usr/local/lib/python3.12/dist-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /usr/local/lib/python3.12/dist-packages/torch/_library/custom_ops.py:922 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+/usr/local/lib/python3.12/dist-packages/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+WARNING:2026-03-06 17:33:14,507:fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
