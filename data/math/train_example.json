@@ -1,0 +1,20 @@
+{
+  "level": "Level 5",
+  "type": "Algebra",
+  "data_source": "DigitalLearningGmbH/MATH-lighteval",
+  "prompt": [
+    {
+      "content": "Let \\[f(x) = \\left\\{\n\\begin{array}{cl} ax+3, &\\text{ if }x>2, \\\\\nx-5 &\\text{ if } -2 \\le x \\le 2, \\\\\n2x-b &\\text{ if } x <-2.\n\\end{array}\n\\right.\\]Find $a+b$ if the piecewise function is continuous (which means that its graph can be drawn without lifting your pencil from the paper). Let's think step by step and output the final answer within \\boxed{}.",
+      "role": "user"
+    }
+  ],
+  "ability": "math",
+  "reward_model": {
+    "ground_truth": "0",
+    "style": "rule"
+  },
+  "extra_info": {
+    "index": 0,
+    "split": "train"
+  }
+}
