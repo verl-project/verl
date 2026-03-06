@@ -316,7 +316,7 @@ class TorchTitanEngine(BaseEngine):
 
     def get_model_parallel_group(self):
         raise NotImplementedError
-    
+
     def get_context_parallel_group(self):
         raise NotImplementedError
 
