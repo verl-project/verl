@@ -40,10 +40,11 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class DataParallelPPOCritic(BasePPOCritic):
-    def __init__(self, config, critic_module: nn.Module, critic_optimizer: optim.Optimizer):
+    def __init__(self, config, critic_module: nn.Module, critic_optimizer: optim.Optimizer, dp_group=None):
         super().__init__(config=config)
         self.critic_module = critic_module
         self.critic_optimizer = critic_optimizer
+        self.dp_group = dp_group
         self.use_remove_padding = self.config.model.get("use_remove_padding", False)
         print(f"Critic use_remove_padding={self.use_remove_padding}")
 
@@ -166,7 +167,9 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         if use_dynamic_bsz:
             max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
-            micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
+            micro_batches, batch_idx_list = prepare_dynamic_batch(
+                data, max_token_len=max_token_len, dp_group=self.dp_group
+            )
         else:
             micro_batches = data.split(micro_batch_size)
 
@@ -210,7 +213,9 @@ class DataParallelPPOCritic(BasePPOCritic):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                    micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
+                    micro_batches, _ = prepare_dynamic_batch(
+                        mini_batch, max_token_len=max_token_len, dp_group=self.dp_group
+                    )
                 else:
                     self.gradient_accumulation = (
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
