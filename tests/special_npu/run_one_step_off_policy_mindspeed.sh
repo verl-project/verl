@@ -56,8 +56,8 @@ echo "Running one_step_off_policy with ${ACTOR_STRATEGY} strategy"
 echo "Rollout GPUs: ${n_npus_rollout}, Training GPUs: ${n_npus_training}"
 
 common_params=(
-    data.train_files="/home/dataset/gsm8k/train.parquet"
-    data.val_files="/home/dataset/gsm8k/test.parquet"
+    data.train_files="${HOME}/data/gsm8k/train.parquet"
+    data.val_files="${HOME}/data/gsm8k/test.parquet"
     data.prompt_key=prompt
     data.truncation='left'
     data.max_prompt_length=${max_prompt_length}
