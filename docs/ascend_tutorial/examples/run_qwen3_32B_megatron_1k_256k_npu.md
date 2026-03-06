@@ -1,7 +1,10 @@
+# Long Sequence Qwen3-32B 1k-to-256k Example
+
 Last updated: 6/3/2026.
+
 本章对Qwen3-32B进行了长序列开发。Qwen3-32B的模型能力为最长推到40k
 
-# 全层实验
+## 全层实验
 
 对Qwen3-32B进行了长序列开发，脚本如下：
 
@@ -107,7 +110,7 @@ python3 -m verl.trainer.main_ppo \
   
 ![qwen3-32b-perfo](https://github.com/ChibiQuest/verl_data/blob/main/qwen3-32B-1k-256k/performance.png)
 
-# 减层实验
+## 减层实验
 
 在实际推理中，我们发现其最大在20k左右，因此对其进行减层实验，其response能到达到40k。
 
