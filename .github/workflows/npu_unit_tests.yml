@@ -102,6 +102,7 @@ jobs:
           npu-smi info
       - name: Check initial pip list from image
         run: |
+          pip install uv
           pip list
       - name: Checkout volcengine/verl repo
         uses: actions/checkout@v4
