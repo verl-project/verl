@@ -36,7 +36,7 @@ from nemo_automodel.components.training.utils import (
 )
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-from transformers.utils import TRANSFORMERS_CACHE
+from huggingface_hub.constants import HF_HUB_CACHE
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -52,7 +52,7 @@ from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     build_automodel_model,
-    build_model_wrapper_from_engine_config,
+    build_distributed_config_from_engine_config,
     get_dp_group_size,
     get_dp_rank,
     get_pp_rank,
@@ -90,9 +90,9 @@ class AutomodelEngine(BaseEngine):
         self.rank = torch.distributed.get_rank()
 
         world_size = torch.distributed.get_world_size()
-        self.model_wrapper = build_model_wrapper_from_engine_config(self.engine_config, world_size)
-        self.device_mesh = getattr(self.model_wrapper, "device_mesh", None)
-        self.moe_mesh = getattr(self.model_wrapper, "moe_mesh", None)
+        self.distributed_config, self.device_mesh, self.moe_mesh = build_distributed_config_from_engine_config(
+            self.engine_config, world_size
+        )
 
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
@@ -121,13 +121,15 @@ class AutomodelEngine(BaseEngine):
 
     def initialize(self):
         """Build the model, optimizer, LR scheduler, and checkpointer using Automodel infrastructure."""
-        self.module = build_automodel_model(self.model_config, self.engine_config, self.model_wrapper)
+        self.module = build_automodel_model(
+            self.model_config, self.engine_config, self.distributed_config, self.device_mesh, self.moe_mesh
+        )
         log_gpu_memory_usage("After Automodel model build", logger=logger)
 
         if not self.engine_config.forward_only:
             self.optimizer = self._build_optimizer(self.module)
             # maybe shard optimizer for MegatronFSDP
-            maybe_fully_shard_optimizer(self.module, self.optimizer, self.model_wrapper)
+            maybe_fully_shard_optimizer(self.module, self.optimizer, self.distributed_config)
             self.lr_scheduler = self._build_lr_scheduler(self.optimizer)
         else:
             self.optimizer = None
@@ -313,7 +315,7 @@ class AutomodelEngine(BaseEngine):
             enabled=True,
             checkpoint_dir="checkpoints/",
             model_save_format="safetensors",
-            model_cache_dir=TRANSFORMERS_CACHE,
+            model_cache_dir=HF_HUB_CACHE,
             model_repo_id=self.model_config.path,
             save_consolidated=True,
             is_peft=False,

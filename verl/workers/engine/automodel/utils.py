@@ -54,30 +54,32 @@ def get_dp_group_size(device_mesh, include_cp=False):
     return torch.distributed.get_world_size()
 
 
-def maybe_fully_shard_optimizer(model, optimizer, model_wrapper):
+def maybe_fully_shard_optimizer(model, optimizer, distributed_config):
     """Call fully_shard_optimizer for MegatronFSDP strategy."""
-    from nemo_automodel.components.distributed.megatron_fsdp import MegatronFSDPManager
+    from nemo_automodel.components.distributed.config import MegatronFSDPConfig
 
-    if isinstance(model_wrapper, MegatronFSDPManager) and torch.distributed.get_world_size() > 1:
+    if isinstance(distributed_config, MegatronFSDPConfig) and torch.distributed.get_world_size() > 1:
         from megatron_fsdp.fully_shard import fully_shard_optimizer
 
         fully_shard_optimizer(model, optimizer)
 
 
-def build_model_wrapper_from_engine_config(engine_config, world_size):
-    """Construct an Automodel model wrapper
+def build_distributed_config_from_engine_config(engine_config, world_size):
+    """Build v5 distributed config, device_mesh, and moe_mesh from engine config.
 
     Args:
         engine_config: AutomodelEngineConfig instance.
         world_size: Total number of processes in the job.
 
     Returns:
-        A model wrapper instance with device meshes configured.
+        Tuple of (distributed_config, device_mesh, moe_mesh).
     """
+    from nemo_automodel.components.distributed.config import DDPConfig, FSDP2Config, MegatronFSDPConfig
+    from nemo_automodel.components.distributed.mesh_utils import create_device_mesh
+
     strategy = engine_config.distributed_strategy
 
     if strategy == "fsdp2":
-        from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
         from torch.distributed.fsdp import MixedPrecisionPolicy
 
         from verl.utils.torch_dtypes import PrecisionType
@@ -89,50 +91,48 @@ def build_model_wrapper_from_engine_config(engine_config, world_size):
             cast_forward_inputs=True,
         )
 
-        wrapper = FSDP2Manager(
-            tp_size=engine_config.tp_size,
-            pp_size=engine_config.pp_size,
-            cp_size=engine_config.cp_size,
-            ep_size=engine_config.ep_size,
-            dp_replicate_size=engine_config.dp_replicate_size,
+        distributed_config = FSDP2Config(
             sequence_parallel=engine_config.sequence_parallel,
-            defer_fsdp_grad_sync=engine_config.defer_fsdp_grad_sync,
-            activation_checkpointing=engine_config.activation_checkpointing,
-            world_size=world_size,
             mp_policy=mp_policy,
+            activation_checkpointing=engine_config.activation_checkpointing,
+            defer_fsdp_grad_sync=engine_config.defer_fsdp_grad_sync,
         )
 
     elif strategy == "megatron_fsdp":
-        from nemo_automodel.components.distributed.megatron_fsdp import MegatronFSDPManager
-
-        wrapper = MegatronFSDPManager(
-            tp_size=engine_config.tp_size,
-            cp_size=engine_config.cp_size,
+        distributed_config = MegatronFSDPConfig(
             activation_checkpointing=engine_config.activation_checkpointing,
-            world_size=world_size,
         )
 
     elif strategy == "ddp":
-        from nemo_automodel.components.distributed.ddp import DDPManager
-
-        wrapper = DDPManager(
-            world_size=world_size,
+        distributed_config = DDPConfig(
             activation_checkpointing=engine_config.activation_checkpointing,
         )
 
     else:
         raise ValueError(f"Unsupported distributed_strategy: {strategy}")
 
-    return wrapper
+    device_mesh, moe_mesh = create_device_mesh(
+        distributed_config,
+        tp_size=engine_config.tp_size,
+        pp_size=engine_config.pp_size,
+        cp_size=engine_config.cp_size,
+        ep_size=engine_config.ep_size,
+        dp_replicate_size=engine_config.dp_replicate_size,
+        world_size=world_size,
+    )
+
+    return distributed_config, device_mesh, moe_mesh
 
 
-def build_automodel_model(model_config, engine_config, model_wrapper):
+def build_automodel_model(model_config, engine_config, distributed_config, device_mesh, moe_mesh):
     """Build a model using NeMoAutoModelForCausalLM.from_pretrained().
 
     Args:
         model_config: HFModelConfig with model path and settings.
         engine_config: AutomodelEngineConfig with distributed settings.
-        model_wrapper: Model wrapper (FSDP2Manager/MegatronFSDPManager/DDPManager).
+        distributed_config: FSDP2Config, MegatronFSDPConfig, or DDPConfig instance.
+        device_mesh: Pre-created device mesh (or None for DDP).
+        moe_mesh: Pre-created MoE mesh (or None).
 
     Returns:
         A HuggingFace model with Automodel's distributed infrastructure applied.
@@ -142,12 +142,12 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
     kwargs = {}
 
     if engine_config.enable_fp8:
-        from nemo_automodel.components.fp8.config import FP8Config
+        from nemo_automodel.components.quantization.fp8 import FP8Config
 
         kwargs["fp8_config"] = FP8Config()
 
     if engine_config.enable_compile:
-        from nemo_automodel.components.compile.config import CompileConfig
+        from nemo_automodel.components.utils.compile_utils import CompileConfig
 
         kwargs["compile_config"] = CompileConfig()
 
@@ -161,7 +161,7 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
 
     # Create MoE BackendConfig
     if engine_config.use_te_backend or engine_config.ep_size > 1:
-        from nemo_automodel.components.models.common import BackendConfig
+        from nemo_automodel.components.models.common.utils import BackendConfig
 
         backend_config = BackendConfig(
             attn="te" if engine_config.use_te_backend else engine_config.attn_implementation,
@@ -177,25 +177,16 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
         )
         kwargs["backend"] = backend_config
 
-    # Create parallelize_fn for MoE EP sharding.
+    # MoE config for EP
     if engine_config.ep_size > 1:
-        from functools import partial
+        from nemo_automodel.components.moe.config import MoEParallelizerConfig
 
-        from nemo_automodel.components.moe.parallelizer import parallelize_model
-
-        parallelize_fn = partial(
-            parallelize_model,
-            activation_checkpointing=engine_config.activation_checkpointing,
+        kwargs["moe_config"] = MoEParallelizerConfig(
             ignore_router_for_ac=engine_config.ignore_router_for_ac,
             reshard_after_forward=engine_config.reshard_after_forward,
             lm_head_precision=engine_config.lm_head_precision,
             wrap_outer_model=engine_config.wrap_outer_model,
         )
-        kwargs["parallelize_fn"] = parallelize_fn
-
-    # Pass TP/CP sizes so from_pretrained() can apply internal overrides.
-    kwargs["tp_size"] = engine_config.tp_size
-    kwargs["cp_size"] = engine_config.cp_size
 
     kwargs["attn_implementation"] = engine_config.attn_implementation
 
@@ -205,7 +196,10 @@ def build_automodel_model(model_config, engine_config, model_wrapper):
 
     model = NeMoAutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_config.path,
-        model_wrapper=model_wrapper,
+        device_mesh=device_mesh,
+        moe_mesh=moe_mesh,
+        distributed_config=distributed_config,
+        activation_checkpointing=engine_config.activation_checkpointing,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
