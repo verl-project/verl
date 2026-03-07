@@ -43,6 +43,20 @@ from verl.workers.config import ActorConfig
 __all__ = ["DataParallelPPOActor"]
 
 logger = logging.getLogger(__file__)
+
+
+def _apply_temperature(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Apply temperature scaling, handling activation-offloaded views correctly.
+
+    FSDP2 + activation_offload wraps squeeze() in a custom autograd Function.
+    Inplace div_() on such views raises RuntimeError. Use non-inplace division
+    when gradients are enabled (training), inplace when disabled (compute_log_prob).
+    """
+    if torch.is_grad_enabled():
+        return logits / temperature
+    return logits.div_(temperature)
+
+
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
@@ -256,7 +270,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                 else:
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
-                    logits_rmpad.div_(temperature)
+                    logits_rmpad = _apply_temperature(logits_rmpad, temperature)
 
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                     inplace_backward = True
@@ -365,7 +379,7 @@ class DataParallelPPOActor(BasePPOActor):
                 else:
                     logits = output.logits
 
-                    logits.div_(temperature)
+                    logits = _apply_temperature(logits, temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
                     if calculate_entropy:
