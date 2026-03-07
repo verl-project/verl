@@ -68,7 +68,7 @@ jobs:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models
     runs-on: linux-aarch64-a2-8
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
       options: >-
@@ -135,7 +135,7 @@ jobs:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
     runs-on: linux-aarch64-a2-8
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
       options: >-
