@@ -142,10 +142,6 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo --config-path=config \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
-    actor_rollout_ref.actor.megatron.use_dist_checkpointing=True \
-    actor_rollout_ref.actor.megatron.dist_checkpointing_path=${DIST_CKPT_PATH} \
-    actor_rollout_ref.ref.megatron.use_dist_checkpointing=True \
-    actor_rollout_ref.ref.megatron.dist_checkpointing_path=${DIST_CKPT_PATH} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} $@
 
 echo "One-step-off-policy E2E test completed successfully with ${ACTOR_STRATEGY} strategy"
