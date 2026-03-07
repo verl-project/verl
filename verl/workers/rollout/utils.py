@@ -18,6 +18,8 @@ import os
 import uvicorn
 from fastapi import FastAPI
 
+from verl.utils.net_utils import get_free_port
+
 logger = logging.getLogger(__file__)
 
 
@@ -38,19 +40,16 @@ async def run_unvicorn(app: FastAPI, server_args, server_address, max_retries=5)
 
     for i in range(max_retries):
         try:
+            server_port, sock = get_free_port(server_address)
             app.server_args = server_args
-            # port=0 lets the OS atomically assign a free port — no TOCTOU race
-            config = uvicorn.Config(app, host=server_address, port=0, log_level="warning")
+            config = uvicorn.Config(app, host=server_address, port=server_port, log_level="warning")
             server = uvicorn.Server(config)
-            server_task = asyncio.create_task(server.serve())
-            while not server.started:
-                if server_task.done():
-                    server_task.result()  # raises if serve() failed
-                await asyncio.sleep(0.1)
-            server_port = server.servers[0].sockets[0].getsockname()[1]
+            server.should_exit = True
+            await server.serve()
+            server_task = asyncio.create_task(server.main_loop())
             break
         except (OSError, SystemExit) as e:
-            logger.error(f"Failed to start HTTP server at try {i}, error: {e}")
+            logger.error(f"Failed to start HTTP server on port {server_port} at try {i}, error: {e}")
     else:
         logger.error(f"Failed to start HTTP server after {max_retries} retries, exiting...")
         os._exit(-1)
