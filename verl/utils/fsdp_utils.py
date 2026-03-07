@@ -506,6 +506,30 @@ def maybe_patch_fsdp_module(model):
         fully_shard_module.FSDPModule = orig_fsdp_module
 
 
+def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
+    """Select modules to wrap individually with fully_shard in FSDP2.
+
+    Matches transformer layers by class name, and embed_tokens/lm_head by name
+    (with isinstance fallback). Name-based matching is needed because peft wraps
+    embed_tokens in ModulesToSaveWrapper, breaking isinstance(module, nn.Embedding).
+    When tie_word_embeddings is True, embed_tokens and lm_head share weights and
+    must not be wrapped separately.
+    """
+    _tie = getattr(model.config, "tie_word_embeddings", False)
+    _wrap_by_name = set() if _tie else {"embed_tokens", "lm_head"}
+
+    modules = []
+    for name, module in model.named_modules():
+        leaf_name = name.rsplit(".", 1)[-1] if "." in name else name
+        if (
+            module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap
+            or (isinstance(module, nn.Embedding) and not _tie)
+            or (leaf_name in _wrap_by_name and hasattr(module, "weight"))
+        ):
+            modules.append(module)
+    return modules
+
+
 def apply_fsdp2(model, fsdp_kwargs, config):
     """model: AutoModelForCausalLM"""
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
@@ -520,12 +544,7 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
-    modules = []
-    for name, module in model.named_modules():
-        if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap or (
-            isinstance(module, nn.Embedding) and not model.config.tie_word_embeddings
-        ):
-            modules.append(module)
+    modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
 
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
