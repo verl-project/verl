@@ -2,6 +2,7 @@ Ascend Dockerfile Build Guidance
 ===================================
 
 Last updated: 03/03/2025.
+<<<<<<< HEAD
 
 
 镜像获取 & 公开镜像地址
@@ -12,6 +13,8 @@ Last updated: 03/03/2025.
 每日构建镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-latest
 
 verl release版本镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-{verl release版本号}
+=======
+>>>>>>> 013ci
 
 
 
@@ -33,7 +36,11 @@ Atlas 800T A3
 ================= ============
 基础镜像            Ubuntu 22.04
 Python             3.11
+<<<<<<< HEAD
 CANN               8.5.RC1
+=======
+CANN               8.5.0
+>>>>>>> 013ci
 torch              2.8.0
 torch_npu          2.8.0
 torchvision        0.22.1
@@ -56,11 +63,11 @@ Dockerfile构建镜像脚本清单
 ============== ============== ============== ==============================================================
 A2              8.2.RC1        vLLM            `Dockerfile.ascend_8.2.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a2>`_
 A2              8.3.RC1        vLLM            `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
-A2              8.5.RC1        vLLM            `Dockerfile.ascend_8.5.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.rc1_a2>`_
+A2              8.5.0          vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
 A2              8.3.RC1        SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2>`_
 A3              8.2.RC1        vLLM            `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
 A3              8.3.RC1        vLLM            `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
-A3              8.5.RC1        vLLM            `Dockerfile.ascend_8.5.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.rc1_a3>`_
+A3              8.5.0          vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
 A3              8.3.RC1         SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
 ============== ============== ============== ==============================================================
 
