@@ -749,20 +749,6 @@ def restore_dynamic_batch(data: torch.Tensor, batch_idx_list: list[list[int]]) -
     return reverted_data
 
 
-def synchronize_micro_batches_num_across_ranks(
-    micro_batches_idx: list[list[int]],
-    batch_size: int,
-    dp_group: Optional[dist.ProcessGroup] = None,
-) -> list[list[int]]:
-    """Ensure all DP ranks have the same number of micro-batches by padding with empty batches."""
-    local_num = torch.tensor([len(micro_batches_idx)], dtype=torch.long, device="cuda")
-    world_num = [torch.zeros_like(local_num) for _ in range(dist.get_world_size(dp_group))]
-    dist.all_gather(world_num, local_num, group=dp_group)
-    max_num = max(t.item() for t in world_num)
-    while len(micro_batches_idx) < max_num:
-        micro_batches_idx.append(list(range(batch_size)))
-    return micro_batches_idx
-
 
 def get_truncate_padding_micro_batches_jagged(
     batch: TensorDict,
@@ -810,9 +796,9 @@ def get_truncate_padding_micro_batches_jagged(
     if current_micro_batch:
         micro_batches_idx.append(current_micro_batch)
 
-    if same_micro_num_in_dp and dist.is_initialized():
+    if same_micro_num_in_dp:
         micro_batches_idx = synchronize_micro_batches_num_across_ranks(
-            micro_batches_idx, batch_size=len(sequence_lengths), dp_group=dp_group
+            micro_batches_idx, dp_group=dp_group
         )
 
     return micro_batches_idx
