@@ -126,6 +126,6 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
             multi_modal_data=multi_modal_data,
             num_turns=2,
             metrics=metrics,
-            extra_fields=output.extra_fields,
+            extra_fields=output.extra_info,
         )
         return output

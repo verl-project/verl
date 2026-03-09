@@ -486,7 +486,7 @@ class RayFlowGRPOTrainer:
                 test_output_gen_batch_padded = test_output_gen_batch_padded.union(batch_reward)
                 # wake up rollout model
                 # replace with wake_up method once supported
-                self.checkpoint_manager.update_weights()
+                self.checkpoint_manager.update_weights(self.global_steps)
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
@@ -1182,7 +1182,7 @@ class RayFlowGRPOTrainer:
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
-        self.checkpoint_manager.update_weights()
+        self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -1399,7 +1399,7 @@ class RayFlowGRPOTrainer:
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
-                            self.checkpoint_manager.update_weights()
+                            self.checkpoint_manager.update_weights(self.global_steps)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

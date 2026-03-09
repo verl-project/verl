@@ -60,8 +60,8 @@ class ImageOutput(BaseModel):
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
     """number of preempted times for metric calculation"""
-    extra_fields: dict[str, Any] = {}
-    """Extra fields for dynamic addition."""
+    extra_info: dict[str, Any] = {}
+    """extra info for rollout"""
 
 
 class RolloutMode(Enum):

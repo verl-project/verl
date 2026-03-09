@@ -923,9 +923,17 @@ class DiffusionAgentLoopWorker:
     def __init__(
         self,
         config: DictConfig,
-        server_handles: list[ray.actor.ActorHandle],
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
+        """Initialize agent loop manager.
+        Args:
+            config (DictConfig): YAML config.
+            servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
+            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
+            reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+        """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
@@ -933,7 +941,11 @@ class DiffusionAgentLoopWorker:
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(config, server_handles)
+            self.server_manager = AsyncLLMServerManager(
+                config,
+                servers,
+                load_balancer_handle=load_balancer_handle,
+            )
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles

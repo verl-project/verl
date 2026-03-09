@@ -93,6 +93,8 @@ class vLLMOmniHttpServer:
         self.node_rank = node_rank
         self.gpus_per_node = gpus_per_node
         self.nnodes = nnodes
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -433,7 +435,7 @@ class vLLMOmniHttpServer:
         negative_prompt_embeds = final_res.request_output.diffusion_output["negative_prompt_embeds"]
         negative_prompt_embeds_mask = final_res.request_output.diffusion_output["negative_prompt_embeds_mask"]
 
-        extra_fields = {
+        extra_info = {
             "all_latents": all_latents,
             "all_timesteps": all_timesteps,
             "prompt_embeds": prompt_embeds,
@@ -442,6 +444,7 @@ class vLLMOmniHttpServer:
             "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
             if negative_prompt_embeds_mask is not None
             else None,
+            "global_steps": self.global_steps,
         }
 
         # Determine stop reason from finish_reason
@@ -465,7 +468,7 @@ class vLLMOmniHttpServer:
             log_probs=log_probs,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
-            extra_fields=extra_fields,
+            extra_info=extra_info,
         )
 
     async def wake_up(self):
@@ -511,6 +514,10 @@ class vLLMOmniHttpServer:
 
     async def clear_kv_cache(self):
         pass
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
 
     async def wait_for_requests_to_drain(self):
         # TODO (mike): to be implemented

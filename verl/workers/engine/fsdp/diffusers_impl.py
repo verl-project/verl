@@ -124,6 +124,12 @@ class DiffusersFSDPEngine(BaseEngine):
         self._is_lora = self.model_config.lora_rank > 0
         self._guidance_scale = self.model_config.guidance_scale
 
+        # QAT (Quantization-Aware Training)
+        self._qat_config = getattr(self.engine_config, "qat", None)
+        self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
+        if self._qat_enabled:
+            raise NotImplementedError("Quantization-Aware Training (QAT) is not supported yet.")
+
     @property
     def is_param_offload_enabled(self) -> bool:
         return self._is_offload_param
