@@ -64,10 +64,6 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
         assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
         assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
 
-        rollout_pool = [config.rollout.n_gpus_per_node] * config.rollout.nnodes
-        resource_pool_spec["rollout_pool"] = rollout_pool
-        mapping[Role.Rollout] = "rollout_pool"
-
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
 
@@ -81,48 +77,15 @@ def create_role_worker_mapping(config):
     Returns:
         dict: Mapping from roles to worker classes
     """
-    # Select worker class based on strategy
-    use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-    if use_legacy_worker_impl == "disable":
-        from verl.experimental.separation.engine_workers import (
-            DetachActorWorker,
-            DetachAsyncRolloutWorker,
-            TrainingWorker,
-        )
-        from verl.single_controller.ray import RayWorkerGroup
+    from verl.experimental.separation.engine_workers import DetachActorWorker
+    from verl.single_controller.ray import RayWorkerGroup
+    from verl.workers.engine_workers import TrainingWorker
 
-        ray_worker_group_cls = RayWorkerGroup
-
-        CriticWorker = TrainingWorker
-    else:
-        if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.experimental.one_step_off_policy.fsdp_workers import (
-                CriticWorker,
-                DetachActorWorker,
-                DetachAsyncRolloutWorker,
-            )
-            from verl.single_controller.ray import RayWorkerGroup
-
-            ray_worker_group_cls = RayWorkerGroup
-
-        elif config.actor_rollout_ref.actor.strategy == "megatron":
-            assert config.critic.strategy == "megatron"
-            from verl.experimental.one_step_off_policy.megatron_workers import (
-                CriticWorker,
-                DetachActorWorker,
-                DetachAsyncRolloutWorker,
-            )
-            from verl.single_controller.ray import RayWorkerGroup
-
-            ray_worker_group_cls = RayWorkerGroup
-        else:
-            raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
+    ray_worker_group_cls = RayWorkerGroup
 
     role_worker_mapping = {
         Role.Actor: ray.remote(DetachActorWorker),
-        Role.Rollout: ray.remote(DetachAsyncRolloutWorker),
-        Role.Critic: ray.remote(CriticWorker),
+        Role.Critic: ray.remote(TrainingWorker),
     }
 
     # Add reference policy (if KL loss or reward is required)
@@ -218,6 +181,10 @@ def main(config):
 
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
+
+    # TODO: unify rollout config with actor_rollout_ref
+    config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
+    config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node
 
     run_ppo(config, task_runner_class=OneStepTaskRunner)
     print(f"total time: {time() - start_time:.2f} seconds")

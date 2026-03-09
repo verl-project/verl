@@ -258,13 +258,19 @@ def apply_patch():
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         # query: [96, 1, 16, 128], key:[96, 1, 16, 128], value:[96, 1, 16, 128]
-        query, key, value = self.get_query_key_value_tensors(
+        qkv = self.get_query_key_value_tensors(
             hidden_states,
             key_value_states,
             position_ids,
             packed_seq_params,
             inference_context=inference_context,
         )
+        query, key, value = qkv[:3]
+        q_compressed = None
+        # kv_compressed = None
+        if len(qkv) > 4:
+            q_compressed = qkv[3]
+            # kv_compressed = qkv[4]
 
         # ===================================================
         # Adjust key, value for inference
@@ -288,9 +294,13 @@ def apply_patch():
         # core attention computation
         # ==================================
         # Need corresponding TE change
-        thd_qkv_format = packed_seq_params and packed_seq_params.qkv_format == "thd"
+        non_dsa_thd_qkv_format = (
+            packed_seq_params
+            and packed_seq_params.qkv_format == "thd"
+            and getattr(self.config, "experimental_attention_variant", None) is None
+        )
         v_dim = value.shape[-1]
-        if thd_qkv_format and query.shape[-1] != v_dim:
+        if non_dsa_thd_qkv_format and query.shape[-1] != v_dim:
             value = F.pad(value, [0, query.shape[-1] - v_dim])
             self.core_attention.hidden_size_per_attention_head_v = value.shape[-1]
         if self.checkpoint_core_attention and self.training:
@@ -298,6 +308,12 @@ def apply_patch():
                 query, key, value, attention_mask, packed_seq_params=packed_seq_params
             )
         else:
+            extra_kwargs = {}
+            if getattr(self.config, "experimental_attention_variant", None) == "dsa":
+                # For dsa we need to pass in the original hidden states and the compressed
+                # query representation.
+                extra_kwargs["x"] = hidden_states
+                extra_kwargs["qr"] = q_compressed
             core_attn_out = self.core_attention(
                 query,
                 key,
@@ -305,8 +321,9 @@ def apply_patch():
                 attention_mask,
                 packed_seq_params=packed_seq_params,
                 attn_mask_type=attn_mask_type,
+                **extra_kwargs,
             )
-        if thd_qkv_format:
+        if non_dsa_thd_qkv_format:
             if core_attn_out.ndim == 2:
                 core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-1], -1, value.shape[-1])
             if query.shape[-1] != v_dim:
@@ -329,7 +346,11 @@ def apply_patch():
 
         return output, bias
 
-    MLASelfAttention.get_query_key_value_tensors = patch_get_query_key_value_tensors
+    # This patch targets mcore 0.12 MLA behavior only.
+    # For newer mcore, upstream MLA already has packed-seq + CP handling and
+    # overriding it with the legacy implementation can break RoPE shapes.
+    if not mcore_ge_013:
+        MLASelfAttention.get_query_key_value_tensors = patch_get_query_key_value_tensors
 
     MultiLatentAttention.forward = patch_forward
 
@@ -362,3 +383,104 @@ def apply_patch_mbridge():
             return tp_group
 
         megatron.core.utils.get_tensor_model_parallel_group_if_none = get_tensor_model_parallel_group_if_none
+
+
+def apply_patch_megatron_v012_with_torch_v28():
+    # Error due to missing serialization_format in _write_item of megatron v012;
+    # resolved by using megatron v013's implementation.
+    import inspect
+    import logging
+    import os
+    from pathlib import Path
+
+    import megatron.core
+    import torch
+    from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
+    from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
+    from packaging import version
+    from torch import multiprocessing as mp
+    from torch.distributed.checkpoint.filesystem import _write_item
+
+    if (
+        version.parse(torch.__version__).base_version != "2.8.0"
+        or version.parse(megatron.core.__version__).base_version != "0.12.1"
+    ):
+        return
+
+    WriteBucket = tuple[Path, str, tuple[list, list]]
+
+    @staticmethod
+    @_disable_gc()
+    def write_preloaded_data_patch(
+        transform_list,
+        local_proc_idx: int,
+        write_bucket: WriteBucket,
+        results_queue: mp.SimpleQueue,
+        count_queue: mp.JoinableQueue,
+        use_fsync: bool,
+        **kwargs,
+    ) -> None:
+        """
+        Performs actual data saving to storage.
+
+        Args:
+            local_proc_idx (int): index of a local process that performs writing
+            write_bucket (WriteBucket): data to write to storage
+            results_queue (mp.Queue): queue to return the write results
+                to the proxy checkpoint process.
+            count_queue (mp.JoinableQueue): queue to marks worker task as completed
+            use_fsync (bool): if True, calls os.fsync at the end of saving
+
+        Returns: None, the write result are put into the `queue`
+        """
+        logger = logging.getLogger(__name__)
+        logger.debug(f"{local_proc_idx} started")
+        mem_before = _process_memory()
+        use_msc = kwargs.get("use_msc", False)
+        local_results = []
+        try:
+            file_name, storage_key, (bytes_data, tensor_data) = write_bucket
+            extra_kwargs = {}
+            if "serialization_format" in inspect.signature(_write_item).parameters:
+                from torch.distributed.checkpoint.filesystem import SerializationFormat
+
+                extra_kwargs["serialization_format"] = SerializationFormat.TORCH_SAVE
+            if use_msc:
+                import multistorageclient as msc
+
+                open_file = msc.open
+            else:
+                open_file = open
+            with open_file(file_name, "wb") as stream:
+                for write_item, data in bytes_data:
+                    local_results.append(
+                        _write_item(*transform_list, stream, data, write_item, storage_key, **extra_kwargs)
+                    )
+
+                for write_item, tensor in tensor_data:
+                    assert tensor.is_cpu
+                    local_results.append(
+                        _write_item(*transform_list, stream, tensor, write_item, storage_key, **extra_kwargs)
+                    )
+
+                if use_fsync:
+                    if use_msc:
+                        stream.fsync()
+                    else:
+                        os.fsync(stream.fileno())
+            local_output = (local_proc_idx, local_results)
+        except Exception as e:
+            logger.debug(f"{local_proc_idx} failed")
+            local_output = (local_proc_idx, e)  # type: ignore[assignment]
+
+        results_queue.put(local_output)
+        # Signal this process is done.
+        count_queue.get()
+        count_queue.task_done()
+
+        mem_after = _process_memory()
+        logger.debug(f"{local_proc_idx} consumed: {mem_after - mem_before}, before: {mem_before}, after: {mem_after}")
+
+    from megatron.core.dist_checkpointing.strategies.filesystem_async import FileSystemWriterAsync
+
+    FileSystemWriterAsync.write_preloaded_data = write_preloaded_data_patch

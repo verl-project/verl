@@ -21,6 +21,7 @@ from verl.experimental.reward_loop import RewardLoopManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
+from verl.utils import omega_conf_to_dataclass
 from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 
 
@@ -78,13 +79,13 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
         config=config,
         rm_resource_pool=rm_resource_pool,
     )
-    agent_loop_manager = AgentLoopManager(
+    agent_loop_manager = AgentLoopManager.create(
         config=config,
         worker_group=actor_rollout_wg,
         reward_loop_worker_handles=reward_loop_manager.reward_loop_workers,
     )
     checkpoint_manager = CheckpointEngineManager(
-        backend=config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+        config=omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine),
         trainer=actor_rollout_wg,
         replicas=agent_loop_manager.rollout_replicas,
     )

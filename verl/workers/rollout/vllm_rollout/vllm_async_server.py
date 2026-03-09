@@ -35,16 +35,15 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
-from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
+from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
-from verl.workers.rollout.vllm_rollout import ServerAdapter
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -129,6 +128,8 @@ class vLLMHttpServer:
         self.node_rank = node_rank
         self.gpus_per_node = gpus_per_node
         self.nnodes = nnodes
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -153,10 +154,10 @@ class vLLMHttpServer:
         if self.node_rank == 0:
             self._master_address = self._server_address
             # used for torch.distributed.init_process_group
-            self._master_port, self._master_sock = get_free_port(self._server_address)
+            self._master_port, self._master_sock = get_free_port(self._server_address, with_alive_sock=True)
             # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
-            self._dp_rpc_port, self._dp_rpc_sock = get_free_port(self._server_address)
-            self._dp_master_port, self._dp_master_sock = get_free_port(self._server_address)
+            self._dp_rpc_port, self._dp_rpc_sock = get_free_port(self._server_address, with_alive_sock=True)
+            self._dp_master_port, self._dp_master_sock = get_free_port(self._server_address, with_alive_sock=True)
         else:
             self._master_address = None
             self._master_port = None
@@ -181,6 +182,12 @@ class vLLMHttpServer:
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
+
+    @property
+    def lora_as_adapter(self) -> bool:
+        return (
+            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
+        ) and not self.model_config.lora.get("merge", False)
 
     async def collective_rpc(
         self,
@@ -424,6 +431,8 @@ class vLLMHttpServer:
         # 3. launch server
         if self.node_rank == 0:
             self._master_sock.close()
+            self._dp_rpc_sock.close()
+            self._dp_master_sock.close()
             await self.run_server(server_args)
         else:
             # TODO: avoid connect before master_sock close
@@ -470,7 +479,7 @@ class vLLMHttpServer:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
         self.engine = engine_client
-        self._server_port, self._server_task = await run_unvicorn(app, args, self._server_address)
+        self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
@@ -504,6 +513,8 @@ class vLLMHttpServer:
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        prompt_ids = normalize_token_ids(prompt_ids)
+
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
@@ -521,7 +532,11 @@ class vLLMHttpServer:
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
             # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            # Cap max_tokens by response_length to ensure tensor alignment,
+            # and by remaining budget to prevent OOM in multi-turn rollouts.
+            max_tokens = min(
+                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
+            )
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
@@ -543,9 +558,7 @@ class vLLMHttpServer:
 
         # Add lora request
         lora_request = None
-        if (
-            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
-        ) and not self.model_config.lora.get("merge", False):
+        if self.lora_as_adapter:
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
@@ -596,6 +609,7 @@ class vLLMHttpServer:
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
+            extra_info={"global_steps": self.global_steps},
         )
 
     async def wake_up(self):
@@ -618,7 +632,12 @@ class vLLMHttpServer:
 
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here
-            await self.engine.collective_rpc("sleep", kwargs={"level": 2})
+            # lora only update adapter weights, so set sleep level to 1
+            if self.lora_as_adapter:
+                sleep_level = 1
+            else:
+                sleep_level = 2
+            await self.engine.collective_rpc("sleep", kwargs={"level": sleep_level})
 
             # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
             # await self.engine.reset_encoder_cache()
@@ -646,6 +665,10 @@ class vLLMHttpServer:
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.engine.reset_prefix_cache()
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
 
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
@@ -765,9 +788,6 @@ class vLLMHttpServer:
             return {"aborted": False, "request_id": request_id, "error": str(e)}
 
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
-
-
 class vLLMReplica(RolloutReplica):
     def __init__(
         self,
@@ -779,16 +799,6 @@ class vLLMReplica(RolloutReplica):
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(vLLMHttpServer)
-
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        """Get rollout worker actor class for colocated and standalone mode."""
-        worker_dict_cls = RayClassWithInitArgs(
-            cls=_rollout_worker_actor_cls,
-            config=self.config,
-            model_config=self.model_config,
-            device_mesh=None,
-        )
-        return worker_dict_cls
 
     async def launch_servers(self):
         """Launch http server in each node."""
@@ -836,8 +846,14 @@ class vLLMReplica(RolloutReplica):
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
+                runtime_env={
+                    "env_vars": {
+                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                    }
+                },
                 name=name,
+                max_concurrency=self.max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
@@ -898,11 +914,6 @@ class vLLMReplica(RolloutReplica):
 
     async def resume_generation(self):
         """Resume generation on all servers after abort_all_requests."""
-        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
-
-    # TODO(petersh6): refact the checkpoint engine's update_weights and rename this method
-    async def resume_all_requests(self):
-        """Resume all requests on all servers."""
         await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:

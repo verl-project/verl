@@ -1,6 +1,12 @@
 # Target class for this configuration
 _target_: verl.workers.config.TorchtitanEngineConfig
 
+# Whether to offload model parameters to CPU
+param_offload: False
+
+# Whether to offload optimizer state to CPU
+optimizer_offload: False
+
 # policy for wrapping the model
 wrap_policy:
   # Minimum number of parameters to trigger wrapping a layer with FSDP
@@ -51,6 +57,9 @@ context_parallel_size: 1
 
 # Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen")
 attn_type: flex
+
+# Maximum sequence length for RoPE cache. If null, defaults to torchtitan's TrainingConfig.seq_len (2048).
+max_seq_len: null
 
 # Strategy
 strategy: torchtitan

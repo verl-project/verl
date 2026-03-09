@@ -585,6 +585,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
             )
 
+        # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
+        aggressive_empty_cache(force_sync=True)
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
@@ -618,7 +621,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self):
+    async def update_weights(self, global_steps: int = None):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
@@ -626,11 +629,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
            - after update_weights: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
         """
-        assert self.checkpoint_engine is not None
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if self.config.rollout.checkpoint_engine.backend != "naive":
-            per_tensor_param, _ = self.engine.get_per_tensor_param()
+            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
@@ -647,7 +649,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon, base_sync_done=True
         )
 
-        await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=True)
+        await self.rollout.update_weights(
+            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+        )
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:

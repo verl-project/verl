@@ -22,11 +22,11 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig
+from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["CriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "FSDPCriticModelCfg"]
+__all__ = ["CriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "TorchTitanCriticConfig", "FSDPCriticModelCfg"]
 
 
 @dataclass
@@ -222,6 +222,26 @@ class FSDPCriticConfig(CriticConfig):
                         f"critic.ppo_micro_batch_size ({self.ppo_micro_batch_size}) * "
                         f"ulysses_sequence_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
                     )
+
+
+@dataclass
+class TorchTitanCriticConfig(CriticConfig):
+    """Configuration for TorchTitan-based critic model training.
+
+    The inheritance from CriticConfig provides all base critic configuration plus TorchTitan-specific settings.
+
+    Args:
+        strategy (str): Training strategy set to 'torchtitan' for TorchTitan parallelism.
+        torchtitan (TorchtitanEngineConfig): Configuration for TorchTitan engine settings.
+    """
+
+    strategy: str = "torchtitan"
+    torchtitan: TorchtitanEngineConfig = field(default_factory=TorchtitanEngineConfig)
+
+    def __post_init__(self):
+        """Validate TorchTitan critic configuration parameters."""
+        super().__post_init__()
+        self.engine = self.torchtitan
 
 
 @dataclass

@@ -19,6 +19,7 @@ from typing import Any, Optional, Sequence
 import hydra
 import numpy as np
 import ray
+import torch
 from omegaconf import DictConfig
 
 from verl.experimental.agent_loop.agent_loop import (
@@ -27,12 +28,13 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopWorker,
     AsyncLLMServerManager,
     DictConfigWrap,
+    TokenOutput,
     _agent_loop_registry,
+    _get_rollout_and_model_config,
     get_trajectory_info,
 )
-from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.protocol import DataProto
-from verl.single_controller.ray import RayWorkerGroup
+from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
 from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
@@ -43,6 +45,88 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class FullyAsyncLLMServerManager(AsyncLLMServerManager):
+    """FullyAsyncLLMServerManager supports resume generation on partial rollout, making rollout interruption
+    invisible to the AgentLoop.
+    """
+
+    @rollout_trace_op
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+    ) -> TokenOutput:
+        """Generate tokens from prompt ids.
+
+        Args:
+            request_id (str): request id for sticky session.
+            prompt_ids (List[int]): List of prompt token ids.
+            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
+
+        Returns:
+            TokenOutput: token output
+        """
+        limit_key = None
+        if "max_tokens" in sampling_params:
+            limit_key = "max_tokens"
+        elif "max_new_tokens" in sampling_params:
+            limit_key = "max_new_tokens"
+        original_max_tokens = sampling_params.get(limit_key) if limit_key else None
+
+        final_output = TokenOutput(
+            token_ids=[],
+            log_probs=[],
+            num_preempted=0,
+        )
+        min_global_steps, max_global_steps = None, None
+
+        while True:
+            # 1. generate tokens
+            output = await super().generate(
+                request_id=request_id,
+                prompt_ids=prompt_ids + final_output.token_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+
+            # 2. merge output into final_output
+            final_output.token_ids.extend(output.token_ids)
+            if output.log_probs is not None:
+                final_output.log_probs.extend(output.log_probs)
+            if output.routed_experts is not None:
+                if final_output.routed_experts is None:
+                    final_output.routed_experts = output.routed_experts
+                else:
+                    final_output.routed_experts = torch.cat([final_output.routed_experts, output.routed_experts], dim=0)
+            if output.num_preempted is not None:
+                final_output.num_preempted += output.num_preempted
+            final_output.stop_reason = output.stop_reason
+
+            # update model weights version
+            global_steps = output.extra_info.get("global_steps", None)
+            if min_global_steps is None:
+                min_global_steps = global_steps
+            max_global_steps = global_steps
+
+            # 3. update max_new_tokens
+            if original_max_tokens is not None:
+                sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
+                if len(final_output.token_ids) >= original_max_tokens:
+                    final_output.stop_reason = "length"
+                    break
+
+            # 4. check stop reason
+            if output.stop_reason not in ("aborted", "abort") or not self.config.async_training.partial_rollout_resume:
+                break
+        final_output.extra_info["global_steps"] = global_steps
+        final_output.extra_info["min_global_steps"] = min_global_steps
+        final_output.extra_info["max_global_steps"] = max_global_steps
+        return final_output
+
     @rollout_trace_op
     async def generate_for_partial(
         self,
@@ -66,15 +150,18 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             - Element 1 (list[float]): Log probabilities for the response token IDs.
             - Element 2 (bool): A flag or status indicating cancellation.
         """
-        server = self._choose_server(request_id)
-        output = await server.generate_for_partial.remote(
-            request_id=request_id,
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            image_data=image_data,
-            video_data=video_data,
-        )
-        return output
+        server_id, server = await self._acquire_server(request_id=request_id)
+        try:
+            output = await server.generate_for_partial.remote(
+                request_id=request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+            return output
+        finally:
+            self._release_server(server_id)
 
 
 @ray.remote
@@ -82,11 +169,21 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
     def __init__(
         self,
         config: DictConfig,
-        server_handles: list[ray.actor.ActorHandle],
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
-        super().__init__(config, server_handles, reward_loop_worker_handles)
+        self.server_manager = FullyAsyncLLMServerManager(
+            config,
+            servers,
+            load_balancer_handle=load_balancer_handle,
+        )
+        super().__init__(
+            config,
+            servers,
+            load_balancer_handle,
+            reward_loop_worker_handles,
+        )
         # A shared cancellation event for all agent loops running on this worker.
         self.cancellation_event = asyncio.Event()
 
@@ -102,7 +199,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         Returns:
             list[AgentLoopOutput]: List of agent loop outputs, one per sample in the batch.
         """
-        config = self.config.actor_rollout_ref.rollout
+        config = self.rollout_config
         sampling_params = dict(
             temperature=config.temperature,
             top_p=config.top_p,
@@ -151,7 +248,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         return outputs, is_cancel
 
     def _addition_process(self, output: DataProto):
-        """collect metirics"""
+        """collect metrics"""
         metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
         processing_times_list = [item["generate_sequences"] for item in metrics]
         tool_calls_times_list = [item["tool_calls"] for item in metrics]
@@ -169,7 +266,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
     ) -> AgentLoopOutput:
         # Completed, return directly
         if kwargs["output"] is not None and not kwargs["output"].extra_fields.get("is_cancel", False):
-            logger.info("In _partial_run_agent_loop, already completed, return derictly!")
+            logger.info("In _partial_run_agent_loop, already completed, return directly!")
             return kwargs["output"]
         try:
             with rollout_trace_attr(
@@ -191,7 +288,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
                     tokenizer=self.tokenizer,
                     processor=self.processor,
                     dataset_cls=self.dataset_cls,
-                    dataset_config=DictConfigWrap(config=self.config.data),
+                    data_config=DictConfigWrap(config=self.config.data),
                 )
                 output: AgentLoopOutput = await agent_loop.run(
                     sampling_params, cancellation_event=self.cancellation_event, **kwargs
@@ -219,15 +316,17 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self,
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
+        rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
+        self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
         self.reward_loop_worker_handles = reward_loop_worker_handles
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
 
         # Select rollout replica class based on rollout name
-        rollout_name = config.actor_rollout_ref.rollout.name
+        rollout_name = self.rollout_config.name
         if rollout_name == "sglang":
             from verl.experimental.fully_async_policy.sglang_rollout.sglang_async_server import FullyAsyncSGLangReplica
 
@@ -245,63 +344,6 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self.server_handles = None
         self.server_addresses = None
         self.agent_loop_workers = None
-
-    @classmethod
-    async def create(
-        cls,
-        config: DictConfig,
-        worker_group: RayWorkerGroup = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-    ):
-        instance = cls(config, worker_group, reward_loop_worker_handles)
-        await instance._async_init()
-        return instance
-
-    async def _async_init(self):
-        await self._initialize_llm_servers_async()
-        self._init_agent_loop_workers()
-
-    async def _initialize_llm_servers_async(self):
-        rollout_world_size = (
-            self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-            * self.config.actor_rollout_ref.rollout.data_parallel_size
-            * self.config.actor_rollout_ref.rollout.pipeline_model_parallel_size
-        )
-        world_size = (
-            self.worker_group.world_size
-            if self.worker_group
-            else self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
-        )
-        num_replicas = world_size // rollout_world_size
-
-        rollout_config = self.config.actor_rollout_ref.rollout
-        model_config = self.config.actor_rollout_ref.model
-        self.rollout_replicas = [
-            self.rollout_replica_class(
-                replica_rank=replica_rank,
-                config=rollout_config,
-                model_config=model_config,
-                gpus_per_node=self.config.trainer.n_gpus_per_node,
-            )
-            for replica_rank in range(num_replicas)
-        ]
-
-        if self.worker_group:
-            await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
-        else:
-            await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
-
-        self.server_handles = [server._server_handle for server in self.rollout_replicas]
-        self.server_addresses = [server._server_address for server in self.rollout_replicas]
-
-        print(f"AgentLoopManager: {self.server_addresses}")
-        # Update Prometheus configuration with server addresses
-        if rollout_config.prometheus.enable:
-            if rollout_config.disable_log_stats:
-                raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
-            await asyncio.to_thread(
-                update_prometheus_config, rollout_config.prometheus, self.server_addresses, rollout_config.name
-            )
 
     async def generate_single_sample_async(
         self,

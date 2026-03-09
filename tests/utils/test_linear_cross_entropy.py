@@ -34,6 +34,7 @@ import os
 import torch
 
 import verl.utils.torch_functional as verl_F
+from verl.utils.device import is_torch_npu_available
 from verl.utils.experimental.torch_functional import FusedLinearForPPO
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.torch_functional import logprobs_from_logits
@@ -360,7 +361,7 @@ def test_lce_non_divisible_vocab_padding():
     Reproducing construction: one token-logit at +3, all others at -15
     → denominator ≈ 20, phantom adds ≈ 25 → error ≈ 0.82 per token.
     """
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_available() or is_torch_npu_available(check_device=False):
         return
 
     torch.manual_seed(0)

@@ -144,13 +144,16 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install cupy-cuda12x pytest-asyncio
+          pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip3 install --upgrade "transformers<5.0"
       - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
         run: |
           ROLLOUT_NAME=vllm pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
+      - name: Test bucketed weight transfer
+        run: |
+          pytest -svvv tests/utils/test_bucketed_weight_transfer.py
 
   cleanup:
     runs-on: ubuntu-latest

@@ -33,21 +33,22 @@ from sglang.srt.entrypoints.http_server import (
     set_global_state,
 )
 from sglang.srt.managers.io_struct import (
+    ContinueGenerationReqInput,
     GenerateReqInput,
+    PauseGenerationReqInput,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
 
-from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.sglang_rollout.sglang_rollout import ServerAdapter, _set_envs_and_config
-from verl.workers.rollout.utils import get_max_position_embeddings, run_unvicorn
+from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -103,6 +104,8 @@ class SGLangHttpServer:
         self.node_rank = node_rank
         self.nnodes = nnodes
         self.base_gpu_id = base_gpu_id
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -123,17 +126,19 @@ class SGLangHttpServer:
                 profiler_config = None
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
 
-        # used for NCCL process group
-        if self.node_rank == 0:
+        # For multi-node, we need dist_init_addr so nodes can coordinate NCCL init.
+        # For single-node, let SGLang handle port selection internally via nccl_port,
+        # which also avoids port conflicts.
+        self._master_address = None
+        self._master_port = None
+        self._master_sock = None
+        if self.nnodes > 1 and self.node_rank == 0:
             self._master_address = self._server_address
-            self._master_port, self._master_sock = get_free_port(self._server_address)
+            self._master_port, self._master_sock = get_free_port(self._server_address, with_alive_sock=True)
             logger.info(
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
                 f"master address: {self._master_address}, port: {self._master_port}"
             )
-        else:
-            self._master_address = None
-            self._master_port = None
 
     def get_master_address(self):
         """Get master address and port for init NCCL process group."""
@@ -145,10 +150,13 @@ class SGLangHttpServer:
         return self._server_address, self._server_port
 
     async def launch_server(self, master_address: str = None, master_port: int = None):
-        if self.node_rank != 0:
-            assert master_address and master_port, "non-master node should provide master address and port"
-            self._master_address = master_address
-            self._master_port = master_port
+        if self.nnodes > 1:
+            if self.node_rank != 0:
+                assert master_address and master_port, "non-master node should provide master address and port"
+                self._master_address = master_address
+                self._master_port = master_port
+            else:
+                self._master_sock.close()
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
@@ -167,11 +175,6 @@ class SGLangHttpServer:
                 fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
-        dist_init_addr = (
-            f"[{self._master_address}]:{self._master_port}"
-            if is_valid_ipv6_address(self._master_address)
-            else f"{self._master_address}:{self._master_port}"
-        )
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         args = {
             "model_path": self.model_config.local_path,
@@ -186,7 +189,6 @@ class SGLangHttpServer:
             "ep_size": self.config.expert_parallel_size,
             "node_rank": self.node_rank,
             "load_format": self.config.load_format,
-            "dist_init_addr": dist_init_addr,
             "nnodes": self.nnodes,
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_running_requests": self.config.get("max_num_seqs", None),
@@ -201,6 +203,16 @@ class SGLangHttpServer:
             else json.dumps({}),
             **engine_kwargs,
         }
+
+        # Only set dist_init_addr for multi-node; for single-node, let SGLang
+        # handle port selection internally via nccl_port to avoid conflicts.
+        if self.nnodes > 1:
+            dist_init_addr = (
+                f"[{self._master_address}]:{self._master_port}"
+                if is_valid_ipv6_address(self._master_address)
+                else f"{self._master_address}:{self._master_port}"
+            )
+            args["dist_init_addr"] = dist_init_addr
 
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
@@ -278,7 +290,7 @@ class SGLangHttpServer:
 
             add_prometheus_middleware(app)
 
-        self._server_port, self._server_task = await run_unvicorn(app, server_args, self._server_address)
+        self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
         self.tokenizer_manager.server_status = ServerStatus.Up
 
     async def wake_up(self):
@@ -337,7 +349,11 @@ class SGLangHttpServer:
             # support vllm-style 'max_tokens' param
             max_new_tokens = sampling_params.pop("max_tokens")
         else:
-            max_new_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            # Cap max_tokens by response_length to ensure tensor alignment,
+            # and by remaining budget to prevent OOM in multi-turn rollouts.
+            max_new_tokens = min(
+                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
+            )
 
         # Clamp max_new_tokens to the valid range [0, max_possible_tokens]
         max_new_tokens = max(0, min(max_new_tokens, max_possible_tokens))
@@ -364,6 +380,8 @@ class SGLangHttpServer:
         generate_request = GenerateReqInput(**request)
 
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
+        finish_reason = output["meta_info"]["finish_reason"]
+        finish_reason = finish_reason["type"] if finish_reason else None
         if return_logprob:
             output_token_logprobs = output["meta_info"]["output_token_logprobs"]
             log_probs, token_ids = zip(
@@ -391,7 +409,23 @@ class SGLangHttpServer:
                     -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
                 )
 
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts)
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            routed_experts=routed_experts,
+            stop_reason=finish_reason,
+            extra_info={"global_steps": self.global_steps},
+        )
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
+
+    async def abort_all_requests(self):
+        await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+
+    async def resume_generation(self):
+        await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
 
     async def start_profile(self, **kwargs):
         if (
@@ -413,9 +447,6 @@ class SGLangHttpServer:
             await self.tokenizer_manager.stop_profile()
 
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
-
-
 class SGLangReplica(RolloutReplica):
     def __init__(
         self,
@@ -427,16 +458,6 @@ class SGLangReplica(RolloutReplica):
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(SGLangHttpServer)
-
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        """Get rollout worker actor class for colocated and standalone mode."""
-        worker_dict_cls = RayClassWithInitArgs(
-            cls=_rollout_worker_actor_cls,
-            config=self.config,
-            model_config=self.model_config,
-            device_mesh=None,
-        )
-        return worker_dict_cls
 
     async def launch_servers(self):
         """Launch http server in each node."""
@@ -496,6 +517,7 @@ class SGLangReplica(RolloutReplica):
                 ),
                 runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
                 name=name,
+                max_concurrency=self.max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
@@ -510,7 +532,9 @@ class SGLangReplica(RolloutReplica):
             self.servers.append(server)
 
         # launch http server in each node
-        master_address, master_port = await self.servers[0].get_master_address.remote()
+        master_address, master_port = None, None
+        if self.nnodes > 1:
+            master_address, master_port = await self.servers[0].get_master_address.remote()
         await asyncio.gather(
             *[
                 server.launch_server.remote(master_address=master_address, master_port=master_port)
