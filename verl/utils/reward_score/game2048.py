@@ -25,9 +25,7 @@ Game logic ported from the Unsloth reinforcement-fine-tuning notebook.
 
 import ast
 import re
-import signal
 import sys
-import types
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -265,28 +263,23 @@ class _TimeoutError(Exception):
     pass
 
 
-def _timeout_handler(signum, frame):
-    raise _TimeoutError("Strategy timed out")
-
-
 def execute_strategy_with_timeout(strategy: Callable, game: GameBoard, timeout_seconds: int = 5):
-    """Run strategy(board) in a loop until game ends or timeout."""
-    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(timeout_seconds)
-    try:
-        steps = 0
-        while game.state() == "ongoing":
-            action = strategy(list(game.board()))
-            steps += 1
-            if not isinstance(action, str):
-                return steps, "failed"
-            game.do_action(action)
-        return steps, game.state()
-    except _TimeoutError:
-        raise
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+    """Run strategy(board) in a loop until game ends or timeout.
+    Uses a time-based check so it works safely inside Ray worker threads
+    (signal.SIGALRM only works in the main thread).
+    """
+    import time
+    deadline = time.time() + timeout_seconds
+    steps = 0
+    while game.state() == "ongoing":
+        if time.time() > deadline:
+            raise _TimeoutError("Strategy timed out")
+        action = strategy(list(game.board()))
+        steps += 1
+        if not isinstance(action, str):
+            return steps, "failed"
+        game.do_action(action)
+    return steps, game.state()
 
 
 # ---------------------------------------------------------------------------

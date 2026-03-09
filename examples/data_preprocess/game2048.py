@@ -33,17 +33,17 @@ import datasets
 
 DATA_SOURCE = "game2048"
 
-PROMPT = """Create a new short 2048 strategy using only native Python code.
-You are given a list of lists of numbers representing the current board state.
-Output one action for "W" (up), "A" (left), "S" (down), "D" (right) as the optimal next step.
+PROMPT = """
+Create a new short 2048 strategy using only native Python code.
+You are given a list of list of numbers for the current board state.
+Output one action for "W", "A", "S", "D" on what is the optimal next step.
 Output your new short function in backticks using the format below:
 ```python
 def strategy(board):
-    return "W"  # Example
+    return "W" # Example
 ```
-All helper functions must be defined inside `strategy`. Only output the function `strategy`. \
-Do not import any third-party libraries.""".strip()
-
+All helper functions should be inside def strategy. Only output the short function `strategy`.
+""".strip()
 
 def make_row(idx: int, split: str) -> dict:
     return {
