@@ -531,8 +531,10 @@ class vLLMHttpServer:
         else:
             # Default to a calculation that considers configured lengths
             if self.config.enable_rollout_routing_replay:
-                # When routing replay is enabled, we strictly use the configured response length
-                max_tokens = self.config.response_length
+                # When routing replay is enabled, we apply a dual-constraint on max_tokens:
+                # 1. response_length: Ensures the generated length fits the fixed-size tensor padding logic.
+                # 2. remaining_budget: Prevents total sequence length from exceeding the global limit (OOM).
+                max_tokens = min(self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids))
             else:
                 # Otherwise, use a dynamic calculation based on prompt length
                 max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
