@@ -166,4 +166,4 @@ jobs:
       - name: Running the E2E test with one_step_off_policy algorithm (Megatron)
         run: |
           ray stop --force
-          bash tests/special_e2e/run_one_step_off_policy.sh
+          bash tests/special_npu/run_one_step_off_policy.sh
