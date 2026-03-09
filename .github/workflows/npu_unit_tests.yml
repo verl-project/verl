@@ -61,6 +61,13 @@ on:
       # Ignore CPU tests
       - "!tests/*_on_cpu.py"
 
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
+
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -73,22 +80,29 @@ permissions:
 jobs:
   npu_unit_tests:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2-8
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
-      options: >-
-        --shm-size 16g
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      #options: >-
+      #  --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
     steps:
+      - name: Debug - Keep Alive on Failure
+        if: failure()
+        run: |
+          echo "Job failed! Sleeping for 300 seconds to allow debugging..."
+          sleep 300
+        shell: bash
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
       - name: Check initial pip list from image
         run: |
+          pip install uv
           pip list
       - name: Checkout volcengine/verl repo
         uses: actions/checkout@v4
@@ -97,9 +111,9 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
-          pip install --no-deps -e .[test]
-          pip install mlflow pytest-asyncio
+          uv pip install -r requirements-npu.txt
+          uv pip install --no-deps -e .[test]
+          uv pip install mlflow pytest-asyncio
       - name: Check final pip list
         run: |
           pip list
