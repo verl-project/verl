@@ -197,7 +197,14 @@ async def test_server_adapter(init_config):
 
     # 2. create standalone rollout with AgentLoopManager
     agent_loop_manager = await AgentLoopManager.create(config=init_config)
-    server_handles = [server._server_handle for server in agent_loop_manager.rollout_replicas]
+    servers = list(
+        zip(
+            agent_loop_manager.server_addresses,
+            [server._server_handle for server in agent_loop_manager.rollout_replicas],
+            strict=True,
+        )
+    )
+    load_balancer_handle = agent_loop_manager.global_load_balancer
 
     # 3. create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(
@@ -212,7 +219,9 @@ async def test_server_adapter(init_config):
         [{"role": "user", "content": "Please write an article about the geography of America, at least 1000 words."}],
     ] * n
 
-    server_manager = AsyncLLMServerManager(config=init_config, server_handles=server_handles)
+    server_manager = AsyncLLMServerManager(
+        config=init_config, servers=servers, load_balancer_handle=load_balancer_handle
+    )
 
     # 4. test update_weights with global_steps=None
     await _run_update_weights_with_global_steps_none(
@@ -233,7 +242,9 @@ async def test_server_adapter(init_config):
     )
 
     # 6. test FullyAsyncLLMServerManager with partial rollout resume
-    server_manager = FullyAsyncLLMServerManager(config=init_config, server_handles=server_handles)
+    server_manager = FullyAsyncLLMServerManager(
+        config=init_config, servers=servers, load_balancer_handle=load_balancer_handle
+    )
     await _run_server_manager_with_resume(
         initial_steps=4,
         train_steps=3,

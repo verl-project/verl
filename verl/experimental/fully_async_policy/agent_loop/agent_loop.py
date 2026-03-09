@@ -150,15 +150,18 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
             - Element 1 (list[float]): Log probabilities for the response token IDs.
             - Element 2 (bool): A flag or status indicating cancellation.
         """
-        server = self._choose_server(request_id)
-        output = await server.generate_for_partial.remote(
-            request_id=request_id,
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            image_data=image_data,
-            video_data=video_data,
-        )
-        return output
+        server_id, server = await self._acquire_server(request_id=request_id)
+        try:
+            output = await server.generate_for_partial.remote(
+                request_id=request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+            return output
+        finally:
+            self._release_server(server_id)
 
 
 @ray.remote
@@ -166,11 +169,21 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
     def __init__(
         self,
         config: DictConfig,
-        server_handles: list[ray.actor.ActorHandle],
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
-        super().__init__(config, server_handles, reward_loop_worker_handles)
+        self.server_manager = FullyAsyncLLMServerManager(
+            config,
+            servers,
+            load_balancer_handle=load_balancer_handle,
+        )
+        super().__init__(
+            config,
+            servers,
+            load_balancer_handle,
+            reward_loop_worker_handles,
+        )
         # A shared cancellation event for all agent loops running on this worker.
         self.cancellation_event = asyncio.Event()
 
@@ -235,7 +248,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         return outputs, is_cancel
 
     def _addition_process(self, output: DataProto):
-        """collect metirics"""
+        """collect metrics"""
         metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
         processing_times_list = [item["generate_sequences"] for item in metrics]
         tool_calls_times_list = [item["tool_calls"] for item in metrics]
@@ -253,7 +266,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
     ) -> AgentLoopOutput:
         # Completed, return directly
         if kwargs["output"] is not None and not kwargs["output"].extra_fields.get("is_cancel", False):
-            logger.info("In _partial_run_agent_loop, already completed, return derictly!")
+            logger.info("In _partial_run_agent_loop, already completed, return directly!")
             return kwargs["output"]
         try:
             with rollout_trace_attr(
