@@ -48,6 +48,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.max_num_seqs = 256
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.checkpoint_engine.backend = "nccl" if get_device_name() == "cuda" else "hccl"
+    config.actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes = 128
     config.actor_rollout_ref.rollout.nnodes = 1
     config.trainer.n_gpus_per_node = 4
     config.trainer.nnodes = 1

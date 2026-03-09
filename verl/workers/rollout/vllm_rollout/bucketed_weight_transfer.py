@@ -28,6 +28,7 @@ import zmq
 from torch.multiprocessing.reductions import reduce_tensor
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.tensor_utils import compute_weight_chunks
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -124,6 +125,39 @@ class BucketedWeightSender:
                 # transfer volume.
                 # weight = weight.to(dtype, non_blocking=True)
 
+                # Check if the weight needs to be sliced into chunks
+                # (e.g., large embedding layer that exceeds bucket_size)
+                if weight.nbytes > self.bucket_size:
+                    # Use shared utility to compute chunk info
+                    chunk_infos = compute_weight_chunks(name, weight, self.bucket_size)
+
+                    for info in chunk_infos:
+                        # Extract chunk along first dimension
+                        chunk = weight[info.start_idx : info.end_idx]
+                        chunk_size = chunk.nbytes
+
+                        # Fill bucket with chunk
+                        if offset + chunk_size > self.bucket_size:
+                            get_torch_device().synchronize()
+                            self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+                            self.socket.recv()
+                            bucket_meta = {}
+                            offset = 0
+
+                        bucket_meta[f"{name}_chunk_{info.chunk_idx}"] = {
+                            "name": name,
+                            "shape": chunk.shape,
+                            "dtype": chunk.dtype,
+                            "offset": offset,
+                            "chunk_idx": info.chunk_idx,
+                            "total_chunks": info.total_chunks,
+                        }
+                        self.buffer[offset : offset + chunk_size].copy_(
+                            chunk.view(-1).view(torch.uint8), non_blocking=True
+                        )
+                        offset += chunk_size
+
+                    continue
                 # fill the tensor bucket
                 if offset + weight.nbytes > self.bucket_size:
                     get_torch_device().synchronize()
@@ -132,11 +166,6 @@ class BucketedWeightSender:
                     bucket_meta = {}
                     offset = 0
 
-                # TODO: slice embedding layer weight into chunks
-                assert offset + weight.nbytes <= self.bucket_size, (
-                    f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-                    f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
-                )
                 bucket_meta[name] = {
                     "name": name,
                     "shape": weight.shape,
@@ -236,6 +265,9 @@ class BucketedWeightReceiver:
             self._init_socket()
             self._init_buffer()
 
+            # Buffer to collect chunks for weights that were sliced
+            pending_chunks = {}  # name -> {chunk_idx: tensor, ...}
+
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
@@ -251,13 +283,39 @@ class BucketedWeightReceiver:
                         tensor = tensor.clone()
                     else:
                         tensor = tensor.to(self.device)
-                    weights.append((name, tensor))
+
+                    # Check if this is a chunk of a sliced weight
+                    if "chunk_idx" in meta and "total_chunks" in meta:
+                        # This is a chunk, store it for later merging
+                        original_name = meta["name"]
+                        chunk_idx = meta["chunk_idx"]
+                        if original_name not in pending_chunks:
+                            pending_chunks[original_name] = {}
+                        pending_chunks[original_name][chunk_idx] = tensor
+
+                        # Check if we have all chunks for this weight
+                        if len(pending_chunks[original_name]) == meta["total_chunks"]:
+                            # Merge all chunks back into one tensor
+                            chunks_dict = pending_chunks[original_name]
+                            sorted_chunks = [chunks_dict[i] for i in range(meta["total_chunks"])]
+                            merged_tensor = torch.cat(sorted_chunks, dim=0)
+                            weights.append((original_name, merged_tensor))
+                            del pending_chunks[original_name]
+                    else:
+                        weights.append((name, tensor))
+
                 get_torch_device().synchronize()
                 self.socket.send(b"")
                 on_bucket_received(weights)
                 del weights, tensor
                 if metadata["is_last"]:
                     break
+            # Check if there are any remaining chunks that weren't processed
+            if pending_chunks:
+                raise RuntimeError(
+                    f"Received chunks for weights {list(pending_chunks.keys())} "
+                    f"but did not receive all chunks for them."
+                )
         finally:
             self._cleanup()
 
