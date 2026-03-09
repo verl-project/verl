@@ -140,6 +140,7 @@ class RobDataParallelSACActor(BaseSACActor):
 
         self._init_alpha()
         self._init_critic()
+        self._init_actor_ema()
     
     def _init_critic(self):
         """Initialize the critic optimizer."""
@@ -178,6 +179,40 @@ class RobDataParallelSACActor(BaseSACActor):
             self.alpha_optimizer = torch.optim.Adam([self.raw_alpha], lr=self.sac_config.get("alpha_lr", 3e-4))
             self.alpha_scheduler = torch.optim.lr_scheduler.ConstantLR(self.alpha_optimizer, factor=1.0)
 
+    def _init_actor_ema(self):
+        self.actor_ema_enabled = bool(self.config.get("actor_ema_enabled", True))
+        self.actor_ema_decay = float(self.config.get("actor_ema_decay", 0.995))
+        self.actor_ema_shadow: dict[str, torch.Tensor] = {}
+
+        if not self.actor_ema_enabled:
+            return
+
+        for name, param in self.actor_module.named_parameters():
+            if param.requires_grad:
+                self.actor_ema_shadow[name] = param.detach().clone().to(dtype=torch.float32)
+
+    @torch.no_grad()
+    def _update_actor_ema(self):
+        if not self.actor_ema_enabled:
+            return
+
+        one_minus_decay = 1.0 - self.actor_ema_decay
+        for name, param in self.actor_module.named_parameters():
+            if not param.requires_grad:
+                continue
+            shadow = self.actor_ema_shadow[name]
+            shadow.mul_(self.actor_ema_decay).add_(param.detach().to(dtype=torch.float32), alpha=one_minus_decay)
+
+    @torch.no_grad()
+    def _apply_actor_ema_to_actor_module(self):
+        if not self.actor_ema_enabled:
+            return
+
+        for name, param in self.actor_module.named_parameters():
+            if not param.requires_grad:
+                continue
+            param.copy_(self.actor_ema_shadow[name].to(device=param.device, dtype=param.dtype))
+
     def _get_alpha(self) -> torch.Tensor:
         if self.auto_entropy:
             if self.alpha_type == "exp":
@@ -191,7 +226,7 @@ class RobDataParallelSACActor(BaseSACActor):
 
     def _calculate_actor_loss(
         self,
-        log_probs: torch.Tensor,
+        log_probs: Optional[torch.Tensor],
         q_values: torch.Tensor,
         valids: torch.Tensor,
     ) -> torch.Tensor:
@@ -207,12 +242,15 @@ class RobDataParallelSACActor(BaseSACActor):
         """
 
         alpha = self._get_alpha()
-        loss = alpha * log_probs - q_values
+        if log_probs is None:
+            loss = -q_values
+        else:
+            loss = alpha * log_probs - q_values
         actor_loss = (loss * valids).sum() / (valids.sum().clamp_min(1.0))
 
         return actor_loss
 
-    def _calculate_alpha_loss(self, log_probs: torch.Tensor, valids: torch.Tensor) -> torch.Tensor:
+    def _calculate_alpha_loss(self, log_probs: Optional[torch.Tensor], valids: torch.Tensor) -> torch.Tensor:
         """Calculate alpha loss for automatic entropy tuning.
 
         Args:
@@ -222,6 +260,9 @@ class RobDataParallelSACActor(BaseSACActor):
         Returns:
             Tensor of shape (1,) representing the alpha loss.
         """
+
+        if log_probs is None:
+            return torch.tensor(0.0, device=valids.device)
 
         alpha_loss = -self._get_alpha() * (log_probs.detach() + self.target_entropy)
         alpha_loss = (alpha_loss * valids).sum() / (valids.sum().clamp_min(1.0))
@@ -233,7 +274,7 @@ class RobDataParallelSACActor(BaseSACActor):
         q_target: torch.Tensor,
         rewards: torch.Tensor,
         dones: torch.Tensor,
-        next_log_prob: torch.Tensor,
+        next_log_prob: Optional[torch.Tensor],
         valids: torch.Tensor,
     ) -> torch.Tensor:
         """Calculate critic loss using the SAC loss function.
@@ -254,7 +295,10 @@ class RobDataParallelSACActor(BaseSACActor):
         alpha = self._get_alpha()
 
         with torch.no_grad():
-            y = rewards + gamma * (1.0 - dones) * (q_target - alpha * next_log_prob)
+            if next_log_prob is None:
+                y = rewards + gamma * (1.0 - dones) * q_target
+            else:
+                y = rewards + gamma * (1.0 - dones) * (q_target - alpha * next_log_prob)
 
         y = y.unsqueeze(1).expand_as(q_predict)  # (B, critic_num)
         valid_mask = valids.unsqueeze(1)
@@ -263,17 +307,22 @@ class RobDataParallelSACActor(BaseSACActor):
         critic_loss = per_critic.sum()
         return critic_loss
 
-    def _forward_critic(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _forward_critic(self, micro_batch: TensorDict, resample=True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         s0 = get_dict_from_prefix(micro_batch, "s0.")
         s1 = get_dict_from_prefix(micro_batch, "s1.")
         a0 = get_dict_from_prefix(micro_batch, "a0.")
+        a1 = get_dict_from_prefix(micro_batch, "a1.")
 
         with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             with torch.no_grad():
                 s = merge_nested_dicts_or_tuples(s0, s1)
                 state_features = self.actor_module.sac_forward_state_features(s)
                 s0_state_features, s1_state_features = split_nested_dicts_or_tuples(state_features, 2)
-                a1_actions, log_probs_1 = self.actor_module.sac_forward_actor(s1_state_features)
+                if resample:
+                    a1_actions, log_probs_1 = self.actor_module.sac_forward_actor(s1_state_features)
+                    a1 = {"full_action": a1_actions}
+                else:
+                    log_probs_1 = None
 
             q_values_0 = self.actor_module.sac_forward_critic(
                 a0,
@@ -283,7 +332,7 @@ class RobDataParallelSACActor(BaseSACActor):
                 requires_grad=True,
             )
             q_values_1 = self.actor_module.sac_forward_critic(
-                {"full_action": a1_actions},
+                a1,
                 s1_state_features,
                 use_target_network=True,
                 method="min",
@@ -300,7 +349,7 @@ class RobDataParallelSACActor(BaseSACActor):
             )
         return critic_loss, q_values_0, q_values_1
 
-    def _forward_actor(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _forward_actor(self, micro_batch: TensorDict) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         micro_batch = micro_batch.to(get_device_id())
         s0 = get_dict_from_prefix(micro_batch, "s0.")
 
@@ -385,15 +434,18 @@ class RobDataParallelSACActor(BaseSACActor):
                 raw_actor_loss, log_probs, q_values = self._forward_actor(micro_batch)
                 (raw_actor_loss / grad_accum_steps).backward()
                 actor_loss_list.append(raw_actor_loss.detach().item())
-                actor_logprobs_list.append(log_probs.detach())
+                if log_probs is not None:
+                    actor_logprobs_list.append(log_probs.detach())
                 actor_qvalues_list.append(q_values.detach())
             actor_grad_norm = self._optimizer_step()
+            self._update_actor_ema()
+            self._apply_actor_ema_to_actor_module()
 
             # Training alpha
             # NOTE: We reuse the log-probabilities computed during the actor forward pass
             # to update the entropy temperature (alpha), instead of re-forwarding
             # the actor after the policy update (saving compute).
-            if self.auto_entropy:
+            if self.auto_entropy and actor_logprobs_list:
                 self.alpha_optimizer.zero_grad()
                 for micro_batch, log_probs in zip(micro_batches, actor_logprobs_list, strict=False):
                     micro_batch = micro_batch.to(get_device_id())
@@ -404,6 +456,8 @@ class RobDataParallelSACActor(BaseSACActor):
                 alpha_grad_norm = torch.nn.utils.clip_grad_norm_(self.raw_alpha, max_norm=self.config.grad_clip)
                 self.alpha_optimizer.step()
                 self.alpha_scheduler.step()
+
+            self._apply_actor_ema_to_actor_module()
 
         # Update target networks
         self.actor_module.sac_update_target_network(self.sac_config.tau)
@@ -441,6 +495,8 @@ class RobDataParallelSACActor(BaseSACActor):
             "sac/replay_task_count": replay_sample_info["task_count"],
 
             "sac/alpha": self._get_alpha().detach().item(),
+            "sac/actor_ema_enabled": float(self.actor_ema_enabled),
+            "sac/actor_ema_decay": self.actor_ema_decay,
             "sac/replay_pool_size": len(self.replay_pool),
 
             "critic/loss": sum(critic_loss_list) / len(critic_loss_list) if critic_loss_list else 0.0,
