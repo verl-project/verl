@@ -169,13 +169,12 @@ class TRTLLMHttpServer:
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,
         }
-        
+
+        self_defined_extension = {
+            "ray_worker_extension_cls": "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension",
+        }
         if self.is_vlm_model:
-            llm_kwargs.update(
-                {
-                    "ray_worker_extension_cls": "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension",
-                }
-            )
+            llm_kwargs.update(self_defined_extension)
         else:
             llm_kwargs.update(
                 {
