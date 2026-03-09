@@ -293,7 +293,6 @@ class ServerAdapter(BaseRollout):
         self.is_leader_rank = None
         self.replica_rank = None
         self.is_dp_rank = None
-        self._supports_partial_loading = None
 
         # hybrid mode
         if self.device_mesh is not None:
@@ -324,21 +323,6 @@ class ServerAdapter(BaseRollout):
         assert self.is_leader_rank is not None, "is_leader_rank is not set"
 
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
-
-    async def get_supports_partial_loading(self) -> bool:
-        """Query and cache whether the model supports partial weight loading."""
-        if self._supports_partial_loading is not None:
-            return self._supports_partial_loading
-
-        await self._init_server_adapter()
-        try:
-            self._supports_partial_loading = await self.server_actor.supports_partial_loading.remote()
-        except Exception as e:
-            logger.warning(f"Failed to query partial loading support: {e}, defaulting to False")
-            self._supports_partial_loading = False
-
-        logger.info(f"Model supports partial loading: {self._supports_partial_loading}")
-        return self._supports_partial_loading
 
     async def _init_server_adapter(self):
         if self._adapter is not None:
@@ -435,7 +419,7 @@ class ServerAdapter(BaseRollout):
             )
 
         try:
-            device_uuid = get_device_uuid(int(self.gpu_id))
+            device_uuid = get_device_uuid(self.gpu_id)
         except Exception as e:
             logger.error(f"Failed to get device UUID in update_weights(): {e}")
             device_uuid = None
@@ -453,20 +437,15 @@ class ServerAdapter(BaseRollout):
             cur_available_bytes = total_available_bytes
             cur_handles = []
 
-        # Query if model supports partial loading
-        supports_partial_loading = await self.get_supports_partial_loading()
-
         for name, param in weights:
-            if supports_partial_loading:
-                size_in_bytes = param.element_size() * param.numel()
-                if size_in_bytes > cur_available_bytes:
-                    await flush()
+            size_in_bytes = param.element_size() * param.numel()
+            if size_in_bytes > cur_available_bytes:
+                await flush()
 
-                assert cur_available_bytes >= size_in_bytes, (
-                    f"cur_available_bytes: {cur_available_bytes:,} size_in_bytes: {size_in_bytes:,} name: {name}"
-                )
-                cur_available_bytes -= size_in_bytes
-
+            assert cur_available_bytes >= size_in_bytes, (
+                f"cur_available_bytes: {cur_available_bytes:,} size_in_bytes: {size_in_bytes:,} name: {name}"
+            )
+            cur_available_bytes -= size_in_bytes
             handle = reduce_tensor(param.detach())
             cur_handles.append((name, handle))
 

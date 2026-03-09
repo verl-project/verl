@@ -68,9 +68,8 @@ on:
       # FSDP
       - "!verl/workers/**/*dp_*.py"
       # Entrypoints
-      - "verl/workers/rollout/trtllm_rollout/**"
-      - "tests/workers/rollout/rollout_trtllm/**"
-      - ".github/workflows/e2e_ppo_grpo_trainer_trtllm.yml"
+      - "verl/workers/rollout/trtllm_rollout/*"
+      - ".github/workflows/e2e_ppo_grpo_trainer_trtllm"
       - "examples/data_preprocess/gsm8k.py"
       - "examples/data_preprocess/geo3k.py"
       - "examples/data_preprocess/dapo_multiturn_w_tool.py"
@@ -134,11 +133,9 @@ jobs:
       - name: Run TRTLLM unit tests
         run: |
           export TRTLLM_TEST_MODEL_PATH_ROOT="${HOME}/models"
-          ray stop --force
           pytest -v -s \
             tests/workers/rollout/rollout_trtllm/test_adapter.py \
-            tests/workers/rollout/rollout_trtllm/test_async_server.py \
-            tests/workers/rollout/rollout_trtllm/test_trtllm_rollout_utils.py
+            tests/workers/rollout/rollout_trtllm/test_async_server.py
 
   e2e_grpo_trainer_fsdp-qwen2:
     needs: setup
@@ -210,16 +207,17 @@ jobs:
       - name: clean up
         run: |
           rm -rf checkpoints
-  e2e_grpo_trainer_fsdp-vlm:
+
+  e2e_dapo_trainer_megatron_fp8_rollout-qwen3:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 30 # Increase this timeout value as needed
+    timeout-minutes: 60
     env:
       HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -228,22 +226,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-      - name: Prepare GEO3K dataset
-        run: |
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/geo3k --local_save_dir ${PWD}/data/geo3k
-      - name: Running GEO3K E2E training tests with FSDP on 8 L20 GPUs (VLM)
-        run: |
-          ray stop --force
-          DATADIR=${HOME}/data \
-            bash examples/grpo_trainer/run_qwen2_5_vl_3b_trtllm.sh 2 \
-            trainer.total_training_steps=1 \
-            data.train_files="['${PWD}/data/geo3k/train.parquet']" \
-            data.val_files="['${PWD}/data/geo3k/test.parquet']" \
-            trainer.logger='["console"]' \
-            actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct"
-      - name: clean up
-        run: |
-          rm -rf checkpoints
       - name: Prepare DAPO-Math-17k and AIME-2024 datasets (data_preprocess)
         run: |
           python3 examples/data_preprocess/dapo_multiturn_w_tool.py --local_save_dir ${PWD}/data/dapo-math-17k
