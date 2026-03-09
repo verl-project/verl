@@ -166,11 +166,6 @@ class BucketedWeightSender:
                     bucket_meta = {}
                     offset = 0
 
-                # TODO: slice embedding layer weight into chunks
-                assert offset + weight.nbytes <= self.bucket_size, (
-                    f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-                    f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
-                )
                 bucket_meta[name] = {
                     "name": name,
                     "shape": weight.shape,
