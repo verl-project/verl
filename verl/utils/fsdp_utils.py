@@ -810,6 +810,86 @@ def fsdp_merge_unmerge(module: nn.Module, do_merge: bool):
                     _merge_or_unmerge_lora_(submodule, merge=do_merge)
 
 
+def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
+    """Merge LoRA into base weights and extract full state dict with HF key names.
+
+    For rollout backends (e.g. SGLang) whose load_weights() expects standard
+    HuggingFace parameter names and handles QKV/gate_up fusion internally.
+    Sending LoRA delta keys to these backends fails with KeyError.
+
+    This function:
+    1. Merges LoRA adapters into base weights (layer-by-layer for FSDP2)
+    2. Extracts the full merged state dict with clean HF key names
+    3. Unmerges LoRA adapters to restore training state
+
+    For FSDP2, extraction is done layer-by-layer to avoid OOM from
+    all-gathering the entire model at once.
+
+    Args:
+        module: The FSDP-wrapped PeftModel to extract merged weights from.
+
+    Returns:
+        OrderedDict mapping HF parameter names to CPU tensors.
+    """
+    ver = fsdp_version(module)
+    assert ver in [1, 2], f"collect_merged_lora_params requires FSDP module, got version {ver}"
+
+    merged_params = OrderedDict()
+    peft_model = getattr(module, "_fsdp_wrapped_module", module)
+
+    # Merge LoRA into base weights
+    fsdp_merge_unmerge(module, do_merge=True)
+    try:
+        if ver == 1:
+            with FSDP.summon_full_params(module, writeback=False):
+                model = peft_model.base_model.model
+                for name, param in model.state_dict().items():
+                    if any(x in name for x in ["_flat_param", "lora_"]):
+                        continue
+                    name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
+                    merged_params[name] = (
+                        param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+                    )
+            get_torch_device().empty_cache()
+        else:
+            # FSDP2: extract layer-by-layer to limit peak memory.
+            # Only process leaf FSDPModules (no FSDPModule children) to avoid
+            # extracting the same parameters multiple times from nested wrappers.
+            fsdp_submodules = [
+                (name, submodule)
+                for name, submodule in module.named_modules()
+                if isinstance(submodule, FSDPModule) and name != ""
+            ]
+            fsdp_names = {name for name, _ in fsdp_submodules}
+            for name, submodule in fsdp_submodules:
+                # Skip non-leaf FSDPModules: if any other FSDPModule's name
+                # starts with this name + ".", this is a parent, not a leaf.
+                is_leaf = not any(other.startswith(name + ".") for other in fsdp_names if other != name)
+                if not is_leaf:
+                    continue
+                with FSDP.summon_full_params(submodule, writeback=False):
+                    for pname, param in submodule.state_dict().items():
+                        if any(x in pname for x in ["_flat_param", "lora_"]):
+                            continue
+                        val = (
+                            param.full_tensor().detach().cpu()
+                            if hasattr(param, "full_tensor")
+                            else param.detach().cpu()
+                        )
+                        full_key = f"{name}.{pname}"
+                        # Clean to HuggingFace format
+                        full_key = full_key.replace("_fsdp_wrapped_module.", "")
+                        full_key = full_key.replace("base_model.model.", "")
+                        full_key = full_key.replace(".base_layer", "")
+                        merged_params[full_key] = val
+                get_torch_device().empty_cache()
+    finally:
+        # Always unmerge to restore training state
+        fsdp_merge_unmerge(module, do_merge=False)
+
+    return merged_params
+
+
 def backup_base_model_weights(module):
     """Backup base model weights to CPU with LoRA temporarily disabled.
 

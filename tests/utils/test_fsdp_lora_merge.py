@@ -28,6 +28,7 @@ from verl.utils.device import get_device_name, get_nccl_backend, get_torch_devic
 from verl.utils.fsdp_utils import (
     MixedPrecisionPolicy,
     apply_fsdp2,
+    collect_merged_lora_params,
     get_fsdp_wrap_policy,
     merged_lora_context,
 )
@@ -216,6 +217,139 @@ def test_merged_lora_context_gptoss(world_size, strategy, backup_adapters, tmp_p
     mp.spawn(
         fn=_test_merged_lora_context_worker,
         args=(world_size, rendezvous_file, strategy, model_config, lora_config_dict, backup_adapters),
+        nprocs=world_size,
+        join=True,
+    )
+
+
+def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, strategy):
+    """Worker function for testing collect_merged_lora_params."""
+    get_torch_device().set_device(rank)
+    torch.distributed.init_process_group(
+        backend=get_nccl_backend(),
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    device_mesh = init_device_mesh(get_device_name(), mesh_shape=(world_size,), mesh_dim_names=("dp",))
+
+    model_config = Qwen2Config(num_hidden_layers=2, num_attention_heads=2, hidden_size=128)
+    with torch.device(get_device_name()):
+        model = AutoModelForCausalLM.from_config(
+            config=model_config, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
+        )
+        model = model.to(device=get_device_name())
+
+    # Get base model keys before adding LoRA
+    base_keys = set(model.state_dict().keys())
+
+    lora_config = LoraConfig(
+        r=8, lora_alpha=16, target_modules=["q_proj", "v_proj"], lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"
+    )
+    model = get_peft_model(model, lora_config)
+
+    # Initialize LoRA weights to non-zero values
+    from peft.tuners.lora import LoraLayer
+
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            if isinstance(module, LoraLayer):
+                for adapter_name in module.lora_A.keys():
+                    module.lora_A[adapter_name].weight.data.uniform_(0.5, 1.5)
+                    module.lora_B[adapter_name].weight.data.uniform_(1.5, 2.5)
+
+    # Save adapter weights to verify they're restored after extraction
+    from peft.utils.save_and_load import get_peft_model_state_dict
+
+    original_adapter_weights = get_peft_model_state_dict(model)
+
+    # Wrap with FSDP
+    if strategy == "fsdp":
+        mixed_precision = MixedPrecision(
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32
+        )
+        model = FSDP(
+            model,
+            use_orig_params=True,
+            device_id=get_torch_device().current_device(),
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            mixed_precision=mixed_precision,
+            device_mesh=device_mesh,
+            auto_wrap_policy=get_fsdp_wrap_policy(module=model, is_lora=True),
+        )
+    else:
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32, cast_forward_inputs=True
+        )
+        fsdp_kwargs = {"mesh": device_mesh, "mp_policy": mp_policy}
+        apply_fsdp2(model, fsdp_kwargs, {})
+
+    # Call collect_merged_lora_params
+    merged_params = collect_merged_lora_params(model)
+
+    # 1. All returned tensors should be on CPU
+    for key, val in merged_params.items():
+        assert val.is_cpu, f"Expected CPU tensor for {key}, got {val.device}"
+
+    # 2. No LoRA or FSDP artifact keys
+    for key in merged_params.keys():
+        assert "lora_" not in key, f"LoRA key should be filtered: {key}"
+        assert "_flat_param" not in key, f"FSDP flat param should be filtered: {key}"
+        assert "_fsdp_wrapped_module" not in key, f"FSDP wrapper prefix should be stripped: {key}"
+        assert ".base_layer" not in key, f"peft base_layer should be stripped: {key}"
+
+    # 3. Keys should match base model format (model.layers.X.self_attn.q_proj.weight etc.)
+    for base_key in base_keys:
+        assert base_key in merged_params, f"Base model key {base_key} missing from merged params"
+
+    # 4. Merged params should have the same count as base model (no extras)
+    assert len(merged_params) == len(base_keys), (
+        f"Expected {len(base_keys)} params, got {len(merged_params)}. "
+        f"Extra keys: {set(merged_params.keys()) - base_keys}"
+    )
+
+    # 5. LoRA should be unmerged after extraction (training state restored)
+    lora_layers = [m for m in model.modules() if isinstance(m, LoraLayer)]
+    for layer in lora_layers:
+        assert not getattr(layer, "merged", False), "LoRA should be unmerged after collect_merged_lora_params"
+
+    # 6. Adapter weights should be preserved
+    restored_adapter_weights = get_peft_model_state_dict(model)
+    for key in original_adapter_weights.keys():
+        assert key in restored_adapter_weights, f"Adapter key {key} missing after extraction"
+        torch.testing.assert_close(
+            original_adapter_weights[key].cpu(),
+            restored_adapter_weights[key].cpu(),
+            rtol=1e-5,
+            atol=1e-6,
+            msg=f"Adapter weight {key} changed after extraction",
+        )
+
+    # 7. Calling twice should produce identical results (idempotent)
+    merged_params_2 = collect_merged_lora_params(model)
+    assert set(merged_params.keys()) == set(merged_params_2.keys()), "Keys should be identical across calls"
+    for key in merged_params.keys():
+        torch.testing.assert_close(
+            merged_params[key], merged_params_2[key], rtol=1e-5, atol=1e-6, msg=f"Values differ for {key}"
+        )
+
+    if rank == 0:
+        print(f"collect_merged_lora_params test with {strategy} passed on {world_size} GPUs!")
+
+    torch.distributed.barrier()
+    torch.distributed.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", (2,))
+@pytest.mark.parametrize("strategy", ("fsdp", "fsdp2"))
+def test_collect_merged_lora_params(world_size, strategy, tmp_path):
+    """Test collect_merged_lora_params extracts correct HF-format merged weights."""
+    rendezvous_file = str(tmp_path / f"rdzv_file_merged_params_{strategy}")
+    os.makedirs(os.path.dirname(rendezvous_file), exist_ok=True)
+
+    mp.spawn(
+        fn=_test_collect_merged_lora_params_worker,
+        args=(world_size, rendezvous_file, strategy),
         nprocs=world_size,
         join=True,
     )

@@ -63,6 +63,7 @@ from verl.utils.fsdp_utils import (
     MixedPrecisionPolicy,
     apply_fsdp2,
     collect_lora_params,
+    collect_merged_lora_params,
     fsdp2_load_full_state_dict,
     fsdp_version,
     get_fsdp_wrap_policy,
@@ -752,13 +753,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         if hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
-            params = collect_lora_params(
-                module=self.actor_module_fsdp,
-                layered_summon=self.config.rollout.get("layered_summon", False),
-                base_sync_done=self.base_sync_done,
-            )
-            if not self.base_sync_done:
-                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            if self.config.rollout.get("merge_lora_before_sync", False):
+                # Merge LoRA into base weights and extract with HF key names.
+                # Required for backends (e.g. SGLang) whose load_weights() expects
+                # standard HF param names and can't handle LoRA delta keys.
+                params = collect_merged_lora_params(module=self.actor_module_fsdp)
+                # Always full weights, so mark base as synced
+                self.base_sync_done = True
+            else:
+                params = collect_lora_params(
+                    module=self.actor_module_fsdp,
+                    layered_summon=self.config.rollout.get("layered_summon", False),
+                    base_sync_done=self.base_sync_done,
+                )
+                if not self.base_sync_done:
+                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
             params = self.actor_module_fsdp.state_dict()
 
@@ -771,10 +780,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # separately collect and update LoRA weights and base model weights through their respective interfaces.
         # Here: params contains LoRA weights, base_model_params contains base model weights.
         # Only needed if the rollout engine actually sleeps/frees weights (free_cache_engine=True).
+        # Skip when merge_lora_before_sync=True: params already contains full merged weights.
         if (
             peft_config is not None
             and getattr(self.rollout, "sleep_level", None) == 2
             and self.config.rollout.free_cache_engine
+            and not self.config.rollout.get("merge_lora_before_sync", False)
         ):
             base_model_params = collect_lora_params(
                 module=self.actor_module_fsdp,

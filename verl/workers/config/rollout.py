@@ -225,6 +225,11 @@ class RolloutConfig(BaseConfig):
 
     layered_summon: bool = False
 
+    # Merge LoRA into base weights before syncing to rollout engine.
+    # Required for backends (e.g. SGLang) whose load_weights() expects standard
+    # HF parameter names and cannot handle LoRA delta keys directly.
+    merge_lora_before_sync: bool = False
+
     layer_name_map: dict = field(default_factory=dict)
 
     sglang_engine_mode: str = "local"
