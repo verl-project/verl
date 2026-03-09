@@ -106,6 +106,92 @@ class TestTRTLLMReplica:
             assert len(bundle_indices) == 1
             assert bundle_indices[0] == [2, 3]
 
+    def test_placement_group_multi_node_ray_resource_pool(self):
+        """
+        Scenario: RayResourcePool, 2 nodes, 8 GPUs each, TP=16, replica_rank=0
+        Single replica spans 2 placement groups (one per node).
+        Expected: Replica 0 gets bundles [0..7] from PG0 and [0..7] from PG1.
+        """
+        with patch("verl.workers.rollout.trtllm_rollout.trtllm_async_server.ray"):
+            mock_config = MagicMock()
+            mock_config.tensor_model_parallel_size = 16
+            mock_config.data_parallel_size = 1
+            mock_config.pipeline_model_parallel_size = 1
+
+            replica = TRTLLMReplica(
+                replica_rank=0,
+                config=mock_config,
+                model_config=MagicMock(),
+                gpus_per_node=8,
+            )
+
+            mock_pg0 = MagicMock()
+            mock_pg0.bundle_count = 8
+            mock_pg1 = MagicMock()
+            mock_pg1.bundle_count = 8
+
+            resource_pool = RayResourcePool(
+                process_on_nodes=[8, 8],
+                use_gpu=True,
+                max_colocate_count=1,
+                name_prefix="test_rollout",
+            )
+            resource_pool.pgs = [mock_pg0, mock_pg1]
+
+            replica.resource_pool = resource_pool
+            replica.world_size = 16
+
+            pgs, bundle_indices = replica.get_pgs_and_bundle_indices()
+
+            assert len(pgs) == 2
+            assert pgs[0] == mock_pg0
+            assert pgs[1] == mock_pg1
+            assert len(bundle_indices) == 2
+            assert bundle_indices[0] == list(range(8))
+            assert bundle_indices[1] == list(range(8))
+
+    def test_placement_group_multi_node_multi_replica(self):
+        """
+        Scenario: RayResourcePool, 2 nodes, 8 GPUs each, TP=8, 2 replicas.
+        Each replica occupies one full node (one PG each).
+        Expected: Replica 0 gets PG0 [0..7], Replica 1 gets PG1 [0..7].
+        """
+        with patch("verl.workers.rollout.trtllm_rollout.trtllm_async_server.ray"):
+            mock_config = MagicMock()
+            mock_config.tensor_model_parallel_size = 8
+            mock_config.data_parallel_size = 1
+            mock_config.pipeline_model_parallel_size = 1
+
+            mock_pg0 = MagicMock()
+            mock_pg0.bundle_count = 8
+            mock_pg1 = MagicMock()
+            mock_pg1.bundle_count = 8
+
+            resource_pool = RayResourcePool(
+                process_on_nodes=[8, 8],
+                use_gpu=True,
+                max_colocate_count=1,
+                name_prefix="test_rollout",
+            )
+            resource_pool.pgs = [mock_pg0, mock_pg1]
+
+            for replica_rank in range(2):
+                replica = TRTLLMReplica(
+                    replica_rank=replica_rank,
+                    config=mock_config,
+                    model_config=MagicMock(),
+                    gpus_per_node=8,
+                )
+                replica.resource_pool = resource_pool
+                replica.world_size = 8
+
+                pgs, bundle_indices = replica.get_pgs_and_bundle_indices()
+
+                assert len(pgs) == 1
+                assert pgs[0] == (mock_pg0 if replica_rank == 0 else mock_pg1)
+                assert len(bundle_indices) == 1
+                assert bundle_indices[0] == list(range(8))
+
 
 class TestTRTLLMHttpServer:
     @staticmethod

@@ -38,7 +38,7 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(logging.DEBUG)
 
 # Default configuration constants
 DEFAULT_TIMEOUT = 60.0
@@ -323,17 +323,23 @@ class ServerAdapter(BaseRollout):
         assert self.is_leader_rank is not None, "is_leader_rank is not set"
 
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
+        logger.debug(
+            f"ServerAdapter.__init__: replica_rank={self.replica_rank}, is_leader_rank={self.is_leader_rank}, "
+            f"gpu_id={self.gpu_id}, node_ip={self.node_ip}, "
+            f"hybrid_device_mesh={'set' if self.hybrid_device_mesh is not None else 'None'}"
+        )
 
     async def _init_server_adapter(self):
         if self._adapter is not None:
             return
 
         # Lazy init http server adapter because http server is launched after hybrid engine.
+        logger.debug(f"_init_server_adapter: looking up ray actor 'trtllm_server_{self.replica_rank}'")
         self.server_actor = ray.get_actor(f"trtllm_server_{self.replica_rank}")
         server_address, server_port = await self.server_actor.get_server_address.remote()
         assert server_address == self.node_ip, f"server address: {server_address} != node_ip: {self.node_ip}"
 
-        logger.debug(f"replica_rank={self.replica_rank}, server address: {server_address}, port: {server_port}")
+        logger.debug(f"_init_server_adapter: replica_rank={self.replica_rank}, server={server_address}:{server_port}")
         host = f"[{server_address}]" if is_valid_ipv6_address(server_address) else server_address
         self._adapter = AsyncTRTLLMHttpAdapter(
             host=host,
@@ -350,10 +356,13 @@ class ServerAdapter(BaseRollout):
         Args:
             tag: weights or kv_cache.
         """
+        logger.debug(f"resume: tags={tags}, is_leader={self.is_leader_rank}, free_cache={self.config.free_cache_engine}")
         # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
         # have completed actor offloading to CPU, preventing OOM issue.
         if "kv_cache" in tags and self.config.free_cache_engine:
+            logger.debug("resume: waiting on barrier for kv_cache sync")
             await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+            logger.debug("resume: barrier done")
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
@@ -362,19 +371,25 @@ class ServerAdapter(BaseRollout):
             else:
                 raise ValueError(f"Invalid tag: {tags}")
             await self._init_server_adapter()
+            logger.debug(f"resume: resuming memory occupation with tags={tags}")
             await self._adapter.resume_memory_occupation(tags=tags)
+            logger.debug("resume: done")
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
+        logger.debug(f"release: is_leader={self.is_leader_rank}, free_cache={self.config.free_cache_engine}")
         if self.is_leader_rank and self.config.free_cache_engine:
             await self._init_server_adapter()
             tags = self._WEIGHTS_TAGS + ["kv_cache"]
+            logger.debug(f"release: releasing memory occupation with tags={tags}")
             await self._adapter.release_memory_occupation(tags=tags)
+            logger.debug("release: done")
 
     async def update_weights_from_ipc_handles(self, device_handles):
         assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
 
         """Update weights from IPC handles."""
+        logger.debug(f"update_weights_from_ipc_handles: gathering handles, is_leader={self.is_leader_rank}")
         if self.is_leader_rank:
             gathered_handles = [None for _ in range(self.hybrid_device_mesh["exclude_dp"].size())]
         else:
@@ -390,9 +405,12 @@ class ServerAdapter(BaseRollout):
 
         if self.is_leader_rank:
             all_handles = {k: v for d in gathered_handles for k, v in d.items()}
+            logger.debug(f"update_weights_from_ipc_handles: gathered {len(all_handles)} device handles, sending to server")
             await self._adapter.update_weights(all_handles)
 
+        logger.debug("update_weights_from_ipc_handles: waiting on barrier")
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+        logger.debug("update_weights_from_ipc_handles: done")
 
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
@@ -408,6 +426,9 @@ class ServerAdapter(BaseRollout):
             await self._init_server_adapter()
 
         total_available_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) * 1024 * 1024
+        logger.debug(
+            f"update_weights: gpu_id={self.gpu_id}, bucket_size={total_available_bytes / 1024 / 1024:.0f}MB"
+        )
 
         if self.config.get("quantization", None) == "fp8":
             from verl.utils.trtllm.trtllm_fp8_utils import TRTLLMFP8QuantizerHelper
@@ -427,17 +448,25 @@ class ServerAdapter(BaseRollout):
 
         cur_available_bytes = total_available_bytes
         cur_handles = []
+        flush_count = 0
+        weight_count = 0
 
         async def flush():
-            nonlocal cur_available_bytes, cur_handles
+            nonlocal cur_available_bytes, cur_handles, flush_count
             if not cur_handles:
                 return
+            flush_count += 1
+            logger.debug(
+                f"update_weights: flush #{flush_count}, {len(cur_handles)} handles, "
+                f"used {(total_available_bytes - cur_available_bytes) / 1024 / 1024:.1f}MB"
+            )
             serialized_device_handles = {device_uuid: base64.b64encode(pickle.dumps(cur_handles)).decode("utf-8")}
             await self.update_weights_from_ipc_handles(serialized_device_handles)
             cur_available_bytes = total_available_bytes
             cur_handles = []
 
         for name, param in weights:
+            weight_count += 1
             size_in_bytes = param.element_size() * param.numel()
             if size_in_bytes > cur_available_bytes:
                 await flush()
@@ -451,12 +480,16 @@ class ServerAdapter(BaseRollout):
 
         await flush()
 
+        logger.debug(f"update_weights: processed {weight_count} weights in {flush_count} flushes")
+
         if self.is_leader_rank:
             # Finalize update weights
+            logger.debug("update_weights: finalizing (sending None)")
             await self._adapter.update_weights(None)
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+        logger.debug("update_weights: done")
 
         del weights
         gc.collect()

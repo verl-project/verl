@@ -32,7 +32,7 @@ from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 
 @ray.remote
@@ -96,6 +96,12 @@ class TRTLLMHttpServer:
         self._server_port = None
 
         logger.info(f"TRTLLMHttpServer, replica_rank: {self.replica_rank}")
+        logger.debug(
+            f"TRTLLMHttpServer.__init__: TP={self.config.tensor_model_parallel_size}, "
+            f"PP={self.config.pipeline_model_parallel_size}, max_model_len={self.config.max_model_len}, "
+            f"load_format={self.config.load_format}, rollout_mode={self.rollout_mode}, "
+            f"max_colocate_count={self.max_colocate_count}, server_address={self._server_address}"
+        )
 
         self.sampling_args = {
             "detokenize": False,
@@ -188,7 +194,9 @@ class TRTLLMHttpServer:
                 }
             )
 
+        logger.debug(f"launch_server: creating AsyncLLM with kwargs: {llm_kwargs}")
         self.llm = await AsyncLLM(**llm_kwargs)
+        logger.debug("launch_server: AsyncLLM created")
 
         trtllm_server = OpenAIServer(
             generator=self.llm,
@@ -199,6 +207,7 @@ class TRTLLMHttpServer:
         )
         app = trtllm_server.app
         self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
+        logger.debug(f"launch_server: HTTP server started on {self._server_address}:{self._server_port}")
 
     async def generate(
         self,
@@ -243,22 +252,30 @@ class TRTLLMHttpServer:
         raise NotImplementedError
 
     async def wake_up(self):
+        logger.debug(f"wake_up: rollout_mode={self.rollout_mode}")
         if self.rollout_mode == RolloutMode.HYBRID:
             # In hybrid mode, rollout is wake up in `update_weights`
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         if self.rollout_mode == RolloutMode.COLOCATED:
+            logger.debug("wake_up: resuming with full tags")
             await self.llm.resume(tags=ServerAdapter.get_full_tags())
+            logger.debug("wake_up: done")
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
     async def sleep(self):
+        logger.debug(f"sleep: rollout_mode={self.rollout_mode}, free_cache={self.config.free_cache_engine}")
         if not self.config.free_cache_engine:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
+            logger.debug("sleep: releasing with full tags (hybrid)")
             await self.llm.release(tags=ServerAdapter.get_full_tags())
+            logger.debug("sleep: done")
         elif self.rollout_mode == RolloutMode.COLOCATED:
+            logger.debug("sleep: releasing with full tags (colocated)")
             await self.llm.release(tags=ServerAdapter.get_full_tags())
+            logger.debug("sleep: done")
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -297,14 +314,22 @@ class TRTLLMReplica(RolloutReplica):
                 "Subgroup world size must be equal to world size"
             )
             local_bundle_index = self.resource_pool.start_bundle_index
+            logger.debug(
+                f"get_pgs_and_bundle_indices: SubRayResourcePool, start_bundle_index={local_bundle_index}"
+            )
         # For RayResourcePool, the replica is assigned to entire resource pool.
         # We need to find start pg index and local bundle index based on replica rank.
         else:
             local_bundle_index = self.world_size * self.replica_rank
+            logger.debug(
+                f"get_pgs_and_bundle_indices: RayResourcePool, replica_rank={self.replica_rank}, "
+                f"world_size={self.world_size}, initial local_bundle_index={local_bundle_index}"
+            )
 
-        while local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
-            start_pg_index += 1
+        while start_pg_index < len(self.resource_pool.pgs) and local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
+            start_pg_index += 1
+        logger.debug(f"get_pgs_and_bundle_indices: start_pg_index={start_pg_index}, local_bundle_index={local_bundle_index}")
         assert (
             start_pg_index < len(self.resource_pool.pgs)
             and local_bundle_index < self.resource_pool.pgs[start_pg_index].bundle_count
@@ -338,10 +363,10 @@ class TRTLLMReplica(RolloutReplica):
 
         assert left_bundle_count == 0, "all bundle indices should be assigned"
 
+        logger.debug(f"get_pgs_and_bundle_indices: assigned {len(pgs)} PGs, bundle_indices={bundle_indices}")
         return pgs, bundle_indices
 
     async def launch_servers(self):
-        assert self.nnodes == 1, "TRTLLMReplica doesn't support multiple nodes for single replica yet."
         assert self.resource_pool.pgs is not None, "placement groups are not initialized"
 
         pgs, bundle_indices = self.get_pgs_and_bundle_indices()
@@ -360,6 +385,7 @@ class TRTLLMReplica(RolloutReplica):
             if not self.is_reward_model
             else f"trtllm_server_reward_{self.replica_rank}"
         )
+        logger.debug(f"launch_servers: creating server actor '{name}' on node_id={node_id}")
 
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
@@ -383,10 +409,13 @@ class TRTLLMReplica(RolloutReplica):
         self.servers.append(server)
 
         # launch http server in each node
+        logger.debug(f"launch_servers: launching {len(self.servers)} server(s)")
         await asyncio.gather(*[server.launch_server.remote() for server in self.servers])
+        logger.debug("launch_servers: all servers launched")
 
         # get http server address from first server
         server_address, server_port = await self.servers[0].get_server_address.remote()
+        logger.debug(f"launch_servers: server address={server_address}:{server_port}")
         self._server_handle = self.servers[0]
         self._server_address = (
             f"[{server_address}]:{server_port}"
