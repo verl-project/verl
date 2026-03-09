@@ -71,7 +71,7 @@ permissions:
 jobs:
   e2e_sft_llm_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a2-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
