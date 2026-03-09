@@ -177,6 +177,51 @@ class TestBucketedWeightTransferSHM:
     def test_empty_weights(self):
         _transfer_and_validate([], bucket_size_mb=1, use_shm=True)
 
+    def test_large_tensor_chunked_single_weight(self):
+        """Test a single tensor larger than bucket_size gets chunked correctly."""
+        # 1 MB bucket; create a tensor that's ~2 MB (needs 2 chunks)
+        # float32 = 4 bytes, so 2MB / 4 = 524288 elements
+        numel = (2 << 20) // 4
+        specs = [("large_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
+    def test_large_tensor_chunked_2d(self):
+        """Test a 2D tensor larger than bucket_size gets chunked correctly."""
+        # 1 MB bucket; create a 2D tensor that's ~2.5 MB
+        # shape (1024, 640) with float32 = 1024 * 640 * 4 = 2.5 MB
+        specs = [("large_2d_weight", (1024, 640), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
+    def test_large_tensor_chunked_multiple_buckets(self):
+        """Test a tensor larger than bucket_size that spans multiple buckets."""
+        # 1 MB bucket; create a tensor that's ~3.5 MB (needs 4 chunks)
+        # float32 = 4 bytes, so 3.5MB / 4 = 917504 elements
+        numel = (int(3.5 * (1 << 20))) // 4
+        specs = [("huge_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
+    def test_mixed_small_and_chunked_weights(self):
+        """Test a mix of normal weights and chunked large weights."""
+        # 1 MB bucket
+        specs = [
+            ("small.weight", (64, 64), torch.float32),  # ~16 KB
+            ("large.weight", (1024, 512), torch.float32),  # ~2 MB (chunked)
+            ("another_small.bias", (128,), torch.float32),  # ~512 bytes
+            ("huge.weight", (2048, 512), torch.float32),  # ~4 MB (chunked)
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
+    def test_chunked_with_different_dtypes(self):
+        """Test chunked weights with different dtypes."""
+        # 1 MB bucket
+        specs = [
+            # bf16: ~2 MB (chunked), 2 bytes per element
+            ("large_bf16", (1024, 1024), torch.bfloat16),
+            # float32: ~2 MB (chunked), 4 bytes per element
+            ("large_fp32", (1024, 512), torch.float32),
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
 
 # ---------------------------------------------------------------------------
 # CUDA IPC tests (CUDA only — IPC is not supported on NPU)
@@ -216,4 +261,49 @@ class TestBucketedWeightTransferIPC:
         # 1 MB bucket = 1048576 bytes; float32 = 4 bytes => 262144 elements
         numel = (1 << 20) // 4
         specs = [("exact_fit", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_tensor_chunked_single_weight(self):
+        """Test a single tensor larger than bucket_size gets chunked correctly."""
+        # 1 MB bucket; create a tensor that's ~2 MB (needs 2 chunks)
+        # float32 = 4 bytes, so 2MB / 4 = 524288 elements
+        numel = (2 << 20) // 4
+        specs = [("large_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_tensor_chunked_2d(self):
+        """Test a 2D tensor larger than bucket_size gets chunked correctly."""
+        # 1 MB bucket; create a 2D tensor that's ~2.5 MB
+        # shape (1024, 640) with float32 = 1024 * 640 * 4 = 2.5 MB
+        specs = [("large_2d_weight", (1024, 640), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_tensor_chunked_multiple_buckets(self):
+        """Test a tensor larger than bucket_size that spans multiple buckets."""
+        # 1 MB bucket; create a tensor that's ~3.5 MB (needs 4 chunks)
+        # float32 = 4 bytes, so 3.5MB / 4 = 917504 elements
+        numel = (int(3.5 * (1 << 20))) // 4
+        specs = [("huge_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_mixed_small_and_chunked_weights(self):
+        """Test a mix of normal weights and chunked large weights."""
+        # 1 MB bucket
+        specs = [
+            ("small.weight", (64, 64), torch.float32),  # ~16 KB
+            ("large.weight", (1024, 512), torch.float32),  # ~2 MB (chunked)
+            ("another_small.bias", (128,), torch.float32),  # ~512 bytes
+            ("huge.weight", (2048, 512), torch.float32),  # ~4 MB (chunked)
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_chunked_with_different_dtypes(self):
+        """Test chunked weights with different dtypes."""
+        # 1 MB bucket
+        specs = [
+            # bf16: ~2 MB (chunked), 2 bytes per element
+            ("large_bf16", (1024, 1024), torch.bfloat16),
+            # float32: ~2 MB (chunked), 4 bytes per element
+            ("large_fp32", (1024, 512), torch.float32),
+        ]
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
