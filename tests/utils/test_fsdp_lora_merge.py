@@ -222,7 +222,7 @@ def test_merged_lora_context_gptoss(world_size, strategy, backup_adapters, tmp_p
     )
 
 
-def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, strategy):
+def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, strategy, lora_targets):
     """Worker function for testing collect_merged_lora_params."""
     get_torch_device().set_device(rank)
     torch.distributed.init_process_group(
@@ -244,7 +244,7 @@ def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, s
     base_keys = set(model.state_dict().keys())
 
     lora_config = LoraConfig(
-        r=8, lora_alpha=16, target_modules=["q_proj", "v_proj"], lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"
+        r=8, lora_alpha=16, target_modules=lora_targets, lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"
     )
     model = get_peft_model(model, lora_config)
 
@@ -333,6 +333,42 @@ def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, s
             merged_params[key], merged_params_2[key], rtol=1e-5, atol=1e-6, msg=f"Values differ for {key}"
         )
 
+    # 8. Value correctness: merged weights should equal base + LoRA delta for
+    # targeted modules, and match base weights exactly for non-targeted modules.
+    # Build a non-FSDP reference by merging LoRA on an unwrapped copy.
+    ref_config = Qwen2Config(num_hidden_layers=2, num_attention_heads=2, hidden_size=128)
+    with torch.device("cpu"):
+        ref_model = AutoModelForCausalLM.from_config(
+            config=ref_config, torch_dtype=torch.bfloat16, attn_implementation="eager"
+        )
+    ref_lora = LoraConfig(
+        r=8, lora_alpha=16, target_modules=lora_targets, lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"
+    )
+    ref_model = get_peft_model(ref_model, ref_lora)
+    # Copy the same base + adapter weights from the FSDP model
+    fsdp_full_sd = {}
+    if strategy == "fsdp":
+        with FSDP.summon_full_params(model, writeback=False):
+            for k, v in model.state_dict().items():
+                clean = k.replace("_fsdp_wrapped_module.", "")
+                fsdp_full_sd[clean] = v.full_tensor().cpu() if hasattr(v, "full_tensor") else v.cpu()
+    else:
+        with FSDP.summon_full_params(model, writeback=False):
+            for k, v in model.state_dict().items():
+                fsdp_full_sd[k] = v.full_tensor().cpu() if hasattr(v, "full_tensor") else v.cpu()
+    ref_model.load_state_dict(fsdp_full_sd, strict=False)
+    ref_merged = ref_model.merge_and_unload()
+    ref_sd = ref_merged.state_dict()
+    for key in base_keys:
+        assert key in ref_sd, f"Reference missing {key}"
+        torch.testing.assert_close(
+            merged_params[key].to(torch.float32),
+            ref_sd[key].to(torch.float32),
+            rtol=1e-3,
+            atol=1e-3,
+            msg=f"Value mismatch for {key}",
+        )
+
     if rank == 0:
         print(f"collect_merged_lora_params test with {strategy} passed on {world_size} GPUs!")
 
@@ -342,14 +378,16 @@ def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, s
 
 @pytest.mark.parametrize("world_size", (2,))
 @pytest.mark.parametrize("strategy", ("fsdp", "fsdp2"))
-def test_collect_merged_lora_params(world_size, strategy, tmp_path):
+@pytest.mark.parametrize("lora_targets", (["q_proj", "v_proj"], "all-linear"))
+def test_collect_merged_lora_params(world_size, strategy, lora_targets, tmp_path):
     """Test collect_merged_lora_params extracts correct HF-format merged weights."""
-    rendezvous_file = str(tmp_path / f"rdzv_file_merged_params_{strategy}")
+    suffix = "alllinear" if lora_targets == "all-linear" else "qv"
+    rendezvous_file = str(tmp_path / f"rdzv_file_merged_params_{strategy}_{suffix}")
     os.makedirs(os.path.dirname(rendezvous_file), exist_ok=True)
 
     mp.spawn(
         fn=_test_collect_merged_lora_params_worker,
-        args=(world_size, rendezvous_file, strategy),
+        args=(world_size, rendezvous_file, strategy, lora_targets),
         nprocs=world_size,
         join=True,
     )
