@@ -2,7 +2,6 @@ Ascend Dockerfile Build Guidance
 ===================================
 
 Last updated: 03/03/2025.
-<<<<<<< HEAD
 
 
 镜像获取 & 公开镜像地址
@@ -13,8 +12,6 @@ Last updated: 03/03/2025.
 每日构建镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-latest
 
 verl release版本镜像名格式：verl-{CANN版本}-{NPU设备类型}-{操作系统版本}-{python版本}-{verl release版本号}
-=======
->>>>>>> 013ci
 
 
 
@@ -36,11 +33,7 @@ Atlas 800T A3
 ================= ============
 基础镜像            Ubuntu 22.04
 Python             3.11
-<<<<<<< HEAD
-CANN               8.5.RC1
-=======
 CANN               8.5.0
->>>>>>> 013ci
 torch              2.8.0
 torch_npu          2.8.0
 torchvision        0.22.1
