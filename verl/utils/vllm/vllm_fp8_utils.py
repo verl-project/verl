@@ -438,10 +438,6 @@ def process_weights_after_loading_moe_for_vllm13(self, layer) -> None:
     """
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         prepare_fp8_moe_layer_for_deepgemm,
-        requant_weight_ue8m0_inplace,
-    )
-    from vllm.utils.deep_gemm import (
-        is_deep_gemm_e8m0_used,
     )
 
     try:
