@@ -758,7 +758,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # Required for backends (e.g. SGLang) whose load_weights() expects
                 # standard HF param names and can't handle LoRA delta keys.
                 params = collect_merged_lora_params(module=self.actor_module_fsdp)
-                # Always full weights, so mark base as synced
+                # Full merged weights, not LoRA deltas — clear peft_config so
+                # downstream update_weights treats these as plain HF params.
+                peft_config = None
                 self.base_sync_done = True
             else:
                 params = collect_lora_params(
@@ -816,9 +818,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 name,
                 param.to(device, non_blocking=True).full_tensor()
                 if isinstance(param, DTensor)
-                else param.to(device, non_blocking=False)
-                if param.is_cpu
-                else param,
+                else param.to(device, non_blocking=False),
             )
             for name, param in _items
         )
@@ -848,6 +848,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             peft_config is not None
             and getattr(self.rollout, "sleep_level", None) == 2
             and self.config.rollout.free_cache_engine
+            and not self.config.rollout.get("merge_lora_before_sync", False)
         ):
             per_tensor_base_params = (
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)

@@ -861,6 +861,13 @@ def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
                 if isinstance(submodule, FSDPModule) and name != ""
             ]
             fsdp_names = {name for name, _ in fsdp_submodules}
+
+            def _clean_fsdp2_key(key):
+                key = key.replace("_fsdp_wrapped_module.", "")
+                key = key.replace("base_model.model.", "")
+                key = key.replace(".base_layer", "")
+                return key
+
             for name, submodule in fsdp_submodules:
                 # Skip non-leaf FSDPModules: if any other FSDPModule's name
                 # starts with this name + ".", this is a parent, not a leaf.
@@ -876,13 +883,32 @@ def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
                             if hasattr(param, "full_tensor")
                             else param.detach().cpu()
                         )
-                        full_key = f"{name}.{pname}"
-                        # Clean to HuggingFace format
-                        full_key = full_key.replace("_fsdp_wrapped_module.", "")
-                        full_key = full_key.replace("base_model.model.", "")
-                        full_key = full_key.replace(".base_layer", "")
+                        full_key = _clean_fsdp2_key(f"{name}.{pname}")
                         merged_params[full_key] = val
                 get_torch_device().empty_cache()
+
+            # Params owned directly by the root FSDPModule (e.g. model.norm,
+            # lm_head, tied embed_tokens) are not inside any child FSDPModule.
+            # All-gather only these individual params to avoid materializing the
+            # entire model on GPU (which would defeat leaf-by-leaf extraction).
+            leaf_prefixes = {
+                name + "." for name in fsdp_names
+                if not any(other.startswith(name + ".") for other in fsdp_names if other != name)
+            }
+            for pname, param in module.named_parameters():
+                if any(pname.startswith(lp) for lp in leaf_prefixes):
+                    continue
+                if any(x in pname for x in ["_flat_param", "lora_"]):
+                    continue
+                clean_key = _clean_fsdp2_key(pname)
+                if clean_key in merged_params:
+                    continue
+                merged_params[clean_key] = (
+                    param.full_tensor().detach().cpu()
+                    if hasattr(param, "full_tensor")
+                    else param.detach().cpu()
+                )
+            get_torch_device().empty_cache()
     finally:
         # Always unmerge to restore training state
         fsdp_merge_unmerge(module, do_merge=False)
