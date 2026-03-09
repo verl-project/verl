@@ -41,7 +41,14 @@ ppo_mini_batch_size=8
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 
-USE_LEGACY_WORKER_IMPL="enable" # disable, enable
+USE_LEGACY_WORKER_IMPL="disable" # disable, enable
+if [ "$USE_LEGACY_WORKER_IMPL" = "disable" ]; then
+    ROUTING_REPLAY_MODE_ARG="actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE}"
+    remove_padding=True
+else
+    ROUTING_REPLAY_MODE_ARG="actor_rollout_ref.actor.router_replay.mode=${ROUTING_REPLAY_MODE}"
+    remove_padding=False
+fi
 exper_name=Node${NODES}_bs${bs}_${PP}${TP}${EP}${ETP}_${VLLM_INFER_TP}_minbs${ppo_mini_batch_size}_micro_bs${micro_bs}
 
 python3 -m verl.trainer.main_ppo --config-path=config \
@@ -56,10 +63,10 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     data.truncation='error' \
     actor_rollout_ref.model.use_fused_kernels=True \
     actor_rollout_ref.model.path=$HF_MODEL_PATH \
-    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.use_remove_padding=$remove_padding \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
-    actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE} \
+    ${ROUTING_REPLAY_MODE_ARG} \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=flex \
     +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True \
@@ -84,6 +91,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
+    actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$micro_bs \

@@ -171,6 +171,41 @@ def get_num_layers_to_build(
     return num_layers_to_build
 
 
+def is_moe_layer(tf_config, layer_idx):
+    moe_layer_freq = getattr(tf_config, "moe_layer_freq", None)
+
+    if isinstance(moe_layer_freq, int):
+        return layer_idx % moe_layer_freq == 0
+    elif isinstance(moe_layer_freq, list):
+        return moe_layer_freq[layer_idx] == 1
+    else:
+        raise ValueError(f"Unsupported moe_layer_freq type: {type(moe_layer_freq)}")
+
+
+def get_moe_num_layers_to_build(
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+) -> int:
+    """Count the number of MoE layers assigned to the current rank.
+    When ``moe_layer_freq`` is 1 or unset, every transformer layer is an MoE
+    layer, so the count equals the total layer count. Otherwise only layers
+    whose global index satisfies the frequency predicate are counted.
+    Args:
+        config: Megatron TransformerConfig providing layer layout information.
+        vp_stage: Virtual-pipeline stage index (None defaults to current).
+        pp_rank: Pipeline-parallel rank (None defaults to current).
+    Returns:
+        Number of MoE layers on the specified rank/stage.
+    """
+    total_layers = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
+
+    layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage)
+    local_global_indices = range(layer_offset, layer_offset + total_layers)
+
+    num_moe_layers = sum(1 for idx in local_global_indices if is_moe_layer(config, idx))
+
+    return num_moe_layers
+
+
 def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -249,24 +284,27 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
             dim=0
         )  # layer_num, dynamic_bs_all, topk
-        num_layers_in_data = layers_topk_idx_reshape.shape[0]
-        use_global_layer_index = getattr(tf_config, "num_layers", None) == num_layers_in_data
         local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
-        offset, _ = local_rank_info["start"], local_rank_info["end"]
+        offset, end = local_rank_info["start"], local_rank_info["end"]
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
-        for i, router in enumerate(router_instances_list):
-            layer_idx = None
-            if use_global_layer_index:
-                layer_number = getattr(router, "layer_number", None)
-                if layer_number is not None:
-                    layer_idx = layer_number - 1
-            if layer_idx is None:
-                layer_idx = i + offset
-            if layer_idx < 0 or layer_idx >= num_layers_in_data:
-                raise ValueError(
-                    f"router replay layer index {layer_idx} out of range for data with {num_layers_in_data} layers"
-                )
-            router.set_target_indices(layers_topk_idx_reshape[layer_idx].to(torch.int64))
+
+        # When dim-0 covers all layers (e.g. R3, or R2 with all-MoE models),
+        # index by absolute layer_idx; otherwise (R2 with mixed dense/MoE),
+        # dim-0 only contains MoE layers, index by MoE-layer ordinal.
+        index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
+
+        # For R2: count MoE layers before `offset` as the starting position.
+        moe_idx = sum(1 for i in range(offset) if is_moe_layer(tf_config, i))
+
+        router_offset = 0
+        for layer_idx in range(offset, end):
+            if not is_moe_layer(tf_config, layer_idx):
+                continue
+            router = router_instances_list[router_offset]
+            idx = layer_idx if index_by_layer else moe_idx
+            router.set_target_indices(layers_topk_idx_reshape[idx].to(torch.int64))
+            router_offset += 1
+            moe_idx += 1
 
 
 def reorder_and_merge_vpp_layers(
@@ -378,7 +416,7 @@ def pp_gather(local_layers_router_map, tf_config):
         for pp_stage in range(pp_size):
             vpp_router_map_offset[pp_stage].append(0)
             for vp_stage in range(vp_size):
-                num_layers_to_build = get_num_layers_to_build(tf_config, vp_stage, pp_stage)
+                num_layers_to_build = get_moe_num_layers_to_build(tf_config, vp_stage, pp_stage)
                 vpp_router_map_offset[pp_stage].append(num_layers_to_build + vpp_router_map_offset[pp_stage][-1])
         layers_topk_idx_global = []
         for vp_stage in range(vp_size):
@@ -419,8 +457,7 @@ class RouterReplayHelper:
             for pre_vp_stage in range(vp_size):
                 if pre_vp_stage == vp_rank:
                     break
-                num_layers_to_build = get_num_layers_to_build(tf_config, pre_vp_stage)
-                offset += num_layers_to_build
+                offset += get_moe_num_layers_to_build(tf_config, pre_vp_stage)
         else:
             offset = 0
 

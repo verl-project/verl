@@ -18,7 +18,7 @@ from multiprocessing import shared_memory
 
 import torch
 
-from verl.workers.rollout.vllm_rollout.utils import create_shared_memory, rebuild_shared_memory
+from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import create_shared_memory, rebuild_shared_memory
 
 
 class TestSharedMemory(unittest.TestCase):
