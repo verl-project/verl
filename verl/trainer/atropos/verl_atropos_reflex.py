@@ -78,7 +78,8 @@ class AtroposVerlTrainer(RayPPOTrainer):
                 port = ray.get(worker.get_vllm_port.remote())
                 endpoints.append(f"http://{host}:{port}")
             return endpoints
-        except Exception:
+        except Exception as e:
+            print(f"[Atropos] Error getting vLLM endpoints: {e}")
             return []
 
     def _get_atropos_batch(self) -> Optional[DataProto]:
@@ -92,8 +93,8 @@ class AtroposVerlTrainer(RayPPOTrainer):
                 batch = resp.get("batch")
                 if batch:
                     return self._atropos_batch_to_dataproto(batch)
-            except requests.exceptions.RequestException:
-                pass
+            except requests.exceptions.RequestException as e:
+                print(f"[Atropos] Failed to get batch on attempt {attempt + 1}: {e}")
             time.sleep(2)
         print("[Atropos] Timed out waiting for batch")
         return None
@@ -123,7 +124,15 @@ class AtroposVerlTrainer(RayPPOTrainer):
         Training loop — pulls batches from Atropos instead of parquet files.
         Uses GRPO advantage estimation unless Atropos provides token-level advantages.
         """
-        self.logger.info("Starting Atropos-verl GRPO training loop")
+        from verl.utils.tracking import Tracking
+        from omegaconf import OmegaConf
+        logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
+        logger.info("Starting Atropos-verl GRPO training loop")
 
         for step in range(self.total_training_steps):
             # 1. Get batch from Atropos
@@ -142,7 +151,7 @@ class AtroposVerlTrainer(RayPPOTrainer):
             self._sync_weights_to_vllm()
 
             # 5. Log
-            self.logger.log(metrics, step=step)
+            logger.log(metrics, step=step)
 
             if step % self.config.trainer.get("save_freq", 20) == 0:
                 self._save_checkpoint(step)
