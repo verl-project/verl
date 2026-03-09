@@ -46,8 +46,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='gsm8k_async_rl' \
     trainer.experiment_name='qwen0.5b_gsm8k_toolcall_shaping' \
-    custom_reward_function.path="$PROJECT_DIR/examples/sglang_multiturn/gsm8k_toolcall_shaping/gsm8k_toolcall_shaping.py" \
-    custom_reward_function.name=compute_score \
+    reward.custom_reward_function.path="$PROJECT_DIR/examples/sglang_multiturn/gsm8k_toolcall_shaping/gsm8k_toolcall_shaping.py" \
+    reward.custom_reward_function.name=compute_score \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \

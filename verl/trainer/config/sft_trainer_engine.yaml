@@ -55,6 +55,8 @@ checkpoint:
 
   # For more flexibility, you can specify the contents to load from the checkpoint.
   load_contents: ${checkpoint.save_contents}
+  # Mbridge config extension.
+  mbridge_config: {}
 
 trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}

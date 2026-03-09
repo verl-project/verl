@@ -60,7 +60,7 @@ class MessageQueue:
         self.dropped_samples = 0
 
         print(
-            f"[MessageQueue] initialized with max_queue_size={max_queue_size},"
+            f"[MessageQueue] initialized with max_queue_size={max_queue_size}, "
             f"staleness_threshold={self.staleness_threshold}"
         )
 

@@ -1,0 +1,236 @@
+# # Tests layout
+
+# Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
+# - `tests/trainer` for testing functionality related to `verl/trainer`
+# - `tests/models` for testing functionality related to `verl/models`
+# - ...
+
+# There are a few folders with `special_` prefix, created for special purposes:
+# - `special_distributed`: unit tests that must run with multiple GPUs
+# - `special_e2e`: end-to-end tests with training/generation scripts
+# - `special_npu`: tests for NPUs
+# - `special_sanity`: a suite of quick sanity tests
+# - `special_standalone`: a set of test that are designed to run in dedicated environments
+
+# Accelerators for tests
+# - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
+# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+
+# # Workflow layout
+
+# All CI tests are configured by yaml files in `.github/workflows/`. Here's an overview of all test configs:
+# 1. A list of always triggered CPU sanity tests: `check-pr-title.yml`, `secrets_scan.yml`, `check-pr-title,yml`, `pre-commit.yml`, `doc.yml`
+# 2. Some heavy multi-GPU unit tests, such as `model.yml`, `vllm.yml`, `sgl.yml`
+# 3. End-to-end tests: `e2e_*.yml`
+# 4. Unit tests
+#   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
+#   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
+#   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
+#     - new workflow yaml is added to `.github/workflows`
+#     - new tests are added to workflow mentioned in 2.
+
+name: e2e_ppo_trainer_megatron_vllm_2_ascend
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch.
+  # For push, for now only anti-patterns are specified so it is more conservative
+  # and achieves higher coverage.
+  push:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      # Other entrypoints
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      # FSDP
+      - "!verl/workers/**/*dp_*.py"
+      - "!verl/utils/fsdp_utils.py"
+      - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
+      - "!verl/model_merger/fsdp_model_merger.py"
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      # Other entrypoints
+      - "!docker/**"
+      # Docs
+      - "!**/*.md"
+      - "!docs/**"
+      - "!examples/**"
+      - "!tests/**"
+      - "!verl/trainer/main_*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      # FSDP
+      - "!verl/workers/**/*dp_*.py"
+      - "!verl/utils/fsdp_utils.py"
+      - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
+      - "!verl/model_merger/fsdp_model_merger.py"
+      # Entrypoints
+      - ".github/workflows/e2e_ppo_trainer_megatron_vllm_2_ascend.yml"
+      - "examples/data_preprocess/gsm8k.py"
+      - "examples/data_preprocess/geo3k.py"
+      - "tests/special_e2e/run_ppo_trainer_megatron.sh"
+      - "verl/trainer/main_ppo.py"
+      - "verl/trainer/config/ppo_megatron_trainer.yaml"
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  e2e_ppo_trainer_fsdp_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2-8
+    timeout-minutes: 90 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install -r requirements-npu.txt
+          pip install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      # Function RM
+      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
+        run: |
+          ray stop --force
+          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+      - name: Test merging DDP+FSDP checkpoints (Qwen Actor)
+        run: |
+          exp_name="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4"
+          python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
+      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (FSDP2)
+        run: |
+          ray stop --force
+          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8" STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+      - name: Test merging FSDP2 checkpoints (Qwen Actor)
+        run: |
+          exp_name="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8"
+          python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
+      - name: Running GSM8K E2E without rmpad using function rm
+        run: |
+          ray stop --force
+          RM_PAD=False bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+      - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm (GRPO)
+        run: |
+          ray stop --force
+          CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+      # TODO 
+      # vllm0.11.0 not support them, will be opened until vllm0.13.0 ok
+      # - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
+      #   run: |
+      #     ray stop --force
+      #     ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+      # - name: Test GRPO LoRA checkpoints merging function
+      #   run: |
+      #     export EXP_NAME="qwen2.5-0.5b-function-reward-minimal"
+      #     ls checkpoints/verl-test/${EXP_NAME}/global_step_1/actor
+      #     cat checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface/config.json
+      #     python3 -m verl.model_merger merge --backend fsdp --local_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/ --target_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface
+      # - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon with fsdp2
+      #   run: |
+      #     ray stop --force
+      #     ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+  #     TODO
+  #     vllm0.11 not support them, will be open after vllm0.13
+  # e2e_ppo_trainer_fsdp-qwen2_5vl-3b_ascend:
+  #   if: github.repository_owner == 'verl-project'
+  #   runs-on: linux-aarch64-a2-8
+  #   timeout-minutes: 60 # Increase this timeout value as needed
+  #   container:
+  #     image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+  #     options: >-
+  #       --shm-size 16g
+  #   env:
+  #     HF_ENDPOINT: "https://hf-mirror.com"
+  #     HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+  #   steps:
+  #     - name: Check npu and CANN info
+  #       run: |
+  #         cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+  #         npu-smi info
+  #     - name: Check initial pip list from image
+  #       run: |
+  #         pip list
+  #     - name: Checkout verl-project/verl repo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #         clean: true
+  #     - name: Install the current repository
+  #       run: |
+  #         pip install -r requirements-npu.txt
+  #         pip install --no-deps -e .
+  #         pip install trl
+  #     - name: Check final pip list
+  #       run: |
+  #         pip list
+  #     - name: Prepare weights
+  #       run: |
+  #         ln -s /root/.cache/models ~/models
+  #     # Geo3k
+  #     - name: Prepare GEO3K dataset
+  #       run: |
+  #         python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+  #     - name: Running GEO3K VLM GRPO E2E training tests on 8 L20 GPUs with rmpad using function rm
+  #       run: |
+  #         ray stop --force
+  #         TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+  #           MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
+  #           MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+  #           ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+  #           SP_SIZE=2 \
+  #           bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+  #     - name: Running GEO3K VLM PPO E2E training tests on 8 L20 GPUs with rmpad using function rm
+  #       run: |
+  #         ray stop --force
+  #         TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+  #           MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
+  #           MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+  #           ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+  #           SP_SIZE=2 \
+  #           bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+  #     - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
+  #       run: |
+  #         ray stop --force
+  #         TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+  #           MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
+  #           MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+  #           ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+  #           SP_SIZE=2 \
+  #           LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
+  #           bash tests/special_e2e/ppo_trainer/run_function_reward.sh

@@ -20,6 +20,7 @@
 /verl/workers/actor/megatron_actor.py @ISEEKYAN @vermouth1992
 /verl/workers/critic/megatron_critic.py @ISEEKYAN @vermouth1992
 /verl/workers/megatron_workers.py @ISEEKYAN @vermouth1992
+/verl/experimental @wuxibin89 @ArronHZG
 
 /tests/single_controller @zw0610 @wuxibin89
 /tests/trainer @eric-haibin-lin @vermouth1992 @tongyx361 @PeterSH6

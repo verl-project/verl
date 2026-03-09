@@ -58,7 +58,6 @@ SGLANG_REQUIRES = [
 ]
 TRL_REQUIRES = ["trl<=0.9.6"]
 MCORE_REQUIRES = ["mbridge"]
-TRANSFERQUEUE_REQUIRES = ["TransferQueue==0.1.5"]
 
 extras_require = {
     "test": TEST_REQUIRES,
@@ -70,7 +69,6 @@ extras_require = {
     "sglang": SGLANG_REQUIRES,
     "trl": TRL_REQUIRES,
     "mcore": MCORE_REQUIRES,
-    "transferqueue": TRANSFERQUEUE_REQUIRES,
     "trtllm": TRTLLM_REQUIRES,
 }
 
@@ -92,7 +90,11 @@ setup(
     extras_require=extras_require,
     package_data={
         "": ["version/*"],
-        "verl": ["trainer/config/*.yaml"],
+        "verl": [
+            "trainer/config/*.yaml",
+            "trainer/config/*/*.yaml",
+            "experimental/*/config/*.yaml",
+        ],
     },
     include_package_data=True,
     long_description=long_description,

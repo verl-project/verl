@@ -84,6 +84,7 @@ class SFTTrainer:
         resume_from_path = getattr(self.config.trainer, "resume_from_path", None)
         max_ckpt_to_keep = getattr(self.config.trainer, "max_ckpt_to_keep", None)
         default_hdfs_dir = getattr(self.config.trainer, "default_hdfs_dir", None)
+        lora_train_meta = self._get_lora_train_meta()
 
         self.ckpt_handler = CheckpointHandler(
             engine=self.engine,
@@ -93,7 +94,46 @@ class SFTTrainer:
             default_hdfs_dir=default_hdfs_dir,
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
+            lora_train_meta=lora_train_meta,
         )
+
+    def _get_lora_train_meta(self):
+        lora_adapter_path = self.config.model.get("lora_adapter_path", None)
+        lora_rank = int(getattr(self.config.model, "lora_rank", 0) or 0)
+
+        if lora_adapter_path is None and lora_rank <= 0:
+            return None
+
+        raw_lora_alpha = self.config.model.get("lora_alpha", None)
+        if raw_lora_alpha is None:
+            log_with_rank(
+                "LoRA is enabled but `model.lora_alpha` is not set; fallback to 0 in checkpoint metadata.",
+                logger=logger,
+                rank=self.rank,
+                level=logging.WARNING,
+                log_only_rank_0=True,
+            )
+            lora_alpha = 0
+        else:
+            lora_alpha = int(raw_lora_alpha)
+            if lora_alpha == 0:
+                log_with_rank(
+                    "LoRA is enabled but `model.lora_alpha` is 0; this may lead to ineffective LoRA scaling.",
+                    logger=logger,
+                    rank=self.rank,
+                    level=logging.WARNING,
+                    log_only_rank_0=True,
+                )
+
+        task_type = self.config.model.get("task_type", None)
+        if task_type is None:
+            task_type = "CAUSAL_LM"
+
+        return {
+            "r": lora_rank,
+            "lora_alpha": int(lora_alpha or 0),
+            "task_type": str(task_type),
+        }
 
     def _build_config(self):
         from verl.utils.config import omega_conf_to_dataclass
@@ -238,8 +278,14 @@ class SFTTrainer:
             batch_seqlens: torch.Tensor = data["attention_mask"].sum(dim=-1)
         batch_seqlens = batch_seqlens.to(self.device_name)  # (global_bsz // dp)
 
+        dp_group = self.engine.get_data_parallel_group()
+        dp_size = self.engine.get_data_parallel_size()
+
+        if dp_size == 1 or dp_group is None:
+            return batch_seqlens.tolist()
+
         output_tensor = torch.empty(
-            (batch_seqlens.shape[0] * self.engine.get_data_parallel_size(),),
+            (batch_seqlens.shape[0] * dp_size,),
             dtype=batch_seqlens.dtype,
             device=self.device_name,
         )  # (global_bsz,)
@@ -247,7 +293,7 @@ class SFTTrainer:
         torch.distributed.all_gather_into_tensor(
             output_tensor=output_tensor,
             input_tensor=batch_seqlens,
-            group=self.engine.get_data_parallel_group(),
+            group=dp_group,
         )
 
         batch_seqlens = output_tensor.tolist()
@@ -372,9 +418,9 @@ class SFTTrainer:
                     if self.engine.is_mp_src_rank_with_outputs():
                         val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
                         # average over data parallel group
-                        torch.distributed.all_reduce(
-                            val_loss, op=torch.distributed.ReduceOp.AVG, group=self.engine.get_data_parallel_group()
-                        )
+                        dp_group = self.engine.get_data_parallel_group()
+                        if dp_group is not None:
+                            torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
 
                     if is_logging:
                         metric = {"val/loss": val_loss.detach().item()}

@@ -7,19 +7,18 @@
 # specify the default per-component configs
 defaults:
 
+  - model_engine: dp
+
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
   # actor_rollout_ref.actor: trainer/config/actor/dp_actor.yaml
-  - actor@actor_rollout_ref.actor: dp_actor
+  - actor@actor_rollout_ref.actor: ${model_engine}_actor
 
   # data: trainer/config/data/legacy_data.yaml
   - data@data: legacy_data
 
-  # (Rule-based) Reward manager config.
-  - reward_manager@reward_manager
-
   # Reference model config.
   # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
-  - ref@actor_rollout_ref.ref: dp_ref
+  - ref@actor_rollout_ref.ref: ${model_engine}_ref
 
   # Rollout model config.
   - rollout@actor_rollout_ref.rollout: rollout
@@ -28,10 +27,13 @@ defaults:
   - model@actor_rollout_ref.model: hf_model
 
   # Critic model config.
-  - critic@critic: dp_critic
+  - critic@critic: ${model_engine}_critic
 
-  # Reward model config.
-  - reward_model@reward_model: dp_reward_loop
+  # legacy reward impl config, for backward compatibility
+  - legacy_reward_impl
+
+  # Reward config.
+  - reward@reward: reward
 
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
@@ -54,16 +56,6 @@ actor_rollout_ref:
 
     # for huge model, layered summon can save memory (prevent OOM) but make it slower
     layered_summon: False
-
-# custom reward function definition
-custom_reward_function:
-
-  # The path to the file containing your customized reward function.
-  # If not specified, pre-implemented reward functions will be used.
-  path: null
-
-  # The name of the reward function within the specified file. Default is 'compute_score'.
-  name: compute_score
 
 # config for the algorithm
 algorithm:

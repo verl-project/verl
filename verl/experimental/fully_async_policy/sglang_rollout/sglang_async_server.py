@@ -19,7 +19,7 @@ import ray
 import torch
 from ray.actor import ActorHandle
 
-from verl.workers.config import HFModelConfig, RewardModelConfig, RolloutConfig
+from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode
 from verl.workers.rollout.sglang_rollout.async_sglang_server import (
     SGLangHttpServer,
@@ -33,7 +33,7 @@ logger.setLevel(logging.INFO)
 class SGLangHttpServerForPartial(SGLangHttpServer):
     def __init__(
         self,
-        config: RolloutConfig | RewardModelConfig,
+        config: RolloutConfig,
         model_config: HFModelConfig,
         rollout_mode: RolloutMode,
         workers: list[ActorHandle],
@@ -171,17 +171,12 @@ class SGLangHttpServerForPartial(SGLangHttpServer):
         async with self.lock:
             self.paused = False
 
-    async def reset_prefix_cache(self):
-        async with self.lock:
-            print("Reset prefix cache ...")
-            await self.tokenizer_manager.flush_cache()
-
 
 class FullyAsyncSGLangReplica(SGLangReplica):
     def __init__(
         self,
         replica_rank: int,
-        config: RolloutConfig | RewardModelConfig,
+        config: RolloutConfig,
         model_config: HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
@@ -196,7 +191,3 @@ class FullyAsyncSGLangReplica(SGLangReplica):
     async def resume(self):
         """Resume each rollout server."""
         await asyncio.gather(*[server.resume.remote() for server in self.servers])
-
-    async def reset_prefix_cache(self):
-        """reset kv cache in each rollout server."""
-        await asyncio.gather(*[server.reset_prefix_cache.remote() for server in self.servers])

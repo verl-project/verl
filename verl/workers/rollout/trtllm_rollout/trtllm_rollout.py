@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import gc
 import logging
 import os
 import pickle
@@ -31,6 +32,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.multiprocessing.reductions import reduce_tensor
 
+from verl.utils.device import get_torch_device
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -69,8 +71,9 @@ _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
 
 
-def get_device_uuid(id: int) -> str:
+def get_device_uuid(id: str | int) -> str:
     """Get the UUID of a CUDA device using NVML."""
+    id = int(id)  # pynvml expects int; ray.get_gpu_ids() may return str
     global _NVML_INITIALIZED
     with _NVML_LOCK:
         if not _NVML_INITIALIZED:
@@ -274,6 +277,15 @@ class ServerAdapter(BaseRollout):
     def __init__(
         self, config: RolloutConfig, model_config: HFModelConfig, device_mesh: DeviceMesh, replica_rank: int = -1
     ):
+        if config.get("quantization", None) == "fp8":
+            FP8_BLOCK_QUANT_KWARGS = {
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "quant_method": "fp8",
+                "weight_block_size": [128, 128],
+            }
+            fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+            model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         super().__init__(config, model_config, device_mesh)
         self._adapter = None
         self.hybrid_device_mesh = None
@@ -326,6 +338,10 @@ class ServerAdapter(BaseRollout):
         self._adapter = AsyncTRTLLMHttpAdapter(
             host=host,
             port=server_port,
+            timeout=self.config.server.timeout,
+            max_attempts=self.config.server.max_attempts,
+            retry_delay=self.config.server.retry_delay,
+            max_connections=self.config.server.max_connections,
         )
 
     async def resume(self, tags: list[str]):
@@ -334,6 +350,10 @@ class ServerAdapter(BaseRollout):
         Args:
             tag: weights or kv_cache.
         """
+        # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
+        # have completed actor offloading to CPU, preventing OOM issue.
+        if "kv_cache" in tags and self.config.free_cache_engine:
+            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
@@ -374,7 +394,9 @@ class ServerAdapter(BaseRollout):
 
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
-    async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
+    async def update_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+    ):
         assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
 
         """Update the weights of the rollout model.
@@ -386,6 +408,15 @@ class ServerAdapter(BaseRollout):
             await self._init_server_adapter()
 
         total_available_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) * 1024 * 1024
+
+        if self.config.get("quantization", None) == "fp8":
+            from verl.utils.trtllm.trtllm_fp8_utils import TRTLLMFP8QuantizerHelper
+
+            fp8_quantizer_helper = TRTLLMFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+            weights = fp8_quantizer_helper.quant_weights_by_name(
+                weights,
+                dtype=self.model_config.hf_config.dtype,
+            )
 
         try:
             device_uuid = get_device_uuid(self.gpu_id)
@@ -423,7 +454,13 @@ class ServerAdapter(BaseRollout):
         if self.is_leader_rank:
             # Finalize update weights
             await self._adapter.update_weights(None)
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+
+        del weights
+        gc.collect()
+        get_torch_device().empty_cache()
 
     def _get_attribute(self, name: str):
         return getattr(self, name)
