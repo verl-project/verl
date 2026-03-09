@@ -57,3 +57,10 @@ try:
     __all__ += ["KIMICheckpointEngine"]
 except ImportError:
     KIMICheckpointEngine = None
+
+try:
+    from .mooncake_checkpoint_engine import MooncakeCheckpointEngine
+
+    __all__ += ["MooncakeCheckpointEngine"]
+except ImportError:
+    MooncakeCheckpointEngine = None

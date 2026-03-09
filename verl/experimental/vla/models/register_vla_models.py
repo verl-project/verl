@@ -15,7 +15,9 @@
 
 """Utility helpers to register custom VLA models with Hugging Face Auto classes."""
 
-from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
+from transformers import AutoConfig, AutoImageProcessor, AutoProcessor
+
+from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 from .openvla_oft.configuration_prismatic import OpenVLAConfig
 from .openvla_oft.modeling_prismatic import OpenVLAForActionPrediction
@@ -26,6 +28,7 @@ _REGISTERED_MODELS = {
     "openvla_oft": False,
     "pi0_torch": False,
 }
+AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
 def register_openvla_oft() -> None:

@@ -1,9 +1,8 @@
 Ascend Quickstart
 ===================================
 
-Last updated: 2/13/2026.
+Last updated: 03/03/2026.
 
-我们在 verl 上增加对华为昇腾设备的支持。
 
 
 关键更新
@@ -43,11 +42,11 @@ DockerFile镜像构建 & 获取 & 使用
     +---------------+----------------------+
     | Python        | >= 3.10, <3.12       |
     +---------------+----------------------+
-    | CANN          | == 8.3.RC1           |
+    | CANN          | == 8.5.RC1           |
     +---------------+----------------------+
-    | torch         | == 2.7.1             |
+    | torch         | == 2.8.0             |
     +---------------+----------------------+
-    | torch_npu     | == 2.7.1             |
+    | torch_npu     | == 2.8.0             |
     +---------------+----------------------+
 
 2. （可选）在 x86 平台安装时，pip 需要配置额外的源，指令如下：
@@ -65,7 +64,7 @@ DockerFile镜像构建 & 获取 & 使用
     +---------------+----------------------+
     | torchvision   | == 0.22.1            |
     +---------------+----------------------+
-    | triton-ascend | == 3.2.0rc4          |
+    | triton-ascend | == 3.2.0             |
     +---------------+----------------------+
     | transformers  | == 4.57.6            |
     +---------------+----------------------+
@@ -82,7 +81,7 @@ DockerFile镜像构建 & 获取 & 使用
         pip uninstall -y triton triton-ascend
     
         # 安装triton-ascend，不需要单独安装triton
-        pip install triton-ascend==3.2.0rc4
+        pip install triton-ascend==3.2.0
 
 
 安装 vllm & vllm-ascend
@@ -99,15 +98,17 @@ DockerFile镜像构建 & 获取 & 使用
 
     .. code-block:: bash
 
-        git clone --depth 1 --branch v0.11.0 https://github.com/vllm-project/vllm.git
-        cd vllm && VLLM_TARGET_DEVICE=empty pip install -v -e . && cd ..
+        git clone --depth 1 --branch v0.13.0 https://github.com/vllm-project/vllm.git
+        cd vllm && pip install -r requirements/build.txt
+        VLLM_TARGET_DEVICE=empty pip install -v -e. && cd ..
 
 3. vllm-ascend 源码安装指令：
 
     .. code-block:: bash
 
-        git clone --depth 1 --branch v0.11.0rc1 https://github.com/vllm-project/vllm-ascend.git
-        cd vllm-ascend && pip install -v -e . && cd ..
+        git clone -b releases/v0.13.0 https://github.com/vllm-project/vllm-ascend.git
+        cd vllm-ascend && pip install -r requirements.txt    
+        export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . && cd ..
 
 
 安装 MindSpeed
@@ -119,17 +120,12 @@ MindSpeed 源码安装指令：
     
         # 下载 MindSpeed，切换到指定commit-id，并下载 Megatron-LM
         git clone https://gitcode.com/Ascend/MindSpeed.git
-        cd MindSpeed && git checkout f2b0977e && cd ..
+        cd MindSpeed && git checkout 2.3.0_core_r0.12.1 && cd ..
         git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
     
         # 安装 MindSpeed & Megatron
         pip install -e MindSpeed
-    
-        # 将 Megatron-LM 源码路径配置到 PYTHONPATH 环境变量中
-        export PYTHONPATH=$PYTHONPATH:"$(pwd)/Megatron-LM"
-    
-        # （可选）如希望 shell 关闭，或系统重启后，PYTHONPATH 环境变量仍然生效，建议将它添加到 .bashrc 配置文件中
-        echo "export PYTHONPATH=$PYTHONPATH:\"$(pwd)/Megatron-LM\"" >> ~/.bashrc
+        pip install -e Megatron-LM
     
         # 安装 mbridge
         pip install mbridge
@@ -148,7 +144,7 @@ MindSpeed 对应 Megatron-LM 后端使用场景，使用方式如下：
 
 .. code-block:: bash
 
-    git clone --depth 1 https://github.com/volcengine/verl.git
+    git clone --recursive https://github.com/volcengine/verl.git
     cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd ..
 
 

@@ -151,6 +151,9 @@ jobs:
       - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
         run: |
           ROLLOUT_NAME=vllm pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
+      - name: Test bucketed weight transfer
+        run: |
+          pytest -svvv tests/utils/test_bucketed_weight_transfer.py
 
   cleanup:
     runs-on: ubuntu-latest
