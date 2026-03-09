@@ -274,7 +274,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2, e2e_dapo_trainer_megatron_fp8_rollout-qwen3]
+    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2, e2e_grpo_trainer_fsdp-vlm]
     if: always()
     steps:
       - id: destroy-runner
