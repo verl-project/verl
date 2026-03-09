@@ -483,6 +483,7 @@ class vLLMHttpServer:
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
+        args.api_server_count = 0
 
         def run_headless_wrapper():
             with SuppressSignalInThread():
