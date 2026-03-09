@@ -423,6 +423,65 @@ def process_weights_after_loading_moe_for_vllm11(self, layer) -> None:
             layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
 
+def _swap_w13_to_w31(x):
+    """Local implementation of swap_w13_to_w31 to avoid circular import issues with vllm 0.13+."""
+    import torch
+
+    return x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)
+
+
+def process_weights_after_loading_moe_for_vllm13(self, layer) -> None:
+    """This function is used to process the weights after loading for a FusedMoE layer, it is used for vllm 0.13+
+
+    This version uses the updated vllm APIs that don't include expert_weight_is_col_major.
+    Instead, it uses prepare_fp8_moe_layer_for_deepgemm which handles the scale transformations internally.
+    """
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        prepare_fp8_moe_layer_for_deepgemm,
+        requant_weight_ue8m0_inplace,
+    )
+    from vllm.utils.deep_gemm import (
+        is_deep_gemm_e8m0_used,
+    )
+
+    try:
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
+
+        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+    except ImportError:
+        try:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+        except ImportError:
+            self.rocm_aiter_moe_enabled = False
+
+    assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
+    assert self.quant_config.activation_scheme == "dynamic"
+
+    if self.flashinfer_moe_backend is not None:
+        layer.w13_weight.data = _swap_w13_to_w31(layer.w13_weight.data)
+        layer.w13_weight_scale_inv.data = _swap_w13_to_w31(layer.w13_weight_scale_inv.data)
+
+    if self.allow_deep_gemm:
+        assert layer.weight_block_size is not None
+        block_sz = tuple(layer.weight_block_size)
+
+        # Use the new unified API for deep gemm preparation
+        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_deepgemm(
+            layer.w13_weight.data,
+            layer.w2_weight.data,
+            layer.w13_weight_scale_inv.data,
+            layer.w2_weight_scale_inv.data,
+            block_sz,
+        )
+
+        layer.w13_weight.data = w13
+        layer.w2_weight.data = w2
+        layer.w13_weight_scale_inv.data = w13_scale
+        layer.w2_weight_scale_inv.data = w2_scale
+
+
 def apply_vllm_fp8_patches():
     logger.info("Applying vllm fp8 patches for blockwise quantization")
     func1_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
@@ -434,10 +493,14 @@ def apply_vllm_fp8_patches():
     )
     patcher1.start()
     func2_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
-    patcher2 = patch(
-        func2_path,
-        process_weights_after_loading_moe_for_vllm11
-        if version.parse(vllm.__version__) >= version.parse("0.11.0")
-        else process_weights_after_loading_moe_for_vllm10,
-    )
+
+    # Select the appropriate MoE weights processing function based on vllm version
+    if version.parse(vllm.__version__) >= version.parse("0.13.0"):
+        moe_processor = process_weights_after_loading_moe_for_vllm13
+    elif version.parse(vllm.__version__) >= version.parse("0.11.0"):
+        moe_processor = process_weights_after_loading_moe_for_vllm11
+    else:
+        moe_processor = process_weights_after_loading_moe_for_vllm10
+
+    patcher2 = patch(func2_path, moe_processor)
     patcher2.start()
