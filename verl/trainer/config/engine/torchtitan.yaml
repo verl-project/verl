@@ -58,6 +58,9 @@ context_parallel_size: 1
 # Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen")
 attn_type: flex
 
+# Maximum sequence length for RoPE cache. If null, defaults to torchtitan's TrainingConfig.seq_len (2048).
+max_seq_len: null
+
 # Strategy
 strategy: torchtitan
 

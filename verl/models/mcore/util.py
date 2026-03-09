@@ -27,8 +27,20 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
+    """Compute FP8 alignment sizes for thd-format sequences.
+
+    For FP8 block quantization, each sequence must be padded to a multiple of
+    lcm(16, align_size), and the total padded length must be divisible by
+    (align_size * 128) for TransformerEngine compatibility.
+
+    Returns (per_seq_align_size, total_align_size).
+    """
+    return math.lcm(16, align_size), align_size * 128
+
+
 def preprocess_packed_seqs(
-    input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, use_fp8_padding=False
+    input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, use_fp8_padding: bool = False
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences
@@ -44,9 +56,8 @@ def preprocess_packed_seqs(
     cp_rank = mpu.get_context_parallel_rank()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
     if use_fp8_padding:
-        # if fp8 is enabled, ensure the sequence is padded to multiples of 16 for better performance
-        original_align_size = align_size
-        align_size = math.lcm(16, align_size)
+        per_seq_align, total_align = _compute_fp8_thd_align_size(align_size)
+        align_size = per_seq_align
 
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
     seqlens_in_batch_padded = seqlens_in_batch + pad_size
@@ -57,9 +68,7 @@ def preprocess_packed_seqs(
     cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
 
     if use_fp8_padding:
-        # make sure all the sequences are padded to multiples of 128 for TE compatibility
-        align_size_last = original_align_size * 128
-        pad_size_last = (align_size_last - cu_seqlens_padded[-1] % align_size_last) % align_size_last
+        pad_size_last = (total_align - cu_seqlens_padded[-1] % total_align) % total_align
         cu_seqlens_padded[-1] += pad_size_last
         seqlens_in_batch_padded[-1] += pad_size_last
 
@@ -283,7 +292,7 @@ def postprocess_packed_seqs_for_dict_output(
 
 
 def preprocess_thd_no_padding(
-    input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False
+    input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences
@@ -299,6 +308,10 @@ def preprocess_thd_no_padding(
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
     seqlens_in_batch = input_ids.offsets().diff()
 
+    if use_fp8_padding:
+        per_seq_align, total_align = _compute_fp8_thd_align_size(align_size)
+        align_size = per_seq_align
+
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
     seqlens_in_batch_padded = seqlens_in_batch + pad_size
 
@@ -306,6 +319,12 @@ def preprocess_thd_no_padding(
     cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)
     cu_seqlens_padded = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
+
+    if use_fp8_padding:
+        # Pad the last sequence so total length is divisible by total_align for TE
+        pad_size_last = (total_align - cu_seqlens_padded[-1] % total_align) % total_align
+        cu_seqlens_padded[-1] += pad_size_last
+        seqlens_in_batch_padded[-1] += pad_size_last
 
     # ----------------------------------------------------------------------------
     # Move the index information needed in the subsequent loop to the CPU at once,
@@ -458,7 +477,9 @@ def postprocess_thd_no_padding(
     return output_new_tensor
 
 
-def preprocess_bshd_no_padding(input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False):
+def preprocess_bshd_no_padding(
+    input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
+):
     """
     Preprocess bshd sequences
     return "input_ids, attention_mask, position_ids"
@@ -470,10 +491,20 @@ def preprocess_bshd_no_padding(input_ids: torch.Tensor, pre_process: bool = True
     batch_size = input_ids.shape[0]
     seqlens_in_batch = input_ids.offsets().diff()
     max_seqlen = seqlens_in_batch.max().item()
-    if mpu.get_tensor_model_parallel_world_size() > 1:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    if tp_size > 1:
+        sp_world_size = tp_size
         pad_size = (sp_world_size - max_seqlen % sp_world_size) % sp_world_size
         max_seqlen = max_seqlen + pad_size
+    if use_fp8_padding:
+        # For FP8 block quantization, batch_size * max_seqlen / tp_size must be divisible by 128.
+        # We need: max_seqlen % tp_size == 0 (for SP) AND batch_size * max_seqlen % (128 * tp_size) == 0.
+        # Compute the required alignment for max_seqlen:
+        fp8_total_align = 128 * tp_size
+        fp8_seq_align = fp8_total_align // math.gcd(batch_size, fp8_total_align)
+        # Also ensure tp alignment for SP
+        fp8_seq_align = math.lcm(fp8_seq_align, tp_size)
+        max_seqlen = ((max_seqlen + fp8_seq_align - 1) // fp8_seq_align) * fp8_seq_align
 
     attention_mask = torch.zeros(batch_size, max_seqlen, dtype=torch.bool, device=input_ids.device)
     input_ids_bshd = torch.zeros(batch_size, max_seqlen, dtype=input_ids.dtype, device=input_ids.device)

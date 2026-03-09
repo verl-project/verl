@@ -84,10 +84,16 @@ class TRTLLMHttpServer:
         self.max_colocate_count = max_colocate_count
         self.pgs = pgs
         self.bundle_indices = bundle_indices
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
             self.config.load_format = "auto"
+
+        self.is_vlm_model = (
+            self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
+        ) or hasattr(self.model_config, "vision_config")
 
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
@@ -123,6 +129,21 @@ class TRTLLMHttpServer:
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
 
+        quantization = self.config.quantization
+        if quantization is not None:
+            if quantization == "fp8":
+                FP8_BLOCK_QUANT_KWARGS = {
+                    "activation_scheme": "dynamic",
+                    "fmt": "e4m3",
+                    "quant_method": "fp8",
+                    "weight_block_size": [128, 128],
+                }
+                engine_kwargs["model_kwargs"] = {"quantization_config": FP8_BLOCK_QUANT_KWARGS}
+                if self.config.load_format != "dummy":
+                    raise ValueError("FP8 quantization is only supported for dummy load format")
+            else:
+                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+
         llm_kwargs = {
             "model": self.model_config.local_path,
             "backend": "pytorch",
@@ -130,7 +151,6 @@ class TRTLLMHttpServer:
             "enable_chunked_prefill": self.config.enable_chunked_prefill,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "orchestrator_type": "ray",
-            "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
             "kv_cache_config": kv_cache_config,
             "max_seq_len": self.config.max_model_len,
             "max_batch_size": self.config.max_num_seqs,
@@ -138,6 +158,8 @@ class TRTLLMHttpServer:
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "pipeline_parallel_size": self.config.pipeline_model_parallel_size,
             "moe_expert_parallel_size": self.config.expert_parallel_size,
+            "moe_tensor_parallel_size": self.config.moe_tensor_parallel_size,
+            "load_format": self.config.load_format,
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
@@ -147,6 +169,18 @@ class TRTLLMHttpServer:
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,
         }
+
+        self_defined_extension = {
+            "ray_worker_extension_cls": "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension",
+        }
+        if self.is_vlm_model:
+            llm_kwargs.update(self_defined_extension)
+        else:
+            llm_kwargs.update(
+                {
+                    "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
+                }
+            )
 
         if self.is_reward_model:
             llm_kwargs.update(
@@ -170,7 +204,6 @@ class TRTLLMHttpServer:
             )
 
         self.llm = await AsyncLLM(**llm_kwargs)
-
         trtllm_server = OpenAIServer(
             generator=self.llm,
             model=self.model_config.local_path,
@@ -178,20 +211,18 @@ class TRTLLMHttpServer:
             server_role=None,
             metadata_server_cfg=None,
         )
+
         app = trtllm_server.app
         self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
 
     async def generate(
         self,
-        prompt_ids: list[int],
+        prompt_ids: str | list[int],
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
-        """Generate sequence with token-in-token-out."""
-        assert image_data is None and video_data is None, "Multimodality is not yet supported in TRTLLMHttpServer."
-
         from tensorrt_llm.llmapi import SamplingParams
 
         max_tokens = min(self.config.response_length, self.config.max_model_len - len(prompt_ids))
@@ -202,16 +233,43 @@ class TRTLLMHttpServer:
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
-        outputs = await self.llm.generate_async(
-            inputs=prompt_ids,
-            sampling_params=trt_llm_sampling_params,
-        )
+        if self.is_vlm_model and (image_data or video_data):
+            org_prompt = self.llm.tokenizer.decode(prompt_ids)
+            input_dict = {
+                "prompt": org_prompt,
+                "multi_modal_data": {},
+                "mm_processor_kwargs": {},
+            }
+            if image_data:
+                input_dict["multi_modal_data"]["image"] = image_data
+            if video_data:
+                input_dict["multi_modal_data"]["video"] = video_data
 
+            outputs = await self.llm.generate_async(
+                inputs=input_dict,
+                sampling_params=trt_llm_sampling_params,
+            )
+        else:
+            outputs = await self.llm.generate_async(
+                inputs=prompt_ids,
+                sampling_params=trt_llm_sampling_params,
+            )
         token_ids = outputs.outputs[0].token_ids
         log_probs = None
-        if trt_llm_sampling_params.logprobs is not None:
+        if outputs.outputs[0].logprobs is not None:
+            # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position
             log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs)
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, extra_info={"global_steps": self.global_steps})
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
+
+    async def abort_all_requests(self):
+        raise NotImplementedError
+
+    async def resume_generation(self):
+        raise NotImplementedError
 
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:
