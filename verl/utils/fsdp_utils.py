@@ -890,7 +890,8 @@ def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
             # All-gather only these individual params to avoid materializing the
             # entire model on GPU (which would defeat leaf-by-leaf extraction).
             leaf_prefixes = {
-                name + "." for name in fsdp_names
+                name + "."
+                for name in fsdp_names
                 if not any(other.startswith(name + ".") for other in fsdp_names if other != name)
             }
             for pname, param in module.named_parameters():
@@ -902,9 +903,7 @@ def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
                 if clean_key in merged_params:
                     continue
                 merged_params[clean_key] = (
-                    param.full_tensor().detach().cpu()
-                    if hasattr(param, "full_tensor")
-                    else param.detach().cpu()
+                    param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
                 )
             get_torch_device().empty_cache()
     finally:
