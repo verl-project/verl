@@ -260,6 +260,7 @@ class AsyncTRTLLMHttpAdapter:
 
 
 class ServerAdapter(BaseRollout):
+    # TODO: change to non hard-coded
     _WEIGHTS_TAGS = [
         "sampler",
         "drafter",
@@ -268,7 +269,9 @@ class ServerAdapter(BaseRollout):
         "model_extra",
         "executor_extra",
         "model",
+        "model_weights",
         "draft_model",
+        "draft_model_weights",
     ]
 
     @staticmethod
