@@ -534,7 +534,9 @@ class vLLMHttpServer:
             # Default to a calculation that considers configured lengths
             # Cap max_tokens by response_length to ensure tensor alignment,
             # and by remaining budget to prevent OOM in multi-turn rollouts.
-            max_tokens = min(self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids))
+            max_tokens = min(
+                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
+            )
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
