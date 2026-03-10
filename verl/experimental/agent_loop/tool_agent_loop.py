@@ -229,6 +229,22 @@ class ToolAgentLoop(AgentLoopBase):
         # then add num_preempted to the metrics
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
+        turn_ftl = output.extra_info.get("first_token_latency", -1)
+        if agent_data.metrics.get("first_token_latency", -1) < 0 and turn_ftl >= 0:
+            agent_data.metrics["first_token_latency"] = turn_ftl
+        first_ts = output.extra_info.get("first_token_ts")
+        last_ts = output.extra_info.get("last_token_ts")
+        n_tokens = len(output.token_ids)
+        if first_ts is not None and last_ts is not None and n_tokens > 1:
+            prev_total = agent_data.metrics.get("_tpot_total_time", 0.0)
+            prev_count = agent_data.metrics.get("_tpot_total_tokens", 0)
+            agent_data.metrics["_tpot_total_time"] = prev_total + (last_ts - first_ts)
+            agent_data.metrics["_tpot_total_tokens"] = prev_count + (n_tokens - 1)
+            agent_data.metrics["tpot"] = (
+                agent_data.metrics["_tpot_total_time"] / agent_data.metrics["_tpot_total_tokens"]
+            )
+        elif agent_data.metrics.get("tpot") is None:
+            agent_data.metrics["tpot"] = -1
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids

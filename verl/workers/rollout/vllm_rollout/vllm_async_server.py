@@ -603,13 +603,36 @@ class vLLMHttpServer:
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
 
+        extra_info = {"global_steps": self.global_steps}
+        engine_metrics = final_res.metrics
+        if engine_metrics is not None:
+            if hasattr(engine_metrics, "first_token_latency"):
+                # v1 engine: RequestStateStats (defaults are 0.0, skip unset fields)
+                for key in ("arrival_time", "first_token_ts", "last_token_ts", "first_token_latency"):
+                    val = getattr(engine_metrics, key, None)
+                    if val:
+                        extra_info[key] = val
+            elif hasattr(engine_metrics, "first_token_time"):
+                # v0 engine: RequestMetrics
+                at = getattr(engine_metrics, "arrival_time", None)
+                ft = getattr(engine_metrics, "first_token_time", None)
+                lt = getattr(engine_metrics, "last_token_time", None)
+                if at is not None:
+                    extra_info["arrival_time"] = at
+                if ft is not None:
+                    extra_info["first_token_ts"] = ft
+                if lt is not None:
+                    extra_info["last_token_ts"] = lt
+                if ft is not None and at is not None:
+                    extra_info["first_token_latency"] = ft - at
+
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
-            extra_info={"global_steps": self.global_steps},
+            extra_info=extra_info,
         )
 
     async def wake_up(self):

@@ -172,6 +172,8 @@ class AgentLoopMetrics(BaseModel):
     generate_sequences: float = 0.0
     tool_calls: float = 0.0
     num_preempted: int = -1  # -1 means not available
+    first_token_latency: float = -1
+    tpot: float = -1
 
 
 class AgentLoopOutput(BaseModel):
@@ -1050,6 +1052,18 @@ class AgentLoopManager:
         timing["agent_loop/num_preempted/min"] = num_preempted.min()
         timing["agent_loop/num_preempted/max"] = num_preempted.max()
         timing["agent_loop/num_preempted/mean"] = num_preempted.mean()
+        first_token_latency = np.array([metric["first_token_latency"] for chunk in metrics for metric in chunk])
+        valid_ftl = first_token_latency[first_token_latency >= 0]
+        if len(valid_ftl) > 0:
+            timing["agent_loop/first_token_latency/min"] = valid_ftl.min()
+            timing["agent_loop/first_token_latency/max"] = valid_ftl.max()
+            timing["agent_loop/first_token_latency/mean"] = valid_ftl.mean()
+        tpot = np.array([metric["tpot"] for chunk in metrics for metric in chunk])
+        valid_tpot = tpot[tpot >= 0]
+        if len(valid_tpot) > 0:
+            timing["agent_loop/tpot/min"] = valid_tpot.min()
+            timing["agent_loop/tpot/max"] = valid_tpot.max()
+            timing["agent_loop/tpot/mean"] = valid_tpot.mean()
         timing["agent_loop/generate_sequences/min"] = t_generate_sequences.min()
         timing["agent_loop/generate_sequences/max"] = t_generate_sequences.max()
         timing["agent_loop/generate_sequences/mean"] = t_generate_sequences.mean()
@@ -1066,6 +1080,10 @@ class AgentLoopManager:
         timing["agent_loop/slowest/prompt_length"] = attention_mask[:prompt_length].sum().item()
         timing["agent_loop/slowest/response_length"] = attention_mask[prompt_length:].sum().item()
         timing["agent_loop/slowest/num_preempted"] = num_preempted[slowest]
+        if first_token_latency[slowest] >= 0:
+            timing["agent_loop/slowest/first_token_latency"] = first_token_latency[slowest]
+        if tpot[slowest] >= 0:
+            timing["agent_loop/slowest/tpot"] = tpot[slowest]
 
         return timing
 

@@ -59,6 +59,14 @@ class SingleTurnAgentLoop(AgentLoopBase):
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
+        metrics["first_token_latency"] = output.extra_info.get("first_token_latency", -1)
+        first_ts = output.extra_info.get("first_token_ts")
+        last_ts = output.extra_info.get("last_token_ts")
+        n_tokens = len(output.token_ids)
+        if first_ts is not None and last_ts is not None and n_tokens > 1:
+            metrics["tpot"] = (last_ts - first_ts) / (n_tokens - 1)
+        else:
+            metrics["tpot"] = -1
         response_mask = [1] * len(output.token_ids)
 
         output = AgentLoopOutput(
