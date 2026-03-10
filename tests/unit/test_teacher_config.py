@@ -1,5 +1,6 @@
 import pytest
-from verl.workers.config.teacher import TeacherConfig, MOPDConfig
+
+from verl.workers.config.teacher import MOPDConfig, TeacherConfig
 
 
 def test_teacher_config_requires_name():
