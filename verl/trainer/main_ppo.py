@@ -282,10 +282,18 @@ class TaskRunner:
         from omegaconf import OmegaConf
 
         from verl.utils.fs import copy_to_local
+        from verl.utils.tracking import Tracking
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
+
+        logger = Tracking(
+            project_name=config.trainer.project_name,
+            experiment_name=config.trainer.experiment_name,
+            default_backend=config.trainer.logger,
+            config=OmegaConf.to_container(config, resolve=True),
+        )
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
@@ -354,9 +362,13 @@ class TaskRunner:
         )
         # Initialize the workers of the trainer.
         trainer.init_workers()
+        trainer.global_steps = 0
+        startup_worker_system_metrics = trainer._collect_worker_system_metrics()
+        if startup_worker_system_metrics:
+            logger.log(data=startup_worker_system_metrics, step=trainer.global_steps, backend=["wandb", "vemlp_wandb"])
 
         # Start the training process.
-        trainer.fit()
+        trainer.fit(logger=logger)
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True, max_samples: int = -1):

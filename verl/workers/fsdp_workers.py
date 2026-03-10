@@ -16,6 +16,7 @@ The main entry point to run the PPO algorithm
 """
 
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -96,6 +97,55 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
+
+
+def maybe_stage_model_to_local_cache(model_path: str) -> str:
+    """Stage a Hugging Face repo snapshot into pod-local storage.
+
+    The HyperPod setup already keeps the shared HF cache on FSx, but loading
+    a 32B checkpoint from that shared cache on every rank creates a large
+    cross-node read storm. When `VERL_LOCAL_MODEL_CACHE_ROOT` is set, copy the
+    repo snapshot once per pod into local storage and reuse that local path for
+    tokenizer/config/model initialization.
+    """
+    local_cache_root = os.environ.get("VERL_LOCAL_MODEL_CACHE_ROOT")
+    if not local_cache_root:
+        return model_path
+
+    if os.path.isabs(model_path) or model_path.startswith("hdfs://"):
+        return model_path
+
+    try:
+        from filelock import FileLock
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return model_path
+
+    repo_name = model_path.strip("/").replace("/", "--")
+    staged_model_path = os.path.join(local_cache_root, "models", repo_name)
+    ready_marker = os.path.join(staged_model_path, ".snapshot_ready")
+    lock_name = hashlib.md5(model_path.encode(), usedforsecurity=False).hexdigest() + ".lock"
+    lock_path = os.path.join(local_cache_root, lock_name)
+    shared_hf_cache = os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")
+
+    os.makedirs(local_cache_root, exist_ok=True)
+    with FileLock(lock_path, timeout=1800):
+        if not os.path.exists(ready_marker):
+            os.makedirs(staged_model_path, exist_ok=True)
+            logger.warning("Staging model %s into local cache at %s", model_path, staged_model_path)
+            resolved_path = snapshot_download(
+                repo_id=model_path,
+                local_dir=staged_model_path,
+                cache_dir=shared_hf_cache,
+                token=os.environ.get("HF_TOKEN"),
+            )
+            if resolved_path != staged_model_path:
+                logger.warning("Model %s staged to %s", model_path, resolved_path)
+                staged_model_path = resolved_path
+            with open(ready_marker, "w", encoding="utf-8") as f:
+                f.write(model_path + "\n")
+
+    return staged_model_path
 
 
 def create_device_mesh(world_size, fsdp_size):
@@ -363,7 +413,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             raise ValueError("TiledMLP requires FSDP2. Set `actor_rollout_ref.actor.strategy=fsdp2`.")
 
         log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
-        local_path = model_path
+        local_path = maybe_stage_model_to_local_cache(model_path)
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly

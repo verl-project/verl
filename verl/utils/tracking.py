@@ -67,9 +67,11 @@ class Tracking:
 
             import wandb
 
-            settings = None
+            init_timeout = int(os.environ.get("WANDB_INIT_TIMEOUT", "300"))
+            settings_kwargs = {"init_timeout": init_timeout}
             if config and config["trainer"].get("wandb_proxy", None):
-                settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
+                settings_kwargs["https_proxy"] = config["trainer"]["wandb_proxy"]
+            settings = wandb.Settings(**settings_kwargs)
             entity = os.environ.get("WANDB_ENTITY", None)
             wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
             self.logger["wandb"] = wandb

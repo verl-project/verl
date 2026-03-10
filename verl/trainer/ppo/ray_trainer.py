@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import re
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -1218,7 +1219,123 @@ class RayPPOTrainer:
             critic_output = self.critic_wg.update_critic(batch)
         return critic_output
 
-    def fit(self):
+    @staticmethod
+    def _sanitize_system_metric_component(value: str) -> str:
+        sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", value)
+        sanitized = sanitized.strip("._")
+        return sanitized or "unknown"
+
+    def _should_log_worker_system_metrics(self) -> bool:
+        enabled = os.getenv("VERL_ENABLE_WORKER_SYSTEM_METRICS", "0").strip().lower()
+        if enabled in {"", "0", "false", "no", "off"}:
+            return False
+
+        interval_raw = os.getenv("VERL_WORKER_SYSTEM_METRICS_INTERVAL", "1").strip()
+        try:
+            interval = max(1, int(interval_raw))
+        except ValueError:
+            interval = 1
+
+        current_step = getattr(self, "global_steps", 0)
+        return current_step % interval == 0
+
+    def _collect_worker_system_metrics(self) -> dict[str, float]:
+        if not self._should_log_worker_system_metrics():
+            return {}
+
+        worker_groups = []
+        seen_worker_groups = set()
+        for role, worker_group in (
+            ("actor_rollout", getattr(self, "actor_rollout_wg", None)),
+            ("critic", getattr(self, "critic_wg", None)),
+            ("ref_policy", getattr(self, "ref_policy_wg", None)),
+        ):
+            if worker_group is None or id(worker_group) in seen_worker_groups:
+                continue
+            seen_worker_groups.add(id(worker_group))
+            worker_groups.append((role, worker_group))
+
+        pod_metric_fields = (
+            ("system_cpu_percent", "cpu_percent"),
+            ("system_memory_used_gb", "memory_used_gb"),
+            ("system_memory_total_gb", "memory_total_gb"),
+            ("system_memory_percent", "memory_percent"),
+            ("cgroup_memory_used_gb", "cgroup_memory_used_gb"),
+            ("cgroup_memory_limit_gb", "cgroup_memory_limit_gb"),
+            ("cgroup_memory_percent", "cgroup_memory_percent"),
+        )
+        worker_metric_fields = (
+            ("process_cpu_percent", "process_cpu_percent"),
+            ("process_rss_gb", "process_rss_gb"),
+            ("gpu_memory_allocated_gb", "gpu_memory_allocated_gb"),
+            ("gpu_memory_reserved_gb", "gpu_memory_reserved_gb"),
+            ("gpu_max_memory_allocated_gb", "gpu_max_memory_allocated_gb"),
+            ("gpu_max_memory_reserved_gb", "gpu_max_memory_reserved_gb"),
+        )
+        gpu_metric_fields = (
+            ("gpu_memory_used_gb", "memory_used_gb"),
+            ("gpu_memory_total_gb", "memory_total_gb"),
+            ("gpu_memory_percent", "memory_percent"),
+            ("gpu_utilization_percent", "utilization_percent"),
+            ("gpu_memory_controller_percent", "memory_controller_percent"),
+        )
+
+        metrics: dict[str, float] = {}
+        recorded_pods = set()
+        recorded_gpus = set()
+        sampled_workers_by_pod: dict[str, float] = defaultdict(float)
+
+        for role, worker_group in worker_groups:
+            try:
+                worker_payloads = worker_group.execute_all_sync("get_worker_system_metrics")
+            except Exception as exc:
+                if not getattr(self, "_worker_system_metrics_warning_emitted", False):
+                    print(f"WARNING: failed to collect worker system metrics: {exc}")
+                    self._worker_system_metrics_warning_emitted = True
+                return metrics
+
+            for payload in worker_payloads:
+                if not payload:
+                    continue
+
+                host = self._sanitize_system_metric_component(str(payload.get("host", "unknown")))
+                worker_rank = int(payload.get("rank", -1))
+                worker_prefix = f"system/workers/{role}/{host}/rank_{worker_rank}"
+                worker_values = payload.get("metrics", {})
+
+                sampled_workers_by_pod[host] += 1.0
+                metrics[f"{worker_prefix}/local_rank"] = float(payload.get("local_rank", 0))
+
+                for source_key, target_name in worker_metric_fields:
+                    value = worker_values.get(source_key)
+                    if value is not None:
+                        metrics[f"{worker_prefix}/{target_name}"] = float(value)
+
+                if host not in recorded_pods:
+                    for source_key, target_name in pod_metric_fields:
+                        value = worker_values.get(source_key)
+                        if value is not None:
+                            metrics[f"system/pods/{host}/{target_name}"] = float(value)
+                    recorded_pods.add(host)
+
+                device_identifier = payload.get("device_identifier")
+                if device_identifier is not None:
+                    device_name = self._sanitize_system_metric_component(str(device_identifier))
+                    gpu_key = (host, device_name)
+                    if gpu_key not in recorded_gpus:
+                        gpu_prefix = f"system/pods/{host}/gpus/{device_name}"
+                        for source_key, target_name in gpu_metric_fields:
+                            value = worker_values.get(source_key)
+                            if value is not None:
+                                metrics[f"{gpu_prefix}/{target_name}"] = float(value)
+                        recorded_gpus.add(gpu_key)
+
+        for host, sampled_workers in sampled_workers_by_pod.items():
+            metrics[f"system/pods/{host}/sampled_workers"] = sampled_workers
+
+        return metrics
+
+    def fit(self, logger=None):
         """
         The training loop of PPO.
         The driver process only need to call the compute functions of the worker group through RPC
@@ -1229,18 +1346,25 @@ class RayPPOTrainer:
 
         from verl.utils.tracking import Tracking
 
-        logger = Tracking(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-            default_backend=self.config.trainer.logger,
-            config=OmegaConf.to_container(self.config, resolve=True),
-        )
+        if logger is None:
+            logger = Tracking(
+                project_name=self.config.trainer.project_name,
+                experiment_name=self.config.trainer.experiment_name,
+                default_backend=self.config.trainer.logger,
+                config=OmegaConf.to_container(self.config, resolve=True),
+            )
 
         self.global_steps = 0
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights()
+
+        # Emit per-worker system metrics as soon as the worker groups are live,
+        # so they are visible during long startup/validation phases as well.
+        startup_worker_system_metrics = self._collect_worker_system_metrics()
+        if startup_worker_system_metrics:
+            logger.log(data=startup_worker_system_metrics, step=self.global_steps, backend=["wandb", "vemlp_wandb"])
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -1581,6 +1705,9 @@ class RayPPOTrainer:
                     self.train_dataloader.sampler.update(batch=batch)
 
                 # TODO: make a canonical logger that supports various backend
+                worker_system_metrics = self._collect_worker_system_metrics()
+                if worker_system_metrics:
+                    logger.log(data=worker_system_metrics, step=self.global_steps, backend=["wandb", "vemlp_wandb"])
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)

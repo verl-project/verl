@@ -31,6 +31,102 @@ from verl.utils.device import (
 from .decorator import Dispatch, Execute, register
 
 
+def _bytes_to_gib(num_bytes: int) -> float:
+    return float(num_bytes) / (1024**3)
+
+
+def _read_text_file(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _read_cgroup_memory_bytes() -> tuple[int | None, int | None]:
+    candidates = [
+        ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+        ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ]
+
+    for usage_path, limit_path in candidates:
+        usage_raw = _read_text_file(usage_path)
+        limit_raw = _read_text_file(limit_path)
+        if usage_raw is None or limit_raw is None:
+            continue
+
+        try:
+            usage_bytes = int(usage_raw)
+        except ValueError:
+            continue
+
+        if limit_raw == "max":
+            limit_bytes = None
+        else:
+            try:
+                limit_bytes = int(limit_raw)
+            except ValueError:
+                continue
+            if limit_bytes >= 1 << 60:
+                limit_bytes = None
+
+        return usage_bytes, limit_bytes
+
+    return None, None
+
+
+def _resolve_visible_device_identifier() -> str | None:
+    visible_devices = os.environ.get(get_visible_devices_keyword().upper())
+    if not visible_devices:
+        return None
+
+    parsed_devices = [item.strip() for item in visible_devices.split(",") if item.strip()]
+    if not parsed_devices:
+        return None
+
+    try:
+        current_device = get_torch_device().current_device()
+    except Exception:
+        current_device = 0
+
+    if 0 <= current_device < len(parsed_devices):
+        return parsed_devices[current_device]
+
+    return parsed_devices[0]
+
+
+def _collect_gpu_utilization_metrics(device_identifier: str | None) -> dict[str, float]:
+    pynvml = getattr(_collect_gpu_utilization_metrics, "_pynvml", None)
+    if pynvml is None:
+        try:
+            import pynvml as _pynvml
+
+            _pynvml.nvmlInit()
+            setattr(_collect_gpu_utilization_metrics, "_pynvml", _pynvml)
+            pynvml = _pynvml
+        except Exception:
+            setattr(_collect_gpu_utilization_metrics, "_pynvml", False)
+            return {}
+    if pynvml is False:
+        return {}
+
+    try:
+        if device_identifier is None:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(get_torch_device().current_device())
+        elif device_identifier.isdigit():
+            handle = pynvml.nvmlDeviceGetHandleByIndex(int(device_identifier))
+        else:
+            handle = pynvml.nvmlDeviceGetHandleByUUID(device_identifier.encode())
+
+        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        return {
+            "gpu_utilization_percent": float(utilization.gpu),
+            "gpu_memory_controller_percent": float(utilization.memory),
+        }
+    except Exception:
+        return {}
+
+
 @dataclass
 class DistRankInfo:
     tp_rank: int
@@ -218,6 +314,7 @@ class Worker(WorkerHelper):
         self.fused_worker_dict = {}
         self.__dispatch_dp_rank = {}
         self.__collect_dp_rank = {}
+        self._metrics_process = None
 
     def get_fused_worker_by_name(self, worker_name: str):
         """Get a fused worker by its name.
@@ -316,6 +413,85 @@ class Worker(WorkerHelper):
     def rank(self):
         """Get the rank of this worker in the distributed setup."""
         return self._rank
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_worker_system_metrics(self):
+        payload = {
+            "host": os.environ.get("HOSTNAME") or socket.gethostname(),
+            "node_ip": self._get_node_ip().strip("[]"),
+            "rank": int(self.rank),
+            "local_rank": int(getattr(self, "_local_rank", 0)),
+            "device_identifier": None,
+            "metrics": {},
+        }
+
+        try:
+            import psutil
+        except ImportError:
+            return payload
+
+        if self._metrics_process is None:
+            self._metrics_process = psutil.Process(os.getpid())
+            try:
+                self._metrics_process.cpu_percent(interval=None)
+                psutil.cpu_percent(interval=None)
+            except Exception:
+                pass
+
+        process = self._metrics_process
+        metrics = payload["metrics"]
+
+        try:
+            metrics["process_cpu_percent"] = float(process.cpu_percent(interval=None))
+        except Exception:
+            pass
+
+        try:
+            metrics["process_rss_gb"] = _bytes_to_gib(process.memory_info().rss)
+        except Exception:
+            pass
+
+        try:
+            system_memory = psutil.virtual_memory()
+            metrics["system_cpu_percent"] = float(psutil.cpu_percent(interval=None))
+            metrics["system_memory_used_gb"] = _bytes_to_gib(system_memory.used)
+            metrics["system_memory_total_gb"] = _bytes_to_gib(system_memory.total)
+            metrics["system_memory_percent"] = float(system_memory.percent)
+        except Exception:
+            pass
+
+        cgroup_usage_bytes, cgroup_limit_bytes = _read_cgroup_memory_bytes()
+        if cgroup_usage_bytes is not None:
+            metrics["cgroup_memory_used_gb"] = _bytes_to_gib(cgroup_usage_bytes)
+        if cgroup_limit_bytes is not None and cgroup_limit_bytes > 0:
+            metrics["cgroup_memory_limit_gb"] = _bytes_to_gib(cgroup_limit_bytes)
+            if cgroup_usage_bytes is not None:
+                metrics["cgroup_memory_percent"] = float(100.0 * cgroup_usage_bytes / cgroup_limit_bytes)
+
+        try:
+            torch_device = get_torch_device()
+            if torch_device.is_available():
+                device_identifier = _resolve_visible_device_identifier()
+                payload["device_identifier"] = device_identifier
+
+                metrics["gpu_memory_allocated_gb"] = torch_device.memory_allocated() / (1024**3)
+                metrics["gpu_memory_reserved_gb"] = torch_device.memory_reserved() / (1024**3)
+                metrics["gpu_max_memory_allocated_gb"] = torch_device.max_memory_allocated() / (1024**3)
+                metrics["gpu_max_memory_reserved_gb"] = torch_device.max_memory_reserved() / (1024**3)
+
+                if hasattr(torch_device, "mem_get_info"):
+                    free_bytes, total_bytes = torch_device.mem_get_info()
+                    used_bytes = total_bytes - free_bytes
+                    metrics["gpu_memory_used_gb"] = _bytes_to_gib(used_bytes)
+                    metrics["gpu_memory_total_gb"] = _bytes_to_gib(total_bytes)
+                    if total_bytes > 0:
+                        metrics["gpu_memory_percent"] = float(100.0 * used_bytes / total_bytes)
+
+                metrics.update(_collect_gpu_utilization_metrics(device_identifier))
+        except Exception:
+            pass
+
+        return payload
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO_WITH_FUNC)
     def execute_with_func_generator(self, func, *args, **kwargs):
