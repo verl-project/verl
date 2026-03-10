@@ -22,6 +22,7 @@ import ray
 from tqdm import tqdm
 
 from verl import DataProto
+from verl.experimental.agent_loop.prometheus_utils import get_prometheus_client
 from verl.experimental.fully_async_policy.detach_utils import (
     MetricsAggregator,
     ValidateMetrics,
@@ -140,6 +141,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             + config.rollout.nnodes * config.rollout.n_gpus_per_node
         )
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
+
+        # Initialize Prometheus client if enabled
+        self.prometheus_client = None
+        prometheus_config = self.config.actor_rollout_ref.rollout.prometheus
+        if prometheus_config.enable and prometheus_config.metrics_to_log:
+            self.prometheus_client = get_prometheus_client(prometheus_config)
 
         # use trainer to do validation
         if self.config.async_training.use_trainer_do_validate:

@@ -711,6 +711,10 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         gradient_norm = metrics.get("actor/grad_norm", None)
         metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
+        if getattr(self, "prometheus_client", None) is not None:
+            prometheus_metrics = self.prometheus_client.query_all_metrics(prefix="prometheus/")
+            metrics.update(prometheus_metrics)
+
     def _fit_torch_memory(self):
         if (
             hasattr(self.config.actor_rollout_ref.actor, "profiler")

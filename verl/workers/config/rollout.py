@@ -118,6 +118,8 @@ class PrometheusConfig(BaseConfig):
     file: str = "/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"
     # Specify served_model_name to avoid displaying overly long model paths in Grafana
     served_model_name: Optional[str] = None
+    # List of Prometheus metrics to query and log to experiment tracking
+    metrics_to_log: Optional[list[str]] = None
 
 
 @dataclass
