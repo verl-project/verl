@@ -299,6 +299,8 @@ class _MlflowLoggingAdapter:
         import re
 
         self.logger = logging.getLogger(__name__)
+        # Suppress noisy "Found credentials from IAM Role" on every MLflow request
+        logging.getLogger("botocore.credentials").setLevel(logging.WARNING)
         # MLflow metric key validation logic:
         # https://github.com/mlflow/mlflow/blob/master/mlflow/utils/validation.py#L157C12-L157C44
         # Only characters allowed: slashes, alphanumerics, underscores, periods, dashes, colons,
@@ -307,24 +309,28 @@ class _MlflowLoggingAdapter:
             r"[^/\w.\- :]"
         )  # Allowed: slashes, alphanumerics, underscores, periods, dashes, colons, and spaces.
         self._consecutive_slashes_pattern = re.compile(r"/+")
+        self._sanitized_key_cache = {}
+
+    def _sanitize_key(self, key):
+        if key in self._sanitized_key_cache:
+            return self._sanitized_key_cache[key] or key
+        # First replace @ with _at_ for backward compatibility
+        sanitized = key.replace("@", "_at_")
+        # Replace consecutive slashes with a single slash (MLflow treats them as file paths)
+        sanitized = self._consecutive_slashes_pattern.sub("/", sanitized)
+        # Then replace any other invalid characters with _
+        sanitized = self._invalid_chars_pattern.sub("_", sanitized)
+        if sanitized == key:
+            self._sanitized_key_cache[key] = None
+        else:
+            self.logger.warning("[MLflow] Metric key '%s' sanitized to '%s' due to invalid characters.", key, sanitized)
+            self._sanitized_key_cache[key] = sanitized
+        return sanitized
 
     def log(self, data, step):
         import mlflow
 
-        def sanitize_key(key):
-            # First replace @ with _at_ for backward compatibility
-            sanitized = key.replace("@", "_at_")
-            # Replace consecutive slashes with a single slash (MLflow treats them as file paths)
-            sanitized = self._consecutive_slashes_pattern.sub("/", sanitized)
-            # Then replace any other invalid characters with _
-            sanitized = self._invalid_chars_pattern.sub("_", sanitized)
-            if sanitized != key:
-                self.logger.warning(
-                    "[MLflow] Metric key '%s' sanitized to '%s' due to invalid characters.", key, sanitized
-                )
-            return sanitized
-
-        results = {sanitize_key(k): v for k, v in data.items()}
+        results = {self._sanitize_key(k): v for k, v in data.items()}
         mlflow.log_metrics(metrics=results, step=step)
 
 
