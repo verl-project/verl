@@ -17,6 +17,8 @@ from diffusers.models.normalization import AdaLayerNormContinuous
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
+    ImageRopePrepare,
+    ModulateIndexPrepare,
     QwenEmbedLayer3DRope,
     QwenEmbedRope,
     QwenImageTransformer2DModel,
@@ -86,3 +88,6 @@ class QwenImageTransformer2DModelFixed(QwenImageTransformer2DModel):
 
         self.gradient_checkpointing = False
         self.zero_cond_t = zero_cond_t
+
+        self.image_rope_prepare = ImageRopePrepare(self.img_in, self.pos_embed)
+        self.modulate_index_prepare = ModulateIndexPrepare(zero_cond_t=zero_cond_t)

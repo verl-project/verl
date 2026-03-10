@@ -22,7 +22,7 @@ from types import MethodType
 from typing import Any, Literal, get_args
 
 import torch
-from vllm_omni.diffusion.worker.gpu_worker import CustomPipelineWorkerExtension
+from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl.utils.device import is_npu_available
 from verl.utils.vllm import OmniTensorLoRARequest, TensorLoRARequest, VLLMHijack, VLLMOmniHijack
