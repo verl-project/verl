@@ -76,7 +76,7 @@ class TestValidateReleaseTags:
 
 
 async def _sglang_release(self, tags=None):
-    """Mirrors SglangRollout.release() — calls validate_release_tags."""
+    """Mirrors SGLangRollout.release() — calls validate_release_tags."""
     tag_set = validate_release_tags(tags)
     await self._init_server_adapter()
     if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
@@ -164,7 +164,7 @@ def _make_trtllm_mock():
 # ---------------------------------------------------------------------------
 
 
-class TestSglangReleaseTags:
+class TestSGLangReleaseTags:
     @pytest.mark.asyncio
     async def test_default_releases_both(self):
         mock = _make_sglang_mock()
