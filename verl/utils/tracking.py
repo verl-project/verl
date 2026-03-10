@@ -17,6 +17,7 @@ A unified tracking interface that supports logging data to different backend
 
 import dataclasses
 import json
+import logging
 import os
 from enum import Enum
 from functools import partial
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+
+logger = logging.getLogger(__name__)
 
 MLFLOW_MAX_ATTEMPTS = 3
 MLFLOW_SLEEP_SECONDS = 5
@@ -92,7 +95,7 @@ class Tracking:
             for _mlflow_attempt in range(1, MLFLOW_MAX_ATTEMPTS + 1):
                 try:
                     MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:////tmp/mlruns.db")
-                    print(f"Using MLFlow tracking URI: {MLFLOW_TRACKING_URI}")
+                    logger.info("Using MLFlow tracking URI: %s", MLFLOW_TRACKING_URI)
                     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
                     # Some cloud providers like Azure ML or Databricks automatically set MLFLOW_RUN_ID
@@ -110,11 +113,13 @@ class Tracking:
                     self.logger["mlflow"] = _MlflowLoggingAdapter()
                     break  # Success
                 except Exception as e:
-                    print(f"WARNING: MLflow initialization attempt {_mlflow_attempt}/{MLFLOW_MAX_ATTEMPTS} failed: {e}")
+                    logger.warning(
+                        "MLflow initialization attempt %d/%d failed: %s", _mlflow_attempt, MLFLOW_MAX_ATTEMPTS, e
+                    )
                     if _mlflow_attempt < MLFLOW_MAX_ATTEMPTS:
                         time.sleep(MLFLOW_SLEEP_SECONDS)
                     else:
-                        print("WARNING: All MLflow initialization attempts failed. Proceeding without MLflow tracking.")
+                        logger.warning("All MLflow initialization attempts failed. Proceeding without MLflow tracking.")
 
         if "swanlab" in default_backend:
             import os
