@@ -68,7 +68,7 @@ def compute_teacher_log_probs_standalone(
     batch_size = len(teacher_ids)
     response_len = batch.batch["responses"].shape[1]
 
-    # Initialize output tensor (Fix 2: stacked storage)
+    # Initialize output tensor for collecting teacher log probs
     teacher_log_probs = torch.zeros(
         batch_size,
         response_len,
@@ -76,24 +76,34 @@ def compute_teacher_log_probs_standalone(
         device=batch.batch["responses"].device,
     )
 
-    # Group by teacher_id and forward sub-batches (Fix 3)
+    # Group by teacher_id and forward sub-batches
     for teacher_name, teacher_wg in teacher_wgs.items():
-        # Get indices for this teacher (Fix 7: integer tensor)
+        # Get indices for this teacher
         mask = teacher_ids == teacher_name
         indices = torch.tensor(np.where(mask)[0], dtype=torch.long)
 
         if len(indices) == 0:
             continue
 
-        # Select sub-batch (Fix 7: use select_idxs, not select)
+        # Select sub-batch using integer index tensor
         sub_batch = batch.select_idxs(indices)
 
         # Forward to teacher
         teacher_output = teacher_wg.compute_ref_log_prob(sub_batch)
         sub_log_probs = teacher_output.batch["ref_log_prob"]
 
-        # Scatter back to full batch (Fix 4: correct broadcasting)
+        # Scatter back to full batch (correct broadcasting)
         teacher_log_probs[indices] = sub_log_probs
+
+    # Verify all samples were routed to a known teacher
+    known_teachers = set(teacher_wgs.keys())
+    unique_ids = set(teacher_ids)
+    unknown_ids = unique_ids - known_teachers
+    if unknown_ids:
+        raise ValueError(
+            f"Samples have unknown teacher_ids not matching any teacher worker: "
+            f"{unknown_ids}. Available teachers: {sorted(known_teachers)}"
+        )
 
     return teacher_log_probs
 
@@ -231,3 +241,26 @@ def test_teacher_log_prob_empty_teacher():
     assert unused_wg.call_count == 0
     expected = torch.ones(2, 16) * 5.0
     torch.testing.assert_close(teacher_log_prob, expected)
+
+
+def test_teacher_log_prob_unknown_teacher_id_raises():
+    """Test that unknown teacher_id values raise a clear error."""
+    import pytest
+
+    # Arrange
+    batch = DataProto.from_single_dict(
+        {
+            "input_ids": torch.randint(0, 1000, (3, 32)),
+            "responses": torch.randint(0, 1000, (3, 16)),
+            "attention_mask": torch.ones(3, 48),
+        }
+    )
+    # "biology" is not in teacher_wgs
+    batch.non_tensor_batch["teacher_id"] = np.array(["math", "biology", "math"])
+
+    math_wg = MockTeacherWG(fill_value=1.0)
+    teacher_wgs = {"math": math_wg}
+
+    # Act & Assert: should raise ValueError with unknown teacher_id
+    with pytest.raises(ValueError, match="unknown teacher_ids"):
+        compute_teacher_log_probs_standalone(batch, teacher_wgs)

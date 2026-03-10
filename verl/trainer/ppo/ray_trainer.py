@@ -815,6 +815,12 @@ class RayPPOTrainer:
 
         # Create teacher workers for MOPD
         if self.config.algorithm.get("mopd", {}).get("enabled", False):
+            if Role.RefPolicy not in self.role_worker_mapping:
+                raise ValueError(
+                    "MOPD requires Role.RefPolicy in role_worker_mapping. "
+                    "MOPD is not compatible with LoRA ref-in-actor mode. "
+                    "Please ensure RefPolicy is mapped to a separate worker."
+                )
             self.teacher_wgs = {}
             for teacher_cfg in self.config.algorithm.mopd.teachers:
                 teacher_worker_config = deepcopy(self.config.actor_rollout_ref)
@@ -1196,7 +1202,7 @@ class RayPPOTrainer:
         batch_size = len(teacher_ids)
         response_len = batch.batch["responses"].shape[1]
 
-        # Initialize output tensor (Fix 2: stacked storage)
+        # Initialize output tensor for collecting teacher log probs
         teacher_log_probs = torch.zeros(
             batch_size,
             response_len,
@@ -1204,24 +1210,34 @@ class RayPPOTrainer:
             device=batch.batch["responses"].device,
         )
 
-        # Group by teacher_id and forward sub-batches (Fix 3)
+        # Group by teacher_id and forward sub-batches
         for teacher_name, teacher_wg in self.teacher_wgs.items():
-            # Get indices for this teacher (Fix 7: integer tensor)
+            # Get indices for this teacher
             mask = teacher_ids == teacher_name
             indices = torch.tensor(np.where(mask)[0], dtype=torch.long)
 
             if len(indices) == 0:
                 continue
 
-            # Select sub-batch (Fix 7: use select_idxs, not select)
+            # Select sub-batch using integer index tensor
             sub_batch = batch.select_idxs(indices)
 
             # Forward to teacher
             teacher_output = teacher_wg.compute_ref_log_prob(sub_batch)
             sub_log_probs = teacher_output.batch["ref_log_prob"]
 
-            # Scatter back to full batch (Fix 4: correct broadcasting)
+            # Scatter back to full batch (correct broadcasting)
             teacher_log_probs[indices] = sub_log_probs
+
+        # Verify all samples were routed to a known teacher
+        known_teachers = set(self.teacher_wgs.keys())
+        unique_ids = set(teacher_ids)
+        unknown_ids = unique_ids - known_teachers
+        if unknown_ids:
+            raise ValueError(
+                f"Samples have unknown teacher_ids not matching any teacher worker: "
+                f"{unknown_ids}. Available teachers: {sorted(known_teachers)}"
+            )
 
         return teacher_log_probs
 
