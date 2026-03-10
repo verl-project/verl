@@ -20,6 +20,7 @@ implement PPO-like algorithms.
 
 __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
+import logging
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -33,6 +34,8 @@ from verl.trainer.config import AlgoConfig
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
 from verl.workers.config import ActorConfig
+
+logger = logging.getLogger(__file__)
 
 PolicyLossFn = Callable[
     [
@@ -1004,6 +1007,94 @@ def compute_multi_turn_optimal_token_baseline_advantage(
         advantages = advantages * response_mask  # [shape: (bs * n * turn, response_length)]
 
     return advantages, token_returns
+
+
+@register_adv_est("mopd")
+def compute_mopd_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    teacher_log_prob: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    rollout_log_probs: Optional[torch.Tensor] = None,
+    base_log_prob: Optional[torch.Tensor] = None,
+    lambda_val: float = 1.0,
+    orm_weight: float = 0.0,
+    is_correction: bool = True,
+    is_epsilon_low: float = 0.1,
+    is_epsilon_high: float = 10.0,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Multi-Teacher On-Policy Distillation (MOPD) advantage estimator.
+
+    Implements MiMo paper (arXiv:2601.02780) Eq. 7-9 + G-OPD ExOPD mode.
+
+    Args:
+        token_level_rewards: ORM/verifier scores [batch, response_len]
+        response_mask: Valid token mask [batch, response_len]
+        teacher_log_prob: Per-sample selected teacher log probs [batch, response_len]
+        old_log_probs: Training engine log probs [batch, response_len]
+        rollout_log_probs: Inference engine log probs (optional) [batch, response_len]
+        base_log_prob: Base model log probs for ExOPD (optional) [batch, response_len]
+        lambda_val: G-OPD scaling (1.0=standard MOPD, >1.0=extrapolation)
+        orm_weight: Weight for outcome reward (α in A_final = A_mopd + α·A_orm)
+        is_correction: Enable importance sampling correction
+        is_epsilon_low: Lower bound for IS ratio
+        is_epsilon_high: Upper bound for IS ratio
+
+    Returns:
+        advantages: MOPD advantages [batch, response_len]
+        returns: Token-level rewards (for interface consistency)
+    """
+    # Token-level teacher advantage (stop-gradient)
+    if lambda_val == 1.0 or base_log_prob is None:
+        # Standard MOPD: reverse KL
+        A_mopd = (teacher_log_prob - old_log_probs).detach()
+    else:
+        # ExOPD: base-normalized reverse KL with scaling
+        A_mopd = -((old_log_probs - base_log_prob) - lambda_val * (teacher_log_prob - base_log_prob)).detach()
+
+    # IS correction (training/inference engine mismatch)
+    if is_correction and rollout_log_probs is not None:
+        ratio = (old_log_probs - rollout_log_probs).exp()
+        valid = (ratio >= is_epsilon_low) & (ratio <= is_epsilon_high)
+        weights = torch.where(valid, ratio.detach(), torch.zeros_like(ratio))
+
+        # Fix 5: Degenerate case fallback
+        valid_tokens = (weights > 0) & (response_mask > 0)
+        all_masked = ~valid_tokens.any(dim=-1)  # [batch]
+        if all_masked.any():
+            logger.warning(
+                "IS correction masked all tokens for %s samples. Using unweighted advantages as fallback.",
+                str(all_masked.sum()),
+            )
+            weights[all_masked] = 1.0
+    else:
+        weights = torch.ones_like(old_log_probs)
+
+    # Compose with ORM outcome advantage
+    if orm_weight > 0:
+        # Validate index is available (required by GRPO)
+        if "index" not in kwargs or kwargs["index"] is None:
+            raise ValueError(
+                "MOPD with orm_weight > 0 requires 'index' (uid) in batch. Ensure 'uid' is in data.non_tensor_batch."
+            )
+        # Compute GRPO-style outcome advantage
+        A_orm = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=kwargs["index"],
+        )[0]  # returns (advantages, returns)
+        A_final = weights * (A_mopd + orm_weight * A_orm)
+    else:
+        A_final = weights * A_mopd
+
+    # Fix 10: Apply response mask
+    A_final = A_final * response_mask
+
+    # Returns = token_level_rewards for interface consistency
+    returns = token_level_rewards * response_mask
+
+    return A_final, returns
 
 
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
