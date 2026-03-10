@@ -314,12 +314,16 @@ def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, s
         assert not getattr(layer, "merged", False), "LoRA should be unmerged after collect_merged_lora_params"
 
     # 6. Adapter weights should be preserved
+    # For FSDP2, state_dict() returns sharded DTensors; unshard via full_tensor() before comparing.
     restored_adapter_weights = get_peft_model_state_dict(model)
     for key in original_adapter_weights.keys():
         assert key in restored_adapter_weights, f"Adapter key {key} missing after extraction"
+        restored = restored_adapter_weights[key]
+        if hasattr(restored, "full_tensor"):
+            restored = restored.full_tensor()
         torch.testing.assert_close(
             original_adapter_weights[key].cpu(),
-            restored_adapter_weights[key].cpu(),
+            restored.cpu(),
             rtol=1e-5,
             atol=1e-6,
             msg=f"Adapter weight {key} changed after extraction",
