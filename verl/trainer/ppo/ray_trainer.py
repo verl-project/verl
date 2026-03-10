@@ -1255,6 +1255,17 @@ class RayPPOTrainer:
 
         self.global_steps = 0
 
+        # Validate MOPD + ppo_epochs constraint: teacher advantages are computed
+        # once per rollout and become stale across PPO epochs
+        if self.config.algorithm.get("mopd", {}).get("enabled", False) and getattr(
+            self.config.algorithm, "ppo_epochs", 1
+        ) > 1:
+            raise ValueError(
+                "MOPD requires ppo_epochs=1 because teacher advantages are "
+                "computed once per rollout and become stale across PPO epochs. "
+                "Set algorithm.ppo_epochs=1."
+            )
+
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights(self.global_steps)
