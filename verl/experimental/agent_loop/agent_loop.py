@@ -989,13 +989,13 @@ class AgentLoopManager:
         timing["agent_loop/num_preempted/min"] = num_preempted.min()
         timing["agent_loop/num_preempted/max"] = num_preempted.max()
         timing["agent_loop/num_preempted/mean"] = num_preempted.mean()
-        first_token_latency = np.array([metric.get("first_token_latency", -1) for chunk in metrics for metric in chunk])
+        first_token_latency = np.array([metric["first_token_latency"] for chunk in metrics for metric in chunk])
         valid_ftl = first_token_latency[first_token_latency >= 0]
         if len(valid_ftl) > 0:
             timing["agent_loop/first_token_latency/min"] = valid_ftl.min()
             timing["agent_loop/first_token_latency/max"] = valid_ftl.max()
             timing["agent_loop/first_token_latency/mean"] = valid_ftl.mean()
-        tpot = np.array([metric.get("tpot", -1) for chunk in metrics for metric in chunk])
+        tpot = np.array([metric["tpot"] for chunk in metrics for metric in chunk])
         valid_tpot = tpot[tpot >= 0]
         if len(valid_tpot) > 0:
             timing["agent_loop/tpot/min"] = valid_tpot.min()
@@ -1017,8 +1017,10 @@ class AgentLoopManager:
         timing["agent_loop/slowest/prompt_length"] = attention_mask[:prompt_length].sum().item()
         timing["agent_loop/slowest/response_length"] = attention_mask[prompt_length:].sum().item()
         timing["agent_loop/slowest/num_preempted"] = num_preempted[slowest]
-        timing["agent_loop/slowest/first_token_latency"] = first_token_latency[slowest]
-        timing["agent_loop/slowest/tpot"] = tpot[slowest]
+        if first_token_latency[slowest] >= 0:
+            timing["agent_loop/slowest/first_token_latency"] = first_token_latency[slowest]
+        if tpot[slowest] >= 0:
+            timing["agent_loop/slowest/tpot"] = tpot[slowest]
 
         return timing
 

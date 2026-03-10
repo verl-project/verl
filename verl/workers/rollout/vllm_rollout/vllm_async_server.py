@@ -603,23 +603,22 @@ class vLLMHttpServer:
         engine_metrics = final_res.metrics
         if engine_metrics is not None:
             if hasattr(engine_metrics, "first_token_latency"):
-                # v1 engine: RequestStateStats
+                # v1 engine: RequestStateStats (defaults are 0.0, skip unset fields)
                 for key in ("arrival_time", "first_token_ts", "last_token_ts", "first_token_latency"):
                     val = getattr(engine_metrics, key, None)
-                    if val is not None:
+                    if val:
                         extra_info[key] = val
             elif hasattr(engine_metrics, "first_token_time"):
                 # v0 engine: RequestMetrics
-                for src, dst in (
-                    ("arrival_time", "arrival_time"),
-                    ("first_token_time", "first_token_ts"),
-                    ("last_token_time", "last_token_ts"),
-                ):
-                    val = getattr(engine_metrics, src, None)
-                    if val is not None:
-                        extra_info[dst] = val
-                ft = getattr(engine_metrics, "first_token_time", None)
                 at = getattr(engine_metrics, "arrival_time", None)
+                ft = getattr(engine_metrics, "first_token_time", None)
+                lt = getattr(engine_metrics, "last_token_time", None)
+                if at is not None:
+                    extra_info["arrival_time"] = at
+                if ft is not None:
+                    extra_info["first_token_ts"] = ft
+                if lt is not None:
+                    extra_info["last_token_ts"] = lt
                 if ft is not None and at is not None:
                     extra_info["first_token_latency"] = ft - at
 
