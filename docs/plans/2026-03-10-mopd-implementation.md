@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+ | PyTorch | Ray | FSDP2 | Hydra | verl framework
 
-**Scope:** ~500 LOC production code + ~150 LOC tests
+**Scope:** ~550 LOC production code + ~180 LOC tests
 
 ---
 
@@ -21,7 +21,7 @@
 4. ✅ Correct broadcasting with `.unsqueeze(-1)`
 5. ✅ IS correction degenerate case fallback
 6. ✅ Explicit backward compatibility guards
-7. ✅ `batch.select()` uses integer tensor indices
+7. ✅ `batch.select_idxs()` uses integer tensor indices
 8. ✅ Teacher configs validated in `__post_init__`
 9. ✅ `rollout_log_probs` optional with None-check
 10. ✅ Advantage normalization respects response_mask
@@ -248,11 +248,11 @@ def test_mopd_advantage_basic():
 def test_mopd_advantage_with_is_correction():
     """Test IS correction masks tokens outside epsilon bounds."""
     B, T = 2, 5
-    teacher_log_prob = torch.zeros(B, T)
-    old_log_probs = torch.zeros(B, T)
+    teacher_log_prob = torch.ones(B, T) * 2.0  # Non-zero to verify masking
+    old_log_probs = torch.ones(B, T) * 1.0     # Non-zero advantage
     rollout_log_probs = torch.tensor([
-        [0.0, 0.0, -5.0, 0.0, 0.0],  # token 2 has large ratio
-        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, -4.0, 1.0, 1.0],  # token 2: ratio = exp(1-(-4)) = 148 > 10
+        [1.0, 1.0, 1.0, 1.0, 1.0],
     ])
     response_mask = torch.ones(B, T)
     token_level_rewards = torch.zeros(B, T)
@@ -269,8 +269,10 @@ def test_mopd_advantage_with_is_correction():
         is_epsilon_high=10.0,
     )
 
-    # Token [0, 2] should be masked (ratio = exp(0 - (-5)) = 148 > 10)
+    # Token [0, 2] should be masked to 0 (ratio = exp(1-(-4)) = 148 > 10)
     assert advantages[0, 2].item() == 0.0
+    # Non-masked tokens should have non-zero advantage (teacher - old = 2-1 = 1)
+    assert advantages[0, 0].item() != 0.0
 
 
 def test_mopd_advantage_exopd_mode():
@@ -381,11 +383,17 @@ def compute_mopd_advantage(
 
     # Compose with ORM outcome advantage
     if orm_weight > 0:
+        # Validate index is available (required by GRPO)
+        if "index" not in kwargs or kwargs["index"] is None:
+            raise ValueError(
+                "MOPD with orm_weight > 0 requires 'index' (uid) in batch. "
+                "Ensure 'uid' is in data.non_tensor_batch."
+            )
         # Compute GRPO-style outcome advantage
         A_orm = compute_grpo_outcome_advantage(
             token_level_rewards=token_level_rewards,
             response_mask=response_mask,
-            index=kwargs.get("index"),  # uid for grouping
+            index=kwargs["index"],
         )[0]  # returns (advantages, returns)
         A_final = weights * (A_mopd + orm_weight * A_orm)
     else:
@@ -421,6 +429,115 @@ git commit -m "feat(mopd): add MOPD advantage estimator to core_algos
 - Tests: 3 unit tests (basic, IS correction, ExOPD)
 
 Implements Fixes 5, 9, 10"
+```
+
+---
+
+### Task 2.5: Wire MOPD Kwargs into compute_advantage Dispatch
+
+**Files:**
+- Modify: `verl/trainer/ppo/ray_trainer.py:190-217`
+- Test: `tests/unit/test_mopd_advantage.py` (extend)
+
+**Step 1: Write failing test for dispatch wiring**
+
+Append to `tests/unit/test_mopd_advantage.py`:
+
+```python
+def test_mopd_kwargs_received_via_dispatch():
+    """Test that compute_mopd_advantage receives correct kwargs from dispatch."""
+    import numpy as np
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+    from verl.trainer.ppo.core_algos import AdvantageEstimator
+
+    B, T = 4, 10
+    data = DataProto.from_single_dict({
+        "token_level_rewards": torch.randn(B, T),
+        "response_mask": torch.ones(B, T),
+        "old_log_probs": torch.randn(B, T),
+        "teacher_log_prob": torch.randn(B, T),
+    })
+    data.non_tensor_batch["uid"] = np.array(["a", "a", "b", "b"])
+
+    # Should not crash — verifies kwargs are passed through
+    result = compute_advantage(
+        data,
+        adv_estimator="mopd",
+        config=None,
+    )
+    assert "advantages" in result.batch
+    assert "returns" in result.batch
+```
+
+**Step 2: Run test to verify it fails**
+
+```bash
+pytest tests/unit/test_mopd_advantage.py::test_mopd_kwargs_received_via_dispatch -v
+```
+
+Expected: FAIL (teacher_log_prob/old_log_probs not passed to estimator)
+
+**Step 3: Add MOPD kwargs to compute_advantage dispatch**
+
+Modify `verl/trainer/ppo/ray_trainer.py` in `compute_advantage()` function,
+in the `else` branch (around line 192-215), add MOPD-specific kwargs:
+
+```python
+    else:
+        # handle all other adv estimator type other than GAE and GRPO
+        adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
+        adv_kwargs = {
+            "token_level_rewards": data.batch["token_level_rewards"],
+            "response_mask": data.batch["response_mask"],
+            "config": config,
+        }
+        if "uid" in data.non_tensor_batch:  # optional
+            adv_kwargs["index"] = data.non_tensor_batch["uid"]
+        if "reward_baselines" in data.batch:  # optional
+            adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+
+        # MOPD-specific kwargs (pass from batch if available)
+        if "teacher_log_prob" in data.batch:
+            adv_kwargs["teacher_log_prob"] = data.batch["teacher_log_prob"]
+        if "old_log_probs" in data.batch:
+            adv_kwargs["old_log_probs"] = data.batch["old_log_probs"]
+        if "rollout_log_probs" in data.batch:
+            adv_kwargs["rollout_log_probs"] = data.batch["rollout_log_probs"]
+        if "base_log_prob" in data.batch:
+            adv_kwargs["base_log_prob"] = data.batch["base_log_prob"]
+
+        # Pass MOPD config values if available
+        mopd_cfg = getattr(config, "mopd", None) if config else None
+        if mopd_cfg is not None:
+            adv_kwargs["lambda_val"] = getattr(mopd_cfg, "lambda_val", 1.0)
+            adv_kwargs["orm_weight"] = getattr(mopd_cfg, "orm_weight", 0.0)
+            adv_kwargs["is_correction"] = getattr(mopd_cfg, "is_correction", True)
+            adv_kwargs["is_epsilon_low"] = getattr(mopd_cfg, "is_epsilon_low", 0.1)
+            adv_kwargs["is_epsilon_high"] = getattr(mopd_cfg, "is_epsilon_high", 10.0)
+
+        # ... existing optimal token baseline code ...
+```
+
+**Step 4: Run tests to verify they pass**
+
+```bash
+pytest tests/unit/test_mopd_advantage.py -v
+```
+
+Expected: All 4 tests PASS (3 original + 1 new dispatch test)
+
+**Step 5: Commit**
+
+```bash
+git add verl/trainer/ppo/ray_trainer.py tests/unit/test_mopd_advantage.py
+git commit -m "feat(mopd): wire MOPD kwargs into compute_advantage dispatch
+
+- Pass teacher_log_prob, old_log_probs, rollout_log_probs, base_log_prob
+- Forward MOPD config values (lambda, IS bounds, orm_weight)
+- Backward compatible (only passes if keys exist in batch)
+
+Fixes Issue 2: compute_advantage dispatch gap"
 ```
 
 ---
@@ -484,8 +601,10 @@ if self.config.algorithm.get("mopd", {}).get("enabled", False):
             role=f"Teacher_{teacher_cfg.name}",
         )
 
-        resource_pool = self.resource_pool_manager.get_resource_pool_by_name(
-            teacher_cfg.resource_pool
+        # Use the same resource pool as the actor (global_pool by default)
+        resource_pool = self.resource_pool_manager.resource_pool_dict.get(
+            teacher_cfg.resource_pool,
+            list(self.resource_pool_manager.resource_pool_dict.values())[0]
         )
         teacher_wg = self.ray_worker_group_cls(
             resource_pool=resource_pool,
@@ -520,11 +639,13 @@ Implements Fix 1: Teachers in RefPolicy workers"
 
 ---
 
-### Task 4: Implement Sub-Batch Teacher Routing
+### Task 5: Implement Sub-Batch Teacher Routing
 
 **Files:**
 - Modify: `verl/trainer/ppo/ray_trainer.py:1428-1433`
 - Test: `tests/unit/test_teacher_routing.py`
+
+**Note:** Depends on Task 4 (dataset provides `teacher_id`).
 
 **Step 1: Write failing test for sub-batch routing**
 
@@ -533,7 +654,19 @@ Create `tests/unit/test_teacher_routing.py`:
 ```python
 import torch
 import numpy as np
+from unittest.mock import MagicMock
 from verl import DataProto
+
+
+class MockTeacherWG:
+    """Mock teacher worker group for unit testing."""
+    def compute_ref_log_prob(self, sub_batch):
+        batch_size = sub_batch.batch["responses"].shape[0]
+        response_len = sub_batch.batch["responses"].shape[1]
+        result = DataProto.from_single_dict({
+            "ref_log_prob": torch.randn(batch_size, response_len),
+        })
+        return result
 
 
 def test_teacher_log_prob_computation():
@@ -590,8 +723,8 @@ def _compute_teacher_log_probs(self, batch: DataProto) -> torch.Tensor:
         if len(indices) == 0:
             continue
 
-        # Select sub-batch
-        sub_batch = batch.select(indices)
+        # Select sub-batch (Fix 7: use select_idxs, not select)
+        sub_batch = batch.select_idxs(indices)
 
         # Forward to teacher
         teacher_output = teacher_wg.compute_ref_log_prob(sub_batch)
@@ -642,22 +775,29 @@ Implements Fixes 2, 3, 4, 7"
 
 ---
 
-### Task 5: Add Teacher ID to Dataset
+### Task 4: Add Teacher ID to Dataset
 
 **Files:**
 - Modify: `verl/utils/dataset/rl_dataset.py:50-100`
 - Test: `tests/unit/test_dataset_teacher_id.py`
+
+**Note:** This task comes before sub-batch routing because routing depends on
+dataset providing `teacher_id` in `non_tensor_batch`.
 
 **Step 1: Write failing test for teacher_id in dataset**
 
 Create `tests/unit/test_dataset_teacher_id.py`:
 
 ```python
+from unittest.mock import MagicMock
 from verl.utils.dataset.rl_dataset import RLDataset
 
 
 def test_dataset_includes_teacher_id():
     """Test that dataset includes teacher_id field."""
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.encode.return_value = [1, 2, 3]
+
     dataset = RLDataset(
         data_files=["test_data.jsonl"],
         tokenizer=mock_tokenizer,
@@ -866,19 +1006,28 @@ git commit -m "test(mopd): add E2E integration test
 
 ## Implementation Complete
 
-**Total LOC estimate:** ~500 production + ~150 tests
+**Total LOC estimate:** ~550 production + ~180 tests
 
 **All 10 fixes incorporated:**
 1. ✅ Teachers in RefPolicy workers (Task 3)
-2. ✅ Stacked tensor storage (Task 4)
-3. ✅ Sub-batch forwarding (Task 4)
-4. ✅ Correct broadcasting (Task 4)
+2. ✅ Stacked tensor storage (Task 5)
+3. ✅ Sub-batch forwarding (Task 5)
+4. ✅ Correct broadcasting (Task 5)
 5. ✅ IS correction fallback (Task 2)
 6. ✅ Backward compatibility (Task 6)
-7. ✅ Integer tensor indices (Task 4)
+7. ✅ `select_idxs()` with integer tensor indices (Task 5)
 8. ✅ Config validation (Task 1)
 9. ✅ Optional rollout_log_probs (Task 2)
 10. ✅ Advantage normalization (Task 2)
+
+**Additional fixes from review:**
+- ✅ compute_advantage dispatch wiring (Task 2.5)
+- ✅ Resource pool API corrected (Task 3)
+- ✅ GRPO index validation (Task 2)
+- ✅ IS correction test uses non-zero values (Task 2)
+- ✅ Mock objects defined in test files (Tasks 4, 5)
+
+**Task execution order:** 1 → 2 → 2.5 → 3 → 4 → 5 → 6 → 7
 
 **Next Steps:**
 1. Execute plan using `superpowers:executing-plans` skill
