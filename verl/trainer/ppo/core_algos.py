@@ -1046,7 +1046,7 @@ def compute_mopd_advantage(
         returns: Token-level rewards (for interface consistency)
     """
     # Token-level teacher advantage (stop-gradient)
-    if lambda_val == 1.0 or base_log_prob is None:
+    if base_log_prob is None:
         # Standard MOPD: reverse KL
         A_mopd = (teacher_log_prob - old_log_probs).detach()
     else:
@@ -1059,13 +1059,12 @@ def compute_mopd_advantage(
         valid = (ratio >= is_epsilon_low) & (ratio <= is_epsilon_high)
         weights = torch.where(valid, ratio.detach(), torch.zeros_like(ratio))
 
-        # Fix 5: Degenerate case fallback
+        # Degenerate case: fall back to unweighted advantages when all tokens are masked
         valid_tokens = (weights > 0) & (response_mask > 0)
         all_masked = ~valid_tokens.any(dim=-1)  # [batch]
         if all_masked.any():
             logger.warning(
-                "IS correction masked all tokens for %s samples. Using unweighted advantages as fallback.",
-                str(all_masked.sum()),
+                "IS correction masked all tokens for some samples. Using unweighted advantages as fallback."
             )
             weights[all_masked] = 1.0
     else:
@@ -1088,7 +1087,7 @@ def compute_mopd_advantage(
     else:
         A_final = weights * A_mopd
 
-    # Fix 10: Apply response mask
+    # Mask out invalid tokens
     A_final = A_final * response_mask
 
     # Returns = token_level_rewards for interface consistency
