@@ -1176,6 +1176,55 @@ class RayPPOTrainer:
 
         return ref_log_prob
 
+    def _compute_teacher_log_probs(self, batch: DataProto) -> torch.Tensor:
+        """Compute teacher log probs with sub-batch routing by teacher_id.
+
+        Groups samples by teacher_id, forwards sub-batches to the corresponding
+        teacher worker group, and scatters results back into a full-batch tensor.
+
+        Implements Fixes 2 (stacked storage), 3 (sub-batch forwarding),
+        4 (correct broadcasting), 7 (select_idxs with integer tensor).
+
+        Args:
+            batch: DataProto containing "teacher_id" in non_tensor_batch
+                and "responses" in batch (used for shape).
+
+        Returns:
+            torch.Tensor: Teacher log probs of shape [batch_size, response_len].
+        """
+        teacher_ids = batch.non_tensor_batch["teacher_id"]
+        batch_size = len(teacher_ids)
+        response_len = batch.batch["responses"].shape[1]
+
+        # Initialize output tensor (Fix 2: stacked storage)
+        teacher_log_probs = torch.zeros(
+            batch_size,
+            response_len,
+            dtype=torch.float32,
+            device=batch.batch["responses"].device,
+        )
+
+        # Group by teacher_id and forward sub-batches (Fix 3)
+        for teacher_name, teacher_wg in self.teacher_wgs.items():
+            # Get indices for this teacher (Fix 7: integer tensor)
+            mask = teacher_ids == teacher_name
+            indices = torch.tensor(np.where(mask)[0], dtype=torch.long)
+
+            if len(indices) == 0:
+                continue
+
+            # Select sub-batch (Fix 7: use select_idxs, not select)
+            sub_batch = batch.select_idxs(indices)
+
+            # Forward to teacher
+            teacher_output = teacher_wg.compute_ref_log_prob(sub_batch)
+            sub_log_probs = teacher_output.batch["ref_log_prob"]
+
+            # Scatter back to full batch (Fix 4: correct broadcasting)
+            teacher_log_probs[indices] = sub_log_probs
+
+        return teacher_log_probs
+
     def _compute_old_log_prob(self, batch: DataProto):
         if self.use_legacy_worker_impl == "disable":
             # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
@@ -1490,8 +1539,18 @@ class RayPPOTrainer:
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_log_prob = self._compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
+                            if hasattr(self, "teacher_wgs"):
+                                # MOPD: compute teacher log probs via sub-batch routing
+                                teacher_log_prob = self._compute_teacher_log_probs(batch)
+                                batch.batch["teacher_log_prob"] = teacher_log_prob
+                                # Also compute ref_log_prob if KL loss is used alongside MOPD
+                                if self.config.actor_rollout_ref.actor.use_kl_loss:
+                                    ref_log_prob = self._compute_ref_log_prob(batch)
+                                    batch = batch.union(ref_log_prob)
+                            else:
+                                # Standard: compute ref log prob
+                                ref_log_prob = self._compute_ref_log_prob(batch)
+                                batch = batch.union(ref_log_prob)
 
                     # compute values
                     if self.use_critic:
