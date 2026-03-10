@@ -45,7 +45,7 @@ __all__ = ["DataParallelPPOActor"]
 logger = logging.getLogger(__file__)
 
 
-def _apply_temperature(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+def _apply_temperature(logits: torch.Tensor, temperature) -> torch.Tensor:
     """Apply temperature scaling, handling activation-offloaded views correctly.
 
     FSDP2 + activation_offload wraps squeeze() in a custom autograd Function.
