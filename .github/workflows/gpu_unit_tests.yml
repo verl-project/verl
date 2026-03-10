@@ -75,7 +75,7 @@ env:
 
 jobs:
   setup:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -90,7 +90,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   gpu_unit_tests:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed

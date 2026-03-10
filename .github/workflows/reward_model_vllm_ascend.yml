@@ -60,7 +60,7 @@ permissions:
 
 jobs:
   reward_model_vllm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     runs-on: linux-aarch64-a2b3-test-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:

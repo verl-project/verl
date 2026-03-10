@@ -88,7 +88,7 @@ permissions:
 
 jobs:
   e2e_ppo_trainer_fsdp_vllm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     runs-on: linux-aarch64-a2b3-test-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
@@ -168,7 +168,7 @@ jobs:
   #     TODO
   #     vllm0.11 not support them, will be open after vllm0.13
   # e2e_ppo_trainer_fsdp-qwen2_5vl-3b_ascend:
-  #   if: github.repository_owner == 'verl-project'
+  #   if: github.repository_owner == 'ascend-gha-runners'
   #   runs-on: linux-aarch64-a2b3-8
   #   timeout-minutes: 60 # Increase this timeout value as needed
   #   container:

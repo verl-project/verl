@@ -95,7 +95,7 @@ NPU 相关的工作流主要包括：
 
    jobs:
      your_job_name:  # 任务唯一标识
-       if: github.repository_owner == 'verl-project'  # 仅在主仓库运行
+       if: github.repository_owner == 'ascend-gha-runners'  # 仅在主仓库运行
        runs-on: linux-aarch64-a2-4  # 硬件规格：a2实例，4卡NPU
        timeout-minutes: 60          # 任务超时阈值（分钟）
        container:

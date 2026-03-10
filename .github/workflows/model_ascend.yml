@@ -62,7 +62,7 @@ permissions:
 
 jobs:
   model_rmpad_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     runs-on: linux-aarch64-a2b3-test-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
@@ -111,7 +111,7 @@ jobs:
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     runs-on: linux-aarch64-a2b3-test-8
     timeout-minutes: 60
     container:

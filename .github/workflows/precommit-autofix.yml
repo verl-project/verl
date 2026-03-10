@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   precommit:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     runs-on: ubuntu-latest
 
     steps:

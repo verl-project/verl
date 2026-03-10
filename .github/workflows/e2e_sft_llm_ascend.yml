@@ -70,7 +70,7 @@ permissions:
 
 jobs:
   e2e_sft_llm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     runs-on: linux-aarch64-a2b3-test-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:

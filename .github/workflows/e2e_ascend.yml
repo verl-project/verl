@@ -65,7 +65,7 @@ permissions:
 
 jobs:
   llm_rl_job:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     name: E2E Ascend testing for RL training scenarios of LLM models
     runs-on: linux-aarch64-a2b3-test-8
     timeout-minutes: 60
@@ -132,7 +132,7 @@ jobs:
           bash tests/special_npu/run_fully_async_policy.sh
 
   vlm_rl_job:
-    if: github.repository_owner == 'verl-project'
+    if: github.repository_owner == 'ascend-gha-runners'
     name: E2E Ascend testing for RL training scenarios of VLM models
     runs-on: linux-aarch64-a2b3-test-8
     timeout-minutes: 60
