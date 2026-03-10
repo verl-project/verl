@@ -19,6 +19,7 @@ import logging
 
 import modelopt.torch.quantization as mtq
 import torch.nn as nn
+from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ def build_quantize_config(
 
     quant_cfg = {
         **_NVFP4_W4A16_QUANTIZER_CFG,
+        **_default_disabled_quantizer_cfg,
         **ignore_cfg,
     }
     logger.info("Built NVFP4 %s quantize config, ignore_patterns=%s", qat_mode, ignore_patterns)

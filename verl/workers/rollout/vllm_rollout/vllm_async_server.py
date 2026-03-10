@@ -264,7 +264,6 @@ class vLLMHttpServer:
                 raise ValueError(f"Unsupported quant_method: {quant_method}")
             logger.info(f"QAT quantization config injected (quant_method={quant_method})")
             hf_overrides["quantization_config"] = quantization_config_dict
-            print(f"quantization config: {quantization_config_dict}")
         elif quantization is not None:
             # Handle other quantization methods (fp8, torchao)
             _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]

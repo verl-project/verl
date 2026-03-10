@@ -118,6 +118,27 @@ class EngineConfig(BaseConfig):
 
 
 @dataclass
+class QATEngineConfig(BaseConfig):
+    """Configuration for QAT (Quantization-Aware Training) within an engine.
+
+    Args:
+        enable (bool): Whether to enable QAT, default False
+        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
+        group_size (int): Group size for blockwise quantization, default 16
+        ignore_patterns (list[str]): Module name patterns to exclude from quantization
+        activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
+        quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
+    """
+
+    enable: bool = False
+    mode: str = "w4a16"
+    group_size: int = 16
+    ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
+    activation_observer: str = "static_minmax"
+    quantization_config_path: Optional[str] = None
+
+
+@dataclass
 class McoreEngineConfig(EngineConfig):
     """Configuration for Megatron parallelism.
 
@@ -169,6 +190,7 @@ class McoreEngineConfig(EngineConfig):
     use_mbridge: bool = True
     vanilla_mbridge: bool = True
     strategy: str = "megatron"
+    qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -178,27 +200,6 @@ class McoreEngineConfig(EngineConfig):
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
-
-
-@dataclass
-class QATEngineConfig(BaseConfig):
-    """Configuration for QAT (Quantization-Aware Training) within an engine.
-
-    Args:
-        enable (bool): Whether to enable QAT, default False
-        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
-        group_size (int): Group size for blockwise quantization, default 16
-        ignore_patterns (list[str]): Module name patterns to exclude from quantization
-        activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
-        quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
-    """
-
-    enable: bool = False
-    mode: str = "w4a16"
-    group_size: int = 16
-    ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
-    activation_observer: str = "static_minmax"
-    quantization_config_path: Optional[str] = None
 
 
 @dataclass

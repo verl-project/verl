@@ -64,6 +64,16 @@ actor_rollout_ref:
         mode: disabled
         record_file: null
         replay_file: null
+      qat:
+        _target_: verl.workers.config.QATEngineConfig
+        enable: false
+        mode: w4a16
+        group_size: 16
+        ignore_patterns:
+        - lm_head
+        - '*mlp.gate'
+        activation_observer: null
+        quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -220,6 +230,16 @@ actor_rollout_ref:
         mode: disabled
         record_file: null
         replay_file: null
+      qat:
+        _target_: verl.workers.config.QATEngineConfig
+        enable: false
+        mode: w4a16
+        group_size: 16
+        ignore_patterns:
+        - lm_head
+        - '*mlp.gate'
+        activation_observer: null
+        quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
     load_weight: true
   rollout:
@@ -338,7 +358,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,null}
+    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
     layer_name_map:
       qkv_layer_name: qkv
       gate_proj_layer_name: gate_up
@@ -506,6 +526,16 @@ critic:
       mode: disabled
       record_file: null
       replay_file: null
+    qat:
+      _target_: verl.workers.config.QATEngineConfig
+      enable: false
+      mode: w4a16
+      group_size: 16
+      ignore_patterns:
+      - lm_head
+      - '*mlp.gate'
+      activation_observer: null
+      quantization_config_path: null
   _target_: verl.workers.config.McoreCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: megatron
