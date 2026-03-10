@@ -599,18 +599,17 @@ class vLLMHttpServer:
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
 
-        # Extract per-request metrics from vLLM engine (best-effort)
         extra_info = {"global_steps": self.global_steps}
         engine_metrics = final_res.metrics
         if engine_metrics is not None:
-            # v1 engine: RequestStateStats
             if hasattr(engine_metrics, "first_token_latency"):
+                # v1 engine: RequestStateStats
                 for key in ("arrival_time", "first_token_ts", "last_token_ts", "first_token_latency"):
                     val = getattr(engine_metrics, key, None)
                     if val is not None:
                         extra_info[key] = val
-            # v0 engine: RequestMetrics
             elif hasattr(engine_metrics, "first_token_time"):
+                # v0 engine: RequestMetrics
                 for src, dst in (
                     ("arrival_time", "arrival_time"),
                     ("first_token_time", "first_token_ts"),
