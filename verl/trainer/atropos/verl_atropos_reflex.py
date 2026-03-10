@@ -3,14 +3,19 @@ verl <-> Atropos Reflex Layer
 Connects verl's RayPPOTrainer (GRPO mode) to Atropos RL environment API.
 Subclasses RayPPOTrainer — drop-in replacement with Atropos as data source.
 """
+import logging
 import requests
+import numpy as np
 import time
 import torch
-from typing import Optional
-from omegaconf import DictConfig, open_dict
+from typing import Optional, List
+from omegaconf import DictConfig, OmegaConf
 
 from verl import DataProto
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+from verl.utils.tracking import Tracking
+
+logger = logging.getLogger(__name__)
 
 
 class AtroposVerlTrainer(RayPPOTrainer):
@@ -39,10 +44,10 @@ class AtroposVerlTrainer(RayPPOTrainer):
         """POST /register — tell Atropos our batch size and vLLM endpoints."""
         cfg = self.config
         trainer_cfg = cfg.get("trainer", {})
-        rollout_cfg = cfg.get("actor_rollout_ref", {}).get("rollout", {})
 
-        # Collect vLLM inference server endpoints spun up by verl
         endpoints = self._get_vllm_endpoints()
+        if not endpoints:
+            logger.warning("[Atropos] No vLLM endpoints found — registering without inference servers")
 
         register_data = {
             "wandb_group": trainer_cfg.get("project_name", "verl_atropos"),
@@ -64,23 +69,26 @@ class AtroposVerlTrainer(RayPPOTrainer):
                 timeout=10,
             ).json()
             self._atropos_uuid = resp.get("uuid")
-            print(f"[Atropos] Registered — UUID: {self._atropos_uuid}")
+            logger.info(f"[Atropos] Registered — UUID: {self._atropos_uuid}")
         except requests.exceptions.RequestException as e:
-            print(f"[Atropos] Registration failed: {e}")
+            logger.error(f"[Atropos] Registration failed: {e}")
+            raise
 
-    def _get_vllm_endpoints(self):
+    def _get_vllm_endpoints(self) -> List[str]:
         """Get vLLM inference server URLs from Ray worker group."""
+        endpoints = []
         try:
-            endpoints = []
+            import ray
             for worker in self.actor_rollout_wg.get_workers():
-                import ray
                 host = ray.get(worker.get_host.remote())
                 port = ray.get(worker.get_vllm_port.remote())
                 endpoints.append(f"http://{host}:{port}")
-            return endpoints
+        except AttributeError as e:
+            logger.warning(f"[Atropos] Worker group not ready for endpoint discovery: {e}")
         except Exception as e:
-            print(f"[Atropos] Error getting vLLM endpoints: {e}")
-            return []
+            logger.error(f"[Atropos] Unexpected error getting vLLM endpoints: {e}")
+            raise
+        return endpoints
 
     def _get_atropos_batch(self) -> Optional[DataProto]:
         """GET /batch — poll Atropos for scored trajectory data."""
@@ -93,15 +101,20 @@ class AtroposVerlTrainer(RayPPOTrainer):
                 batch = resp.get("batch")
                 if batch:
                     return self._atropos_batch_to_dataproto(batch)
+                logger.debug(f"[Atropos] No batch ready on attempt {attempt + 1}, retrying in 2s")
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"[Atropos] Connection error on attempt {attempt + 1}: {e}")
+            except requests.exceptions.Timeout:
+                logger.warning(f"[Atropos] Timeout on attempt {attempt + 1}")
             except requests.exceptions.RequestException as e:
-                print(f"[Atropos] Failed to get batch on attempt {attempt + 1}: {e}")
+                logger.error(f"[Atropos] Unrecoverable request error: {e}")
+                return None
             time.sleep(2)
-        print("[Atropos] Timed out waiting for batch")
+        logger.error("[Atropos] Timed out waiting for batch after 30 attempts (60s)")
         return None
 
     def _atropos_batch_to_dataproto(self, batch: dict) -> DataProto:
         """Convert Atropos batch format to verl DataProto."""
-        import torch
         tokens = torch.tensor(batch.get("tokens", []), dtype=torch.long)
         masks = torch.tensor(batch.get("masks", []), dtype=torch.long)
         scores = torch.tensor(batch.get("scores", []), dtype=torch.float)
@@ -112,7 +125,6 @@ class AtroposVerlTrainer(RayPPOTrainer):
             "token_level_scores": scores,
         })
 
-        # Token-level advantage override if provided
         if "advantages" in batch:
             advantages = torch.tensor(batch["advantages"], dtype=torch.float)
             data.batch["token_level_advantages"] = advantages
@@ -124,9 +136,7 @@ class AtroposVerlTrainer(RayPPOTrainer):
         Training loop — pulls batches from Atropos instead of parquet files.
         Uses GRPO advantage estimation unless Atropos provides token-level advantages.
         """
-        from verl.utils.tracking import Tracking
-        from omegaconf import OmegaConf
-        logger = Tracking(
+        tracker = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
             default_backend=self.config.trainer.logger,
@@ -138,6 +148,7 @@ class AtroposVerlTrainer(RayPPOTrainer):
             # 1. Get batch from Atropos
             batch = self._get_atropos_batch()
             if batch is None:
+                logger.error(f"[Atropos] No batch at step {step}, stopping training")
                 break
 
             # 2. Compute advantages (GRPO) unless Atropos provided token-level
@@ -151,18 +162,25 @@ class AtroposVerlTrainer(RayPPOTrainer):
             self._sync_weights_to_vllm()
 
             # 5. Log
-            logger.log(metrics, step=step)
+            tracker.log(metrics, step=step)
 
             if step % self.config.trainer.get("save_freq", 20) == 0:
                 self._save_checkpoint(step)
 
     def _compute_grpo_advantages(self, batch: DataProto) -> DataProto:
-        """Compute GRPO advantages from token-level scores."""
+        """Compute GRPO advantages from token-level scores.
+        Uses numpy for ARM-native computation when torch unavailable.
+        """
         scores = batch.batch["token_level_scores"]
-        # GRPO: normalize scores within group
-        mean = scores.mean(dim=-1, keepdim=True)
-        std = scores.std(dim=-1, keepdim=True) + 1e-8
-        batch.batch["token_level_advantages"] = (scores - mean) / std
+        try:
+            mean = scores.mean(dim=-1, keepdim=True)
+            std = scores.std(dim=-1, keepdim=True) + 1e-8
+            batch.batch["token_level_advantages"] = (scores - mean) / std
+        except Exception:
+            s = np.array(scores) if not hasattr(scores, 'numpy') else scores.numpy()
+            mean = s.mean()
+            std = s.std() + 1e-8
+            batch.batch["token_level_advantages"] = (s - mean) / std
         return batch
 
     def _sync_weights_to_vllm(self):
@@ -170,4 +188,4 @@ class AtroposVerlTrainer(RayPPOTrainer):
         try:
             self.actor_rollout_wg.sync_model_weights()
         except Exception as e:
-            print(f"[Atropos] Weight sync failed: {e}")
+            logger.warning(f"[Atropos] Weight sync failed: {e}")
