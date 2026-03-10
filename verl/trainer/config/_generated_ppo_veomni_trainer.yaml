@@ -575,6 +575,16 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
+  mopd:
+    enabled: false
+    lambda_val: 1.0
+    orm_weight: 0.0
+    is_correction: true
+    is_epsilon_low: 0.1
+    is_epsilon_high: 10.0
+    use_base_normalization: false
+    base_model_path: null
+    teachers: []
   _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0

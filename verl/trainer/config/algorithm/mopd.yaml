@@ -1,0 +1,36 @@
+# MOPD (Multi-Teacher On-Policy Distillation) algorithm sub-config
+# Composed via sub-key pattern: algorithm@algorithm.mopd
+# See: verl/workers/config/teacher.py for MOPDConfig dataclass
+
+# Whether to enable MOPD training (default: false for backward compat)
+enabled: false
+
+# G-OPD scaling coefficient (1.0=standard MOPD, >1.0=extrapolation)
+lambda_val: 1.0
+
+# Weight for outcome reward mixing (alpha in A_final = A_mopd + alpha * A_orm)
+orm_weight: 0.0
+
+# Enable importance sampling correction for train/inference mismatch
+is_correction: true
+
+# Lower bound for IS ratio acceptance
+is_epsilon_low: 0.1
+
+# Upper bound for IS ratio acceptance
+is_epsilon_high: 10.0
+
+# Enable ExOPD base model normalization
+use_base_normalization: false
+
+# Path to base model for ExOPD (shared across teachers)
+base_model_path: null
+
+# List of teacher configurations
+# Example:
+# - name: math
+#   model_path: /models/math-teacher
+#   weight: 1.0
+#   resource_pool: global_pool
+#   log_prob_micro_batch_size: 8
+teachers: []

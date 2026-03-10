@@ -21,6 +21,8 @@ defaults:
   - reward@reward: reward
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
+  # MOPD (Multi-Teacher On-Policy Distillation) config.
+  - algorithm@algorithm.mopd: mopd
   - _self_
 
 actor_rollout_ref:
