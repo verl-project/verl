@@ -74,5 +74,5 @@ python3 -m verl.trainer.main_ppo \
     global_profiler.steps=$PROFILE_STEPS \
     global_profiler.save_path="$SAVE_PATH" $@
 
-python3 "tests/utils/test_check_and_profiler_output.py" --profiler-dir="$SAVE_PATH" --device="npu"
+python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="npu"
 rm -rf "$SAVE_PATH"

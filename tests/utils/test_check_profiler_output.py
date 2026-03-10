@@ -25,6 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 class ProfilerChecker:
     """Unified Profiler checker supporting GPU/NPU devices"""
+
     TARGET_STAGES = ["actor_update", "*_rollout_*", "ref_*"]
 
     def __init__(self, device_type: str, profiler_dir: str):
@@ -114,15 +115,23 @@ class ProfilerChecker:
 def parse_args():
     """Parse command line arguments (add device parameter)"""
     parser = argparse.ArgumentParser(description="Check Profiler deliverables (support GPU/NPU)")
-    parser.add_argument("--device", type=str, required=True, choices=["gpu", "npu"],
-                        help="Device type, available values: gpu/npu (required)")
-    parser.add_argument("--profiler-dir", type=str, default="./profiler_data",
-                        help="Path to profiler data directory (default: ./profiler_data)")
+    parser.add_argument(
+        "--device",
+        type=str,
+        required=True,
+        choices=["gpu", "npu"],
+        help="Device type, available values: gpu/npu (required)",
+    )
+    parser.add_argument(
+        "--profiler_dir",
+        type=str,
+        default="./profiler_data",
+        help="Path to profiler data directory (default: ./profiler_data)",
+    )
     return parser.parse_args()
 
 
 def main():
-
     args = parse_args()
 
     try:
@@ -136,7 +145,7 @@ def main():
             sys.exit(1)
 
     except Exception as e:
-        logger.error(f"Check failed with error: {str(e)}", exc_info=True)
+        logger.exception(f"Check failed with error: {str(e)}")
         sys.exit(1)
 
 
