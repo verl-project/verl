@@ -259,144 +259,6 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             )
         return past_key_values
 
-    def _get_logprobs(
-        self,
-        s: dict[str, torch.Tensor],
-        prefix_features: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        *,
-        x_t: torch.Tensor | None = None,  # (B, T, A)
-        x_next: torch.Tensor | None = None,  # (B, T, A)
-        v_t: torch.Tensor | None = None,  # (B, T, A)
-        t: torch.Tensor | None = None,  # (B,)
-        step_idx: torch.Tensor | None = None,  # (B,)
-    ) -> torch.Tensor:
-        """
-        Compute log-probability of x_{t+1} given (x_t, v_t) under the Flow-SDE formulation.
-        See https://arxiv.org/abs/2510.25889
-        """
-
-        prefix_embs, prefix_pad_masks, _ = prefix_features
-        states = s["states"]
-        B = prefix_embs.shape[0]
-        device = prefix_embs.device
-
-        past_key_values = self._build_kv_cache_from_prefix(prefix_features)
-
-        if x_t is None or x_next is None or v_t is None or t is None:
-            actions_shape = (B, self.model.n_action_steps, self.model.max_action_dim)
-            x = self.model.sample_noise(actions_shape, device=device)
-
-            dt = -1.0 / float(self.model.num_steps)
-            t_grid = torch.arange(1.0, -dt / 2, dt, dtype=torch.float32, device=device)
-
-            x_prev, v_prev, t_prev = None, None, None
-            for tt in t_grid:
-                x_prev = x
-                t_prev = tt
-                v_prev = self.model.denoise_step(
-                    states,
-                    prefix_pad_masks,
-                    past_key_values,
-                    x,
-                    tt.expand(B),
-                )
-                x = x + dt * v_prev
-
-            x_t = x_prev
-            x_next = x
-            v_t = v_prev
-            t = t_prev.expand(B)
-
-        # sigma schedule step index
-        K = int(self.model.num_steps)
-        if step_idx is None:
-            step_idx = torch.full((B,), K - 1, device=device, dtype=torch.long)
-
-        # one-step mean/std
-        dt_pos = 1.0 / float(K)
-        t_b = t[:, None, None]  # (B,1,1)
-        dt_b = torch.full_like(t_b, dt_pos)
-
-        x0_pred = x_t - v_t * t_b
-        x1_pred = x_t + v_t * (1.0 - t_b)
-
-        # heuristic sigma schedule (ported family)
-        noise_level = 0.5
-        t_grid_full = torch.arange(1.0, -dt_pos / 2, -dt_pos, dtype=torch.float32, device=device)  # len=K+1
-        t_for_sigma = torch.where(t_grid_full == 1.0, t_grid_full[1], t_grid_full)
-        sigmas = noise_level * torch.sqrt(t_grid_full / (1.0 - t_for_sigma).clamp_min(1e-6))
-        sigmas = sigmas[:-1]  # len=K
-
-        sigma_i = sigmas[step_idx][:, None, None].clamp_min(1e-6)  # (B,1,1)
-
-        x0_weight = torch.ones_like(t_b) - (t_b - dt_b)
-        x1_weight = t_b - dt_b - (sigma_i**2) * dt_b / (2.0 * t_b.clamp_min(1e-6))
-
-        x_next_mean = x0_pred * x0_weight + x1_pred * x1_weight
-        x_next_std = (dt_b.sqrt() * sigma_i).clamp_min(1e-6)
-
-        dist = Normal(x_next_mean.float(), x_next_std.float())
-        log_probs = dist.log_prob(x_next.float()).sum(dim=2).mean(dim=1)  # (B,)
-        return log_probs
-
-    def _sample_actions_and_logprobs_from_prefix(
-        self,
-        states: torch.Tensor,
-        prefix_features: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Sample actions amd compute logprob aligned with those sampled actions.
-
-        Args:
-            states: (B, state_dim)
-            prefix_features: tuple of (prefix_embs, prefix_pad_masks, prefix_att_masks)
-
-        Returns:
-            actions: (B, n_action_steps, action_dim)
-            log_probs: (B,)
-        """
-
-        prefix_embs, prefix_pad_masks, _ = prefix_features
-        B = prefix_embs.shape[0]
-        device = prefix_embs.device
-
-        past_key_values = self._build_kv_cache_from_prefix(prefix_features)
-
-        actions_shape = (B, self.model.n_action_steps, self.model.max_action_dim)
-        x = self.model.sample_noise(actions_shape, device=device)
-
-        dt = -1.0 / float(self.model.num_steps)
-        t_grid = torch.arange(1.0, -dt / 2, dt, dtype=torch.float32, device=device)  # len=K
-
-        x_prev, v_prev, t_prev = None, None, None
-        for tt in t_grid:
-            x_prev = x
-            t_prev = tt
-            v_prev = self.model.denoise_step(
-                states,
-                prefix_pad_masks,
-                past_key_values,
-                x,
-                tt.expand(B),
-            )
-            x = x + dt * v_prev
-
-        actions = x  # x_K
-
-        # aligned logprob: use last transition (K-1)
-        step_idx = torch.full((B,), int(self.model.num_steps) - 1, device=device, dtype=torch.long)
-        log_probs = self._get_logprobs(
-            {"states": states},
-            prefix_features,
-            x_t=x_prev,
-            x_next=actions,
-            v_t=v_prev,
-            t=t_prev.expand(B),
-            step_idx=step_idx,
-        )
-
-        return actions, log_probs
-
     @override
     def sac_init(self):
         """Initialize SAC-related components."""
@@ -411,17 +273,89 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
     @override
     def sac_forward_actor(
         self,
-        state_features: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        prefix_features, states = state_features
-        actions, log_probs = self._sample_actions_and_logprobs_from_prefix(states, prefix_features)
-        return actions, log_probs
+        state_features: tuple[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        prefix_features, states, _, _ = state_features
+
+        prefix_embs, prefix_pad_masks, _ = prefix_features
+        batch_size = prefix_embs.shape[0]
+        device = prefix_embs.device
+
+        past_key_values = self._build_kv_cache_from_prefix(prefix_features)
+
+        actions_shape = (batch_size, self.model.n_action_steps, self.model.max_action_dim)
+        dt = -1.0 / float(self.model.num_steps)
+        t_grid = torch.arange(1.0, -dt / 2, dt, dtype=torch.float32, device=device)
+
+        with torch.no_grad():
+            a0 = self.model.sample_noise(actions_shape, device=device)
+            for tt in t_grid:
+                v_prev = self.model.denoise_step(
+                    states,
+                    prefix_pad_masks,
+                    past_key_values,
+                    a0,
+                    tt.expand(batch_size),
+                )
+                a0 = a0 + dt * v_prev
+            a0 = a0.detach()
+
+        z = self.model.sample_noise(actions_shape, device=device)
+        t = torch.rand((batch_size,), dtype=torch.float32, device=device)
+        t_expanded = t[:, None, None]
+        a_t = (1.0 - t_expanded) * a0 + t_expanded * z
+
+        v_theta = self.model.denoise_step(
+            states,
+            prefix_pad_masks,
+            past_key_values,
+            a_t,
+            t,
+        )
+        a0_hat = a_t - t_expanded * v_theta
+
+        return a0_hat, None
+
+    def _encode_critic_image_features(
+        self,
+        raw_images: torch.Tensor,
+        raw_image_masks: torch.Tensor,
+        use_target_network: bool,
+        requires_grad: bool,
+    ) -> torch.Tensor:
+        image_encoder = self.target_image_encoder if use_target_network else self.critic_image_encoder
+        for p in image_encoder.parameters():
+            p.requires_grad_(requires_grad)
+
+        batch_size, num_images, channels, height, width = raw_images.shape
+        flat_images = raw_images.reshape(batch_size * num_images, channels, height, width)
+        flat_images = flat_images.float()
+        if flat_images.max().item() > 1.5:
+            flat_images = flat_images / 255.0
+
+        encoded = image_encoder(flat_images)
+        encoded = encoded.reshape(batch_size, num_images, -1)
+
+        masks = raw_image_masks.to(encoded.device).to(encoded.dtype).unsqueeze(-1)
+        denom = masks.sum(dim=1).clamp_min(1.0)
+        pooled = (encoded * masks).sum(dim=1) / denom
+        return pooled
 
     @override
     def sac_forward_critic(
         self,
         a: dict[str, torch.Tensor],
-        state_features: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+        state_features: tuple[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
         *,
         use_target_network: bool = False,
         method: Literal["cat", "min"] = "cat",
@@ -444,7 +378,17 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
     
     @override
     def sac_get_critic_parameters(self) -> list[torch.nn.Parameter]:
-        return [p for head in self.critic_heads for p in head.parameters()]
+        critic_head_params = [p for head in self.critic_heads for p in head.parameters()]
+        critic_image_encoder_params = list(self.critic_image_encoder.parameters())
+        return critic_head_params + critic_image_encoder_params
+
+    @override
+    def sac_get_named_actor_parameters(self) -> list[tuple[str, torch.nn.Parameter]]:
+        return [
+            (name, param)
+            for name, param in self.model.named_parameters()
+            if param.requires_grad
+        ]
 
     @override
     def sac_forward_state_features(

@@ -17,6 +17,7 @@ Single Process Actor
 
 import logging
 import os
+from typing import Optional
 
 import numpy as np
 import torch
@@ -140,7 +141,11 @@ class RobDataParallelSACActor(BaseSACActor):
 
         self._init_alpha()
         self._init_critic()
-        self._init_actor_ema()
+
+        self.actor_ema_enabled = bool(self.config.get("actor_ema_enabled", True))
+        self.actor_ema_decay = float(self.config.get("actor_ema_decay", 0.995))
+        self.actor_ema_shadow: dict[str, torch.Tensor] = {}
+        self.actor_ema_initialized = False
     
     def _init_critic(self):
         """Initialize the critic optimizer."""
@@ -180,16 +185,19 @@ class RobDataParallelSACActor(BaseSACActor):
             self.alpha_scheduler = torch.optim.lr_scheduler.ConstantLR(self.alpha_optimizer, factor=1.0)
 
     def _init_actor_ema(self):
-        self.actor_ema_enabled = bool(self.config.get("actor_ema_enabled", True))
-        self.actor_ema_decay = float(self.config.get("actor_ema_decay", 0.995))
-        self.actor_ema_shadow: dict[str, torch.Tensor] = {}
-
-        if not self.actor_ema_enabled:
+        if self.actor_ema_initialized:
             return
 
-        for name, param in self.actor_module.named_parameters():
-            if param.requires_grad:
-                self.actor_ema_shadow[name] = param.detach().clone().to(dtype=torch.float32)
+        self.actor_ema_shadow = {}
+
+        if not self.actor_ema_enabled:
+            self.actor_ema_initialized = True
+            return
+
+        for name, param in self.actor_module.sac_get_named_actor_parameters():
+            self.actor_ema_shadow[name] = param.detach().clone().to(dtype=torch.float32)
+
+        self.actor_ema_initialized = True
 
     @torch.no_grad()
     def _update_actor_ema(self):
@@ -197,9 +205,7 @@ class RobDataParallelSACActor(BaseSACActor):
             return
 
         one_minus_decay = 1.0 - self.actor_ema_decay
-        for name, param in self.actor_module.named_parameters():
-            if not param.requires_grad:
-                continue
+        for name, param in self.actor_module.sac_get_named_actor_parameters():
             shadow = self.actor_ema_shadow[name]
             shadow.mul_(self.actor_ema_decay).add_(param.detach().to(dtype=torch.float32), alpha=one_minus_decay)
 
@@ -208,10 +214,9 @@ class RobDataParallelSACActor(BaseSACActor):
         if not self.actor_ema_enabled:
             return
 
-        for name, param in self.actor_module.named_parameters():
-            if not param.requires_grad:
-                continue
-            param.copy_(self.actor_ema_shadow[name].to(device=param.device, dtype=param.dtype))
+        for name, param in self.actor_module.sac_get_named_actor_parameters():
+            shadow = self.actor_ema_shadow[name]
+            param.copy_(shadow.to(device=param.device, dtype=param.dtype))
 
     def _get_alpha(self) -> torch.Tensor:
         if self.auto_entropy:

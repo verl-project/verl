@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import torch
 
@@ -48,6 +48,15 @@ class SupportSACTraining:
 
         raise NotImplementedError("Subclasses must implement sac_get_critic_parameters method.")
 
+    def sac_get_named_actor_parameters(self) -> list[tuple[str, torch.nn.Parameter]]:
+        """Get named actor parameters for optimization/EMA updates.
+
+        Returns:
+            A list of (name, parameter) tuples representing actor-side trainable parameters.
+        """
+
+        raise NotImplementedError("Subclasses must implement sac_get_named_actor_parameters method.")
+
     def sac_forward_critic(
         self,
         a: dict[str, torch.Tensor],
@@ -76,7 +85,7 @@ class SupportSACTraining:
     def sac_forward_actor(
         self,
         state_features: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Compute actions and their log probabilities from state features.
 
         Args:
@@ -84,7 +93,8 @@ class SupportSACTraining:
 
         Returns:
             actions: torch.Tensor of shape (B, n_action_steps, action_dim), sampled actions.
-            log_probs: torch.Tensor of shape (B,), log probabilities of the sampled actions.
+            log_probs: Optional torch.Tensor of shape (B,), log probabilities of sampled actions.
+                Can be None when SAC is configured to train without entropy/log-prob terms.
         """
 
         raise NotImplementedError("Subclasses must implement sac_forward_actor method.")
