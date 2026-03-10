@@ -18,63 +18,125 @@ import logging
 import os
 import sys
 
+# Initialize logger
 logger = logging.getLogger(__file__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 
-def check_profiler_output(profiler_dir: str) -> bool:
-    """Check if profiler deliverables are generated correctly"""
-    logger.info("Starting profiler deliverables check...")
+class ProfilerChecker:
+    """Unified Profiler checker supporting GPU/NPU devices"""
+    TARGET_STAGES = ["actor_update", "*_rollout_*", "ref_*"]
 
-    # Check if profiler_data directory exists
-    if not os.path.exists(profiler_dir):
-        logger.error(f"Profiler data directory not found: {profiler_dir}")
-        return False
+    def __init__(self, device_type: str, profiler_dir: str):
+        self.device_type = device_type.lower()  # Convert to lowercase uniformly to avoid case issues
+        self.profiler_dir = profiler_dir
 
-    target_stages = ["actor_update", "*_rollout_*", "ref_*"]
+        # Validate device type legality
+        if self.device_type not in ["gpu", "npu"]:
+            raise ValueError(f"Unsupported device type: {device_type}, only gpu/npu are supported")
 
-    for stage in target_stages:
-        if stage == "*_rollout_*":
-            expected_count = 2
-        else:
-            expected_count = 1
+    def _check_gpu_profiler(self) -> bool:
+        """GPU version of Profiler check logic"""
+        for stage in self.TARGET_STAGES:
+            # Build search path
+            search_pattern = os.path.join(self.profiler_dir, stage)
+            dirs = glob.glob(search_pattern, recursive=True)
 
-        # Find all xxx_ascend_xxx directories
-        search_pattern = os.path.join(profiler_dir, stage, "*_ascend_*")
-        dirs = glob.glob(search_pattern, recursive=True)
+            # Print debug information
+            for d in dirs:
+                print(f"[{stage}] Found: {d}")
 
-        # Print found directories for debugging
-        for d in dirs:
-            print(f"[{stage}] Found: {d}")
-
-        if len(dirs) != expected_count:
-            logger.error(f"[{stage}] Expected {expected_count} *_ascend_* directories, found {len(dirs)}")
-            return False
-
-        # Check each xxx_ascend_xxx directory
-        for ascend_dir in dirs:
-            profiler_output = glob.glob(os.path.join(ascend_dir, "PROF_*"))
-            if not profiler_output or not os.path.isdir(profiler_output[0]):
-                logger.error(f"[{stage}] PROF not found in {ascend_dir}")
+            # Check directory count
+            if len(dirs) != 1:
+                logger.error(f"[{stage}] Expected 1 directories, found {len(dirs)}")
                 return False
 
-    logger.info("All profiler deliverables check passed!")
-    return True
+            # Check files in directory
+            for gpu_dir in dirs:
+                if "_rollout_" in gpu_dir:
+                    expected_count = 3
+                else:
+                    expected_count = 1
+
+                profiler_output = glob.glob(os.path.join(gpu_dir, "*"))
+                if not profiler_output or len(profiler_output) != expected_count:
+                    logger.error(f"[{stage}] PROF not found in {gpu_dir}")
+                    return False
+
+        return True
+
+    def _check_npu_profiler(self) -> bool:
+        """NPU version of Profiler check logic"""
+        for stage in self.TARGET_STAGES:
+            # Determine expected directory count for each stage
+            if stage == "*_rollout_*":
+                expected_count = 2
+            else:
+                expected_count = 1
+
+            # Build NPU-specific path (xxx_ascend_xxx)
+            search_pattern = os.path.join(self.profiler_dir, stage, "*_ascend_*")
+            dirs = glob.glob(search_pattern, recursive=True)
+
+            # Print debug information
+            for d in dirs:
+                print(f"[{stage}] Found: {d}")
+
+            # Check directory count
+            if len(dirs) != expected_count:
+                logger.error(f"[{stage}] Expected {expected_count} *_ascend_* directories, found {len(dirs)}")
+                return False
+
+            # Check PROF files in NPU directory
+            for ascend_dir in dirs:
+                profiler_output = glob.glob(os.path.join(ascend_dir, "PROF_*"))
+                if not profiler_output or not os.path.isdir(profiler_output[0]):
+                    logger.error(f"[{stage}] PROF not found in {ascend_dir}")
+                    return False
+        return True
+
+    def check(self) -> bool:
+        """Unified check entry"""
+        logger.info(f"Starting profiler deliverables check for {self.device_type.upper()}...")
+
+        # First check if root directory exists
+        if not os.path.exists(self.profiler_dir):
+            logger.error(f"Profiler data directory not found: {self.profiler_dir}")
+            return False
+
+        # Call corresponding check logic based on device type
+        if self.device_type == "gpu":
+            return self._check_gpu_profiler()
+        else:  # npu
+            return self._check_npu_profiler()
 
 
 def parse_args():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description="Check and clean Profiler deliverables")
-    parser.add_argument("--profiler-dir", type=str, default="./profiler_data", help="Path to profiler data directory")
+    """Parse command line arguments (add device parameter)"""
+    parser = argparse.ArgumentParser(description="Check Profiler deliverables (support GPU/NPU)")
+    parser.add_argument("--device", type=str, required=True, choices=["gpu", "npu"],
+                        help="Device type, available values: gpu/npu (required)")
+    parser.add_argument("--profiler-dir", type=str, default="./profiler_data",
+                        help="Path to profiler data directory (default: ./profiler_data)")
     return parser.parse_args()
 
 
 def main():
+
     args = parse_args()
 
-    if check_profiler_output(args.profiler_dir):
-        sys.exit(0)
-    else:
+    try:
+        # Initialize checker and execute check
+        checker = ProfilerChecker(device_type=args.device, profiler_dir=args.profiler_dir)
+        if checker.check():
+            logger.info(f"All {args.device.upper()} profiler deliverables check passed!")
+            sys.exit(0)
+        else:
+            logger.error(f"{args.device.upper()} profiler check failed!")
+            sys.exit(1)
+
+    except Exception as e:
+        logger.error(f"Check failed with error: {str(e)}", exc_info=True)
         sys.exit(1)
 
 
