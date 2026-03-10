@@ -28,6 +28,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, Place
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
+from verl.single_controller.ray.topology_aware import topology_aware_schedule
 from verl.utils.device import get_device_name
 from verl.utils.py_functional import temp_env_var
 
@@ -153,6 +154,9 @@ class RayResourcePool(ResourcePool):
             placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime)
             for idx, bundles in enumerate(pg_scheme)
         ]
+
+        if device_name == "NPU":
+            pgs = topology_aware_schedule(pgs, strategy, pg_name_prefix, lifetime)
 
         ray.get([pg.ready() for pg in pgs])
 
