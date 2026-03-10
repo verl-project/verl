@@ -1,4 +1,4 @@
-FROM lmsysorg/sglang:v0.5.9-cu130
+FROM lmsysorg/sglang:v0.5.9
 
 ARG PIP_NO_CACHE_DIR=1
 
@@ -14,7 +14,7 @@ RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 p
 
 RUN pip install codetiming mathruler pylatexenc qwen_vl_utils cachetools pytest-asyncio
 
-RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=16 pip install --no-build-isolation flash_attn==2.8.3
+RUN pip install --no-build-isolation flash_attn==2.8.3
 
 RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
     wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
@@ -39,11 +39,5 @@ RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.
 RUN pip install git+https://github.com/volcengine/verl.git@v0.7.0 && \
     pip uninstall -y verl
 
-# for packages compiled with cuda-12
-RUN apt-get update && \
-    apt-get install -y cuda-cudart-12-9 && \
-    rm -rf /var/lib/apt/lists/* && \
-    ln -sf /usr/local/cuda-12.9/lib64/libcudart.so.12 /usr/local/cuda/lib64/libcudart.so.12
-
-RUN sed -i '/nvidia-cudnn-cu13/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1+cu130.dist-info/METADATA && \
+RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-2.9.1+cu129.dist-info/METADATA && \
     pip install --no-deps --force-reinstall nvidia-cudnn-cu12==9.16.0.29

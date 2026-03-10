@@ -1,4 +1,4 @@
-FROM nvidia/cuda:13.0.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_NO_CACHE_DIR=1
@@ -28,7 +28,7 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && \
 RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
-RUN pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+RUN pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
 
 RUN pip install vllm==0.17.0
 
@@ -53,7 +53,7 @@ RUN export NVTE_FRAMEWORK=pytorch && \
 
 RUN pip install codetiming mathruler pylatexenc qwen_vl_utils cachetools pytest-asyncio
 
-RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=16 pip install --no-build-isolation flash_attn==2.8.3
+RUN pip install --no-build-isolation flash_attn==2.8.3
 
 RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
     wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
