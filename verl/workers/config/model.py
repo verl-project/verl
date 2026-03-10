@@ -114,6 +114,7 @@ class HFModelConfig(BaseConfig):
     enable_activation_offload: bool = False
 
     use_remove_padding: bool = True
+    truncate_padding: bool = False
 
     # TODO: unify fsdp and megatron lora config
     # fsdp lora related. We may setup a separate config later
