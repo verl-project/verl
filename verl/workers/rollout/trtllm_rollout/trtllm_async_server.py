@@ -130,7 +130,9 @@ class TRTLLMHttpServer:
             "enable_chunked_prefill": self.config.enable_chunked_prefill,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "orchestrator_type": "ray",
-            "ray_worker_extension_cls": "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension",
+            "ray_worker_extension_cls": (
+                "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension"
+            ),
             "kv_cache_config": kv_cache_config,
             "max_seq_len": self.config.max_model_len,
             "max_batch_size": self.config.max_num_seqs,

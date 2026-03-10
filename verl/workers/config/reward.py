@@ -87,7 +87,7 @@ class RewardModelConfig(BaseConfig):
     n_gpus_per_node: int = 0
     nnodes: int = 0
     model_path: Optional[str] = None
-    inference: RolloutConfig = field(default_factory=RolloutConfig)
+    rollout: RolloutConfig = field(default_factory=RolloutConfig)
 
 
 @dataclass
@@ -103,3 +103,7 @@ class RewardConfig(BaseConfig):
 
     # sandbox fusion args
     sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)
+    
+    # beam search configuration for reward model
+    num_gpus: int = 1
+    beam_search_config: dict = field(default_factory=dict)

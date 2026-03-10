@@ -25,6 +25,15 @@ from verl.utils.device import get_device_name, get_nccl_backend, get_torch_devic
 from verl.utils.net_utils import is_ipv6
 
 
+def find_free_port():
+    """Find a free port on localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
+
+
 def set_numa_affinity():
     if is_npu_available:
         # TODO (FightingZhen) libnuma.so is not available in e2e_ascend CI image, remove this code after image update.
@@ -83,12 +92,41 @@ def initialize_global_process_group_ray(timeout_second=None, backend=None):
     if not torch.distributed.is_initialized():
         rank = int(os.environ.get("RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))
+        
+        # Get or create init_method
+        init_method = os.environ.get("DIST_INIT_METHOD", None)
+        
+        # If no init_method is provided, create one
+        if init_method is None:
+            if world_size == 1:
+                # For single process, use file-based init to avoid port conflicts
+                import tempfile
+                temp_dir = tempfile.gettempdir()
+                init_method = f"file://{temp_dir}/torch_dist_init_{os.getpid()}"
+            else:
+                # For multi-process, use TCP with a dynamically allocated port
+                if rank == 0:
+                    free_port = find_free_port()
+                    hostname = os.environ.get("MASTER_ADDR", "127.0.0.1")
+                    init_method = f"tcp://{hostname}:{free_port}"
+                    os.environ["DIST_INIT_METHOD"] = init_method
+                    print(f"Auto-allocated port for distributed init: {free_port}")
+                else:
+                    # Worker nodes: wait for master to set the init method
+                    import time
+                    max_wait = 30
+                    waited = 0
+                    while "DIST_INIT_METHOD" not in os.environ and waited < max_wait:
+                        time.sleep(0.1)
+                        waited += 0.1
+                    init_method = os.environ.get("DIST_INIT_METHOD", None)
+        
         torch.distributed.init_process_group(
             backend=backend,
             rank=rank,
             world_size=world_size,
             timeout=timeout,
-            init_method=os.environ.get("DIST_INIT_METHOD", None),
+            init_method=init_method,
         )
 
 

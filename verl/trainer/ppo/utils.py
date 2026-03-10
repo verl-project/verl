@@ -79,8 +79,23 @@ def need_reference_policy(
 def need_reward_model(
     config: DictConfig,
 ) -> bool:
-    """Given the config, do we need reward model."""
-    return config.reward.reward_model.enable
+    """Given the config, do we need reward model.
+    
+    Returns True if:
+    1. Traditional reward model is enabled (config.reward.reward_model.enable=True)
+    2. Custom reward manager uses GPU resources (e.g., forward_rdkit with forward_model)
+    """
+    # Traditional reward model
+    if config.reward.reward_model.enable:
+        return True
+    
+    # Custom reward manager that needs GPU (e.g., forward_rdkit with VLLM forward model)
+    # Check if forward_model is configured with GPU resources
+    forward_model_config = config.reward.get("forward_model", {})
+    if forward_model_config.get("model_path") and forward_model_config.get("num_gpus", 0) > 0:
+        return True
+    
+    return False
 
 
 def need_critic(config: DictConfig) -> bool:

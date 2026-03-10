@@ -105,15 +105,36 @@ class RewardLoopWorker:
         -> rm is genrm: raise error (user-costomized reward func must be provided)
     """
 
-    def __init__(self, config: DictConfig, reward_router_address: str = None):
+    def __init__(
+        self,
+        config: DictConfig,
+        reward_router_address: str = None,
+        placement_group=None,
+        start_bundle_index: int = None,
+        num_gpus: int = None,
+    ):
         """
         Args:
             config: DictConfig, the config for reward loop worker.
             reward_router_address: str, the address of reward router.
+            placement_group: Ray PlacementGroup for sharing global_pool (e.g. forward_rdkit VLLM).
+            start_bundle_index: First bundle index for this worker in the placement group.
+            num_gpus: Number of GPUs (bundles) this worker needs for its model.
         """
         self.config = config
         self.reward_router_address = reward_router_address
+        self.placement_group = placement_group
+        self.start_bundle_index = start_bundle_index
+        self.num_gpus = num_gpus
         self._init_reward_fn()
+
+    def wait_beamsearch_ready(self) -> bool:
+        """Block until this worker's reward manager (e.g. VLLMBeamSearchManager) has finished loading. Returns True. Used to serialize init and avoid GPU memory spike."""
+        if hasattr(self.reward_manager, "vllm_beamsearch_manager") and hasattr(
+            self.reward_manager.vllm_beamsearch_manager, "wait_ready"
+        ):
+            self.reward_manager.vllm_beamsearch_manager.wait_ready()
+        return True
 
     def _init_reward_fn(self):
         input_tokenizer_local_path = copy_to_local(self.config.actor_rollout_ref.model.path)
@@ -123,18 +144,52 @@ class RewardLoopWorker:
             reward_model_tokenizer_local_path = copy_to_local(self.config.reward.reward_model.model_path)
             self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
 
+        reward_manager_kwargs = {
+            "reward_router_address": self.reward_router_address,
+            "reward_model_tokenizer": self.reward_model_tokenizer,
+        }
+        if self.placement_group is not None and self.start_bundle_index is not None and self.num_gpus is not None:
+            reward_manager_kwargs["placement_group"] = self.placement_group
+            reward_manager_kwargs["start_bundle_index"] = self.start_bundle_index
+            reward_manager_kwargs["num_gpus"] = self.num_gpus
+
         self.reward_manager = load_reward_manager(
             self.config,
             self.input_tokenizer,
-            reward_router_address=self.reward_router_address,
-            reward_model_tokenizer=self.reward_model_tokenizer,
+            **reward_manager_kwargs,
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
+        # If reward_manager has run_batch_forward, execute it first
+        # This allows each worker to independently process its chunk using local GPUs
+        print(f"[RewardLoopWorker] compute_score_batch called with data length: {len(data)}")
+        print(f"[RewardLoopWorker] reward_manager type: {type(self.reward_manager)}")
+        print(f"[RewardLoopWorker] reward_manager has run_batch_forward: {hasattr(self.reward_manager, 'run_batch_forward')}")
+        
+        if hasattr(self.reward_manager, 'run_batch_forward'):
+            print(f"[RewardLoopWorker] Executing run_batch_forward...")
+            logger.info("Running batch rxn forward")
+            # Check if run_batch_forward is async (coroutine function)
+            import inspect
+            if inspect.iscoroutinefunction(self.reward_manager.run_batch_forward):
+                data = await self.reward_manager.run_batch_forward(data)
+            else:
+                data = self.reward_manager.run_batch_forward(data)
+            logger.info(f"Batch forward complete, data.batch keys: {list(data.batch.keys())}")
+            print(f"[RewardLoopWorker] run_batch_forward complete, is_valid in keys: {'is_valid' in data.batch.keys()}")
+        else:
+            print(f"[RewardLoopWorker] run_batch_forward NOT FOUND - skipping batch forward")
+            print(f"[RewardLoopWorker] Available methods: {[m for m in dir(self.reward_manager) if not m.startswith('_')]}")
+        
         tasks = []
+        # asyncio application
         for i in range(len(data)):
-            tasks.append(asyncio.create_task(self.compute_score(data[i : i + 1])))
+            # Use direct indexing instead of slicing to preserve all keys
+            single_data = data[i : i + 1]
+            logger.debug(f"Item {i} batch keys before compute_score: {list(single_data.batch.keys())}")
+            tasks.append(asyncio.create_task(self.compute_score(single_data)))
         outputs = await asyncio.gather(*tasks)
+        
         return outputs
 
     async def compute_score(self, data: DataProto) -> dict:
@@ -276,6 +331,7 @@ class RewardLoopManager:
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
         self.config = config
+        self.rm_resource_pool = rm_resource_pool
         if self.config.reward.reward_model.enable:
             self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
@@ -289,26 +345,130 @@ class RewardLoopManager:
     def _init_reward_loop_workers(self):
         self.reward_loop_workers = []
         num_workers = self.config.reward.num_workers
+        forward_config = self.config.reward.get("forward_model", {})
+        num_gpus_per_worker = forward_config.get("num_gpus", 0) if forward_config.get("model_path") else 0
+
+        # When sharing global_pool: assign placement group bundles to each worker
+        # With 4 workers × 2 GPUs = 8 VLLMBeamSearchInfer actors across 8 bundles
+        # Multi-node: pool may have multiple PGs (e.g. [8, 8]), use all PGs so reward can use 16 bundles.
+        placement_group = None
+        start_bundle_indices = []
+        placement_groups_per_worker = []  # per worker: which pg (when using multiple PGs)
+        if self.rm_resource_pool is not None and num_gpus_per_worker > 0:
+            pgs = self.rm_resource_pool.get_placement_groups()
+            if pgs:
+                total_bundles_needed = num_workers * num_gpus_per_worker
+                total_bundles_available = sum(pg.bundle_count for pg in pgs)
+                if total_bundles_needed <= total_bundles_available:
+                    # Build (pg, start_index) for each worker: walk each PG's bundles in steps of num_gpus_per_worker
+                    for pg in pgs:
+                        for start in range(0, pg.bundle_count - num_gpus_per_worker + 1, num_gpus_per_worker):
+                            placement_groups_per_worker.append(pg)
+                            start_bundle_indices.append(start)
+                            if len(placement_groups_per_worker) >= num_workers:
+                                break
+                        if len(placement_groups_per_worker) >= num_workers:
+                            break
+                    if len(placement_groups_per_worker) >= num_workers:
+                        placement_groups_per_worker = placement_groups_per_worker[:num_workers]
+                        start_bundle_indices = start_bundle_indices[:num_workers]
+                        placement_group = placement_groups_per_worker[0] if num_workers == 1 else None
+                        logger.info(
+                            f"Reward workers will use placement_groups (total {total_bundles_available} bundles) "
+                            f"with {num_workers} workers, each occupying {num_gpus_per_worker} bundles"
+                        )
+                    else:
+                        placement_groups_per_worker = []
+                        start_bundle_indices = []
+                if not placement_groups_per_worker:
+                    pg = pgs[0]
+                    if total_bundles_needed <= pg.bundle_count:
+                        placement_group = pg
+                        start_bundle_indices = [i * num_gpus_per_worker for i in range(num_workers)]
+                        logger.info(
+                            f"Reward workers will use placement_group with {num_workers} workers, "
+                            f"each occupying {num_gpus_per_worker} bundles starting at indices: {start_bundle_indices}"
+                        )
+                    else:
+                        logger.warning(
+                            f"reward needs {total_bundles_needed} bundles but pool has {total_bundles_available} "
+                            f"(first pg has {pg.bundle_count}), reward workers will not use placement group"
+                        )
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
         for i in range(num_workers):
-            # Round-robin scheduling over the all nodes
-            node_id = node_ids[i % len(node_ids)]
+            pg = placement_groups_per_worker[i] if i < len(placement_groups_per_worker) else placement_group
+            start_idx = start_bundle_indices[i] if i < len(start_bundle_indices) else None
+            num_gpus = num_gpus_per_worker if (pg is not None) else None
+
+            opts = {"name": f"reward_loop_worker_{i}"}
+            if pg is None:
+                # No pool: round-robin nodes (original behavior)
+                node_id = node_ids[i % len(node_ids)]
+                opts["scheduling_strategy"] = ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                    node_id=node_id,
+                    soft=True,
+                )
+
+            worker_cls = self.reward_loop_workers_class.options(**opts)
             self.reward_loop_workers.append(
-                self.reward_loop_workers_class.options(
-                    name=f"reward_loop_worker_{i}",
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id,
-                        soft=True,
-                    ),
-                ).remote(self.config, self.reward_router_address)
+                worker_cls.remote(
+                    self.config,
+                    self.reward_router_address,
+                    placement_group=pg,
+                    start_bundle_index=start_idx,
+                    num_gpus=num_gpus,
+                )
             )
+            
+    def _deal_with_1000_score(
+        self, data: DataProto, rollout_num: int, reward_positions: torch.Tensor = None
+    ) -> DataProto:
+        """Replace placeholder score 1000 with mean of *other* (valid) scores in the same rollout group.
+        When reward_positions is provided, also updates batch['rm_scores'] so training uses the replaced value."""
+        for i in range(len(data) // rollout_num):
+            start_idx = i * rollout_num
+            end_idx = start_idx + rollout_num
+            # Mean of valid scores only (exclude 1000 placeholders)
+            valid_sum = 0.0
+            valid_count = 0
+            for j in range(start_idx, end_idx):
+                raw = data[j].non_tensor_batch["score"]
+                try:
+                    if float(raw) < 999.9:
+                        valid_sum += float(raw)
+                        valid_count += 1
+                except (TypeError, ValueError):
+                    pass
+            mean_score = (valid_sum / valid_count) if valid_count > 0 else 0.0
+            for j in range(start_idx, end_idx):
+                raw_score = data[j].non_tensor_batch["score"]
+                try:
+                    is_1000 = float(raw_score) >= 999.9
+                except (TypeError, ValueError):
+                    is_1000 = False
+                if is_1000:
+                    data.non_tensor_batch["score"][j] = mean_score
+                    data.non_tensor_batch["acc"][j] = 0.0
+                    if reward_positions is not None:
+                        data.batch["rm_scores"][j, reward_positions[j].item()] = mean_score
+        return data
+    def wait_reward_workers_ready(self) -> None:
+        """Block until all reward loop workers (and their GPU models, e.g. VLLMBeamSearchInfer) have finished initializing. Call before AgentLoopManager.create() to avoid GPU memory spike from concurrent rollout + beamsearch init."""
+        if not self.reward_loop_workers:
+            return
+        ray.get([w.wait_beamsearch_ready.remote() for w in self.reward_loop_workers])
 
     def compute_rm_score(self, data: DataProto) -> DataProto:
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()
 
+        # Split data into chunks for parallel processing across workers
         chunks = data.chunk(len(self.reward_loop_workers))
+        
+        # Parallel dispatch to all workers
+        # Each worker will independently execute run_batch_forward if available
+        print(f"[RewardLoopManager] compute_rm_score called with data length: {len(data)}")
         outputs = ray.get(
             [
                 worker.compute_score_batch.remote(chunk)
@@ -336,8 +496,15 @@ class RewardLoopManager:
         if self.reward_model_manager is not None:
             self.reward_model_manager.sleep()
 
-        return DataProto(
-            batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"reward_extra_keys": reward_extra_keys}
+        reward_positions = valid_response_length - 1
+        return self._deal_with_1000_score(
+            DataProto(
+                batch=batch,
+                non_tensor_batch=non_tensor_batch,
+                meta_info={"reward_extra_keys": reward_extra_keys},
+            ),
+            self.config.actor_rollout_ref.rollout.n,
+            reward_positions=reward_positions,
         )
 
     def _run_all(self, tasks: list[asyncio.Task]):

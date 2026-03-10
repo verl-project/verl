@@ -15,6 +15,8 @@ import os
 from importlib.metadata import PackageNotFoundError, version
 
 from .vllm_rollout import ServerAdapter  # noqa: F401
+from .vllm_beamsearch_infer_manager import VLLMBeamSearchManager
+
 
 
 def get_version(pkg):

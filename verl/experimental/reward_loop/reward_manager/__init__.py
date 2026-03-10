@@ -17,8 +17,12 @@ from .dapo import DAPORewardManager
 from .naive import NaiveRewardManager
 from .limited import RateLimitedRewardManager
 from .remote import RemoteRewardManager
+from .forward_rdkit import ForwardRDKitRewardManager
+from .forward_rdkit_min import ForwardRDKitMinRewardManager
 
 __all__ = [
+    "ForwardRDKitRewardManager",
+    "ForwardRDKitMinRewardManager",
     "DAPORewardManager",
     "NaiveRewardManager",
     "RateLimitedRewardManager",

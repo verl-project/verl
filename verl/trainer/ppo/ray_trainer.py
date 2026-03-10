@@ -278,6 +278,8 @@ class RayPPOTrainer:
         self.use_reference_policy = need_reference_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
+        print(f"[RayPPOTrainer] use_rm={self.use_rm} (reward_model.enable={self.config.reward.reward_model.enable}, "
+              f"forward_model configured={bool(self.config.reward.get('forward_model', {}).get('model_path'))})")
 
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -804,13 +806,21 @@ class RayPPOTrainer:
         from verl.experimental.reward_loop import RewardLoopManager
 
         # initalize reward loop manager
-        # reward model (colocate or standalone): get resource_pool
-        # no reward model: resource_pool = None
-        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        # reward model (colocate or standalone) or reward manager with GPU (e.g. forward_rdkit): get resource_pool
+        # so that reward can share global_pool with actor/rollout (sleep/wakeup)
+        resource_pool = (
+            self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+            if Role.RewardModel in self.resource_pool_manager.mapping
+            else None
+        )
         self.reward_loop_manager = RewardLoopManager(
             config=self.config,
             rm_resource_pool=resource_pool,
         )
+
+        # Wait for reward workers (and their VLLMBeamSearchInfer) to finish loading before
+        # creating async rollout manager, to avoid GPU memory spike from concurrent init.
+        self.reward_loop_manager.wait_reward_workers_ready()
 
         # create async rollout manager and request scheduler
         # Note: mode is always "async" since sync mode is deprecated
@@ -1575,6 +1585,29 @@ class RayPPOTrainer:
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
                 # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
+
+                # aggregate reward_extra_infos (e.g. tanimoto, score, acc) via reduce_metrics for file/console log
+                reward_metrics_to_reduce = {}
+                for key, lst in reward_extra_infos_dict.items():
+                    if lst is None or len(lst) == 0:
+                        continue
+                    # convert numpy arrays / numpy scalars to plain Python list for easier storage
+                    if isinstance(lst, np.ndarray):
+                        lst = lst.tolist()
+                    else:
+                        lst = [v.item() if isinstance(v, np.generic) else v for v in lst]
+                    try:
+                        first = lst[0]
+                    except (IndexError, TypeError):
+                        continue
+                    if isinstance(first, (int, float)) or (
+                        hasattr(first, "__float__") and not isinstance(first, (list, dict))
+                    ):
+                        reward_metrics_to_reduce[f"reward/{key}_mean"] = lst
+                        reward_metrics_to_reduce[f"reward/{key}_max"] = lst
+                        reward_metrics_to_reduce[f"reward/{key}_min"] = lst
+                if reward_metrics_to_reduce:
+                    metrics.update(reduce_metrics(reward_metrics_to_reduce))
 
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):

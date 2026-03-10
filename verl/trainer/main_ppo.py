@@ -241,7 +241,7 @@ class TaskRunner:
         return resource_pool_manager
 
     def add_reward_model_resource_pool(self, config):
-        """Add reward model worker if enabled."""
+        """Add reward model worker if enabled, or reward manager that needs GPUs (e.g. forward_rdkit) to share global_pool."""
         from verl.trainer.ppo.ray_trainer import Role
 
         if config.reward.reward_model.enable:
@@ -250,6 +250,12 @@ class TaskRunner:
             if config.reward.reward_model.enable_resource_pool:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
+                self.mapping[Role.RewardModel] = "global_pool"
+        else:
+            # reward_model.enable=False but reward manager may need GPUs (e.g. forward_rdkit with forward_model)
+            # share global_pool so VLLMBeamSearchInfer can use same GPUs with sleep/wakeup
+            forward_model_config = config.reward.get("forward_model", {})
+            if forward_model_config.get("model_path") and forward_model_config.get("num_gpus", 0) > 0:
                 self.mapping[Role.RewardModel] = "global_pool"
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
