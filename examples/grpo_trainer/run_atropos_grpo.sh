@@ -19,5 +19,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
-    trainer.total_epochs=15 \
-    trainer.trainer_cls=verl_atropos_reflex.AtroposVerlTrainer $@
+    trainer.total_epochs=15 $@
