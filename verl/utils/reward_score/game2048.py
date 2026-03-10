@@ -364,6 +364,7 @@ def compute_score(solution_str: str, ground_truth: str, extra_info: Optional[dic
     seed = (extra_info or {}).get("seed", int(np.random.randint(10000)))
     game_state = "unknown"
     steps = 0
+    exc_msg = ""
     try:
         game = GameBoard(size=6, seed=seed, target=2048, probability_fours=0.10)
         steps, game_state = execute_strategy_with_timeout(strategy_fn, game, timeout_seconds=5)
@@ -374,11 +375,12 @@ def compute_score(solution_str: str, ground_truth: str, extra_info: Optional[dic
     except _TimeoutError:
         game_state = "timeout"
         score += -1.0
-    except Exception:
+    except Exception as e:
         game_state = "exception"
+        exc_msg = f" | error={type(e).__name__}: {e}"
         score += -3.0
 
     if should_print:
-        print(f"[2048] sample {_PRINTER} | steps={steps} state={game_state} score={score}\n{function}\n")
+        print(f"[2048] sample {_PRINTER} | steps={steps} state={game_state} score={score}{exc_msg}\n{function}\n")
 
     return score

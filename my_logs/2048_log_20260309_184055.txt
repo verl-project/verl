@@ -9364,3 +9364,52 @@ ray init kwargs: {'num_cpus': None, 'runtime_env': {'env_vars': {'TOKENIZERS_PAR
 [36m(RewardLoopWorker pid=401360)[0m             for i in range(4):
 [36m(RewardLoopWorker pid=401360)[0m                 for j in range(1, 4):
 [36m(RewardLoopWorker pid=401360)[0m                     if board[i][j] != 0:
+*** SIGTERM received at time=1773083862 on cpu 66 ***
+PC: @     0x7fb165e03d71  (unknown)  (unknown)
+    @     0x7fb165db0330  (unknown)  (unknown)
+    @     0x7fb165e06c8e        224  pthread_cond_timedwait
+    @     0x7fafe69f050f       1184  ray::core::GetRequest::Wait()
+    @     0x7fafe69f2667       1328  ray::core::CoreWorkerMemoryStore::GetImpl()
+    @     0x7fafe69f30b9         64  ray::core::CoreWorkerMemoryStore::Get()
+    @     0x7fafe69f32bf        208  ray::core::CoreWorkerMemoryStore::Get()
+    @     0x7fafe6899fa6       1488  ray::core::CoreWorker::GetObjects()
+    @     0x7fafe689ac30        160  ray::core::CoreWorker::Get()
+    @     0x7fafe67c6db0        272  __pyx_pw_3ray_7_raylet_10CoreWorker_35get_objects()
+    @           0x549825         32  PyObject_Vectorcall
+    @           0x5d71d9        384  _PyEval_EvalFrameDefault
+    @           0x5d571b        128  PyEval_EvalCode
+    @           0x5d32ac        112  (unknown)
+    @           0x581ccd         64  (unknown)
+    @           0x549825         32  PyObject_Vectorcall
+    @           0x5d71d9        384  _PyEval_EvalFrameDefault
+    @           0x6bc342         80  (unknown)
+    @           0x6bbf72        288  Py_RunMain
+    @           0x6bbbdd         48  Py_BytesMain
+    @     0x7fb165d951ca        160  (unknown)
+    @     0x7fb165d9528b         96  __libc_start_main
+    @           0x657005  (unknown)  _start
+[2026-03-09 19:17:43,009 E 378056 378056] logging.cc:474: *** SIGTERM received at time=1773083863 on cpu 66 ***
+[2026-03-09 19:17:43,009 E 378056 378056] logging.cc:474: PC: @     0x7fb165e03d71  (unknown)  (unknown)
+[2026-03-09 19:17:43,009 E 378056 378056] logging.cc:474:     @     0x7fb165db0330  (unknown)  (unknown)
+[2026-03-09 19:17:43,009 E 378056 378056] logging.cc:474:     @     0x7fb165e06c8e        224  pthread_cond_timedwait
+[2026-03-09 19:17:43,009 E 378056 378056] logging.cc:474:     @     0x7fafe69f050f       1184  ray::core::GetRequest::Wait()
+[2026-03-09 19:17:43,009 E 378056 378056] logging.cc:474:     @     0x7fafe69f2667       1328  ray::core::CoreWorkerMemoryStore::GetImpl()
+[2026-03-09 19:17:43,009 E 378056 378056] logging.cc:474:     @     0x7fafe69f30b9         64  ray::core::CoreWorkerMemoryStore::Get()
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @     0x7fafe69f32bf        208  ray::core::CoreWorkerMemoryStore::Get()
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @     0x7fafe6899fa6       1488  ray::core::CoreWorker::GetObjects()
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @     0x7fafe689ac30        160  ray::core::CoreWorker::Get()
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @     0x7fafe67c6db0        272  __pyx_pw_3ray_7_raylet_10CoreWorker_35get_objects()
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x549825         32  PyObject_Vectorcall
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x5d71d9        384  _PyEval_EvalFrameDefault
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x5d571b        128  PyEval_EvalCode
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x5d32ac        112  (unknown)
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x581ccd         64  (unknown)
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x549825         32  PyObject_Vectorcall
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x5d71d9        384  _PyEval_EvalFrameDefault
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x6bc342         80  (unknown)
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x6bbf72        288  Py_RunMain
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x6bbbdd         48  Py_BytesMain
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @     0x7fb165d951ca        160  (unknown)
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @     0x7fb165d9528b         96  __libc_start_main
+[2026-03-09 19:17:43,010 E 378056 378056] logging.cc:474:     @           0x657005  (unknown)  _start
+examples/grpo_trainer/run_qwen2-7b_game2048_trtllm.sh: line 115: 378056 Aborted                 (core dumped) python3 -m verl.trainer.main_ppo algorithm.adv_estimator=grpo algorithm.rollout_correction.rollout_is_threshold=2.0 data.train_files="['$TRAIN_PATH']" data.val_files="['$TEST_PATH']" data.train_batch_size=256 data.max_prompt_length=512 data.max_response_length=1024 data.return_raw_chat=True data.filter_overlong_prompts=True data.truncation='error' actor_rollout_ref.hybrid_engine=True actor_rollout_ref.model.path=${MODEL_PATH} actor_rollout_ref.model.use_remove_padding=True actor_rollout_ref.model.enable_gradient_checkpointing=True actor_rollout_ref.actor.optim.lr=1e-6 actor_rollout_ref.actor.ppo_mini_batch_size=256 actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 actor_rollout_ref.actor.use_kl_loss=True actor_rollout_ref.actor.kl_loss_coef=0.001 actor_rollout_ref.actor.kl_loss_type=low_var_kl actor_rollout_ref.actor.entropy_coeff=0 actor_rollout_ref.actor.fsdp_config.param_offload=False actor_rollout_ref.actor.fsdp_config.optimizer_offload=False actor_rollout_ref.rollout.name=trtllm actor_rollout_ref.rollout.mode="async" actor_rollout_ref.rollout.tensor_model_parallel_size=${TP} actor_rollout_ref.rollout.gpu_memory_utilization=0.6 actor_rollout_ref.rollout.n=2 actor_rollout_ref.rollout.max_num_seqs=${MAX_BATCH_SIZE} actor_rollout_ref.rollout.max_num_batched_tokens=32768 +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5 actor_rollout_ref.rollout.calculate_log_probs=True actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 actor_rollout_ref.ref.fsdp_config.param_offload=True algorithm.use_kl_in_reward=False trainer.critic_warmup=0 trainer.logger='["console","tensorboard"]' trainer.project_name="${PROJECT_NAME}" trainer.experiment_name="${EXP_NAME}" trainer.n_gpus_per_node=8 trainer.nnodes=1 trainer.save_freq=-1 trainer.test_freq=5 trainer.resume_mode=disable trainer.total_epochs=15 "${@:2}"
