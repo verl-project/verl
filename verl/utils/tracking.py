@@ -25,6 +25,9 @@ from typing import Any
 
 import orjson
 
+MLFLOW_MAX_ATTEMPTS = 3
+MLFLOW_SLEEP_SECONDS = 5
+
 
 class Tracking:
     """A unified tracking interface for logging experiment data to multiple backends.
@@ -82,25 +85,36 @@ class Tracking:
 
         if "mlflow" in default_backend:
             import os
+            import time
 
             import mlflow
 
-            MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:////tmp/mlruns.db")
-            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+            for _mlflow_attempt in range(1, MLFLOW_MAX_ATTEMPTS + 1):
+                try:
+                    MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:////tmp/mlruns.db")
+                    print(f"Using MLFlow tracking URI: {MLFLOW_TRACKING_URI}")
+                    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
-            # Some cloud providers like Azure ML or Databricks automatically set MLFLOW_RUN_ID
-            # If set, attach to the existing run instead of creating a new one
-            run_id = os.environ.get("MLFLOW_RUN_ID")
-            if run_id:
-                mlflow.start_run(run_id=run_id)
-            else:
-                # Project_name is actually experiment_name in MLFlow
-                # If experiment does not exist, will create a new experiment
-                experiment = mlflow.set_experiment(project_name)
-                mlflow.start_run(experiment_id=experiment.experiment_id, run_name=experiment_name)
+                    # Some cloud providers like Azure ML or Databricks automatically set MLFLOW_RUN_ID
+                    # If set, attach to the existing run instead of creating a new one
+                    run_id = os.environ.get("MLFLOW_RUN_ID")
+                    if run_id:
+                        mlflow.start_run(run_id=run_id)
+                    else:
+                        # Project_name is actually experiment_name in MLFlow
+                        # If experiment does not exist, will create a new experiment
+                        experiment = mlflow.set_experiment(project_name)
+                        mlflow.start_run(experiment_id=experiment.experiment_id, run_name=experiment_name)
 
-            mlflow.log_params(_compute_mlflow_params_from_objects(config))
-            self.logger["mlflow"] = _MlflowLoggingAdapter()
+                    mlflow.log_params(_compute_mlflow_params_from_objects(config))
+                    self.logger["mlflow"] = _MlflowLoggingAdapter()
+                    break  # Success
+                except Exception as e:
+                    print(f"WARNING: MLflow initialization attempt {_mlflow_attempt}/{MLFLOW_MAX_ATTEMPTS} failed: {e}")
+                    if _mlflow_attempt < MLFLOW_MAX_ATTEMPTS:
+                        time.sleep(MLFLOW_SLEEP_SECONDS)
+                    else:
+                        print("WARNING: All MLflow initialization attempts failed. Proceeding without MLflow tracking.")
 
         if "swanlab" in default_backend:
             import os
