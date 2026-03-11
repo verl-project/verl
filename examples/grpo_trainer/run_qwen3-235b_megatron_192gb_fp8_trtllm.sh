@@ -15,17 +15,17 @@ kl_loss_coef=0.001
 clip_ratio_low=0.2
 clip_ratio_high=0.28
 
-max_prompt_length=$((512 * 2))
-max_response_length=$((640 * 4))
+max_prompt_length=$((1024 * 2))
+max_response_length=$((1204 * 8))
 enable_overlong_buffer=True
 overlong_buffer_len=$((1024 * 1))
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
-train_prompt_bsz=${TRAIN_BS:-16}
+train_prompt_bsz=${TRAIN_BS:-32}
 n_resp_per_prompt=8
-train_prompt_mini_bsz=8
+train_prompt_mini_bsz=16
 
 NNODES=${NNODES:-8}
 
@@ -52,8 +52,8 @@ train_pp=${PP:-8}
 
 EP=${EP:-4}
 ETP=1
-gen_moe_ep=${GEN_MOE_EP:-4}
-gen_moe_tp=${GEN_MOE_TP:-2}
+GEN_MOE_EP=${GEN_MOE_EP:-4}
+GEN_MOE_TP=${GEN_MOE_TP:-2}
 CP=1
 # Setting this to > 0.6 will likely CPU OOM
 optimizer_offload_fraction=${OFFLOAD_FRACTION:-0.6}
@@ -126,12 +126,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.optim.clip_grad=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     +actor_rollout_ref.rollout.quantization="fp8" \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
-    +actor_rollout_ref.rollout.moe_tp_size=${gen_moe_tp} \
-    +actor_rollout_ref.rollout.moe_ep_size=${gen_moe_ep} \
+    +actor_rollout_ref.rollout.moe_tensor_parallel_size=${GEN_MOE_TP} \
+    actor_rollout_ref.rollout.expert_parallel_size=${GEN_MOE_EP} \
     actor_rollout_ref.rollout.name=trtllm \
     actor_rollout_ref.rollout.mode="async" \
     +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 \
