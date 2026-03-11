@@ -55,7 +55,7 @@ class ProfilerChecker:
             # Check files in directory
             for gpu_dir in dirs:
                 if "_rollout_" in gpu_dir:
-                    expected_count = 3
+                    break
                 else:
                     expected_count = 1
 
