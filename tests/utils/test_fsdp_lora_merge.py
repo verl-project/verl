@@ -258,10 +258,7 @@ def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, s
                     module.lora_A[adapter_name].weight.data.uniform_(0.5, 1.5)
                     module.lora_B[adapter_name].weight.data.uniform_(1.5, 2.5)
 
-    # Save adapter weights to verify they're restored after extraction
     from peft.utils.save_and_load import get_peft_model_state_dict
-
-    original_adapter_weights = get_peft_model_state_dict(model)
 
     # Wrap with FSDP
     if strategy == "fsdp":
@@ -283,6 +280,13 @@ def _test_collect_merged_lora_params_worker(rank, world_size, rendezvous_file, s
         )
         fsdp_kwargs = {"mesh": device_mesh, "mp_policy": mp_policy}
         apply_fsdp2(model, fsdp_kwargs, {})
+
+    # Save adapter weights AFTER FSDP wrapping so dtypes match (bfloat16 mixed precision).
+    original_adapter_weights = {}
+    for key, val in get_peft_model_state_dict(model).items():
+        if hasattr(val, "full_tensor"):
+            val = val.full_tensor()
+        original_adapter_weights[key] = val.detach().cpu().clone()
 
     # Call collect_merged_lora_params
     merged_params = collect_merged_lora_params(model)
