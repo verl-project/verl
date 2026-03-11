@@ -341,6 +341,12 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
         )
     )
 
+    # vLLM v0.17 removed the `else: register_parameter("input_scale", None)` from
+    # create_weights() for dynamic activation, but apply() still accesses layer.input_scale.
+    # Since block_quant always uses dynamic activation, ensure the attribute exists.
+    if not hasattr(layer, "input_scale"):
+        layer.input_scale = None
+
     maybe_post_process_fp8_weight_block(layer)
 
 
