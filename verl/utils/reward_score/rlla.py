@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import json
-import os
+import random
 import re
 from collections import Counter
 
@@ -28,11 +28,6 @@ def match_score(list1, list2):
     if list1 == list2:
         return 1.0
 
-    if os.getenv("REFINEDREWARD", 0) == "1":
-        print("REFINEDREWARD is set to 1, so strict match is used")
-        if list1 != list2:
-            return 0.0
-
     if not list1 or not list2:
         return 0.0
 
@@ -46,34 +41,18 @@ def match_score(list1, list2):
 
 
 # custoimzed reward functions: format
-def customize_format_reward_func(completions, answer, step, max_possible_reward, min_possible_reward, **kwargs):
-    if str(os.getenv("MAX1STEP30MAX3", 0)) == "1":
-        print("MAX1STEP30MAX3 is set to 1, so max 1 -> 30 steps -> max 3")
-        if step >= 30:
-            max_possible_reward = max_possible_reward / 2
-            min_possible_reward = min_possible_reward / 2
-        else:
-            max_possible_reward = max_possible_reward
-            min_possible_reward = min_possible_reward
-
-    # schedule reward
-    if str(os.getenv("SCHEDULEREWARD", 0)) == "1":
-        print("SCHEDULEREWARD is set to 1, so schedule reward is used")
-        max_possible_reward = 2 - (2 - max_possible_reward) * step / 150
-        min_possible_reward = -2 + (2 + min_possible_reward) * step / 150
-        if max_possible_reward < 1.0:
-            max_possible_reward = 1.0
-        if min_possible_reward > -1.0:
-            min_possible_reward = -1.0
-
+def customize_format_reward_func(
+    completions, answer, step, max_possible_reward, min_possible_reward, do_print, **kwargs
+):
     rewards = []
     responses = [completion[0]["content"] for completion in completions]
 
-    print("\n======= Answer ======= ")
-    print(answer[0])
-    print("\n======= Responses ======= ")
-    for idx, response in enumerate(responses):
-        print(f"*** Response {idx + 1}***\n{response}")
+    if do_print:
+        print("\n======= Answer ======= ")
+        print(answer[0])
+        print("\n======= Responses ======= ")
+        for idx, response in enumerate(responses):
+            print(f"*** Response {idx + 1}***\n{response}")
 
     for response, ans in zip(responses, answer, strict=False):
         reward = min_possible_reward
@@ -110,53 +89,20 @@ def customize_format_reward_func(completions, answer, step, max_possible_reward,
 
         rewards.append(reward)
 
-    print("\n======= Reward for <format> =======")
-    print("Reward function for <format> is called ...")
-    print(rewards)
+    if do_print:
+        print("\n======= Reward for <format> =======")
+        print("Reward function for <format> is called ...")
+        print(rewards)
+
     return rewards
 
 
-# customized reward functions: length
-def customize_length_reward_func(completions, answer, step, max_possible_reward, min_possible_reward, **kwargs):
-    # schedule length
-    if os.getenv("SCHEDULELENGTH", 0) == "1":
-        print("SCHEDULELENGTH is set to 1, so schedule max reward for length is used")
-        max_reward_len = (640 - 384) * step / 105 + 384
-    else:
-        max_reward_len = 512
-
-    """Reward function that gives higher scores to longer completions."""
-    responses = [completion[0]["content"] for completion in completions]
-    rewards = []
-
-    for response, ans in zip(responses, answer, strict=False):
-        if "<think>" not in response or "</think>" not in response:
-            rewards.append(min_possible_reward)
-            continue
-        think_responses = response.split("<think>")[-1].split("</think>")[0].strip()
-        reward = round(len(think_responses.split()) / max_reward_len, 2)
-        if reward > 1.0:
-            reward = 1.0
-
-        final_reward = reward * (max_possible_reward - min_possible_reward) + min_possible_reward
-        rewards.append(final_reward)
-
-    print("\n======= Reward for <length> =======")
-    print("Reward function for <length> is called ...")
-    print(rewards)
-    return rewards
-
-
-def compute_tool_call_reward(gt_tools, pd_tools, max_possible_reward, min_possible_reward):
+def compute_tool_call_reward(gt_tools, pd_tools, max_possible_reward, min_possible_reward, do_print):
     if gt_tools == pd_tools:
-        print("Max possible score:", "Exact Match!")
-        print("Score:", max_possible_reward)
+        if do_print:
+            print("Max possible score:", "Exact Match!")
+            print("Score:", max_possible_reward)
         return max_possible_reward
-
-    if os.getenv("COARSEREWARD", 0) == "1":
-        print("COARSEREWARD is set to 1, so coarse reward is used")
-        if gt_tools != pd_tools:
-            return min_possible_reward
 
     gt_names = [tool["name"] for tool in gt_tools]
     pd_names = [tool["name"] for tool in pd_tools]
@@ -169,11 +115,7 @@ def compute_tool_call_reward(gt_tools, pd_tools, max_possible_reward, min_possib
         gt_name = gt_tool["name"]
         gt_params = gt_tool["parameters"]
 
-        if str(os.getenv("INTERMEDIATEREWARD", 0)) == "1":
-            print("INTERMEDIATEREWARD is set to 1, so local max possible is changed")
-            local_max_possible += 1.0
-        else:
-            local_max_possible += 1.0 + len(gt_params)
+        local_max_possible += 1.0 + len(gt_params)
 
         best_match = None
         best_match_score = 0.0
@@ -183,15 +125,6 @@ def compute_tool_call_reward(gt_tools, pd_tools, max_possible_reward, min_possib
         for i, pd_tool in enumerate(pd_tools):
             if i in used_pd_indices or pd_tool["name"] != gt_name:
                 continue
-
-            if str(os.getenv("INTERMEDIATEREWARD", 0)) == "1":
-                if gt_tool == pd_tool:
-                    best_match = pd_tool
-                    best_match_index = i
-                    best_match_score = 1.0
-                    break
-                else:
-                    continue
 
             pd_params = pd_tool["parameters"]
             param_score = match_score(list(gt_params.keys()), list(pd_params.keys()))
@@ -210,33 +143,18 @@ def compute_tool_call_reward(gt_tools, pd_tools, max_possible_reward, min_possib
             used_pd_indices.add(best_match_index)
             score += best_match_score
 
-    print()
-    print("Max possible score:", local_max_possible)
-    print("Score:", score)
+    if do_print:
+        print()
+        print("Max possible score:", local_max_possible)
+        print("Score:", score)
 
     return (max_possible_reward - min_possible_reward) * score / local_max_possible + min_possible_reward
 
 
 # custoimzed reward functions: tool call correctness
-def customize_correctness_reward_tool(completions, answer, step, max_possible_reward, min_possible_reward, **kwargs):
-    if str(os.getenv("MAX1STEP30MAX3", 0)) == "1":
-        print("MAX1STEP30MAX3 is set to 1, so max 1 -> 30 steps -> max 3")
-        if step < 30:
-            max_possible_reward = max_possible_reward / 3
-            min_possible_reward = min_possible_reward / 3
-        else:
-            max_possible_reward = max_possible_reward
-            min_possible_reward = min_possible_reward
-
-    if str(os.getenv("SCHEDULEREWARD", 0)) == "1":
-        print("SCHEDULEREWARD is set to 1, so schedule reward is used")
-        max_possible_reward = (max_possible_reward - 2) * step / 150 + 2
-        min_possible_reward = (min_possible_reward + 2) * step / 150 - 2
-        if max_possible_reward > 3.0:
-            max_possible_reward = 3.0
-        if min_possible_reward < -3.0:
-            min_possible_reward = -3.0
-
+def customize_correctness_reward_tool(
+    completions, answer, step, max_possible_reward, min_possible_reward, do_print, **kwargs
+):
     responses = [completion[0]["content"] for completion in completions]
     rewards = []
 
@@ -263,16 +181,17 @@ def customize_correctness_reward_tool(completions, answer, step, max_possible_re
             pd_tools = response.split("<tool_call>")[1].split("</tool_call>")[0].strip().split("\n")
             pd_tools = [json.loads(tool) for tool in pd_tools]
             reward = compute_tool_call_reward(
-                gt_tools, pd_tools, max_possible_reward, min_possible_reward
+                gt_tools, pd_tools, max_possible_reward, min_possible_reward, do_print
             )  # top reward is 2
         except Exception:
             reward = min_possible_reward
 
         rewards.append(reward)
 
-    print("\n======= Reward for <tool call> =======")
-    print("Reward function for <tool call> correctness is called ...")
-    print(rewards)
+    if do_print:
+        print("\n======= Reward for <tool call> =======")
+        print("Reward function for <tool call> correctness is called ...")
+        print(rewards)
     return rewards
 
 
@@ -300,13 +219,8 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, step=0):
     else:
         raise NotImplementedError(f"Unknown model name: {exp_name}")
 
-    if str(os.getenv("CORRECTMAX1", 0)) == "1":
-        print("CORRECTMAX1 is set to 1, so max score is set to 1")
-        tool_max_possible = 1.0
-        tool_min_possible = -1.0
-    else:
-        tool_max_possible = 3.0
-        tool_min_possible = -3.0
+    tool_max_possible = 3.0
+    tool_min_possible = -3.0
 
     format_max_possible = 1.0
     format_min_possible = 0.0
@@ -314,9 +228,13 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, step=0):
     completions = [[{"role": "assistant", "content": predict_str}]]
     answer = [ground_truth]
 
-    fomrat_score = customize_format_reward_func(completions, answer, step, format_max_possible, format_min_possible)[0]
+    do_print = random.randint(1, 64) == 1
+
+    fomrat_score = customize_format_reward_func(
+        completions, answer, step, format_max_possible, format_min_possible, do_print
+    )[0]
     correctness_score = customize_correctness_reward_tool(
-        completions, answer, step, tool_max_possible, tool_min_possible
+        completions, answer, step, tool_max_possible, tool_min_possible, do_print
     )[0]
 
     score = fomrat_score + correctness_score

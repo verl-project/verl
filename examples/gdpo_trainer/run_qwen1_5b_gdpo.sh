@@ -1,7 +1,7 @@
 export HCCL_ASYNC_ERROR_HANDLING=0
 
 export DATA_DIR="./dataset/rlla_4k"
-export BASE_MODEL="/home/l00906151/Qwen2.5-1.5B-Instruct"
+export BASE_MODEL="/path/to/your/Qwen2.5-1.5B-Instruct"
 export EXPERIMENT_NAME="qwen2.5-1.5B-GDPO"
 export CKPT_DIR="./results/gdpo"
 
