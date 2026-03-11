@@ -146,6 +146,7 @@ class RobDataParallelSACActor(BaseSACActor):
         self.actor_ema_decay = float(self.config.get("actor_ema_decay", 0.995))
         self.actor_ema_shadow: dict[str, torch.Tensor] = {}
         self.actor_ema_initialized = False
+        self.bc_loss_coef = float(self.sac_config.get("bc_loss_coef", 0.5))
     
     def _init_critic(self):
         """Initialize the critic optimizer."""
@@ -369,11 +370,20 @@ class RobDataParallelSACActor(BaseSACActor):
                 requires_grad=False,
             )
 
-            actor_loss = self._calculate_actor_loss(
+            sac_loss = self._calculate_actor_loss(
                 log_probs=log_probs_0,
                 q_values=q_values_0,
                 valids=micro_batch["valids"],
             )
+            if self.bc_loss_coef > 0:
+                bc_loss = self.actor_module.bc_loss(
+                    state_features=s0_state_features,
+                    actions={"full_action": a0_actions},
+                    valids=micro_batch["valids"],
+                )
+                actor_loss = sac_loss + self.bc_loss_coef * bc_loss
+            else:
+                actor_loss = sac_loss
         return actor_loss, log_probs_0, q_values_0
 
     @override

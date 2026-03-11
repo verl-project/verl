@@ -115,6 +115,16 @@ class SupportSACTraining:
 
         raise NotImplementedError("Subclasses must implement sac_forward_state_features method.")
 
+    def bc_loss(
+        self,
+        state_features: Any,
+        actions: dict[str, torch.Tensor],
+        valids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute behavior cloning loss for actor regularization."""
+
+        raise NotImplementedError("Subclasses must implement bc_loss method.")
+
     def sac_update_target_network(self, tau: float):
         """Update the target network heads using Polyak averaging.
 

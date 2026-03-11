@@ -222,6 +222,44 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         vision_tower = self.model.paligemma_with_expert.vision_tower
         vision_tower.requires_grad_(False)
         vision_tower.eval()
+    
+    def bc_loss(
+        self,
+        state_features: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor],
+        actions: dict[str, torch.Tensor],
+        valids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Calculate the BC loss for the actor."""
+
+        prefix_features, states, _, _ = state_features
+        _, prefix_pad_masks, _ = prefix_features
+        action_tensor = actions["full_action"]
+
+        batch_size = action_tensor.shape[0]
+        device = action_tensor.device
+
+        noise = self.model.sample_noise(action_tensor.shape, device=device)
+        gamma1 = torch.empty((batch_size,), device=device).uniform_(0, 1).pow(1 / 1.5)
+        gamma2 = torch.empty((batch_size,), device=device).uniform_(0, 1).pow(1 / 1.0)
+        time = (gamma1 / (gamma1 + gamma2)) * 0.999 + 0.001
+        time = time.to(dtype=torch.float32, device=device)
+
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1.0 - time_expanded) * action_tensor
+        u_t = noise - action_tensor
+
+        past_key_values = self._build_kv_cache_from_prefix(prefix_features)
+        model_pred = self.model.denoise_step(
+            states,
+            prefix_pad_masks,
+            past_key_values,
+            x_t,
+            time,
+        )
+
+        loss = torch.nn.functional.mse_loss(u_t, model_pred, reduction="none").mean(dim=-1).mean(dim=-1)
+        valid_f = valids.float().to(loss.device)
+        return (loss * valid_f).sum() / valid_f.sum().clamp_min(1.0)
 
     # --- SAC Algorithm Support ---
 
@@ -265,6 +303,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
 
         self.freeze_vision_tower()
 
+        register_fsdp_forward_method(self, "bc_loss")
         register_fsdp_forward_method(self, "sac_forward_critic")
         register_fsdp_forward_method(self, "sac_forward_actor")
         register_fsdp_forward_method(self, "sac_update_target_network")
@@ -306,7 +345,10 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             a0 = a0.detach()
 
         z = self.model.sample_noise(actions_shape, device=device)
-        t = torch.rand((batch_size,), dtype=torch.float32, device=device)
+        gamma1 = torch.empty((batch_size,), device=device).uniform_(0, 1).pow(1 / 1.5)
+        gamma2 = torch.empty((batch_size,), device=device).uniform_(0, 1).pow(1 / 1.0)
+        t = (gamma1 / (gamma1 + gamma2)) * 0.999 + 0.001
+        t = t.to(dtype=torch.float32, device=device)
         t_expanded = t[:, None, None]
         a_t = (1.0 - t_expanded) * a0 + t_expanded * z
 
