@@ -62,7 +62,6 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.utils.device import is_torch_npu_available
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
@@ -757,7 +756,6 @@ class RayPPOTrainer:
                 wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
-        self.device_name = "cuda" if not is_torch_npu_available(check_device=False) else "npu",
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
