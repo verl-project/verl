@@ -56,9 +56,7 @@ import aiohttp
 import requests
 from sglang.srt.entrypoints.EngineBase import EngineBase
 from sglang.srt.entrypoints.http_server import launch_server
-from sglang.srt.managers.io_struct import (
-    UpdateWeightsFromTensorReqInput,
-)
+from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput, UpdateWeightsFromTensorReqInput
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 
@@ -775,6 +773,27 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 "flush_cache": flush_cache,
             },
         )
+
+    async def load_lora_adapter_from_tensor(self, req: LoadLoRAAdapterFromTensorsReqInput):
+        return await self._make_async_request(
+            "load_lora_adapter_from_tensors",
+            {
+                "lora_name": req.lora_name,
+                "config_dict": req.config_dict,
+                "serialized_tensors": req.serialized_tensors,
+            },
+        )
+
+    async def unload_lora_adapter(self, lora_name: str):
+        return await self._make_async_request(
+            "unload_lora_adapter",
+            {
+                "lora_name": lora_name,
+            },
+        )
+
+    async def available_models(self):
+        return await self._make_async_request(endpoint="v1/models", method="GET")
 
     async def flush_cache(self) -> dict[str, Any]:
         """Flush the cache of the server asynchronously.
