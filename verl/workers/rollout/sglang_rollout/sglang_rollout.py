@@ -137,6 +137,12 @@ class ServerAdapter(BaseRollout):
         self.node_rank = self.rollout_rank // local_world_size
         self.local_rank = self.rollout_rank % local_world_size
 
+        # sleep_level controls what gets released during sleep/release:
+        #   2 (default) = release weights + kv_cache (full sleep, merge path)
+        #   1 = release kv_cache only (keep base weights, adapter path)
+        # Set by engine_workers.update_weights() when lora.merge=False.
+        self.sleep_level = 2
+
     async def _init_server_adapter(self):
         if self._engine is not None:
             return
@@ -183,10 +189,19 @@ class ServerAdapter(BaseRollout):
             await self._engine.resume_memory_occupation(tags=tags)
 
     async def release(self):
-        """Release weights and kv cache in GPU memory."""
+        """Release weights and kv cache in GPU memory.
+
+        When sleep_level=1 (LoRA adapter mode), only releases kv_cache
+        to keep base weights alive across training iterations.
+        When sleep_level=2 (default/merge mode), releases everything.
+        """
         await self._init_server_adapter()
         if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
-            await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
+            if self.sleep_level == 1:
+                tags = ["kv_cache"]
+            else:
+                tags = ["kv_cache", "weights"]
+            await self._engine.release_memory_occupation(tags=tags)
 
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs

@@ -125,6 +125,9 @@ ENV/
 *.parquet
 
 
+# local sglang clone
+sglang/
+
 # local logs
 logs
 log
