@@ -119,8 +119,6 @@ class SFTTrainer:
             profiler_config=self.profiler_config,
         )
 
-        self.register_transformers_modules_by_value()
-
         wg_kwargs = {}
         if self.start_profile_step != -1:
             wg_kwargs["profile_steps"] = list(range(self.start_profile_step, self.end_profile_step + 1))
