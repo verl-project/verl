@@ -47,7 +47,7 @@ RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-build-isolation
 RUN export NVTE_FRAMEWORK=pytorch && \
     MAX_JOBS=128 \
     NVTE_BUILD_THREADS_PER_JOB=4 \
-    pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.12
+    pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.10
 
 # RUN pip install --upgrade transformers tokenizers
 
