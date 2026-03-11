@@ -1,0 +1,32 @@
+# mindspeedllm ref config, inheriting from trainer/config/ref/ref.yaml
+defaults:
+  - ref
+  # mindspeedllm engine config
+  - ../optim@optim: mindspeedllm
+  # mindspeedllm engine config
+  - ../engine@mindspeedllm: mindspeedllm
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.MindSpeedLLMActorConfig
+
+strategy: mindspeedllm
+
+mindspeedllm:
+  seed: ${oc.select:actor_rollout_ref.actor.mindspeedllm.seed,42}
+  override_transformer_config: ${oc.select:actor_rollout_ref.actor.mindspeedllm.override_transformer_config,{}}
+  use_mbridge: ${oc.select:actor_rollout_ref.actor.mindspeedllm.use_mbridge,False}
+  vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.mindspeedllm.vanilla_mbridge,True}
+  use_remove_padding: ${oc.select:actor_rollout_ref.actor.mindspeedllm.use_remove_padding,True}
+  tensor_model_parallel_size: ${oc.select:actor_rollout_ref.actor.mindspeedllm.tensor_model_parallel_size,1}
+  pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.mindspeedllm.pipeline_model_parallel_size,1}
+  virtual_pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.mindspeedllm.virtual_pipeline_model_parallel_size,null}
+  context_parallel_size: ${oc.select:actor_rollout_ref.actor.mindspeedllm.context_parallel_size,1}
+  expert_model_parallel_size: ${oc.select:actor_rollout_ref.actor.mindspeedllm.expert_model_parallel_size,1}
+  expert_tensor_parallel_size: ${oc.select:actor_rollout_ref.actor.mindspeedllm.expert_tensor_parallel_size,null}
+  param_offload: ${oc.select:actor_rollout_ref.actor.mindspeedllm.param_offload,False}
+  forward_only: True
+  engine_kwargs: ${oc.select:actor_rollout_ref.actor.mindspeedllm.engine_kwargs,{}}
+
+load_weight: True

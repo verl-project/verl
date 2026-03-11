@@ -46,6 +46,13 @@ except ImportError:
     MindspeedEngineWithLMHead = None
 
 try:
+    from .mindspeedllm import MindSpeedLLMEngineWithLMHead
+
+    __all__ += ["MindSpeedLLMEngineWithLMHead"]
+except ImportError:
+    MindSpeedLLMEngineWithLMHead = None
+
+try:
     from .megatron import MegatronEngine, MegatronEngineWithLMHead
 
     __all__ += ["MegatronEngine", "MegatronEngineWithLMHead"]

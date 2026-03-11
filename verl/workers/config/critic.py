@@ -22,11 +22,18 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig
+from .engine import FSDPEngineConfig, McoreEngineConfig, MindSpeedLLMEngineConfig, TorchtitanEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["CriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "TorchTitanCriticConfig", "FSDPCriticModelCfg"]
+__all__ = [
+    "CriticConfig",
+    "FSDPCriticConfig",
+    "McoreCriticConfig",
+    "TorchTitanCriticConfig",
+    "FSDPCriticModelCfg",
+    "MindSpeedLLMCriticConfig",
+]
 
 
 @dataclass
@@ -270,3 +277,25 @@ class FSDPCriticModelCfg(BaseModelConfig):
     target_modules: str | list[str] = "all-linear"
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
+
+
+@dataclass
+class MindSpeedLLMCriticConfig(CriticConfig):
+    """Configuration for mindspeedllm-based critic model training.
+
+    The inheritance from CriticConfig provides all base critic configuration plus mindspeedllm-specific settings.
+
+    Args:
+        nccl_timeout (int): NCCL timeout in seconds for distributed operations.
+        mindspeedllm (Dict[str, Any]): mindspeedllm-specific parallelism settings.
+        load_weight (bool): Whether to load initial weights.
+    """
+
+    strategy: str = "mindspeedllm"
+    nccl_timeout: int = 600
+    mindspeedllm: MindSpeedLLMEngineConfig = field(default_factory=MindSpeedLLMEngineConfig)
+    load_weight: bool = True
+
+    def validate(self, n_gpus: int, train_batch_size: int):
+        """Validate mindspeedllm critic configuration with runtime parameters."""
+        super().validate(n_gpus, train_batch_size)

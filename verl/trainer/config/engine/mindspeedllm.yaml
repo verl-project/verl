@@ -1,0 +1,108 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.MindSpeedLLMEngineConfig
+
+engine_kwargs:
+  use_mcore_models: True
+  spec: [mindspeed_llm.tasks.models.spec.qwen3_spec, layer_spec]
+  qk_layernorm: True
+  position_embedding_type: rope
+  normalization: RMSNorm
+  disable_bias_linear: true
+  swiglu: true
+  attention_softmax_in_fp32: true  
+  no_gradient_accumulation_fusion: true
+  group_query_attention: true
+  num_query_groups: 4
+
+  transformer_impl: transformer_engine
+
+  no_pad_to_seq_lengths: true
+  reset_attention_mask: true
+  context_parallel_algo: ulysses_cp_algo
+  attention_mask_type: general
+
+  #optimizer
+  use_flash_attn: true
+  use_fused_rotary_pos_emb: true
+  sequence_parallel: true
+  use_rotary_position_embeddings: true
+  use_fused_swiglu: true
+  use_fused_rmsnorm: true
+  no_masked_softmax_fusion: true
+  use_distributed_optimizer: true
+
+  seq_length: 10240
+  micro_batch_size: 1
+  initial_loss_scale: 4096
+  init_method_std: 0.01
+  hidden_dropout: 0.0
+
+# Whether to offload model parameters to CPU
+param_offload: False
+
+# Whether to offload gradients to CPU
+grad_offload: False
+
+# Whether to offload optimizer state to CPU
+optimizer_offload: False
+
+# tensor model parallel size
+tensor_model_parallel_size: 1
+
+# expert model parallel size
+expert_model_parallel_size: 1
+
+# expert tensor parallel size (null to be same as TP)
+expert_tensor_parallel_size: null
+
+# pipeline model parallel size
+pipeline_model_parallel_size: 1
+
+# virtual pipeline model parallel size
+virtual_pipeline_model_parallel_size: null
+
+# context parallel size
+context_parallel_size: 1
+
+# sequence parallel
+sequence_parallel: True
+
+# Whether to use distributed optimizer
+use_distributed_optimizer: True
+
+# Whether to use distributed checkpointing
+use_dist_checkpointing: False
+
+# distributed checkpointing path
+dist_checkpointing_path: null
+
+# distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
+dist_checkpointing_prefix: ''
+
+# oc.select: default val for ref.megatron.seed
+seed: 42
+
+# Allow to override Distributed Data Parallel (DDP) config
+override_ddp_config: {}
+
+# additional transformer config like: num_layers_in_first(/last)_pipeline_stage
+# oc.select: default val for ref.megatron.override_transformer_config
+override_transformer_config: {}
+
+override_mcore_model_config: {}
+
+# oc.select: default val for ref.megatron.use_mbridge
+use_mbridge: True
+
+# oc.select: default val for ref.megatron.vanilla_mbridge
+vanilla_mbridge: True
+
+# whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
+use_remove_padding: True
+
+# whether to use forward only
+forward_only: False
+
+# Mixed precision training param dtype
+dtype: bfloat16 # ["bfloat16", "float16"]
+

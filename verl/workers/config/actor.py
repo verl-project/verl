@@ -22,7 +22,13 @@ from verl.trainer.config import CheckpointConfig, RolloutCorrectionConfig
 from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig, VeOmniEngineConfig
+from .engine import (
+    FSDPEngineConfig,
+    McoreEngineConfig,
+    MindSpeedLLMEngineConfig,
+    TorchtitanEngineConfig,
+    VeOmniEngineConfig,
+)
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
@@ -35,6 +41,7 @@ __all__ = [
     "VeOmniActorConfig",
     "QATConfig",
     "TorchTitanActorConfig",
+    "MindSpeedLLMActorConfig",
 ]
 
 
@@ -366,3 +373,30 @@ class TorchTitanActorConfig(ActorConfig):
         """Validate TorchTitan actor configuration parameters."""
         super().__post_init__()
         self.engine = self.torchtitan
+
+
+@dataclass
+class MindSpeedLLMActorConfig(ActorConfig):
+    """Configuration for mindspeedllm actor models.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        strategy (str): Training strategy set to 'mindspeedllm' for mindspeedllm parallelism.
+        load_weight (bool): Whether to load model weights from checkpoint.
+        mindspeedllm (dict[str, Any]): Configuration for mindspeedllm parallelism settings.
+        profile (dict[str, Any]): Configuration for profiling settings.
+        use_rollout_log_probs (bool): Whether to use log probabilities from rollout engine.
+    """
+
+    strategy: str = "mindspeedllm"
+    load_weight: bool = True
+    mindspeedllm: MindSpeedLLMEngineConfig = field(default_factory=MindSpeedLLMEngineConfig)
+    profile: dict[str, Any] = field(default_factory=dict)
+    use_rollout_log_probs: bool = False
+
+    def __post_init__(self):
+        """Validate FSDP actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.mindspeedllm
+

@@ -1,0 +1,18 @@
+# mindspeed_llm actor config, inheriting from trainer/config/actor/actor.yaml
+defaults:
+  # mindspeed_llm optimizer config
+  - ../optim@optim: mindspeedllm
+
+  # mindspeed_llm engine config
+  - ../engine@mindspeedllm: mindspeedllm
+
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.MindSpeedLLMActorConfig
+
+strategy: mindspeedllm
+
+load_weight: True
