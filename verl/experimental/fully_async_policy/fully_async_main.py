@@ -25,84 +25,9 @@ from omegaconf import OmegaConf
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
 from verl.experimental.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.utils import Role, need_reference_policy
+from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
+from verl.trainer.ppo.utils import Role
 from verl.utils.fs import copy_to_local
-
-
-def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
-    """
-    Create resource pool manager
-
-    Args:
-        config: Configuration object
-        roles: List of roles that need to create resource pools
-
-    Returns:
-        ResourcePoolManager: Resource pool manager
-    """
-    resource_pool_spec = {}
-    mapping = {}
-
-    # Actor/Critic resource pool
-    if any(role in roles for role in [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy, Role.RewardModel]):
-        assert config.trainer.n_gpus_per_node > 0, "config.trainer.n_gpus_per_node must be greater than 0"
-        assert config.trainer.nnodes > 0, "config.trainer.nnodes must be greater than 0"
-
-        trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
-        resource_pool_spec["trainer_pool"] = trainer_pool
-
-        # Map training-related roles to the same resource pool
-        for role in [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy, Role.RewardModel]:
-            if role in roles:
-                mapping[role] = "trainer_pool"
-
-    # Rollout resource pool
-    if Role.Rollout in roles:
-        assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
-        assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
-
-        rollout_pool = [config.rollout.n_gpus_per_node] * config.rollout.nnodes
-        resource_pool_spec["rollout_pool"] = rollout_pool
-        mapping[Role.Rollout] = "rollout_pool"
-
-    return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
-
-
-def create_role_worker_mapping(config):
-    """
-    Create mapping from roles to worker classes
-
-    Args:
-        config: Configuration object
-
-    Returns:
-        dict: Mapping from roles to worker classes
-    """
-    # Select worker class based on strategy
-    use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-    if use_legacy_worker_impl == "disable":
-        from verl.experimental.separation.engine_workers import DetachActorWorker
-        from verl.single_controller.ray import RayWorkerGroup
-        from verl.workers.engine_workers import TrainingWorker
-
-        ray_worker_group_cls = RayWorkerGroup
-
-        CriticWorker = TrainingWorker
-    else:
-        raise NotImplementedError("Fully async policy does not support legacy worker implementation")
-
-    train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
-    role_worker_mapping = {
-        train_role: ray.remote(DetachActorWorker),
-        Role.Critic: ray.remote(CriticWorker),
-    }
-
-    # Add reference policy (if KL loss or reward is required)
-    if need_reference_policy(config):
-        role_worker_mapping[Role.RefPolicy] = ray.remote(DetachActorWorker)
-
-    return role_worker_mapping, ray_worker_group_cls
 
 
 @ray.remote(num_cpus=1)
@@ -151,7 +76,6 @@ class FullyAsyncTaskRunner:
 
         print("[ASYNC MAIN] Creating FullyAsyncRollouter and FullyAsyncTrainer in parallel...")
         with ThreadPoolExecutor(max_workers=2) as executor:
-            # TODO: keep _create_rollouter and _create_trainer parallel
             # Rollouter does not permit continuous allocation, so we allocate trainer first.
             trainer_future = executor.submit(self._create_trainer, config)
             trainer_future.result()
@@ -175,35 +99,23 @@ class FullyAsyncTaskRunner:
         ray.get(self.components["rollouter"].set_message_queue_client.remote(self.components["message_queue_client"]))
         ray.get(self.components["trainer"].set_message_queue_client.remote(self.components["message_queue_client"]))
 
-        print("[ASYNC MAIN] Setting up parameter synchronization...")
-        from verl.experimental.fully_async_policy.param_sync import ParameterSynchronizer
-
-        param_synchronizer = ParameterSynchronizer.remote(
-            config=config,
-            trainer=self.components["trainer"],
-            rollouter=self.components["rollouter"],
-            mq=self.components["message_queue_client"],
-        )
-        ray.get(self.components["trainer"].set_parameter_synchronizer.remote(param_synchronizer))
-
-        # load checkpoint and sync parameter before doing anything
-        val_before_train = config.trainer.get("val_before_train", True)
         # param_version resume from ckpt or default 0
-        param_version = ray.get(self.components["trainer"].load_checkpoint.remote())
+        ray.get(self.components["trainer"].load_checkpoint.remote())
         ray.get(self.components["rollouter"].load_checkpoint.remote())
-        ray.get(
-            param_synchronizer.sync_weights.remote(
-                version=param_version,
-                validate=val_before_train,
-                use_trainer_do_validate=config.async_training.use_trainer_do_validate,
-            )
-        )
-        ray.get(param_synchronizer.wait_last_valid.remote())
 
-        self.components["param_synchronizer"] = param_synchronizer
+        print("[ASYNC MAIN] Setting up parameter synchronization...")
+        ray.get(self.components["trainer"].set_rollouter.remote(self.components["rollouter"]))
+
+        print("[ASYNC MAIN] Param sync before fit..")
+        ray.get(self.components["trainer"]._fit_update_weights.remote())
+
+        if config.trainer.get("val_before_train", True):
+            ray.get(self.components["trainer"]._fit_validate.remote(True))
+
         print("[ASYNC MAIN] All components initialized successfully")
 
     def _create_rollouter(self, config) -> None:
+        print("[ASYNC MAIN] Starting create rollouter...")
         rollouter = FullyAsyncRollouter.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
@@ -221,6 +133,7 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] Rollouter created and initialized successfully")
 
     def _create_trainer(self, config) -> None:
+        print("[ASYNC MAIN] Starting create trainer...")
         trainer_role_mapping = {
             role: worker_cls
             for role, worker_cls in self.components["role_worker_mapping"].items()
@@ -284,6 +197,9 @@ def main(config):
     # Ensure async training config exists
     if not hasattr(config, "async_training"):
         raise RuntimeError("must set async_training config")
+
+    assert config.async_training.use_trainer_do_validate is False, "use_trainer_do_validate is not ready to use."
+
     from time import time
 
     start_time = time()

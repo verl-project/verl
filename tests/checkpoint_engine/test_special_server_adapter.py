@@ -38,7 +38,7 @@ def init_config() -> DictConfig:
         config = compose(
             config_name="ppo_trainer",
             overrides=[
-                "+async_training.partial_rollout_resume=True",
+                "+async_training.partial_rollout=True",
             ],
         )
 
@@ -73,8 +73,8 @@ async def _run_update_weights_with_global_steps_none(
     assert output.stop_reason not in ("aborted", "abort"), (
         f"output.stop_reason is {output.stop_reason}, expected not abort"
     )
-    assert output.extra_info["global_steps"] is None, (
-        f"output.extra_info['global_steps'] is {output.extra_info['global_steps']}, expected None"
+    assert output.extra_fields["global_steps"] is None, (
+        f"output.extra_fields['global_steps'] is {output.extra_fields['global_steps']}, expected None"
     )
     print("========== [update_weights with global_steps=None] ==========")
     print("[RESPONSE]", tokenizer.decode(output.token_ids, skip_special_tokens=True))
@@ -112,7 +112,7 @@ async def _run_server_manager_without_resume(
         outputs = await asyncio.gather(*tasks)
         expected_steps = global_steps - 1
         for output in outputs:
-            global_steps = output.extra_info["global_steps"]
+            global_steps = output.extra_fields["global_steps"]
             assert output.stop_reason in ("aborted", "abort"), (
                 f"output.stop_reason is {output.stop_reason}, expected in abort"
             )
@@ -156,8 +156,8 @@ async def _run_server_manager_with_resume(
     outputs = await asyncio.gather(*tasks)
     expected_min_steps = initial_steps - 1
     for output in outputs:
-        min_global_steps = output.extra_info["min_global_steps"]
-        max_global_steps = output.extra_info["max_global_steps"]
+        min_global_steps = output.extra_fields["min_global_steps"]
+        max_global_steps = output.extra_fields["max_global_steps"]
         assert min_global_steps == expected_min_steps, (
             f"output.min_global_steps is {min_global_steps}, expected {expected_min_steps}"
         )

@@ -154,7 +154,7 @@ class AsyncLLMServerManager:
         """
         server_id, server = await self._acquire_server(request_id)
         try:
-            output = await server.generate.remote(
+            output: TokenOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
@@ -839,9 +839,8 @@ class AgentLoopWorker:
         default_extra_keys = {
             "turn_scores",
             "tool_rewards",
-            "is_cancel",
-            "param_version_start",
-            "param_version_end",
+            "min_global_steps",
+            "max_global_steps",
             "extras",
         }
         all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
