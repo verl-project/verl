@@ -51,6 +51,8 @@ actor_rollout_ref:
       bc_loss_coef: 0
       initial_alpha: 0
       replay_positive_sample_ratio: 0.9
+      critic_replay_positive_sample_ratio: 0.5
+      actor_replay_positive_sample_ratio: 0.8
       auto_entropy: False
       alpha_type: exp
       alpha_lr: 0.0003
