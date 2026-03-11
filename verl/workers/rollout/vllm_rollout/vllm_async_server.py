@@ -609,7 +609,7 @@ class vLLMHttpServer:
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
-            extra_info={"global_steps": self.global_steps},
+            extra_fields={"global_steps": self.global_steps},
         )
 
     async def wake_up(self):
@@ -841,6 +841,7 @@ class vLLMReplica(RolloutReplica):
                 if not self.is_reward_model
                 else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
             )
+
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,

@@ -259,7 +259,7 @@ class TRTLLMHttpServer:
         if outputs.outputs[0].logprobs is not None:
             # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position
             log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs, extra_info={"global_steps": self.global_steps})
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, extra_fields={"global_steps": self.global_steps})
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
