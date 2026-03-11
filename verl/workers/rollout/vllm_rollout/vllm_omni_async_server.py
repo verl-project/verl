@@ -24,11 +24,12 @@ import ray
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from ray.actor import ActorHandle
+from vllm.entrypoints.openai.api_server import build_app
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
-from vllm_omni.entrypoints.openai.api_server import build_app, omni_init_app_state
+from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
+from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -358,7 +359,7 @@ class vLLMOmniHttpServer:
         # TODO (mike): support parsing engine config from CLI
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
-        await omni_init_app_state(engine_client, None, app.state, args)
+        await omni_init_app_state(engine_client, app.state, args)
 
         self.engine = engine_client
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
@@ -399,21 +400,31 @@ class vLLMOmniHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        vllm_omni_sampling_params = dict(extra_args={})
-        for k, v in sampling_params.items():
-            if hasattr(OmniDiffusionRequest, k):
-                vllm_omni_sampling_params[k] = v
-            else:
-                vllm_omni_sampling_params["extra_args"][k] = v
+        # Build OmniCustomPrompt with pre-tokenized IDs
+        custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
+        if negative_prompt_ids is not None:
+            custom_prompt["negative_prompt_ids"] = negative_prompt_ids
+        if multi_modal_data:
+            custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
+        # Build OmniDiffusionSamplingParams from the incoming dict
+        sampling_kwargs: dict[str, Any] = {}
+        extra_args: dict[str, Any] = {}
+        for k, v in sampling_params.items():
+            if hasattr(OmniDiffusionSamplingParams, k):
+                sampling_kwargs[k] = v
+            else:
+                extra_args[k] = v
+        sampling_kwargs["extra_args"] = extra_args
+        if lora_request is not None:
+            sampling_kwargs["lora_request"] = lora_request
+        diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
+
+        # Call AsyncOmni.generate() with the correct API
         generator = self.engine.generate(
-            prompt="",  # TODO (mike): drop empty prompt
-            prompt_ids=prompt_ids,
+            prompt=custom_prompt,
             request_id=request_id,
-            lora_request=lora_request,
-            priority=priority,
-            negative_prompt_ids=negative_prompt_ids,
-            **vllm_omni_sampling_params,
+            sampling_params_list=[diffusion_sampling_params],
         )
 
         # Get final response
@@ -423,23 +434,28 @@ class vLLMOmniHttpServer:
         assert final_res is not None
 
         image = (self._to_tensor(final_res.images[0]) / 255.0).tolist()
+
+        # Extract extra data from custom_output (populated by DiffusionEngine)
+        mm_output = final_res.custom_output or {}
+
         if sampling_params.get("logprobs", False):
-            log_probs = final_res.request_output.diffusion_output["all_log_probs"][0].tolist()
+            all_log_probs = mm_output.get("all_log_probs")
+            log_probs = all_log_probs[0].tolist() if all_log_probs is not None else None
         else:
             log_probs = None
 
-        all_latents = final_res.request_output.diffusion_output["all_latents"][0]
-        all_timesteps = final_res.request_output.diffusion_output["all_timesteps"][0]
-        prompt_embeds = final_res.request_output.diffusion_output["prompt_embeds"][0]
-        prompt_embeds_mask = final_res.request_output.diffusion_output["prompt_embeds_mask"][0]
-        negative_prompt_embeds = final_res.request_output.diffusion_output["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = final_res.request_output.diffusion_output["negative_prompt_embeds_mask"]
+        all_latents = mm_output.get("all_latents")
+        all_timesteps = mm_output.get("all_timesteps")
+        prompt_embeds = mm_output.get("prompt_embeds")
+        prompt_embeds_mask = mm_output.get("prompt_embeds_mask")
+        negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
+        negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
 
         extra_info = {
-            "all_latents": all_latents,
-            "all_timesteps": all_timesteps,
-            "prompt_embeds": prompt_embeds,
-            "prompt_embeds_mask": prompt_embeds_mask,
+            "all_latents": all_latents[0] if all_latents is not None else None,
+            "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
+            "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
+            "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
             "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,
             "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
             if negative_prompt_embeds_mask is not None
@@ -448,9 +464,11 @@ class vLLMOmniHttpServer:
         }
 
         # Determine stop reason from finish_reason
-        # TODO (mike): drop hard code
-        finish_reason = "stop"
-        # finish_reason = final_res.request_output.finish_reason
+        if final_res.request_output is not None and hasattr(final_res.request_output, "finish_reason"):
+            finish_reason = final_res.request_output.finish_reason or "stop"
+        else:
+            finish_reason = "stop"
+
         if finish_reason == "abort":
             stop_reason = "aborted"
         elif finish_reason in ("stop", "length"):
@@ -459,8 +477,7 @@ class vLLMOmniHttpServer:
             stop_reason = finish_reason  # for more stop reason in the future
 
         num_preempted = None
-
-        if hasattr(final_res.request_output, "num_preempted"):
+        if final_res.request_output is not None and hasattr(final_res.request_output, "num_preempted"):
             num_preempted = final_res.request_output.num_preempted
 
         return ImageOutput(

@@ -17,15 +17,20 @@ from typing import Any, Literal
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
 from transformers import Qwen2_5_VLForConditionalGeneration
-from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 from verl.utils.diffusers.schedulers import FlowMatchSDEDiscreteScheduler
-from verl.utils.vllm_omni.data import DiffusionOutput
 from verl.utils.vllm_omni.pipelines.qwen_image.qwen_image_transformer import QwenImageTransformer2DModelFixed
+
+
+def _maybe_to_cpu(v):
+    if isinstance(v, torch.Tensor):
+        return v.detach().cpu()
+    return v
 
 
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
@@ -266,31 +271,32 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         sde_type: Literal["sde", "cps"] = "sde",
         logprobs: bool = True,
     ) -> DiffusionOutput:
-        # # TODO: only support single prompt now
-        # if req.prompt is not None:
-        #     prompt = req.prompt[0] if isinstance(req.prompt, list) else req.prompt
-        prompt_ids = req.prompt_ids if req.prompt_ids is not None else prompt_ids
-        prompt_mask = req.prompt_mask if req.prompt_mask is not None else prompt_mask
-        negative_prompt_ids = req.negative_prompt_ids if req.negative_prompt_ids is not None else negative_prompt_ids
-        negative_prompt_mask = (
-            req.negative_prompt_mask if req.negative_prompt_mask is not None else negative_prompt_mask
-        )
-        height = req.height or self.default_sample_size * self.vae_scale_factor
-        width = req.width or self.default_sample_size * self.vae_scale_factor
-        num_inference_steps = req.num_inference_steps or num_inference_steps
-        max_sequence_length = req.max_sequence_length or max_sequence_length
+        # Extract prompt data from OmniCustomPrompt in req.prompts[0]
+        custom_prompt = req.prompts[0] if req.prompts else {}
+        if isinstance(custom_prompt, dict):
+            prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
+            prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
+            negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
+            negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
 
-        noise_level = req.extra_args.get("noise_level", None) or noise_level
-        sde_window_size = req.extra_args.get("sde_window_size", None) or sde_window_size
-        sde_window_range = req.extra_args.get("sde_window_range", None) or sde_window_range
-        sde_type = req.extra_args.get("sde_type", None) or sde_type
-        logprobs = req.extra_args.get("logprobs", None)
+        # Read sampling params from req.sampling_params
+        sp = req.sampling_params
+        height = sp.height or self.default_sample_size * self.vae_scale_factor
+        width = sp.width or self.default_sample_size * self.vae_scale_factor
+        num_inference_steps = sp.num_inference_steps or num_inference_steps
+        max_sequence_length = sp.max_sequence_length or max_sequence_length
 
-        generator = req.generator or generator
-        if generator is None and req.seed is not None:
-            generator = torch.Generator(device=self.device).manual_seed(req.seed)
-        true_cfg_scale = req.true_cfg_scale or true_cfg_scale
-        req_num_outputs = getattr(req, "num_outputs_per_prompt", None)
+        noise_level = sp.extra_args.get("noise_level", None) or noise_level
+        sde_window_size = sp.extra_args.get("sde_window_size", None) or sde_window_size
+        sde_window_range = sp.extra_args.get("sde_window_range", None) or sde_window_range
+        sde_type = sp.extra_args.get("sde_type", None) or sde_type
+        logprobs = sp.extra_args.get("logprobs", None)
+
+        generator = sp.generator or generator
+        if generator is None and sp.seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(sp.seed)
+        true_cfg_scale = sp.true_cfg_scale or true_cfg_scale
+        req_num_outputs = getattr(sp, "num_outputs_per_prompt", None)
         if req_num_outputs and req_num_outputs > 0:
             num_images_per_prompt = req_num_outputs
 
@@ -303,8 +309,12 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             if isinstance(prompt_ids, list):
                 prompt_ids = torch.tensor(prompt_ids, device=self.device)
             batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
-        else:
+        elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
+        else:
+            # Both prompt_ids and prompt_embeds are None (e.g. during warmup/dummy run).
+            # Return a minimal dummy output to avoid crashing.
+            return DiffusionOutput(output=None, custom_output={})
 
         if isinstance(negative_prompt_ids, list):
             negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
@@ -415,12 +425,14 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
         return DiffusionOutput(
-            output=image,
-            all_latents=all_latents,
-            all_log_probs=all_log_probs,
-            all_timesteps=all_timesteps,
-            prompt_embeds=prompt_embeds,
-            prompt_embeds_mask=prompt_embeds_mask,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            output=_maybe_to_cpu(image),
+            custom_output={
+                "all_latents": _maybe_to_cpu(all_latents),
+                "all_log_probs": _maybe_to_cpu(all_log_probs),
+                "all_timesteps": _maybe_to_cpu(all_timesteps),
+                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
+                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
+                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
+                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+            },
         )

@@ -58,6 +58,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
+    reward.reward_model.rollout.tensor_model_parallel_size=4 \
     reward.custom_reward_function.path=$reward_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.use_legacy_worker_impl=disable \
