@@ -19,7 +19,7 @@ env:
     simulator_type: libero
     max_episode_steps: 512
     reward_coef: 1.0
-    step_penalty: 0.0001
+    step_penalty: 0.001
     only_eval: False
     video_cfg:
       save_video: True
@@ -47,7 +47,8 @@ actor_rollout_ref:
   actor:
     sac:
       gamma: 0.99
-      tau: 0.4
+      tau: 1.0
+      bc_loss_coef: 0
       initial_alpha: 0
       replay_positive_sample_ratio: 0.9
       auto_entropy: False
@@ -55,13 +56,15 @@ actor_rollout_ref:
       alpha_lr: 0.0003
       target_entropy: -64.0
     critic_lr: 0.0001
-    critic_weight_decay: 0.0001
-    critic_warmup_steps: 100
-    actor_update_interval: 3
-    replay_pool_save_interval: 30
+    critic_weight_decay: 0
+    critic_warmup_steps: 500
+    actor_update_interval: 1
+    actor_ema_enabled: true
+    actor_ema_decay: 0.95
+    replay_pool_save_interval: 300
     num_images_in_input: 1
     traj_mini_batch_size: 16
-    replay_pool_capacity: 1000
+    replay_pool_single_size: 1000
     replay_pool_save_dir: /tmp/replay_pools
     fsdp_config:
       wrap_policy:
