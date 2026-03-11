@@ -21,10 +21,17 @@ except ImportError:
     repatch = None
 
 from verl.trainer.config import CheckpointConfig
-from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
+from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig, MindSpeedEngineConfig
+from verl.utils.megatron.router_replay_patch import RouterReplay
+from verl.utils.model import print_model_size
 
 from ..base import EngineRegistry
 from ..megatron import MegatronEngineWithLMHead
+
+from .utils import (
+    apply_patch,
+    gpt_model_provider,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -46,3 +53,49 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
             repatch_config["context_parallel_size"] = self.engine_config.context_parallel_size
 
         repatch(repatch_config)
+
+
+
+@EngineRegistry.register(model_type="language_model", backend="mindspeedllm", device="npu")
+class MindSpeedLLMEngineWithLMHead(MegatronEngineWithLMHead):
+    def __init__(
+        self,
+        model_config: HFModelConfig,
+        engine_config: MindSpeedEngineConfig,
+        optimizer_config: McoreOptimizerConfig,
+        checkpoint_config: CheckpointConfig,
+    ):
+        super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+
+        apply_patch(self.model_config, self.engine_config, self.optimizer_config)
+
+    def _build_megatron_module(self):
+        is_value_model = (
+            "ForTokenClassification" in self.model_config.architectures[0]
+            or "ForSequenceClassification" in self.model_config.architectures[0]
+        )
+
+        self.is_value_model = is_value_model
+
+        from megatron.core.enums import ModelType
+        from megatron.training.training import get_model
+        import torch.distributed
+
+        # For forward_only, we don't need optimizer, lr_scheduler, checkpoint_mananager
+        if self.engine_config.forward_only:
+            module = get_model(gpt_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=False)
+            return module
+
+        module = get_model(gpt_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=True)
+        if self.vanilla_bridge:
+            self.bridge.load_weights(module, self.model_config.local_path)
+        else:
+            raise ValueError(f"vanilla_bridge should be true now, but got {self.vanilla_bridge}")
+
+        if torch.distributed.get_rank() == 0:
+            print_model_size(module[0])
+
+        if self.enable_routing_replay:
+            print(f"routing replay layers: {len(RouterReplay.router_instances)}")
+
+        return module

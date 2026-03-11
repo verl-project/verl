@@ -32,6 +32,7 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
+    "MindSpeedEngineConfig"
 ]
 
 
@@ -394,6 +395,31 @@ class TorchtitanEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["torchtitan"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class MindSpeedEngineConfig(McoreEngineConfig):
+    """Configuration for mindspeed parallelism.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        llm_kwargs (str): mindspeedllm engine kwargs.
+        mm_kwargs (str): mindspeedmm engine kwargs.
+    """
+
+    strategy: str = "mindspeedllm"
+    llm_kwargs: dict[str, Any] = field(default_factory=dict)
+    mm_kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        EngineConfig.__post_init__(self)
+        """config validation logics go here"""
+        assert self.strategy in ["mindspeedllm", "mindspeedmm"], f"strategy {self.strategy} not supported"
+        assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if self.tensor_model_parallel_size == 1:
+            warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
+            self.sequence_parallel = False
 
 
 @dataclass
