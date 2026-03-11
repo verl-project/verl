@@ -21,6 +21,24 @@ from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.model import MtpConfig
 
+@dataclass
+class SkipConfig(BaseConfig):
+    """
+    Configuration for rollout skip: load/dump previously generated rollout data
+    instead of computing new rollouts (e.g. for debugging or reuse).
+    """
+
+    enable: bool = False
+    dump_dir: str = "/tmp/rollout_dump"
+    max_dump_step: int = 1
+    action: str = "repeat"  # cache | repeat | repeat_last
+    compress: bool = False
+
+    def get(self, key: str, default=None):
+        """Dict-like get for compatibility with code that uses skip.get('enable', False)."""
+        return getattr(self, key, default)
+
+
 __all__ = [
     "SamplingConfig",
     "MultiTurnConfig",
@@ -31,6 +49,7 @@ __all__ = [
     "PrometheusConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
+    "SkipConfig",
 ]
 
 
@@ -210,6 +229,9 @@ class RolloutConfig(BaseConfig):
 
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
+
+    # Rollout skip config (load/dump rollout data)
+    skip: SkipConfig = field(default_factory=SkipConfig)
 
     skip_rollout: bool = False
 
