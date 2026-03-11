@@ -103,7 +103,7 @@ RUN apt-get update && apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && \
-    apt-get install --allow-downgrades \
+    apt-get install -y --allow-downgrades --allow-change-held-packages \
     libcudnn9-cuda-12=9.16.0.29-1 \
     libcudnn9-dev-cuda-12=9.16.0.29-1 \
     libcudnn9-headers-cuda-12=9.16.0.29-1 && \

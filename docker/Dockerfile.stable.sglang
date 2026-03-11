@@ -44,7 +44,7 @@ RUN sed -i '/nvidia-cudnn-cu12/d' /usr/local/lib/python3.12/dist-packages/torch-
 
 # for packages compiled from source code
 RUN apt-get update && \
-    apt-get install --allow-downgrades \
+    apt-get install -y --allow-downgrades --allow-change-held-packages \
     libcudnn9-cuda-12=9.16.0.29-1 \
     libcudnn9-dev-cuda-12=9.16.0.29-1 \
     libcudnn9-headers-cuda-12=9.16.0.29-1 && \
