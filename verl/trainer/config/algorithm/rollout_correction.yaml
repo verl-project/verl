@@ -8,17 +8,11 @@ rollout_is: null
 # Upper threshold for IS weight truncation (typical: 2.0-5.0)
 rollout_is_threshold: 2.0
 
-# RS aggregation level: null (disabled), "token", "sequence", "geometric"
+# RS aggregation level: null (disabled), e.g. "token_k1", "seq_sum_k1", "seq_mean_k3"
 rollout_rs: null
 
-# Upper threshold for rejection sampling (null = use rollout_is_threshold)
+# Threshold for rejection sampling (string or float; see code docs)
 rollout_rs_threshold: null
-
-# Lower threshold for rejection sampling (null = auto-compute as 1/upper)
-rollout_rs_threshold_lower: null
-
-# Per-token veto threshold for catastrophic outliers (null = disabled)
-rollout_token_veto_threshold: null
 
 # Operating mode: false = Decoupled (3 policies), true = Bypass (2 policies)
 bypass_mode: false

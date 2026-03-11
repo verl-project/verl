@@ -27,10 +27,10 @@ ckpts_home=${ckpts_home:-~/verl/test/gsm8k-sft-${backend}}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 SP_SIZE=${SP_SIZE:-1}
-FSDP_SIZE=${FSDP_SIZE:-${NUM_GPUS}}
+FSDP_SIZE=${FSDP_SIZE:-1}
 FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp"}
 
 TP_SIZE=${TP_SIZE:-1}
@@ -44,6 +44,8 @@ USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-True}
 
 FSDP_ENGINE_CONFIG="\
     engine=${backend} \
+    model=hf_model \
+    model.path=$MODEL_PATH \
     optim=${backend} \
     optim.lr=1e-5 \
     optim.lr_warmup_steps_ratio=0.2 \
@@ -58,6 +60,8 @@ FSDP_ENGINE_CONFIG="\
 
 VEOMNI_ENGINE_CONFIG="\
     engine=${backend} \
+    model=hf_model \
+    model.path=$MODEL_PATH \
     optim=${backend} \
     optim.lr=1e-5 \
     optim.lr_warmup_steps_ratio=0.2 \
@@ -67,12 +71,12 @@ VEOMNI_ENGINE_CONFIG="\
     optim.lr_min=1e-6 \
     optim.lr_scheduler_type=cosine \
     engine.ulysses_parallel_size=${SP_SIZE} \
-    engine.data_parallel_mode=${FSDP_STRATEGY} \
-    engine.data_parallel_size=${FSDP_SIZE}"
-
+    engine.fsdp_size=${FSDP_SIZE}"
 
 MEGATRON_ENGINE_CONFIG="\
     engine=${backend} \
+    model=hf_model \
+    model.path=$MODEL_PATH \
     optim=${backend} \
     optim.lr=1e-5 \
     optim.lr_warmup_steps_ratio=0.2 \
@@ -85,8 +89,29 @@ MEGATRON_ENGINE_CONFIG="\
     engine.tensor_model_parallel_size=${TP_SIZE} \
     engine.pipeline_model_parallel_size=${PP_SIZE} \
     engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
-    engine.context_parallel_size=${CP_SIZE}
+    engine.context_parallel_size=${CP_SIZE} \
+    +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
     engine.use_mbridge=True"
+
+TORCHTITAN_ENGINE_CONFIG="\
+    engine=${backend} \
+    model=hf_model \
+    model.path=${MODEL_PATH} \
+    optim=${backend} \
+    optim.lr=1e-5 \
+    optim.lr_warmup_steps_ratio=0.2 \
+    optim.weight_decay=0.1 \
+    optim.betas="[0.9,0.95]" \
+    optim.clip_grad=1.0 \
+    optim.min_lr_factor=0.1 \
+    optim.decay_type=cosine \
+    optim.total_training_steps=1000 \
+    engine.tensor_parallel_size=${TP_SIZE} \
+    engine.pipeline_parallel_size=${PP_SIZE} \
+    engine.context_parallel_size=${CP_SIZE} \
+    engine.data_parallel_shard_size=${FSDP_SIZE} \
+    engine.use_torch_compile=False"
+
 
 if [ "$backend" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
@@ -96,6 +121,10 @@ elif [ "$backend" = "veomni" ]; then
     ENGINE_CONFIG="$VEOMNI_ENGINE_CONFIG"
     echo "Using veomni engine"
     exp_name=gsm8k-${backend}-sp${SP_SIZE}-fsdp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+elif [ "$backend" = "torchtitan" ]; then
+    ENGINE_CONFIG="$TORCHTITAN_ENGINE_CONFIG"
+    echo "Using torchtitan engine"
+    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-dp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
 else
     ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
     echo "Using megatron engine"
@@ -113,8 +142,8 @@ $COMMAND \
     data.use_dynamic_bsz=True \
     data.max_token_len_per_gpu=2048 \
     data.messages_key=messages \
-    model.path=$MODEL_PATH \
     model.use_remove_padding=${USE_REMOVE_PADDING} \
+    data.ignore_input_ids_mismatch=True \
     ${ENGINE_CONFIG} \
     trainer.test_freq=after_each_epoch \
     trainer.save_freq=-1 \
@@ -129,5 +158,5 @@ $COMMAND \
     # trainer.total_training_steps=${TOTAL_TRAIN_STEP} \
     # trainer.checkpoint.save_contents=[model,optimizer,extra,hf_model] \
     # trainer.max_ckpt_to_keep=1 \
-    
+
 rm -rf "${ckpts_home:?}/*"

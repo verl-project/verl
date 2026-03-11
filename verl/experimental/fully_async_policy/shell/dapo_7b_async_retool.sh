@@ -83,8 +83,8 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     data.truncation='error' \
     data.custom_cls.path=$retool_path \
     data.custom_cls.name=CustomRLHFDataset \
-    custom_reward_function.path=$retool_path \
-    custom_reward_function.name=compute_score \
+    reward.custom_reward_function.path=$retool_path \
+    reward.custom_reward_function.name=compute_score \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -98,7 +98,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=$ppo_mini_batch_size \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$actor_max_token_len_per_gpu \
-    actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
     critic.strategy=fsdp2 \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=$train_sp \
@@ -132,10 +132,9 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes=$NNODES \
     rollout.n_gpus_per_node=$n_gpus_rollout \
     rollout.total_rollout_steps=$total_rollout_steps \
-    rollout.total_epochs=10 \
-    rollout.test_freq=$test_freq \
+    trainer.total_epochs=10 \
+    trainer.test_freq=$test_freq \
     async_training.staleness_threshold=$staleness_threshold \
     async_training.trigger_parameter_sync_step=$trigger_parameter_sync_step \
     async_training.require_batches=$require_batches \
-    async_training.partial_rollout=$partial_rollout \
-    async_training.use_rollout_log_probs=True
+    async_training.partial_rollout=$partial_rollout

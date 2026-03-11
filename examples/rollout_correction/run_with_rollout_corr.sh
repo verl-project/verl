@@ -19,11 +19,7 @@ rollout_is_batch_normalize="true"        # Self-normalization (mean=1.0)
 
 # Rejection Sampling (RS) configuration
 rollout_rs="null"                         # No rejection sampling for basic RLOO
-rollout_rs_threshold="null"               # RS upper threshold
-rollout_rs_threshold_lower="null"         # RS lower threshold
-
-# Veto mechanism (optional, independent of IS/RS)
-rollout_token_veto_threshold="null"       # Per-token veto threshold (null to disable)
+rollout_rs_threshold="null"               # RS threshold spec (string or float)
 
 # Bypass mode with REINFORCE loss (no PPO clipping)
 bypass_mode="true"     # Skip old_log_prob computation
@@ -37,8 +33,8 @@ MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-7B"}
 TRAIN_FILE=${TRAIN_FILE:-"data/train.parquet"}
 TEST_FILE=${TEST_FILE:-"data/test.parquet"}
 
-max_prompt_length=512
-max_response_length=1024
+max_prompt_length=2048
+max_response_length=4096
 
 # ==============================================================================
 # Training Configuration
@@ -66,6 +62,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_batch_size} \
+    data.truncation='left' \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.gamma=${gamma} \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
@@ -73,15 +70,15 @@ python3 -m verl.trainer.main_ppo \
     algorithm.rollout_correction.rollout_is_batch_normalize=${rollout_is_batch_normalize} \
     algorithm.rollout_correction.rollout_rs=${rollout_rs} \
     algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \
-    algorithm.rollout_correction.rollout_rs_threshold_lower=${rollout_rs_threshold_lower} \
-    algorithm.rollout_correction.rollout_token_veto_threshold=${rollout_token_veto_threshold} \
     algorithm.rollout_correction.bypass_mode=${bypass_mode} \
     algorithm.rollout_correction.loss_type=${loss_type} \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.actor.optim.lr=${learning_rate} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.ppo_epochs=${ppo_epochs} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.name=vllm \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="rollout_corr_rloo_example" \

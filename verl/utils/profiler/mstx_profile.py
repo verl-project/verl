@@ -178,46 +178,31 @@ class NPUProfiler(DistProfiler):
             config = ProfilerConfig(ranks=[], enable=False)
         if not tool_config:
             assert not config.enable, "tool_config must be set when profiler is enabled"
-        self.enable: bool = config.enable
-        if not config.enable:
-            return
-        self.this_step: bool = False
         self.discrete: bool = tool_config.discrete
-        self.this_rank: bool = False
         self.profile_npu = None
         self.profile_contents = tool_config.contents
         self.profile_level = tool_config.level
         self.profile_save_path = config.save_path
         self.analysis = tool_config.analysis
-        if config.all_ranks:
-            self.this_rank = True
-        elif config.ranks:
-            self.this_rank = rank in config.ranks
 
     def start(self, **kwargs):
-        role, profile_step = kwargs.get("role", None), kwargs.get("profile_step", None)
-        profile_step = str(profile_step) if profile_step is not None else None
-        if self.enable and self.this_rank:
-            self.this_step = True
-            if not self.discrete and NPUProfiler._define_count == 0:
-                self.profile_npu = get_npu_profiler(
-                    contents=self.profile_contents,
-                    profile_level=self.profile_level,
-                    profile_save_path=self.profile_save_path,
-                    analysis=self.analysis,
-                    role=role,
-                    profile_step=profile_step,
-                )
-                self.profile_npu.start()
-                NPUProfiler._define_count += 1
+        role = kwargs.get("role", None)
+        if not self.discrete and NPUProfiler._define_count == 0:
+            self.profile_npu = get_npu_profiler(
+                contents=self.profile_contents,
+                profile_level=self.profile_level,
+                profile_save_path=self.profile_save_path,
+                analysis=self.analysis,
+                role=role,
+            )
+            self.profile_npu.start()
+            NPUProfiler._define_count += 1
 
     def stop(self):
-        if self.enable and self.this_rank:
-            self.this_step = False
-            if not self.discrete and NPUProfiler._define_count == 1:
-                self.profile_npu.step()
-                self.profile_npu.stop()
-                NPUProfiler._define_count -= 1
+        if not self.discrete and NPUProfiler._define_count == 1:
+            self.profile_npu.step()
+            self.profile_npu.stop()
+            NPUProfiler._define_count -= 1
 
     def annotate(self, message: Optional[str] = None, role: Optional[str] = None, **kwargs_outer) -> Callable:
         """Decorate a Worker member function to profile the current rank in the current training step.
@@ -235,39 +220,30 @@ class NPUProfiler(DistProfiler):
         def decorator(func):
             @functools.wraps(func)
             def wrapper(*args, **kwargs_inner):
-                if not self.enable:
-                    return func(*args, **kwargs_inner)
-
                 profile_name = message or func.__name__
                 discrete_mode = self.discrete
-                profile_enable = self.this_step and self.enable
 
-                if not profile_enable:
-                    return func(*args, **kwargs_inner)
-
-                if profile_enable:
-                    if not discrete_mode:
-                        mark_range = mark_start_range(message=profile_name)
-                    else:
-                        profile_npu = get_npu_profiler(
-                            contents=self.profile_contents,
-                            profile_level=self.profile_level,
-                            profile_save_path=self.profile_save_path,
-                            analysis=self.analysis,
-                            role=role,
-                        )
-                        profile_npu.start()
-                        mark_range = mark_start_range(message=profile_name)
+                if not discrete_mode:
+                    mark_range = mark_start_range(message=profile_name)
+                else:
+                    profile_npu = get_npu_profiler(
+                        contents=self.profile_contents,
+                        profile_level=self.profile_level,
+                        profile_save_path=self.profile_save_path,
+                        analysis=self.analysis,
+                        role=role,
+                    )
+                    profile_npu.start()
+                    mark_range = mark_start_range(message=profile_name)
 
                 result = func(*args, **kwargs_inner)
 
-                if profile_enable:
-                    if not discrete_mode:
-                        mark_end_range(mark_range)
-                    else:
-                        mark_end_range(mark_range)
-                        profile_npu.step()
-                        profile_npu.stop()
+                if not discrete_mode:
+                    mark_end_range(mark_range)
+                else:
+                    mark_end_range(mark_range)
+                    profile_npu.step()
+                    profile_npu.stop()
 
                 return result
 

@@ -1,20 +1,20 @@
 name: docker-build-ascend-a2
 
 on:
-  workflow_dispatch:  
+  workflow_dispatch:
   push:
-    branches: [ "main" ] 
+    branches: ["main"]
     paths:
-      - "docker/ascend/Dockerfile.ascend_8.3.rc1_a2"
+      - "docker/ascend/Dockerfile.ascend_8.5.rc1_a2"
       - ".github/workflows/docker-build-ascend-a2.yml"
   release:
-    types: [ published ] 
+    types: [published]
   schedule:
     - cron: "0 16 * * *"
 
 jobs:
   build-ascend-image-a2:
-    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'volcengine' }}
+    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
     runs-on: ubuntu-latest
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-build-ascend-image-a2
@@ -36,7 +36,7 @@ jobs:
       - name: Get base image name and tag
         id: base_image
         run: |
-          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend_8.3.rc1_a2 | head -1 | cut -d' ' -f2)
+          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend_8.5.rc1_a2 | head -1 | cut -d' ' -f2)
           echo "Base image full: $BASE_IMAGE_FULL" 
           BASE_IMAGE_TAG=$(echo "$BASE_IMAGE_FULL" | cut -d':' -f2)
           echo "Base image tag: $BASE_IMAGE_TAG"
@@ -56,7 +56,7 @@ jobs:
           fi
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3  
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to Quay.io
         uses: docker/login-action@v3
@@ -72,13 +72,13 @@ jobs:
       - name: Build and push images Quay
         uses: docker/build-push-action@v6
         with:
-          context: .  
-          platforms: linux/amd64,linux/arm64 
-          file: ./docker/ascend/Dockerfile.ascend_8.3.rc1_a2
-          push: true 
-          tags: |  
+          context: .
+          platforms: linux/amd64,linux/arm64
+          file: ./docker/ascend/Dockerfile.ascend_8.5.rc1_a2
+          push: true
+          tags: |
             quay.io/ascend/verl:${{ steps.version.outputs.tag }}
-          cache-from: type=gha  
+          cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1

@@ -87,12 +87,12 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.latest"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -124,7 +124,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps --force-reinstall .
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@550924c --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@83a7c11 --no-deps --no-build-isolation
           pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@5455f0a --no-deps --no-build-isolation
           pip3 install "nvidia-modelopt[torch]>=0.37.0" transformers==4.57.1
       - name: Prepare GSM8K dataset
@@ -159,7 +159,7 @@ jobs:
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 LORA_RANK=8 CRITIC_LORA_RANK=8 \
           MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=2 COMMON_ETP=1 INFER_TP=8 \
-          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          USE_DIST_CKPT=False LORA_MERGE=True ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: clean up
         run: |
           rm -rf checkpoints

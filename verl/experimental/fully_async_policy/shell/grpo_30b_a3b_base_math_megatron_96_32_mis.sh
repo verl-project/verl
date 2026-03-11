@@ -113,10 +113,8 @@ partial_rollout=True
 # Rollout Importance Sampling
 
 rollout_is=null
-rollout_rs=geometric
-rollout_rs_threshold=1.001
-rollout_rs_threshold_lower=0.999
-rollout_token_veto_threshold=1e-4
+rollout_rs=seq_mean_k1
+rollout_rs_threshold="0.999_1.001"
 
 python -m verl.experimental.fully_async_policy.fully_async_main \
     --config-path=config \
@@ -133,12 +131,9 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    async_training.compute_prox_log_prob=True \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_rs=${rollout_rs} \
     algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \
-    algorithm.rollout_correction.rollout_rs_threshold_lower=${rollout_rs_threshold_lower} \
-    algorithm.rollout_correction.rollout_token_veto_threshold=${rollout_token_veto_threshold} \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
@@ -215,12 +210,12 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.ref.megatron.context_parallel_size=${REF_CP} \
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=${REF_EP} \
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${REF_ETP} \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_manager.name=dapo \
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False \
+    +reward.reward_kwargs.max_resp_len=${max_response_length} \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
@@ -234,11 +229,9 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes="${NNODES_ROLLOUT}" \
     rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
-    rollout.total_epochs=10 \
-    rollout.test_freq="${test_freq}" \
+    trainer.total_epochs=10 \
+    trainer.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \
-    async_training.partial_rollout="${partial_rollout}" \
-    async_training.use_rollout_log_probs=True \
-
+    async_training.partial_rollout="${partial_rollout}"

@@ -87,12 +87,12 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.latest"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -145,7 +145,7 @@ jobs:
       - name: clean up and install Megatron-Bridge
         run: |
           rm -rf checkpoints
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@550924c --no-deps --no-build-isolation
+          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@83a7c11 --no-deps --no-build-isolation
           pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@5455f0a --no-deps --no-build-isolation
           pip3 install "nvidia-modelopt[torch]>=0.37.0" transformers==4.57.1
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge LoRA e2e to pre-load and save (Deepseek)

@@ -12,7 +12,7 @@
 # - `special_sanity`: a suite of quick sanity tests
 # - `special_standalone`: a set of test that are designed to run in dedicated environments
 
-# Accelerators for tests 
+# Accelerators for tests
 # - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
 # - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
 
@@ -61,14 +61,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.latest"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -100,7 +99,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --upgrade transformers
+          pip3 install --upgrade "transformers<5.0.0"
       - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
         run: |
           pytest -s tests/models/test_transformer.py
@@ -125,7 +124,7 @@ jobs:
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable:
     needs: setup
-    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
       HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
@@ -145,10 +144,9 @@ jobs:
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
 
-
   model_engine:
     needs: setup
-    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
       HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
@@ -175,13 +173,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs:
-      [
-        setup,
-        model_rmpad,
-        model_rmpad_fsdp2_unstable,
-        model_engine
-      ]
+    needs: [setup, model_rmpad, model_rmpad_fsdp2_unstable, model_engine]
     if: always()
     steps:
       - id: destroy-runner

@@ -14,8 +14,9 @@
 
 from ..device import is_npu_available
 from ..import_utils import is_nvtx_available
+from .config import build_sglang_profiler_args, build_vllm_profiler_args
 from .performance import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
-from .profile import DistProfiler, DistProfilerExtension, Profiler, ProfilerConfig
+from .profile import DistProfiler, DistProfilerExtension, ProfilerConfig
 
 # Select marker implementations by availability, but keep DistProfiler as our dispatcher
 if is_nvtx_available():
@@ -34,8 +35,9 @@ __all__ = [
     "mark_annotate",
     "DistProfiler",
     "DistProfilerExtension",
-    "Profiler",
     "ProfilerConfig",
     "simple_timer",
     "marked_timer",
+    "build_vllm_profiler_args",
+    "build_sglang_profiler_args",
 ]

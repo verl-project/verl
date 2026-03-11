@@ -24,110 +24,11 @@ import hydra
 import ray
 
 from verl.experimental.one_step_off_policy.ray_trainer import OneStepOffRayTrainer
-from verl.experimental.one_step_off_policy.utils import need_critic
+from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.reward import load_reward_manager
-from verl.trainer.ppo.utils import Role, need_reference_policy
+from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
-
-
-def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
-    """
-    Create resource pool manager
-
-    Args:
-        config: Configuration object
-        roles: List of roles that need to create resource pools
-
-    Returns:
-        ResourcePoolManager: Resource pool manager
-    """
-    resource_pool_spec = {}
-    mapping = {}
-
-    # Actor/Critic resource pool
-    if any(role in roles for role in [Role.Actor, Role.Critic, Role.RefPolicy, Role.RewardModel]):
-        assert config.trainer.n_gpus_per_node > 0, "config.trainer.n_gpus_per_node must be greater than 0"
-        assert config.trainer.nnodes > 0, "config.trainer.nnodes must be greater than 0"
-
-        trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
-        resource_pool_spec["trainer_pool"] = trainer_pool
-
-        # Map training-related roles to the same resource pool
-        for role in [Role.Actor, Role.Critic, Role.RefPolicy, Role.RewardModel]:
-            if role in roles:
-                mapping[role] = "trainer_pool"
-
-    # Rollout resource pool
-    if Role.Rollout in roles:
-        assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
-        assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
-
-        rollout_pool = [config.rollout.n_gpus_per_node] * config.rollout.nnodes
-        resource_pool_spec["rollout_pool"] = rollout_pool
-        mapping[Role.Rollout] = "rollout_pool"
-
-    return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
-
-
-def create_role_worker_mapping(config):
-    """
-    Create mapping from roles to worker classes
-
-    Args:
-        config: Configuration object
-
-    Returns:
-        dict: Mapping from roles to worker classes
-    """
-    # Select worker class based on strategy
-    if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-        assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from verl.experimental.one_step_off_policy.fsdp_workers import (
-            CriticWorker,
-            DetachActorWorker,
-            DetachAsyncRolloutWorker,
-        )
-        from verl.single_controller.ray import RayWorkerGroup
-
-        ray_worker_group_cls = RayWorkerGroup
-
-    elif config.actor_rollout_ref.actor.strategy == "megatron":
-        assert config.critic.strategy == "megatron"
-        from verl.experimental.one_step_off_policy.megatron_workers import (
-            CriticWorker,
-            DetachActorWorker,
-            DetachAsyncRolloutWorker,
-        )
-        from verl.single_controller.ray import RayWorkerGroup
-
-        ray_worker_group_cls = RayWorkerGroup
-    else:
-        raise NotImplementedError(f"Unsupported strategy: {config.actor_rollout_ref.actor.strategy}")
-
-    role_worker_mapping = {
-        Role.Actor: ray.remote(DetachActorWorker),
-        Role.Rollout: ray.remote(DetachAsyncRolloutWorker),
-        Role.Critic: ray.remote(CriticWorker),
-    }
-
-    if config.reward_model.enable:
-        if config.reward_model.strategy in ["fsdp", "fsdp2"]:
-            from verl.workers.fsdp_workers import RewardModelWorker
-        elif config.reward_model.strategy == "megatron":
-            from verl.workers.megatron_workers import RewardModelWorker
-        else:
-            raise NotImplementedError(f"Unsupported reward model strategy: {config.reward_model.strategy}")
-
-        role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
-
-    # Add reference policy (if KL loss or reward is required)
-    if need_reference_policy(config):
-        role_worker_mapping[Role.RefPolicy] = ray.remote(DetachActorWorker)
-
-    return role_worker_mapping, ray_worker_group_cls
 
 
 @ray.remote(num_cpus=10, max_concurrency=100)  # please make sure main_task is not scheduled on head
@@ -169,14 +70,6 @@ class OneStepTaskRunner:
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
-
         resource_pool_manager = create_resource_pool_manager(config, role_worker_mapping.keys())
 
         from verl.utils.dataset.rl_dataset import collate_fn
@@ -202,8 +95,6 @@ class OneStepTaskRunner:
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             collate_fn=collate_fn,
@@ -226,6 +117,10 @@ def main(config):
 
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
+
+    # TODO: unify rollout config with actor_rollout_ref
+    config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
+    config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node
 
     run_ppo(config, task_runner_class=OneStepTaskRunner)
     print(f"total time: {time() - start_time:.2f} seconds")

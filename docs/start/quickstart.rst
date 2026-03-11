@@ -9,7 +9,7 @@ Post-train a LLM using GSM8K dataset.
 Introduction
 ------------
 
-.. _hf_dataset_gsm8k: https://huggingface.co/datasets/gsm8k
+.. _hf_dataset_gsm8k: https://huggingface.co/datasets/openai/gsm8k
 
 In this example, we train an LLM to tackle the `GSM8k <hf_dataset_gsm8k>`_ task with function-based rewards. [1]_
 
@@ -53,7 +53,7 @@ Step 2: Download a model for post-training
 
 In this example, we start with the ``Qwen2.5-0.5B-Instruct`` model.
 
-If you want to perform SFT before RL, refer to the :doc:`Complete GSM8K Example<../examples/gsm8k_example>`, the `sft directory <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k>`_ and `SFT Trainer <https://github.com/volcengine/verl/blob/main/verl/trainer/fsdp_sft_trainer.py>`_ for further details.
+If you want to perform SFT before RL, refer to the :doc:`Complete GSM8K Example<../examples/gsm8k_example>`, the `sft directory <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k>`_ and `SFT Trainer <https://github.com/volcengine/verl/blob/main/verl/trainer/sft_trainer.py>`_ for further details.
 
 .. code-block:: bash
 

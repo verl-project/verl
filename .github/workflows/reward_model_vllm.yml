@@ -12,7 +12,7 @@
 # - `special_sanity`: a suite of quick sanity tests
 # - `special_standalone`: a set of test that are designed to run in dedicated environments
 
-# Accelerators for tests 
+# Accelerators for tests
 # - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
 # - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
 
@@ -59,12 +59,12 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.latest"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -80,7 +80,7 @@ jobs:
 
   reward_model_vllm:
     needs: setup
-    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
       HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
@@ -115,7 +115,7 @@ jobs:
       - name: Running vllm agent loop with reward manager tests on 8 L20 GPUs
         run: |
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_loop_reward_manager.py
+          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_standalone.py
       - name: Running vllm agent loop with reward model colocate tests on 8 L20 GPUs
         run: |
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
@@ -123,11 +123,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs:
-      [
-        setup,
-        reward_model_vllm
-      ]
+    needs: [setup, reward_model_vllm]
     if: always()
     steps:
       - id: destroy-runner

@@ -34,6 +34,8 @@ class BaseRollout(ABC):
         config: RolloutConfig,
         model_config: HFModelConfig,
         device_mesh: DeviceMesh,
+        *args,
+        **kwargs,
     ):
         self.config = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
@@ -79,8 +81,9 @@ class BaseRollout(ABC):
 
 
 _ROLLOUT_REGISTRY = {
-    ("vllm", "async"): "verl.workers.rollout.vllm_rollout.vLLMAsyncRollout",
+    ("vllm", "async"): "verl.workers.rollout.vllm_rollout.ServerAdapter",
     ("sglang", "async"): "verl.workers.rollout.sglang_rollout.sglang_rollout.ServerAdapter",
+    ("trtllm", "async"): "verl.workers.rollout.trtllm_rollout.trtllm_rollout.ServerAdapter",
 }
 
 

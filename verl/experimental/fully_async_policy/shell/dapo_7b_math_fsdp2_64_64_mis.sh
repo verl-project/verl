@@ -77,12 +77,10 @@ require_batches=4
 partial_rollout=True
 
 # Rollout Correction
-rollout_is=geometric
-rollout_is_threshold=1.001
-rollout_rs=geometric
-rollout_rs_threshold=1.001
-rollout_rs_threshold_lower=0.99
-rollout_token_veto_threshold=1e-4
+rollout_is=token
+rollout_is_threshold=2.0
+rollout_rs=seq_mean_k1
+rollout_rs_threshold="0.99_1.001"
 
 python -m verl.experimental.fully_async_policy.fully_async_main \
     data.train_files="${TRAIN_FILE}" \
@@ -98,7 +96,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
     critic.strategy=fsdp2 \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
@@ -143,12 +141,12 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_manager.name=dapo \
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False \
+    +reward.reward_kwargs.max_resp_len=${max_response_length} \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
@@ -161,18 +159,14 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes="${NNODES_ROLLOUT}" \
     rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
-    rollout.total_epochs=10 \
-    rollout.test_freq="${test_freq}" \
+    trainer.total_epochs=10 \
+    trainer.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \
     async_training.partial_rollout="${partial_rollout}" \
-    async_training.use_rollout_log_probs=True \
-    async_training.compute_prox_log_prob=True \
+    algorithm.rollout_correction.bypass_mode=False \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
     algorithm.rollout_correction.rollout_rs=${rollout_rs} \
-    algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \
-    algorithm.rollout_correction.rollout_rs_threshold_lower=${rollout_rs_threshold_lower} \
-    algorithm.rollout_correction.rollout_token_veto_threshold=${rollout_token_veto_threshold}
-
+    algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold}

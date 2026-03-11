@@ -112,7 +112,7 @@ def _estimate_qwen2_flops(config, tokens_sum, batch_seqlens, delta_time):
     seqlen_square_sum = 0
     for seqlen in batch_seqlens:
         seqlen_square_sum += seqlen * seqlen
-    attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
 
     # all_layer & all_token fwd & bwd flops
     flops_all_token = dense_N_flops + attn_qkv_flops
@@ -149,7 +149,7 @@ def _estimate_qwen3_vl_flops(config, tokens_sum, batch_seqlens, delta_time, **ka
     seqlen_square_sum = 0
     for seqlen in batch_seqlens:
         seqlen_square_sum += seqlen * seqlen
-    attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
 
     # vit flops
     images_seqlens = kargs.get("images_seqlens", None)
@@ -197,7 +197,7 @@ def _estimate_qwen3_vl_moe_flops(config, tokens_sum, batch_seqlens, delta_time, 
     seqlen_square_sum = 0
     for seqlen in batch_seqlens:
         seqlen_square_sum += seqlen * seqlen
-    attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
 
     # vit flops
     images_seqlens = kargs.get("images_seqlens", None)
@@ -304,7 +304,10 @@ def _estimate_deepseek_v3_flops(config, tokens_sum, batch_seqlens, delta_time):
     for seqlen in batch_seqlens:
         seqlen_square_sum += seqlen * seqlen * num_hidden_layers
 
-    attn_qkv_flops = 12 * seqlen_square_sum * q_head_dim * num_query_heads
+    # Core attention FLOPS for MLA with causal mask:
+    # Q @ K^T: 3 * 2 * seq^2 * q_head_dim * num_heads / 2 (causal)
+    # attn @ V: 3 * 2 * seq^2 * v_head_dim * num_heads / 2 (causal)
+    attn_qkv_flops = 3 * seqlen_square_sum * (q_head_dim + config.v_head_dim) * num_query_heads
     # all_layer & all_token fwd & bwk flops
     flops_all_token = dense_N_flops + attn_qkv_flops
     flops_achieved = flops_all_token * (1.0 / delta_time) / 1e12
@@ -341,7 +344,7 @@ def _estimate_qwen2_moe_flops(config, tokens_sum, batch_seqlens, delta_time):
     seqlen_square_sum = 0
     for seqlen in batch_seqlens:
         seqlen_square_sum += seqlen * seqlen
-    attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
 
     # all_layer & all_token fwd & bwd flops
     flops_all_token = dense_N_flops + attn_qkv_flops
@@ -409,7 +412,7 @@ def _estimate_gemma3_flops(config, tokens_sum, batch_seqlens, delta_time):
             seqlen_square_sum += seqlen * seqlen
         seqlen_square_sum *= num_hidden_layers
 
-    attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads
 
     # all_layer & all_token fwd & bwd flops
     flops_all_token = dense_N_flops + attn_qkv_flops
@@ -449,7 +452,7 @@ def _estimate_apertus_flops(config, tokens_sum, batch_seqlens, delta_time):
     seqlen_square_sum = 0
     for seqlen in batch_seqlens:
         seqlen_square_sum += seqlen * seqlen
-    attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
 
     # all_layer & all_token fwd & bwd flops
     flops_all_token = dense_N_flops + attn_qkv_flops
@@ -520,7 +523,7 @@ def _estimate_gpt_oss_flops(config, tokens_sum, batch_seqlens, delta_time):
             seqlen_square_sum += seqlen * seqlen
         seqlen_square_sum *= num_hidden_layers
 
-    attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads
 
     # Total FLOPs
     flops_all_token = dense_N_flops + attn_qkv_flops
@@ -551,6 +554,7 @@ ESTIMATE_FUNC = {
     "apertus": _estimate_apertus_flops,
     "glm4v": _estimate_qwen2_flops,
     "gpt_oss": _estimate_gpt_oss_flops,
+    "mimo": _estimate_qwen2_flops,
 }
 
 

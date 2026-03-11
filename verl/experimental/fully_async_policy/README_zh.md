@@ -2,7 +2,7 @@
 
 **Author:**  `https://github.com/meituan-search`
 
-Last updated: 12/15/2025.
+Last updated: 02/05/2026.
 
 本文档介绍了完全异步PPO训练系统，该系统实现了 Trainer 和 Rollouter 的完全解耦，支持异步样本生成和训练。
 在该系统下，我们使用128卡训练qwen2.5-7B模型取得了2.35x-2.67x的性能提升,同时效果没有显著受到影响。
@@ -46,7 +46,7 @@ rollout的训练， 通过合理设置资源分配情况、参数同步频率等
 fully_async_policy的整体架构如下图所示，fully_async_policy主要由Rollouter、MessageQueue、Trainer、ParameterSynchronizer四部分组成。
 
 ![fully_async_policy_structure](
-https://github.com/ArronHZG/verl-community/blob/recipe/async_policy/docs/fully_async_policy_structure.svg?raw=true)
+https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_structure.svg?raw=true)
 
 1. Rollouter逐样本生成序列，并将生成的sample放入MessageQueue中，生产的速度受新鲜度控制。
 2. MessageQueue用于暂存Rollouter生成的sample。
@@ -59,33 +59,30 @@ https://github.com/ArronHZG/verl-community/blob/recipe/async_policy/docs/fully_a
 但是相互之间的耗时overlap，端到端的耗时反而有所缩减。
 
 ![fully_async_policy_revenue](
-https://github.com/ArronHZG/verl-community/blob/recipe/async_policy/docs/fully_async_policy_revenue.svg?raw=true)
+https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_revenue.svg?raw=true)
 
 ## 使用方式
 
 ### 参数说明
 
-| super params                                         | implication                                                     |
-|------------------------------------------------------|-----------------------------------------------------------------|
-| `trainer.nnodes`                                     | Trainer的node数量                                                  |
-| `trainer.n_gpus_per_node`                            | Trainer每个node上gpu的数量                                            |
-| `rollout.nnodes`                                     | Rollouter的node数量                                                |
-| `rollout.n_gpus_per_node`                            | Rollouter每个node上gpu的数量                                          |
-| `data.train_batch_size`                              | 在fully async策略中，该值不生效（默认设置为0）                                   |
-| `data.gen_batch_size`                                | 在fully async策略中，使用流式的样本生产逻辑（默认设置为1)                             |
-| `rollout.total_rollout_steps`                        | 总的rollout的sample数量                                              |
-| `rollout.test_freq`                                  | Rollouter每更新多少次参数，进行一次validation                                |
-| `actor_rollout_ref.actor.ppo_mini_batch_size`        | The ppo_mini_batch_size is a global num across all workers/gpus |
-| `async_training.require_batches`                     | FullyAsyncTrainer一次性获取的ppo_mini_batch_size的数量                   |
-| `async_training.trigger_parameter_sync_step`         | 表示FullyAsyncTrainer进行多少次本地更新后,进行一次参数同步                          |
-| `async_training.staleness_threshold`                 | 新鲜度控制                                                           |
-| `async_training.partial_rollout`                     | 是否进行partial_rollout                                             |
-| `async_training.use_rollout_log_probs`               | 使用rollout产生的log_probs                                           |
-| `async_training.compute_prox_log_prob`（experimental） | 是否在train阶段，使用train模型的参数计算token的 log_prob                        |
-| `async_training.checkpoint_engine.enable`| 是否开启checkpoint_engine模式的加速，默认值True |
-| `async_training.checkpoint_engine.overlap_broadcast_and_consume` | 启动checkpoint_engine时，是否在参数同步时在broadcast和加载之间使用流水，默认值False|
-| `async_training.checkpoint_engine.device_buffer_size_M` | 启动checkpoint_engine时，组装的bucket的大小(MB)，默认为4096 |
-| `async_training.use_trainer_do_validate` | 是否使用Trainer的do_validate方法进行validation，默认值False |
+| super params                                                     | implication                                                     |
+|------------------------------------------------------------------|-----------------------------------------------------------------|
+| `trainer.nnodes`                                                 | Trainer的node数量                                                  |
+| `trainer.n_gpus_per_node`                                        | Trainer每个node上gpu的数量                                            |
+| `rollout.nnodes`                                                 | Rollouter的node数量                                                |
+| `rollout.n_gpus_per_node`                                        | Rollouter每个node上gpu的数量                                          |
+| `data.train_batch_size`                                          | 在fully async策略中，该值不生效（默认设置为0）                                   |
+| `data.gen_batch_size`                                            | 在fully async策略中，使用流式的样本生产逻辑（默认设置为1)                             |
+| `rollout.total_rollout_steps`                                    | 总的rollout的sample数量                                              |
+| `rollout.test_freq`                                              | Rollouter每更新多少次参数，进行一次validation                                |
+| `actor_rollout_ref.actor.ppo_mini_batch_size`                    | The ppo_mini_batch_size is a global num across all workers/gpus |
+| `actor_rollout_ref.actor.use_rollout_log_probs=True`             | 使用rollout产生的log_probs                                           |
+| `algorithm.rollout_correction.bypass_mode`                       | 是否在train阶段，使用train模型的参数计算token的 log_prob                        |
+| `async_training.require_batches`                                 | FullyAsyncTrainer一次性获取的ppo_mini_batch_size的数量                   |
+| `async_training.trigger_parameter_sync_step`                     | 表示FullyAsyncTrainer进行多少次本地更新后,进行一次参数同步                          |
+| `async_training.staleness_threshold`                             | 新鲜度控制                                                           |
+| `async_training.partial_rollout`                                 | 是否进行partial_rollout                                             |
+| `async_training.use_trainer_do_validate`                         | 是否使用Trainer的do_validate方法进行validation，默认值False                  |
 
 **进一步的解释：**
 
@@ -124,39 +121,27 @@ https://github.com/ArronHZG/verl-community/blob/recipe/async_policy/docs/fully_a
 
   partial_rollout只会在staleness_threshold>0时才实际上起作用。
 
-* `async_training.use_rollout_log_probs`
+* `actor_rollout_ref.actor.use_rollout_log_probs=True`
 
   在强化学习算法中，log_probs与参数版本，token都存在隐性的相关性。由于PPO/GRPO/DAPO等算法的设定，我们在计算重要性采样时，
   即 old_log_prob必须使用rollout参数及token所对应log_probs，才能保证算法的正确性。在fully
-  async策略中，我们默认old_log_prob是有rollout所计算的，而不是由trainer所计算。
+  async策略中，我们默认old_log_prob是由rollout所计算的，而不是由trainer所计算。
+
+* `algorithm.rollout_correction.bypass_mode`
+  algorithm.rollout_correction.bypass_mode 默认为 True, 直接使用rollout log prob。
+
+  我们在训练过程中，观测到随着训练的进行，训练后期指标和response长度可能会出现不稳定的情况，
+  这里我们可以使用 [Rollout Importance Sampling](https://verl.readthedocs.io/en/latest/advance/rollout_is.html) 的技术进行
+  重要性采样，缓解这一问题。为了使用 `Rollout Importance Sampling` 我们需要使用训练引擎使用当前的参数版本计算old_log_prob，此开关需要打开。
+  此外，在 mode d (async stream pipeline with partial rollout) 的情况下 `algorithm.rollout_correction.bypass_mode=False`
+  以及
+  `Rollout Importance Sampling` 后，我们的实现已近似Areal的 `Decoupled PPO`。
 
 * `async_training.require_batches`
 
   在流式训练中，require_batches 应该设置为1，表示生产够ppo_mini_batch_size样本后，就进行训练。
   在实际测试中，我们发现，如果单次下发的样本较少，由于数据分发的顺序，会导致训练不稳定，response 长度变长。
   在这里，我们额外提供 require_batches 进行流式分发，单次参与训练的样本数量控制。
-
-* `async_training.compute_prox_log_prob` （experimental）
-
-  我们在训练过程中，观测到随着训练的进行，训练后期指标和response长度可能会出现不稳定的情况，
-  这里我们可以使用 [Rollout Importance Sampling](https://verl.readthedocs.io/en/latest/advance/rollout_is.html) 的技术进行
-  重要性采样，缓解这一问题。为了使用 `Rollout Importance Sampling` 我们需要使用训练引擎使用当前的参数版本计算old_log_prob，此开关需要打开。
-  此外，在 mode d (async stream pipeline with partial rollout) 的情况下开启 `compute_prox_log_prob` 以及
-  `Rollout Importance Sampling` 后，我们的实现已近似Areal的 `Decoupled PPO`。
-
-* `async_training.checkpoint_engine.enable`
-  
-  开启checkpoint engine后，相较于原始的逐tensor的参数同步方式，同步时间开销普遍可以降低60%以上。但是组装bucket会带来额外的临时显存开销。
-
-* `async_training.checkpoint_engine.overlap_broadcast_and_consume`
-
-  开启参数broadcast和load_weights之间的流水后，会进一步额外申请更多显存。由于目前分析参数同步的主要耗时并非来自broadcast和load_weights阶段，而是在参数生成阶段（由megatron或FSDP），因此该开关默认关闭。
-
-* `async_training.checkpoint_engine.device_buffer_size_M`
-  
-  控制开启checkpoint engine后，用于同步的显存buffer大小。实际的`bucket_size` = `max(device_buffer_size_M, 最大参数tensor size)`
-  * 在开启`overlap_broadcast_and_consume`时，trainer节点的临时额外显存开销为 `3 * bucket_size`, rollout节点的临时额外显存开销为`2 * bucket_size`。
-  * 在关闭`overlap_broadcast_and_consume`时，trainer节点的临时额外显存开销为 `2 * bucket_size`, rollout节点的临时额外显存开销为`1 * bucket_size`。
 
 * `async_training.use_trainer_do_validate`
 
@@ -199,7 +184,7 @@ https://github.com/ArronHZG/verl-community/blob/recipe/async_policy/docs/fully_a
     3. 如图d所示；
 
 ![fully_async_policy_mode](
-https://github.com/ArronHZG/verl-community/blob/recipe/async_policy/docs/fully_async_policy_mode.svg?raw=true)
+https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_mode.svg?raw=true)
 
 ### 关键指标
 
@@ -269,7 +254,6 @@ python -m recipe.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
-    actor_rollout_ref.rollout.calculate_log_probs=True \
     trainer.nnodes="${NNODES_TRAIN}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     rollout.nnodes="${NNODES_ROLLOUT}" \

@@ -38,6 +38,8 @@ from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.device import auto_set_device, get_device_name
 from verl.utils.distributed import destroy_global_process_group
 from verl.utils.logger import log_with_rank
+from verl.utils.memory_utils import aggressive_empty_cache
+from verl.utils.profiler import log_gpu_memory_usage
 from verl.utils.tracking import Tracking
 from verl.workers.engine_workers import TrainingWorker
 
@@ -51,6 +53,8 @@ class SFTTrainer:
         config,
     ):
         self.config = config
+
+        log_gpu_memory_usage(f"rank {torch.distributed.get_rank()}: Before SFTTrainer init", logger=logger)
 
         self.rank = torch.distributed.get_rank()
 
@@ -73,11 +77,14 @@ class SFTTrainer:
         if self.rank == 0:
             print(self.config)
 
+        log_gpu_memory_usage(f"rank {self.rank}: After SFTTrainer init", logger=logger)
+
     def _build_ckpt_handler(self):
         resume_mode = getattr(self.config.trainer, "resume_mode", "auto")
         resume_from_path = getattr(self.config.trainer, "resume_from_path", None)
         max_ckpt_to_keep = getattr(self.config.trainer, "max_ckpt_to_keep", None)
         default_hdfs_dir = getattr(self.config.trainer, "default_hdfs_dir", None)
+        lora_train_meta = self._get_lora_train_meta()
 
         self.ckpt_handler = CheckpointHandler(
             engine=self.engine,
@@ -87,7 +94,46 @@ class SFTTrainer:
             default_hdfs_dir=default_hdfs_dir,
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
+            lora_train_meta=lora_train_meta,
         )
+
+    def _get_lora_train_meta(self):
+        lora_adapter_path = self.config.model.get("lora_adapter_path", None)
+        lora_rank = int(getattr(self.config.model, "lora_rank", 0) or 0)
+
+        if lora_adapter_path is None and lora_rank <= 0:
+            return None
+
+        raw_lora_alpha = self.config.model.get("lora_alpha", None)
+        if raw_lora_alpha is None:
+            log_with_rank(
+                "LoRA is enabled but `model.lora_alpha` is not set; fallback to 0 in checkpoint metadata.",
+                logger=logger,
+                rank=self.rank,
+                level=logging.WARNING,
+                log_only_rank_0=True,
+            )
+            lora_alpha = 0
+        else:
+            lora_alpha = int(raw_lora_alpha)
+            if lora_alpha == 0:
+                log_with_rank(
+                    "LoRA is enabled but `model.lora_alpha` is 0; this may lead to ineffective LoRA scaling.",
+                    logger=logger,
+                    rank=self.rank,
+                    level=logging.WARNING,
+                    log_only_rank_0=True,
+                )
+
+        task_type = self.config.model.get("task_type", None)
+        if task_type is None:
+            task_type = "CAUSAL_LM"
+
+        return {
+            "r": lora_rank,
+            "lora_alpha": int(lora_alpha or 0),
+            "task_type": str(task_type),
+        }
 
     def _build_config(self):
         from verl.utils.config import omega_conf_to_dataclass
@@ -200,7 +246,7 @@ class SFTTrainer:
             batch_size=self.train_batch_size_per_dp,
             sampler=self.train_sampler,
             collate_fn=self.collate_fn,
-            num_workers=8,
+            num_workers=self.config.data.num_workers,
             pin_memory=False,
             drop_last=True,
             pin_memory_device=device_name,
@@ -215,7 +261,7 @@ class SFTTrainer:
                 batch_size=self.train_batch_size_per_dp,
                 sampler=self.val_sampler,
                 collate_fn=self.collate_fn,
-                num_workers=8,
+                num_workers=self.config.data.num_workers,
                 pin_memory=False,
                 drop_last=True,
                 pin_memory_device=device_name,
@@ -232,8 +278,14 @@ class SFTTrainer:
             batch_seqlens: torch.Tensor = data["attention_mask"].sum(dim=-1)
         batch_seqlens = batch_seqlens.to(self.device_name)  # (global_bsz // dp)
 
+        dp_group = self.engine.get_data_parallel_group()
+        dp_size = self.engine.get_data_parallel_size()
+
+        if dp_size == 1 or dp_group is None:
+            return batch_seqlens.tolist()
+
         output_tensor = torch.empty(
-            (batch_seqlens.shape[0] * self.engine.get_data_parallel_size(),),
+            (batch_seqlens.shape[0] * dp_size,),
             dtype=batch_seqlens.dtype,
             device=self.device_name,
         )  # (global_bsz,)
@@ -241,7 +293,7 @@ class SFTTrainer:
         torch.distributed.all_gather_into_tensor(
             output_tensor=output_tensor,
             input_tensor=batch_seqlens,
-            group=self.engine.get_data_parallel_group(),
+            group=dp_group,
         )
 
         batch_seqlens = output_tensor.tolist()
@@ -298,6 +350,9 @@ class SFTTrainer:
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             self.train_sampler.set_epoch(epoch=epoch)
 
+            aggressive_empty_cache(force_sync=True)
+            log_gpu_memory_usage(f"rank {self.rank}: At start of epoch {epoch}", logger=logger)
+
             for step_in_epoch, data in enumerate(
                 tqdm(
                     self.train_dataloader,
@@ -330,10 +385,11 @@ class SFTTrainer:
                     metrics = tu.get(output, "metrics")
 
                     # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
-                    metrics["train/loss"] = metrics.pop("loss")
-                    metrics["train/grad_norm"] = metrics.pop("grad_norm")
-                    metrics["train/lr"] = metrics.pop("lr")
-                    metrics["train/mfu"] = metrics.pop("mfu")
+                    for k in ["loss", "grad_norm", "lr", "mfu"]:
+                        if k in metrics.keys():
+                            value = metrics.pop(k)
+                            metrics[f"train/{k}"] = value
+
                     metrics["train/global_tokens"] = torch.sum(
                         torch.tensor(batch_seqlens, device=self.device_name)
                     ).item()
@@ -362,9 +418,9 @@ class SFTTrainer:
                     if self.engine.is_mp_src_rank_with_outputs():
                         val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
                         # average over data parallel group
-                        torch.distributed.all_reduce(
-                            val_loss, op=torch.distributed.ReduceOp.AVG, group=self.engine.get_data_parallel_group()
-                        )
+                        dp_group = self.engine.get_data_parallel_group()
+                        if dp_group is not None:
+                            torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
 
                     if is_logging:
                         metric = {"val/loss": val_loss.detach().item()}
@@ -373,6 +429,7 @@ class SFTTrainer:
                     torch.distributed.barrier()
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
+                    aggressive_empty_cache(force_sync=True)
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
                 if is_last_step:

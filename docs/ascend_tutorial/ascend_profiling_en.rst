@@ -1,4 +1,4 @@
-Performance data collection based on FSDP or MindSpeed(Megatron) on Ascend devices(en)
+Profiling Data Collection Guide
 ==========================================================================================
 
 Last updated: 12/20/2025.
@@ -107,13 +107,33 @@ Discrete Mode Collection
       actor_rollout_ref:
          actor:
             profiler:
-               enable: True
-               all_ranks: True
+               enable: True  # Set to True to profile training
+               all_ranks: False
+               ranks: [0]  # Global Rank 0
                tool_config:
                   npu:
                      discrete: True
-                     contents: [npu, cpu]  # Control collection list, default cpu, npu, can configure memory, shapes, module, etc.
-        # rollout & ref follow actor settings
+                     contents: [npu, cpu]
+         rollout:
+            profiler:
+               enable: True  # Set to True to profile inference
+               all_ranks: False
+               ranks: [0]  # In Agent Loop mode, this is the Replica Rank (e.g., 0-th instance)
+               tool_config:
+                  npu:
+                     discrete: True  # Must be enabled in Agent Loop mode
+         # ref follow actor settings
+
+**Agent Loop Mode Description**:
+
+When Rollout runs in `Agent Loop <../advance/agent_loop.rst>`_ mode, performance data for the Rollout phase **must be collected using discrete mode**. In this case, the Profiler is triggered by the inference engine backend.
+
+1. Rank Definition: ranks in the Rollout configuration refers to Replica Rank (inference instance index), not Global Rank.
+
+2. Inference Engine Support: Currently, vLLM and SGLang engines are supported without additional settings. Specific details are as follows:
+
+   - vLLM Engine: Automatically collects AsyncLLM scheduling stacks and inference process performance data. Does not support setting analysis (defaults to no analysis, requires offline analysis) and profiler_level (defaults to level1).
+   - SGLang Engine: Automatically collects inference process performance data. Does not support the memory option in contents. Does not support setting analysis (defaults to enabled) and profiler_level (defaults to level0).
 
 
 Visualization

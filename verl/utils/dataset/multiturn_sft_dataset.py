@@ -19,6 +19,7 @@ Multi-turn SFT dataset that supports training on conversation data with multiple
 import logging
 import os
 import re
+from functools import wraps
 from typing import Any, Optional
 
 import numpy as np
@@ -35,22 +36,37 @@ from verl.utils.chat_template import extract_system_prompt_and_generation
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
+from verl.utils.py_functional import convert_nested_value_to_list_recursive
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def convert_nested_value_to_list_recursive(data_item):
-    if isinstance(data_item, dict):
-        return {k: convert_nested_value_to_list_recursive(v) for k, v in data_item.items()}
-    elif isinstance(data_item, list):
-        return [convert_nested_value_to_list_recursive(elem) for elem in data_item]
-    elif isinstance(data_item, np.ndarray):
-        # Convert to list, then recursively process the elements of the new list
-        return convert_nested_value_to_list_recursive(data_item.tolist())
-    else:
-        # Base case: item is already a primitive type (int, str, float, bool, etc.)
-        return data_item
+def once(func):
+    """Decorator to ensure a function runs only once. Subsequent calls do nothing."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not hasattr(wrapper, "called"):
+            wrapper.called = True
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
+@once
+def print_assembled_message(tokenizer, message_list, input_ids, loss_mask, attn_mask, tools):
+    """
+    Print the message after applying the chat template
+    """
+
+    tokenized = tokenizer.apply_chat_template(message_list, add_generation_prompt=False, tokenize=False, tools=tools)
+    sep = "\n\n"
+    str = f"tokenized entire message:\n{tokenized}"
+    str += sep
+    str += f"tokenized seperately    :\n{tokenizer.decode(input_ids)}"
+
+    logger.debug(str)
 
 
 class MultiTurnSFTDataset(Dataset):
@@ -91,6 +107,7 @@ class MultiTurnSFTDataset(Dataset):
         )
         self.tools_key = config.get("tools_key", "tools")
         self.enable_thinking_key = config.get("enable_thinking_key", "enable_thinking")
+        self.enable_thinking_default = config.get("enable_thinking_default", None)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
@@ -125,7 +142,8 @@ class MultiTurnSFTDataset(Dataset):
 
         dataframes = []
         for parquet_file in self.parquet_files:
-            dataframe = pd.read_parquet(parquet_file)
+            # default loader loads some list as np.ndarray, which fails the tokenizer
+            dataframe = pd.read_parquet(parquet_file, dtype_backend="pyarrow")
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
 
@@ -167,6 +185,7 @@ class MultiTurnSFTDataset(Dataset):
         self,
         index: int,
         message: dict[str, Any],
+        full_message: list,
         tools: Optional[list[dict[str, Any]]] = None,
         enable_thinking: Optional[bool] = None,
     ) -> tuple[list[int], list[int], list[int]]:
@@ -267,7 +286,9 @@ class MultiTurnSFTDataset(Dataset):
         row_dict: dict = self.dataframe.iloc[item].to_dict()
         messages = self._build_messages(row_dict)
         tools = self.tools[item] if self.tools is not None else None
-        enable_thinking = self.enable_thinking[item] if self.enable_thinking is not None else None
+        enable_thinking = (
+            self.enable_thinking[item] if self.enable_thinking is not None else self.enable_thinking_default
+        )
 
         # 1. tokenize each message
         input_ids, loss_mask, attention_mask, multi_modal_inputs = [], [], [], {}
@@ -275,6 +296,7 @@ class MultiTurnSFTDataset(Dataset):
             _input_ids, _loss_mask, _attention_mask, _inputs = self._process_single_message(
                 index=i,
                 message=message,
+                full_message=messages,
                 tools=tools if i == 0 else None,
                 enable_thinking=enable_thinking,
             )
@@ -290,6 +312,8 @@ class MultiTurnSFTDataset(Dataset):
         assert input_ids.shape == loss_mask.shape == attention_mask.shape, (
             f"Shape mismatch: {input_ids.shape}, {loss_mask.shape}, {attention_mask.shape}"
         )
+
+        print_assembled_message(self.tokenizer, messages, input_ids, loss_mask, attention_mask, tools)
         self.sanity_check(input_ids, messages, tools, enable_thinking)
 
         # Since the tokenizer may return user-customized results, we need to filter out inconsistent tensor shapes

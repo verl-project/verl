@@ -24,7 +24,48 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
-__all__ = ["HFModelConfig"]
+__all__ = ["HFModelConfig", "MtpConfig"]
+
+
+@dataclass
+class MtpConfig(BaseConfig):
+    """
+    Configuration for MTP model.
+
+    enable: Enable loading and saving of MTP parameters, but do not use them
+
+    enable_train: Whether to enable using MTP parameters during training
+    enable_rollout: Whether to enable using MTP parameters during rollout
+
+    Training parameters:
+        detach_encoder: Whether to detach encoder parameters during MTP training
+        mtp_loss_scaling_factor: Loss scaling factor during MTP training
+
+    vLLM rollout parameters:
+        method: "mtp"
+        num-speculative-tokens: 1
+
+    SGLang rollout parameters:
+        speculative-algorithm: EAGLE
+        speculative-num-steps: 3
+        speculative-eagle-topk: 1
+        speculative-num-draft-tokens: 4
+    """
+
+    enable: bool = False
+    enable_train: bool = False
+    enable_rollout: bool = False
+
+    detach_encoder: bool = False
+    mtp_loss_scaling_factor: float = 0.1
+
+    speculative_algorithm: str = "EAGLE"
+    speculative_num_steps: int = 3
+    speculative_eagle_topk: int = 1
+    speculative_num_draft_tokens: int = 4
+
+    method: str = "mtp"
+    num_speculative_tokens: int = 1
 
 
 @dataclass
@@ -78,7 +119,8 @@ class HFModelConfig(BaseConfig):
     # fsdp lora related. We may setup a separate config later
     lora_rank: int = 0
     lora_alpha: int = 16
-    target_modules: Optional[str] = "all-linear"
+    target_modules: Optional[Any] = "all-linear"  # allow both "all-linear" and ["q_proj","k_proj"]
+    target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
 
     exclude_modules: Optional[str] = None
 
@@ -96,6 +138,8 @@ class HFModelConfig(BaseConfig):
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
 
     architectures: Optional[list[str]] = None
+
+    mtp: MtpConfig = field(default_factory=MtpConfig)
 
     def __post_init__(self):
         import_external_libs(self.external_lib)
@@ -159,6 +203,20 @@ class HFModelConfig(BaseConfig):
         # per model patch
         if getattr(self.hf_config, "model_type", None) == "kimi_vl":
             self.hf_config.text_config.topk_method = "greedy"
+
+        # Ensure target_modules is a str or list[str] (only if not None)
+        if self.target_modules is not None:
+            if not isinstance(self.target_modules, (str | list)):
+                raise TypeError(
+                    "target_modules must be a string or a list of strings, "
+                    f"but got {type(self.target_modules).__name__}"
+                )
+            if isinstance(self.target_modules, list):
+                for x in self.target_modules:
+                    if not isinstance(x, str):
+                        raise TypeError(
+                            f"All elements in target_modules list must be strings, but found {type(x).__name__}"
+                        )
 
     def get_processor(self):
         return self.processor if self.processor is not None else self.tokenizer

@@ -5,8 +5,6 @@ defaults:
   - actor@actor_rollout_ref.actor: megatron_actor
   # data: trainer/config/data/legacy_data.yaml
   - data@data: legacy_data
-  # (Rule-based) Reward manager config.
-  - reward_manager@reward_manager
   # load the reference default config, then apply the fields in the current yaml
   # Reference model config.
   # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
@@ -17,8 +15,10 @@ defaults:
   - model@actor_rollout_ref.model: hf_model
   # Critic model config.
   - critic@critic: megatron_critic
+  # legacy reward impl config, for backward compatibility
+  - legacy_reward_impl
   # Reward model config.
-  - reward_model@reward_model: megatron_reward_loop
+  - reward@reward: reward
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_
@@ -46,6 +46,9 @@ actor_rollout_ref:
       # LoRA type: "lora", "vlm_lora", "canonical_lora", or "dora"
       type: lora
 
+      # whether to sync weights / refit by either merging LoRA adapters into the base model weights before transferring to vLLM (for better inference speed but more refit time and potential precision loss). If this is False, it will load separate adapters.
+      merge: False
+
       # LoRA rank (Dimension of the low-rank projection space.). Set to 0 to disable LoRA
       rank: 0  # typical values: 8, 16, 32, 64
       
@@ -64,6 +67,11 @@ actor_rollout_ref:
       # - 'linear_fc2': Apply LoRA to the second fully-connected layer in MLP
       # Target modules can also contain wildcards. For example, you can specify
       # target_modules=['*.layers.0.*.linear_qkv', '*.layers.1.*.linear_qkv'] to add LoRA to only linear_qkv on the first two layers
+      # 
+      # Note:
+      # For MLA (e.g., DeepSeek), you should use ["linear_kv_down_proj","linear_kv_up_proj","linear_q_down_proj","linear_q_up_proj","linear_q_proj"]
+      # Instead of "linear_qkv" or ["linear_q","linear_k","linear_v"]
+      # By default, MoE routers are excluded from LoRA adaptation, and you will need to specify "router" in target_modules to include them.
       target_modules:
         - linear_qkv
         - linear_proj
@@ -105,10 +113,6 @@ actor_rollout_ref:
     layer_name_map:
       qkv_layer_name: qkv
       gate_proj_layer_name: gate_up
-
-custom_reward_function:
-  path: null
-  name: compute_score
 
 algorithm:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs

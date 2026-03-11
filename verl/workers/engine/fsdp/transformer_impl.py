@@ -53,6 +53,8 @@ from verl.utils.fsdp_utils import (
     init_fn,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
+    merged_lora_context,
+    normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
     replace_lora_wrapper,
@@ -60,9 +62,14 @@ from verl.utils.fsdp_utils import (
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
-from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.ulysses import (
+    gather_outputs_and_unpad,
+    get_ulysses_sequence_parallel_group,
+    set_ulysses_sequence_parallel_group,
+    ulysses_pad,
+    ulysses_pad_and_slice_inputs,
+)
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -106,6 +113,12 @@ class FSDPEngine(BaseEngine):
         self.mode = None
 
         self.rank = torch.distributed.get_rank()
+
+        # Apply NPU patches for FSDP backend
+        from .utils import apply_npu_fsdp_patches
+
+        apply_npu_fsdp_patches()
+
         # build device mesh for Ulysses Sequence Parallel
 
         self.use_remove_padding = self.model_config.use_remove_padding
@@ -119,6 +132,12 @@ class FSDPEngine(BaseEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+
+        # QAT (Quantization-Aware Training)
+        self._qat_config = getattr(self.engine_config, "qat", None)
+        self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
+        if self._qat_enabled:
+            logger.info(f"QAT enabled: mode={self._qat_config.mode}, group_size={self._qat_config.group_size}")
 
         if self.engine_config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
@@ -162,6 +181,7 @@ class FSDPEngine(BaseEngine):
             lr_scheduler=self.lr_scheduler,
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
+            trust_remote_code=self.model_config.trust_remote_code,
         )
 
         self.to(
@@ -181,14 +201,15 @@ class FSDPEngine(BaseEngine):
 
         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
         self.ulysses_device_mesh = None
+        self.ulysses_parallel_group = None
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_sequence_parallel_size
         dp_size = self.get_data_parallel_size()
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
                 device_name, mesh_shape=(dp_size, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
             )
+            self.ulysses_parallel_group = self.ulysses_device_mesh["sp"].get_group()
 
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
     def _build_module(self):
@@ -272,6 +293,7 @@ class FSDPEngine(BaseEngine):
                 "r": self.model_config.lora_rank,
                 "lora_alpha": self.model_config.lora_alpha,
                 "target_modules": convert_to_regular_types(self.model_config.target_modules),
+                "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
                 "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
                 "bias": "none",
             }
@@ -396,6 +418,7 @@ class FSDPEngine(BaseEngine):
         lr_scheduler_type = optim_config.lr_scheduler_type
         min_lr_ratio = optim_config.min_lr_ratio
         num_cycles = optim_config.num_cycles
+        zero_indexed_step = optim_config.zero_indexed_step
         if num_warmup_steps <= 0:
             num_warmup_steps_ratio = optim_config.lr_warmup_steps_ratio
             num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
@@ -412,10 +435,63 @@ class FSDPEngine(BaseEngine):
                 num_training_steps=total_steps,
                 min_lr_ratio=min_lr_ratio,
                 num_cycles=num_cycles,
+                zero_indexed_step=zero_indexed_step,
             )
         else:
             raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
         return lr_scheduler
+
+    def _apply_qat(self, module):
+        """Apply QAT transformations to the model before FSDP wrapping."""
+        from verl.utils.qat.core import apply_qat, enable_qat_fuse
+
+        module = apply_qat(
+            module,
+            {
+                "enable": self._qat_config.enable,
+                "mode": self._qat_config.mode,
+                "group_size": self._qat_config.group_size,
+                "ignore_patterns": list(self._qat_config.ignore_patterns),
+                "activation_observer": self._qat_config.activation_observer,
+            },
+        )
+        enable_qat_fuse(module)
+
+        if self._qat_config.mode == "w4a4":
+            self._restore_w4a4_input_scales(module, self.model_config.local_path)
+
+        return module
+
+    def _restore_w4a4_input_scales(self, model, model_path):
+        """Restore input_global_scale and input_amax from checkpoint for W4A4 mode."""
+        import glob
+
+        from safetensors import safe_open
+
+        safetensor_files = glob.glob(f"{model_path}/model*.safetensors")
+        loaded_count = 0
+
+        for sf_path in safetensor_files:
+            with safe_open(sf_path, framework="pt") as f:
+                for key in f.keys():
+                    if "input_global_scale" in key:
+                        module_path = key.replace(".input_global_scale", "")
+                        amax_key = f"{module_path}.input_amax"
+
+                        module = model
+                        for part in module_path.split("."):
+                            module = module[int(part)] if part.isdigit() else getattr(module, part)
+
+                        scale_val = f.get_tensor(key)
+                        val = scale_val.item() if scale_val.numel() == 1 else scale_val.max().item()
+                        module.input_global_scale.fill_(val)
+
+                        amax_val = f.get_tensor(amax_key)
+                        amax = amax_val.item() if amax_val.numel() == 1 else amax_val.max().item()
+                        module.input_amax.fill_(amax)
+                        loaded_count += 1
+
+        logger.info(f"[QAT W4A4] Restored {loaded_count} input_global_scale/input_amax from {model_path}")
 
     def _build_model_optimizer(self):
         from verl.utils.model import print_model_size
@@ -425,6 +501,10 @@ class FSDPEngine(BaseEngine):
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
+
+        # Apply QAT before FSDP wrapping (training only)
+        if self._qat_enabled and not self.engine_config.forward_only:
+            module = self._apply_qat(module)
 
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()
@@ -480,6 +560,12 @@ class FSDPEngine(BaseEngine):
             return self.ulysses_device_mesh.get_group(mesh_dim="dp")
         else:
             return torch.distributed.group.WORLD
+
+    def get_model_parallel_group(self):
+        raise NotImplementedError
+
+    def get_context_parallel_group(self):
+        raise NotImplementedError
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
@@ -549,6 +635,12 @@ class FSDPEngine(BaseEngine):
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()
+
+        if self._qat_enabled:
+            from verl.utils.qat.core import invalidate_all_scales
+
+            invalidate_all_scales(self.module)
+
         return grad_norm.item()
 
     def lr_scheduler_step(self):
@@ -632,7 +724,7 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False):
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         load_fsdp_model_to_gpu(self.module)
@@ -640,16 +732,23 @@ class FSDPEngine(BaseEngine):
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
         peft_config = None
+        merge_lora = self.model_config.lora.get("merge", False)
+
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
-            peft_config = peft_model.peft_config.get("default", None)
-            params = collect_lora_params(
-                module=self.module,
-                layered_summon=layered_summon,
-                base_sync_done=base_sync_done,
-            )
-            if not base_sync_done:
-                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            if not merge_lora:
+                peft_config = peft_model.peft_config.get("default", None)
+                params = collect_lora_params(
+                    module=self.module,
+                    layered_summon=layered_summon,
+                    base_sync_done=base_sync_done,
+                )
+                if not base_sync_done:
+                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            else:  # merge lora
+                with merged_lora_context(self.module, backup_adapters=True):
+                    params = self.module.state_dict()
+                    params = normalize_peft_param_name(params)
         else:
             params = self.module.state_dict()
 
@@ -661,14 +760,44 @@ class FSDPEngine(BaseEngine):
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
         if peft_config is not None and base_sync_done:
-            per_tensor_param = params
+            per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
             per_tensor_param = (
-                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
+                (
+                    name,
+                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    if isinstance(param, DTensor)
+                    else param,
+                )
                 for name, param in params.items()
             )
-        return per_tensor_param, peft_config
+
+        if self._qat_enabled:
+            from verl.utils.qat.quantizer import QATQuantizer
+            from verl.utils.torch_dtypes import PrecisionType
+
+            mixed_precision_config = self.engine_config.mixed_precision
+            if mixed_precision_config is not None:
+                param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            else:
+                param_dtype = torch.bfloat16
+
+            quantizer = QATQuantizer(
+                mode=self._qat_config.mode,
+                group_size=self._qat_config.group_size,
+                ignore_patterns=list(self._qat_config.ignore_patterns),
+                device=torch.device(get_device_id()),
+                param_dtype=param_dtype,
+            )
+            per_tensor_param = quantizer.quantize_with_fusion(
+                per_tensor_param,
+                target_device=torch.device("cpu"),
+            )
+
+        peft_config_dict = peft_config.to_dict() if peft_config is not None else None
+        return per_tensor_param, peft_config_dict
 
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()
@@ -681,12 +810,13 @@ class EngineEvalModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, FSDPEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.eval()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, FSDPEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -706,12 +836,13 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, FSDPEngine)
         super().__enter__()
-        self.engine.ulysses_sharding_manager.__enter__()
+        self.prev_sp_group = get_ulysses_sequence_parallel_group()
+        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, FSDPEngine)
-        self.engine.ulysses_sharding_manager.__exit__(exc_type, exc_value, traceback)
+        set_ulysses_sequence_parallel_group(self.prev_sp_group)
         self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 

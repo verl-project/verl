@@ -226,7 +226,7 @@ class RobDataParallelPPOActor(BasePPOActor):
             if calculate_entropy:
                 entropys = restore_dynamic_batch(entropys, batch_idx_list)
 
-        return log_probs, entropys
+        return {"log_probs": log_probs, "entropys": entropys}
 
     def update_policy(self, data: DataProto):
         self.actor_module.train()

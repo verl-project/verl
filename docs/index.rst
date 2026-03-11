@@ -81,6 +81,7 @@ verl is fast with:
    algo/rollout_corr.md
    algo/rollout_corr_math.md
    algo/otb.md
+   algo/dppo.md
 
 .. toctree::
    :maxdepth: 1
@@ -90,6 +91,7 @@ verl is fast with:
    workers/fsdp_workers
    workers/megatron_workers
    workers/sglang_worker
+   workers/trtllm_worker
    workers/model_engine
 
 .. toctree::
@@ -99,10 +101,12 @@ verl is fast with:
    perf/dpsk.md
    perf/best_practices
    perf/perf_tuning
+   perf/perf_tuning_on_ascend.rst
    README_vllm0.8.md
    perf/device_tuning
    perf/verl_profiler_system.md
    perf/nsight_profiling.md
+   perf/torch_profiling.md
 
 .. toctree::
    :maxdepth: 1
@@ -134,6 +138,7 @@ verl is fast with:
    advance/grafana_prometheus.md
    advance/fp8.md
    advance/async-on-policy-distill
+   advance/mtp.md
 
 .. toctree::
    :maxdepth: 1
@@ -141,12 +146,20 @@ verl is fast with:
 
    amd_tutorial/amd_build_dockerfile_page.rst
    amd_tutorial/amd_vllm_page.rst
+   ascend_tutorial/ascend_ci_guide_zh.rst
    ascend_tutorial/ascend_quick_start.rst
    ascend_tutorial/ascend_consistency.rst
    ascend_tutorial/ascend_profiling_zh.rst
    ascend_tutorial/ascend_profiling_en.rst
    ascend_tutorial/dockerfile_build_guidance.rst
    ascend_tutorial/ascend_sglang_quick_start.rst
+   ascend_tutorial/examples/gspo_optimization_practice.md
+   ascend_tutorial/examples/ascend_performance_analysis_guide.md
+   ascend_tutorial/examples/dapo_multi_model_optimization_practice.md
+   ascend_tutorial/examples/ascend_sglang_best_practices.rst
+   ascend_tutorial/examples/ascend_retool_best_pratice.rst
+   ascend_tutorial/features/ascend_backend_features.md
+   ascend_tutorial/examples/run_qwen3_32B_megatron_1k_256k_npu.md
 
 .. toctree::
    :maxdepth: 1

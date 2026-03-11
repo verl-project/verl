@@ -75,3 +75,23 @@ tiled_mlp:
 
   # number of shards to split the input. Higher values reduce peak memory but may slightly impact performance.
   num_shards: 4
+
+# MTP
+mtp:
+
+  _target_: verl.workers.config.MtpConfig
+
+  enable: False
+  enable_train: False
+  enable_rollout: False
+
+  detach_encoder: False
+  mtp_loss_scaling_factor: 0.1
+
+  speculative_algorithm: EAGLE
+  speculative_num_steps: 3
+  speculative_eagle_topk: 1
+  speculative_num_draft_tokens: 4
+
+  method: mtp
+  num_speculative_tokens: 1

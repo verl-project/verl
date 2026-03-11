@@ -1,8 +1,5 @@
-Performance data collection based on FSDP or MindSpeed(Megatron) on Ascend devices(zh)
+Profiling采集指导
 ==================================================================================
-
-在昇腾设备上基于 FSDP 或 MindSpeed (Megatron) 后端进行性能数据采集
-----------------------------------------------------------------
 
 Last updated: 12/20/2025.
 
@@ -102,14 +99,33 @@ Last updated: 12/20/2025.
       actor_rollout_ref:
          actor:
             profiler:
-               enable: True
-               all_ranks: True
+               enable: True  # 设置为 True 以采集训练阶段
+               all_ranks: False
+               ranks: [0]  # 全局 Rank 0
                tool_config:
                   npu:
                      discrete: True
-                     contents: [npu, cpu]  # 控制采集列表，默认cpu、npu，可配置memory、shapes、module等
-        # rollout & ref follow actor settings
+                     contents: [npu, cpu]
+         rollout:
+            profiler:
+               enable: True  # 设置为 True 以采集推理阶段
+               all_ranks: False
+               ranks: [0]  # 在 Agent Loop 模式下，此处指推理实例的 Replica Rank (例如第 0 个实例)
+               tool_config:
+                  npu:
+                     discrete: True  # Agent Loop 模式下必须开启离散模式
+         # ref follow actor settings
 
+**Agent Loop 模式说明**：
+
+在 `Agent Loop <../advance/agent_loop.rst>`_ 模式下，Rollout 阶段的性能数据 **必须使用离散模式** 采集，此时 Profiler 由推理引擎后端触发。
+
+1. Rank 定义：Rollout 配置中的 ranks 指代 Replica Rank（推理实例索引），而非全局 Rank。
+
+2. 推理引擎支持：当前支持vLLM和SGLang引擎，无需额外设置。具体说明如下：
+
+   - vLLM 引擎：自动采集 AsyncLLM 调度栈及推理进程性能数据。不支持设置 analysis（默认不解析，需离线解析）和 profiler_level（默认 level1）。
+   - SGLang 引擎：自动采集推理进程性能数据。不支持 contents 中的 memory 配置项。不支持设置 analysis（默认解析）和 profiler_level（默认 level0）。
 
 可视化
 ------

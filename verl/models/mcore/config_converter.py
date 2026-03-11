@@ -290,7 +290,7 @@ def hf_to_mcore_config_dpskv3(
 
     set_experimental_flag(True)
 
-    from .patch_v012 import apply_patch
+    from .patch import apply_patch
 
     apply_patch()
 
