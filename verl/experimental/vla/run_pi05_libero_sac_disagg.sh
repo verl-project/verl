@@ -30,8 +30,6 @@ MAX_EPISODE_STEPS=512                          # max episode steps for each env
 
 # Training Config
 MINI_BATCH_SIZE=2048                           # mini batch size (batch size per GPU, automatically multiplied by ROLLOUT_N)
-                                               # invalid in SAC, currently
-                                               # In SAC, it equal to (max_interactions - 1) * TRAIN_BATCH_SIZE * ROLLOUT_N / NUM_ROLLOUT_GPUS
 MICRO_BATCH_SIZE=32                            # micro batch size (per GPU, for gradient accumulation, should divide MINI_BATCH_SIZE)
 
 
@@ -127,4 +125,5 @@ $PYTHON -m verl.experimental.vla.main_sac \
     trainer.test_freq=-1 \
     trainer.total_epochs=1000 \
     trainer.val_only=False \
+    algorithm.adv_estimator=reinforce_plus_plus \
     trainer.val_before_train=False

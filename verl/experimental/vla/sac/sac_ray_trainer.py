@@ -336,7 +336,7 @@ class RobRaySACTrainer(RayPPOTrainer):
                         gen_batch.meta_info["n_samples"] = self.config.actor_rollout_ref.rollout.n
                         gen_batch.meta_info["pad_token_id"] = self.tokenizer.pad_token_id
                         gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                        if dataloader_step == 0 :
+                        if dataloader_step == 0:
                             reset_future = self._reset_envs(gen_batch)
 
                     with marked_timer("step", timing_raw):
