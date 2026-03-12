@@ -298,6 +298,12 @@ class TorchTitanEngine(BaseEngine):
             return torch.distributed.group.WORLD
         return None
 
+    def get_model_parallel_group(self):
+        raise NotImplementedError
+
+    def get_context_parallel_group(self):
+        raise NotImplementedError
+
     def _get_data_parallel_mesh(self):
         """Get the data parallel mesh, handling hybrid/fully/replicate shard modes."""
         mesh = self.parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"])

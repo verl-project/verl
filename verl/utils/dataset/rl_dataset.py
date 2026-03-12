@@ -427,8 +427,12 @@ class RLHFDataset(Dataset):
         print(f"total_samples: {total_samples}")
         if total_samples == 0:
             raise ValueError("Cannot split an empty dataset")
+
+        # Calculate effective sample count after dropping remainders if needed
         if total_samples % num_splits != 0:
-            raise ValueError(f"Cannot split dataset size {total_samples} into {num_splits} splits")
+            total_samples = total_samples - (total_samples % num_splits)
+            logging.warning(f"Dropping {len(self.dataframe) % num_splits} samples, effective samples: {total_samples}")
+
         split_size = total_samples // num_splits
         splits = []
 

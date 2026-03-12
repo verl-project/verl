@@ -69,14 +69,14 @@ class DetachActorWorker(ActorRolloutRefWorker):
         strategy = self.config.actor.strategy
 
         if strategy in ["fsdp", "fsdp2"]:
-            from verl.experimental.fully_async_policy.fsdp2_utils import (
+            from verl.utils.fsdp_utils import (
                 fsdp2_sharded_load_from_cpu,
                 fsdp2_sharded_save_to_cpu,
             )
 
             self._strategy_handlers = (fsdp2_sharded_save_to_cpu, fsdp2_sharded_load_from_cpu)
         elif strategy == "megatron":
-            from verl.experimental.fully_async_policy.megatron_utils import (
+            from verl.utils.megatron_utils import (
                 copy_megatron_model_to_cpu,
                 restore_megatron_model_from_cpu,
             )

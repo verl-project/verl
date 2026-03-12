@@ -50,7 +50,7 @@ jobs:
     runs-on: linux-aarch64-a2-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -93,7 +93,7 @@ jobs:
     runs-on: linux-aarch64-a2-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -136,7 +136,7 @@ jobs:
     runs-on: linux-aarch64-a2-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -172,5 +172,3 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen25-vl-3b-instruct_fsdp_npu.sh
-
-  

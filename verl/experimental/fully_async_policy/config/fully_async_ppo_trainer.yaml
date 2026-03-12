@@ -21,12 +21,9 @@ async_training:
   # The number of ppo_mini_batches that the FullyAsyncTrainer obtains once
   require_batches: 1
 
-  # When synchronizing parameters, whether to interrupt rollouter and perform partial rollout
+  # When synchronizing parameters, Whether to resume generation when rollout is interrupted.
+  # If True, AsyncLLMServerManager auto resume generation, making rollout interruption invisible to the AgentLoop.
   partial_rollout: True
-
-  # Whether to resume generation when rollout is interrupted. If True, AsyncLLMServerManager
-  # auto resume generation, making rollout interruption invisible to the AgentLoop.
-  partial_rollout_resume: True
 
   # whether to use trainer do_validate
   use_trainer_do_validate: False
@@ -46,12 +43,6 @@ rollout:
   # total rollout samples # TODO rename to total_rollout_samples
   total_rollout_steps: 100
 
-  # Number of epochs in training 
-  total_epochs: 10
-
-  # Test frequency, how many times a parameter update triggers a validation
-  test_freq: 1
-
 data:
   # Number of samples generated, currently only support 1
   gen_batch_size: 1
@@ -59,8 +50,6 @@ data:
 actor_rollout_ref:
 
   rollout:
-    # Must be turned off! Otherwise, Parameter synchronization cannot be performed.
-    free_cache_engine: False
     # Must be enabled! Otherwise, log_probs cannot be calculated.
     calculate_log_probs: True
 

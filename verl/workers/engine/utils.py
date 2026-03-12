@@ -73,7 +73,6 @@ def prepare_micro_batches(
     force_group_size = tu.get_non_tensor_data(data=data, key="force_group_size", default=1)
 
     if use_dynamic_bsz:
-        assert force_group_size == 1, "force_group_size is not supported when use_dynamic_bsz is True"
         assert "max_token_len_per_gpu" in data.keys(), "max_token_len_per_gpu must be set when use_dynamic_bsz is True"
         max_token_len_per_gpu = data["max_token_len_per_gpu"]
         max_token_len = max_token_len_per_gpu * sp_size
@@ -85,6 +84,7 @@ def prepare_micro_batches(
             same_micro_num_in_dp=same_micro_num_in_dp,
             min_num_micro_batch=min_num_micro_batch,
             use_dynamic_bsz_balance=use_dynamic_bsz_balance,
+            force_group_size=force_group_size,
         )
     else:
         total_data_size = len(data)

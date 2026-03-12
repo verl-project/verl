@@ -127,15 +127,14 @@ common_params=(
     rollout.nnodes=1
     rollout.n_gpus_per_node=${n_gpus_rollout}
     rollout.total_rollout_steps=${total_rollout_steps}
-    rollout.total_epochs=2
-    rollout.test_freq=${test_freq}
+    trainer.total_epochs=2
+    trainer.test_freq=${test_freq}
     # Fully async specific configurations
     async_training.staleness_threshold=${staleness_threshold}
     async_training.partial_rollout="${partial_rollout}"
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
     # NPU specific configurations
     trainer.device='npu'
-    actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )
 
