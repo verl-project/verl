@@ -28,7 +28,7 @@ from verl.utils.device import (
     get_device_name,
 )
 from verl.utils.distributed import initialize_global_process_group_ray
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, PROFILER_TOOL_NAMES, ProfilerConfig
+from verl.utils.profiler import PROFILER_TOOL_NAMES, DistProfiler, DistProfilerExtension, ProfilerConfig
 
 
 def put_tensor_cpu(data_dict):

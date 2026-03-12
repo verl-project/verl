@@ -23,7 +23,7 @@ from omegaconf import MISSING
 from verl.base_config import BaseConfig
 
 # Supported profiler tool names (shared constant)
-PROFILER_TOOL_NAMES: frozenset[str] = frozenset({"npu", "nsys", "torch", "torch_memory"})
+PROFILER_TOOL_NAMES = frozenset({"npu", "nsys", "torch", "torch_memory"})
 
 
 @dataclass

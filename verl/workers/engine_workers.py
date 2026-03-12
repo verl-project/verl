@@ -38,7 +38,13 @@ from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, PROFILER_TOOL_NAMES, ProfilerConfig, log_gpu_memory_usage
+from verl.utils.profiler import (
+    PROFILER_TOOL_NAMES,
+    DistProfiler,
+    DistProfilerExtension,
+    ProfilerConfig,
+    log_gpu_memory_usage,
+)
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict

@@ -65,10 +65,10 @@ from verl.utils.megatron_utils import (
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
 from verl.utils.profiler import (
+    PROFILER_TOOL_NAMES,
     DistProfiler,
     DistProfilerExtension,
     GPUMemoryLogger,
-    PROFILER_TOOL_NAMES,
     ProfilerConfig,
     log_gpu_memory_usage,
     simple_timer,
