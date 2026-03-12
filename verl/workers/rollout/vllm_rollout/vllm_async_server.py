@@ -242,6 +242,7 @@ class vLLMHttpServer:
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
+        quant_config_kwargs = None 
         if qat_config_dict.get("enable", False):
             # QAT uses compressed-tensors quantization, apply patches for dynamic weight loading
             from verl.utils.qat import QATConfig, apply_qat_patches, load_quantization_config
@@ -257,7 +258,7 @@ class vLLMHttpServer:
             logger.info("QAT quantization config injected to vLLM async server")
         elif quantization is not None:
             # Handle other quantization methods (fp8, torchao)
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]
+            _SUPPORTED_QUANTIZATION = ["fp8", "mxfp8", "ascend", "torchao"]
             if quantization not in _SUPPORTED_QUANTIZATION:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
@@ -277,12 +278,24 @@ class vLLMHttpServer:
                 hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Apply vllm fp8 patches
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
+                quant_config_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
                 apply_vllm_fp8_patches()
                 # for subprocesses patching
-                os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+                # os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+
+            elif quantization in ["mxfp8", "ascend"]:
+                # Both mxfp8 and ascend use MXFP8_BLOCK_QUANT_KWARGS
+                # vllm-ascend will automatically handle layer quant types in dynamic mode
+                from verl.utils.vllm.vllm_fp8_utils import MXFP8_BLOCK_QUANT_KWARGS
+                # quant_config_kwargs = dict(MXFP8_BLOCK_QUANT_KWARGS)
+                # Use "ascend" as the vllm quantization parameter
+                quantization = "ascend"
 
         if quantization is not None and self.config.quantization_config_file is not None:
             hf_overrides["quantization_config_file"] = self.config.quantization_config_file
+
+        if quant_config_kwargs is not None:
+            hf_overrides["quantization_config"] = quant_config_kwargs
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
