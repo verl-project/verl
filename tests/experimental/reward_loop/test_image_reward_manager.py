@@ -72,7 +72,7 @@ def test_reward_model_genrm():
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
         config = compose(config_name="ppo_trainer")
 
-    rollout_model_name = os.path.expanduser("~/models/Qwen/Qwen-Image")
+    rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
     reward_model_name = os.path.expanduser("~/models/Qwen/Qwen2.5-VL-3B-Instruct")
 
     config.actor_rollout_ref.model.path = rollout_model_name
@@ -125,7 +125,7 @@ def test_rule_reward():
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
         config = compose(config_name="ppo_trainer")
 
-    rollout_model_name = os.path.expanduser("~/models/Qwen/Qwen-Image")
+    rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
 
     config.actor_rollout_ref.model.path = rollout_model_name
     config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
