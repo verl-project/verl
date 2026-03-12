@@ -20,10 +20,12 @@ import os
 from typing import Any, Optional
 
 import ray
-import sglang.srt.entrypoints.engine
 import torch
 from packaging import version
 from ray.actor import ActorHandle
+
+import sglang
+import sglang.srt.entrypoints.engine
 from sglang.srt.entrypoints.http_server import (
     ServerArgs,
     _GlobalState,
@@ -39,8 +41,6 @@ from sglang.srt.managers.io_struct import (
     ResumeMemoryOccupationReqInput,
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
-
-import sglang
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
