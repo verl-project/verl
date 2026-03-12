@@ -68,6 +68,7 @@ from verl.utils.profiler import (
     DistProfiler,
     DistProfilerExtension,
     GPUMemoryLogger,
+    PROFILER_TOOL_NAMES,
     ProfilerConfig,
     log_gpu_memory_usage,
     simple_timer,
@@ -330,7 +331,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         # omega_profiler_config is DictConfig
         # profiler_config is a ProfilerConfig dataclass
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+        if omega_profiler_config.get("tool", None) in PROFILER_TOOL_NAMES:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
@@ -996,7 +997,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
 
         omega_profiler_config = config.get("profiler", {})
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+        if omega_profiler_config.get("tool", None) in PROFILER_TOOL_NAMES:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
