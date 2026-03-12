@@ -1,4 +1,5 @@
-# Requires: transformers v5.3.0
+# Requires: Automodel, transformers>=5.3.0, torchao
+# MoE also requires: grouped_gemm (github.com/fanshiqing/grouped_gemm v1.1.4)
 
 set -x
 
