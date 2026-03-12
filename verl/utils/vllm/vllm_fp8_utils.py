@@ -485,7 +485,11 @@ def process_weights_after_loading_moe_for_vllm11(self, layer) -> None:
 
 
 def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
-    # remove the reentrancy guard here for refit
+    # removed the reentrancy guard here for refit
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        convert_to_fp8_moe_kernel_format,
+        make_fp8_moe_kernel,
+    )
 
     # Allow for accessing weights and scales in standard way.
     w13 = layer.w13_weight
@@ -496,7 +500,51 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
     w2_input_scale = layer.w2_input_scale
 
     # Shuffle weights to runtime format and setup kernel.
-    self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale)
+    w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+        fp8_backend=self.fp8_backend,
+        layer=layer,
+        w13=w13,
+        w2=w2,
+        w13_scale=w13_scale,
+        w2_scale=w2_scale,
+        w13_input_scale=w13_input_scale,
+        w2_input_scale=w2_input_scale,
+    )
+    from torch.nn import Parameter
+
+    def _create_param_from_subclass_attributes(custom_data, custom_weight):
+        param = Parameter(custom_data, requires_grad=False)
+        base_param_dir = dir(torch.nn.Parameter)
+        custom_weight_dir = dir(custom_weight)
+        # Find the attributes that are unique to the custom parameter
+        custom_attributes = [
+            attr for attr in custom_weight_dir if attr not in base_param_dir and not attr.startswith("__")
+        ]
+        # Set the custom attributes into the base parameter object
+        for attr in custom_attributes:
+            setattr(param, attr, getattr(custom_weight, attr))
+
+        return param
+
+    # Replace parameters with updated versions. Note that this helper
+    # function ensures the replacement is compatible with RL weight reloads.
+    layer.w13_weight = _create_param_from_subclass_attributes(w13, layer.w13_weight)
+    layer.w2_weight = _create_param_from_subclass_attributes(w2, layer.w2_weight)
+    layer.w13_weight_scale = _create_param_from_subclass_attributes(w13_scale, layer.w13_weight_scale)
+    layer.w2_weight_scale = _create_param_from_subclass_attributes(w2_scale, layer.w2_weight_scale)
+
+    self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+    if self.moe_quant_config:
+        assert self.experts_cls is not None
+
+        self.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+        )
 
 
 def apply_vllm_fp8_patches():
