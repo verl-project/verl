@@ -834,7 +834,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 vision_model=hasattr(self.model_config.hf_config, "vision_config"),
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 data_format="thd" if self.engine_config.use_remove_padding else "bshd",
-                enable_mtp=self.model_config.mtp.enable_train,
+                mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
             )
 
         # Router replay: record routing decisions for R2 mode

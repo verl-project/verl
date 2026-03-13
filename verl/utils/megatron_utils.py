@@ -473,8 +473,15 @@ def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
                 for buffer in buffers:
                     # sometimes, we don't want to load grad for pure inference
                     if load_grad and hasattr(buffer, "grad_data_size"):
-                        buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                        buffer.grad_data.zero_()
+                        current_storage_size = buffer.grad_data.storage().size()
+                        if current_storage_size == 0 or current_storage_size == buffer.grad_data_size:
+                            buffer.grad_data.storage().resize_(buffer.grad_data_size)
+                            buffer.grad_data.zero_()
+                        else:
+                            # Non-standard layers (e.g. GatedDeltaNet) may have grad
+                            # buffers with mismatched storage size; skip resize and
+                            # zero in-place with current storage.
+                            buffer.grad_data.zero_()
 
                     if buffer.param_data.storage().size() == 0:
                         buffer.param_data.storage().resize_(buffer.param_data_size)
@@ -1331,6 +1338,15 @@ def get_megatron_module_device(models: list[Any]) -> str:
 
 
 def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConfig):
+    """
+    Check and configure MTP (Multi-Token Prediction) settings.
+
+    Cases:
+        - mtp.enable == False and no MTP layers: return directly
+        - mtp.enable == False and has MTP layers: set num_nextn_predict_layers = 0
+        - mtp.enable == True and has MTP layers: configure override_transformer_config
+        - mtp.enable == True and no MTP layers: raise ValueError
+    """
     has_mtp = (
         model_config.hf_config.num_nextn_predict_layers > 0
         if hasattr(model_config.hf_config, "num_nextn_predict_layers")
@@ -1338,36 +1354,38 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
     )
     enable_mtp = model_config.mtp.enable
 
-    if "mtp_loss_scaling_factor" not in engine_config.override_transformer_config:
-        engine_config.override_transformer_config["mtp_loss_scaling_factor"] = model_config.mtp.mtp_loss_scaling_factor
-
-    if enable_mtp and not model_config.mtp.enable_train:
-        # disable parameter update by configure the loss scale to 0
-        engine_config.override_transformer_config["mtp_loss_scaling_factor"] = 0
-
-    # Modify the hf_config before initialization, and apply patch after innitialization
-    if enable_mtp and not has_mtp:
-        logger.error("enable mtp while model has no mtp layer, ignore model.mtp.enable")
-        model_config.mtp.enable = False
-        model_config.mtp.enable_train = False
-    elif has_mtp and not enable_mtp:
+    if not enable_mtp and not has_mtp:
+        return
+    elif not enable_mtp and has_mtp:
         model_config.hf_config.num_nextn_predict_layers = 0
+    elif enable_mtp and not has_mtp:
+        raise ValueError("enable mtp while model has no mtp layer, please use a model with mtp layer")
+    elif enable_mtp and has_mtp:
+        if "mtp_loss_scaling_factor" not in engine_config.override_transformer_config:
+            engine_config.override_transformer_config["mtp_loss_scaling_factor"] = (
+                model_config.mtp.mtp_loss_scaling_factor
+            )
+    return
 
 
 def patch_engine_mtp(module, model_config):
+    """
+    Apply MTP patches to the model module.
+
+    Args:
+        module: The model module to patch. Can be a single module or a list of modules.
+        model_config: The model configuration containing MTP settings.
+    """
     logger.warning("Applying mtp patch...")
     from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings, patch_postprocess
 
     print(module)
-    if isinstance(module, list):
-        for m in module:
-            patch_postprocess(m)
-            if model_config.mtp.detach_encoder:
-                patch_mtp_layer_get_embeddings(m)
-    else:
-        patch_postprocess(module)
+
+    modules = module if isinstance(module, list) else [module]
+    for m in modules:
+        patch_postprocess(m)
         if model_config.mtp.detach_encoder:
-            patch_mtp_layer_get_embeddings(module)
+            patch_mtp_layer_get_embeddings(m)
 
 
 @torch.no_grad()

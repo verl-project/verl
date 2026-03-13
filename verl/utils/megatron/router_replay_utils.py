@@ -279,7 +279,7 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
     """
     with torch.no_grad():
         if layers_topk_idx.is_nested:
-            layers_topk_idx_rmpad, _ = preprocess_thd_no_padding(layers_topk_idx, pre_process=True)
+            layers_topk_idx_rmpad, _, _ = preprocess_thd_no_padding(layers_topk_idx, pre_process=True)
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(layers_topk_idx, attention_mask, pre_process=True)
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
