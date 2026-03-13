@@ -23,6 +23,7 @@ allowed_modules = ["fsdp", "megatron", "veomni", "sglang", "vllm", "trtllm", "ro
 allowed_modules += ["tests", "training_utils", "recipe", "hardware", "deployment"]
 allowed_modules += ["ray", "worker", "single_controller", "misc", "docker", "ci"]
 allowed_modules += ["perf", "model", "algo", "env", "tool", "ckpt", "doc", "data", "cfg", "reward"]
+allowed_modules += ["fully_async", "one_step_off"]
 allowed_types = ["feat", "fix", "refactor", "chore", "test"]
 
 # Check for [1/N] prefix and extract the rest of the title

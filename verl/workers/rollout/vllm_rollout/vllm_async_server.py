@@ -39,6 +39,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
+from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -127,6 +128,8 @@ class vLLMHttpServer:
         self.node_rank = node_rank
         self.gpus_per_node = gpus_per_node
         self.nnodes = nnodes
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -480,6 +483,7 @@ class vLLMHttpServer:
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
+        args.api_server_count = 0
 
         def run_headless_wrapper():
             with SuppressSignalInThread():
@@ -510,6 +514,8 @@ class vLLMHttpServer:
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        prompt_ids = normalize_token_ids(prompt_ids)
+
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
@@ -527,7 +533,11 @@ class vLLMHttpServer:
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
             # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            # Cap max_tokens by response_length to ensure tensor alignment,
+            # and by remaining budget to prevent OOM in multi-turn rollouts.
+            max_tokens = min(
+                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
+            )
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
@@ -600,6 +610,7 @@ class vLLMHttpServer:
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
+            extra_fields={"global_steps": self.global_steps},
         )
 
     async def wake_up(self):
@@ -655,6 +666,10 @@ class vLLMHttpServer:
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.engine.reset_prefix_cache()
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
 
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
@@ -827,6 +842,7 @@ class vLLMReplica(RolloutReplica):
                 if not self.is_reward_model
                 else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
             )
+
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
@@ -836,9 +852,15 @@ class vLLMReplica(RolloutReplica):
                     "env_vars": {
                         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                         "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                        # To prevent hanging or crash during synchronization of weights between actor and rollout
+                        # in disaggregated mode. See:
+                        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+                        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+                        "NCCL_CUMEM_ENABLE": "0",
                     }
                 },
                 name=name,
+                max_concurrency=self.max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
@@ -899,11 +921,6 @@ class vLLMReplica(RolloutReplica):
 
     async def resume_generation(self):
         """Resume generation on all servers after abort_all_requests."""
-        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
-
-    # TODO(petersh6): refact the checkpoint engine's update_weights and rename this method
-    async def resume_all_requests(self):
-        """Resume all requests on all servers."""
         await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:

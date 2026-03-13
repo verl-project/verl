@@ -33,7 +33,9 @@ from sglang.srt.entrypoints.http_server import (
     set_global_state,
 )
 from sglang.srt.managers.io_struct import (
+    ContinueGenerationReqInput,
     GenerateReqInput,
+    PauseGenerationReqInput,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
 )
@@ -102,6 +104,8 @@ class SGLangHttpServer:
         self.node_rank = node_rank
         self.nnodes = nnodes
         self.base_gpu_id = base_gpu_id
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -345,7 +349,11 @@ class SGLangHttpServer:
             # support vllm-style 'max_tokens' param
             max_new_tokens = sampling_params.pop("max_tokens")
         else:
-            max_new_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            # Cap max_tokens by response_length to ensure tensor alignment,
+            # and by remaining budget to prevent OOM in multi-turn rollouts.
+            max_new_tokens = min(
+                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
+            )
 
         # Clamp max_new_tokens to the valid range [0, max_possible_tokens]
         max_new_tokens = max(0, min(max_new_tokens, max_possible_tokens))
@@ -372,6 +380,8 @@ class SGLangHttpServer:
         generate_request = GenerateReqInput(**request)
 
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
+        finish_reason = output["meta_info"]["finish_reason"]
+        finish_reason = finish_reason["type"] if finish_reason else None
         if return_logprob:
             output_token_logprobs = output["meta_info"]["output_token_logprobs"]
             log_probs, token_ids = zip(
@@ -399,7 +409,23 @@ class SGLangHttpServer:
                     -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
                 )
 
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts)
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            routed_experts=routed_experts,
+            stop_reason=finish_reason,
+            extra_fields={"global_steps": self.global_steps},
+        )
+
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
+
+    async def abort_all_requests(self):
+        await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+
+    async def resume_generation(self):
+        await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
 
     async def start_profile(self, **kwargs):
         if (
@@ -484,6 +510,7 @@ class SGLangReplica(RolloutReplica):
                 if not self.is_reward_model
                 else f"sglang_server_reward_{self.replica_rank}_{node_rank}"
             )
+
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
@@ -491,6 +518,7 @@ class SGLangReplica(RolloutReplica):
                 ),
                 runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
                 name=name,
+                max_concurrency=self.max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,

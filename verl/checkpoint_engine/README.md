@@ -19,6 +19,7 @@ Checkpoint Engine is an unified abstract layer to synchronize weights between va
 |hccl|HCCL|all_gather+broadcast|Ascend NPU & HCCL| High|Low: rebuild hccl group|Off-policy training<br>- Trainer/rollout disaggregated<br>- Fixed clusters
 |nixl|NIXL|all_gather+ring p2p|Various transport backends (D2D, H2H, H2D, etc)<br>- UCX<br>- UCCL<br>- Mooncacke|Medium/High|High: dynamic adjust ring topology|Off-policy training<br>- Trainer/rollout disaggregated<br>- Elastic rollout<br>- Rollout fault tolerance<br>- Heterogeneous hardware rollout
 |kimi_ckpt_engine|MOONCAKE+NCCL/HCCL|p2p+broadcast|NVIDIA/Ascend|High|Low: rebuild communication group|Off-policy training<br>- Trainer/rollout disaggregated<br>- Save checkpoint each time
+|mooncake|Mooncake Transfer Engine|all_gather+ring p2p|NVIDIA/Ascend|High|High: dynamic adjust ring topology|Off-policy training<br>- Trainer/rollout disaggregated<br>- Fixed clusters
 
 ##### kimi_ckpt_engine detail:
 
@@ -29,6 +30,13 @@ In the kimi_ckpt_engine workflow, the trainer first offloads the weights to the 
 This mode requires the P2P feature of checkpoint_engine. Please ensure you have installed it via pip install 'checkpoint-engine[p2p]' and that your version is 0.4.0 or higher.
 
 In addition, during the installation of checkpoint-engine[p2p], the transfer engine will be installed. However, This library has no prebuilt packages for Ascend devices and must be compiled from source. For detailed compilation instructions, see: [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/ascend_direct_transport.md)
+
+Note: Important Configuration for Ascend Devices
+If you are using CANN version >= 8.5.0 on Ascend devices, you must set the following environment variable to enable intra-node ROCE:
+
+```bash
+export HCCL_INTRA_ROCE_ENABLE=1
+```
 
 ### Benchmark
 1. benchmark setup
@@ -49,3 +57,4 @@ pytest tests/checkpoint_engine/test_special_server_adapter.py
 |4*8 H100, ConnectX-7 400 Gbps (InfiniBand)| NIXL | ~7 | 8.25|
 |2*16 Ascend 910C, inner suppernode| HCCL | ~11 | 5.3|
 |2*16 Ascend 910C, inner suppernode| kimi_ckpt_engine | offload: 7 update: 3.5 | 16.5|
+|2*8 H100, ConnectX-7 400 Gbps (InfiniBand)| mooncake | 5.93 | 9.44|

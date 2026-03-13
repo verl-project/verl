@@ -32,6 +32,7 @@ from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
+from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -318,20 +319,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                     auto_model_cls = AutoModelForCausalLM
                 elif "ForConditionalGeneration" in model_config.architectures[0]:
-                    # Handle different transformers versions for Vision2Seq models
-                    import transformers
-                    from packaging import version
-
-                    if version.parse(transformers.__version__) >= version.parse("4.54.0"):
-                        # transformers >= 4.54.0 uses AutoModelForImageTextToText
-                        from transformers import AutoModelForImageTextToText
-
-                        auto_model_cls = AutoModelForImageTextToText
-                    else:
-                        # transformers < 4.54.0 uses AutoModelForVision2Seq
-                        from transformers import AutoModelForVision2Seq
-
-                        auto_model_cls = AutoModelForVision2Seq
+                    auto_model_cls = get_auto_model_for_vision2seq()
                 else:
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
 

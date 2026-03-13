@@ -35,6 +35,7 @@ from verl.tools.schemas import ToolResponse
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -182,7 +183,8 @@ class ToolAgentLoop(AgentLoopBase):
             multi_modal_data["images"] = agent_data.image_data
         if agent_data.video_data is not None:
             multi_modal_data["videos"] = agent_data.video_data
-        output = AgentLoopOutput(
+
+        output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
             response_mask=agent_data.response_mask[: self.response_length],
@@ -193,7 +195,7 @@ class ToolAgentLoop(AgentLoopBase):
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             routed_experts=agent_data.routed_experts,
-            extra_fields={},
+            extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
         return output
@@ -216,7 +218,7 @@ class ToolAgentLoop(AgentLoopBase):
         add_messages: list[dict[str, Any]] = []
 
         with simple_timer("generate_sequences", agent_data.metrics):
-            output = await self.server_manager.generate(
+            output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
                 prompt_ids=agent_data.prompt_ids,
                 sampling_params=sampling_params,
@@ -229,6 +231,14 @@ class ToolAgentLoop(AgentLoopBase):
         # then add num_preempted to the metrics
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
+
+        if not agent_data.extra_fields:
+            agent_data.extra_fields.update(output.extra_fields)
+        else:
+            # Multi-round calls, only update the maximum max_global_steps.
+            max_global_steps = output.extra_fields.get("max_global_steps", None)
+            if max_global_steps:
+                agent_data.extra_fields["max_global_steps"] = max_global_steps
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
@@ -249,7 +259,8 @@ class ToolAgentLoop(AgentLoopBase):
             return AgentState.TERMINATED
 
         # Extract tool calls
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
+        tools = [tool.tool_schema for tool in self.tools.values()]
+        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
 
         # Handle interaction if needed
         if self.interaction_config_file:

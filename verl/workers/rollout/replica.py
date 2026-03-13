@@ -31,6 +31,11 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 logger = logging.getLogger(__file__)
 
 
+# Max number of concurrent calls to the methods of Rollout,
+# excluding calls to generate method.
+CONTROL_METHOD_CONCURRENCY = 16
+
+
 class TokenOutput(BaseModel):
     token_ids: list[int]
     """response token ids"""
@@ -42,6 +47,8 @@ class TokenOutput(BaseModel):
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
     """number of preempted times for metric calculation"""
+    extra_fields: dict[str, Any] = {}
+    """Extra fields for dynamic addition."""
 
 
 class RolloutMode(Enum):
@@ -92,7 +99,7 @@ class RolloutReplica(ABC):
         is_reward_model: bool = False,
     ) -> None:
         self.replica_rank = replica_rank
-        self.config = omega_conf_to_dataclass(config)
+        self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = model_config
 
         self.world_size = (
@@ -229,6 +236,12 @@ class RolloutReplica(ABC):
         """Get rollout server handle for Token-in-token-out generation."""
         return self._server_handle
 
+    @property
+    def max_concurrency(self) -> int:
+        # 1000 is Ray's default max_concurrency for async execution.
+        # Add some margin to account for control method call.
+        return max(1000, self.config.max_num_seqs + CONTROL_METHOD_CONCURRENCY)
+
     def rollout_worker_use_gpu(self) -> bool:
         return True
 
@@ -242,15 +255,11 @@ class RolloutReplica(ABC):
 
     async def abort_all_requests(self):
         """Partial rollout: abort and save all unfinished requests in each rollout server."""
-        # TODO(wuxibin)
-        # await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
-        print(f"abort all requests in rollout replica {self.replica_rank}")
+        await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
 
-    async def resume_all_requests(self):
-        """Partial rollout: resume all unfinished requests in each rollout server."""
-        # TODO(wuxibin)
-        # await asyncio.gather(*[server.resume_all_requests.remote() for server in self.servers])
-        print(f"resume all requests in rollout replica {self.replica_rank}")
+    async def resume_generation(self):
+        """Resume generation on all servers after abort_all_requests."""
+        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
 
     async def clear_kv_cache(self):
         """reset kv cache in each rollout server."""

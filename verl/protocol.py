@@ -1227,6 +1227,89 @@ class DataProtoFuture:
         return output
 
 
+class BatchData:
+    """Uniform dispatch wrapper for batch data operations.
+
+    All type-specific logic (isinstance checks) is centralized here so that
+    callers (e.g. decorator.py) never need to branch on the concrete data type.
+
+    Usage::
+
+        # chunk a single data item into N pieces
+        chunks = BatchData(arg).chunk(chunks=N)
+
+        # concat a list of data items into one
+        merged = BatchData(output_list).concat()
+
+        # validate before dispatching
+        assert BatchData(arg).is_chunkable()
+        assert BatchData(output_list).is_concatable()
+    """
+
+    _CHUNKABLE_TYPES = (TensorDict,)  # lazily extended with DataProto etc.
+    _CONCATABLE_TYPES = (TensorDict,)
+
+    def __init__(self, data):
+        self._data = data
+
+    # ---- validation ----------------------------------------------------------
+
+    def is_chunkable(self) -> bool:
+        """Return True if the wrapped data supports chunk dispatch."""
+        return isinstance(self._data, self._chunkable_types())
+
+    def is_concatable(self) -> bool:
+        """Return True if the wrapped list of data supports concat collect."""
+        data = self._data
+        if not isinstance(data, list | tuple) or len(data) == 0:
+            return False
+        return isinstance(data[0], self._concatable_types())
+
+    # ---- operations ----------------------------------------------------------
+
+    def chunk(self, chunks: int):
+        """Split the wrapped data into *chunks* pieces along the batch dim.
+
+        Returns a tuple/list of the **original data types** (not BatchData).
+        """
+        data = self._data
+        if isinstance(data, TensorDict):
+            from verl.utils.tensordict_utils import chunk_tensordict, contiguous
+
+            raw_chunks = chunk_tensordict(data, chunks)
+            return tuple(contiguous(val).consolidate() for val in raw_chunks)
+        # DataProto, DataProtoFuture, BatchMeta all expose .chunk()
+        return data.chunk(chunks=chunks)
+
+    def concat(self):
+        """Concat the wrapped list of data items into a single result.
+
+        Returns the **original data type** (not BatchData).
+        """
+        data = self._data
+        if not data:
+            raise ValueError("Cannot concatenate an empty list of data items.")
+        sample = data[0]
+        if isinstance(sample, ray.ObjectRef):
+            return DataProtoFuture.concat(data)
+        if isinstance(sample, TensorDict):
+            from verl.utils.tensordict_utils import concat_tensordict
+
+            return concat_tensordict(data)
+        # DataProto, BatchMeta expose .concat() as classmethod / staticmethod
+        return type(sample).concat(data)
+
+    # ---- helpers (lazy type tuples to avoid import-order issues) -------------
+
+    @classmethod
+    def _chunkable_types(cls):
+        return (DataProto, DataProtoFuture, TensorDict)
+
+    @classmethod
+    def _concatable_types(cls):
+        return (DataProto, ray.ObjectRef, TensorDict)
+
+
 def all_gather_data_proto(data: DataProto, process_group):
     # Note that this is an inplace operator just like torch.distributed.all_gather
     group_size = torch.distributed.get_world_size(group=process_group)

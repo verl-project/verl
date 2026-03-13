@@ -88,7 +88,6 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE"
     reward.reward_manager.name=dapo
