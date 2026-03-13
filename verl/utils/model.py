@@ -633,12 +633,15 @@ def patch_valuehead_model(model) -> None:
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification
 
+    # Use attn_implementation from model_config
+    attn_implementation = getattr(model_config, "_attn_implementation", "flash_attention_2")
+
     try:
         model = AutoModelForTokenClassification.from_pretrained(
             pretrained_model_name_or_path=local_path,
             torch_dtype=torch_dtype,
             config=model_config,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
         )
         return model
@@ -660,7 +663,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         pretrained_model_name_or_path=local_path,
         torch_dtype=torch_dtype,
         config=model_config,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_implementation,
         trust_remote_code=trust_remote_code,
     )
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
