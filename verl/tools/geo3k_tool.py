@@ -23,12 +23,14 @@ from verl.utils.reward_score import geo3k
 from verl.utils.rollout_trace import rollout_trace_op
 
 from .base_tool import BaseTool
+from .registry import register_tool
 from .schemas import OpenAIFunctionToolSchema, ToolResponse
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+@register_tool("geo3k")
 class Geo3kTool(BaseTool):
     """A demo tool for calculating the reward of geo3k.
     - `get_openai_tool_schema`: return the tool schema in OpenAI format.

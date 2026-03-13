@@ -23,6 +23,7 @@ from uuid import uuid4
 import ray
 
 from verl.tools.base_tool import BaseTool
+from verl.tools.registry import register_tool
 from verl.utils.reward_score.sandbox_fusion.utils import _process_single_case
 from verl.utils.rollout_trace import rollout_trace_op
 
@@ -98,6 +99,7 @@ def init_execution_pool(
         # return ray.util.multiprocessing.Pool(processes=num_workers)
 
 
+@register_tool("sandbox_fusion")
 class SandboxFusionTool(BaseTool):
     """A tool for executing the code using sanbox fusion image.
 

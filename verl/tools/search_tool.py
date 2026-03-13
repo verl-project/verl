@@ -29,6 +29,7 @@ from verl.tools.utils.search_r1_like_utils import perform_single_search_batch
 from verl.utils.rollout_trace import rollout_trace_op
 
 from .base_tool import BaseTool
+from .registry import register_tool
 from .schemas import OpenAIFunctionToolSchema, ToolResponse
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ def init_search_execution_pool(
         raise NotImplementedError("Process mode is not implemented yet")
 
 
+@register_tool("search")
 class SearchTool(BaseTool):
     """Search tool for retrieving information using external retrieval services.
 
