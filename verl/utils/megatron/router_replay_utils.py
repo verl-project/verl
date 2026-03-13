@@ -395,7 +395,6 @@ def get_current_rank_layer_info(tf_config, vp_rank=None):
         offset = get_transformer_layer_offset(tf_config, vp_stage=vp_rank)
     else:
         offset = get_transformer_layer_offset(tf_config)
-
     local = {}
     local["start"] = offset
     local["end"] = offset + num_layers_to_build
