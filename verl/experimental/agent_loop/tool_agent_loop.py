@@ -427,11 +427,19 @@ class ToolAgentLoop(AgentLoopBase):
             # TODO: append malformed tool_call to the prompt: invalid function name or arguments
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
+            logger.info(f"[ToolCall] request_id={agent_data.request_id} tool={tool_name} args={tool_args}")
             tool = self.tools[tool_name]
             kwargs = tools_kwargs.get(tool_name, {})
             instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
             tool_execution_response, tool_reward, res = await tool.execute(
                 instance_id, tool_args, agent_data=agent_data
+            )
+            has_image = bool(getattr(tool_execution_response, "image", None))
+            has_video = bool(getattr(tool_execution_response, "video", None))
+            logger.info(
+                f"[ToolCall] done tool={tool_name} reward={tool_reward} "
+                f"has_image={has_image} has_video={has_video} "
+                f"response_text_len={len(tool_execution_response.text or '')}"
             )
         except Exception as e:
             logger.warning(f"Error when executing tool: {e}")
