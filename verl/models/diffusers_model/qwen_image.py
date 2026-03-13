@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
 import numpy as np
 import torch
 from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformer2DModel
@@ -51,7 +53,7 @@ class QwenImage(DiffusionModelBase):
         model_config: DiffusersModelConfig,
         micro_batch: TensorDict,
         model_inputs: dict,
-        negative_model_inputs: dict,
+        negative_model_inputs: Optional[dict],
         step: int,
     ):
         latents = micro_batch["all_latents"]
@@ -59,6 +61,7 @@ class QwenImage(DiffusionModelBase):
 
         noise_pred = module(**model_inputs)[0]
         if model_config.guidance_scale > 1.0:
+            assert negative_model_inputs is not None
             neg_noise_pred = module(**negative_model_inputs)[0]
             comb_pred = neg_noise_pred + model_config.guidance_scale * (noise_pred - neg_noise_pred)
             cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)

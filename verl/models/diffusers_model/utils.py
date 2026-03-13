@@ -28,7 +28,7 @@ def set_timesteps(scheduler: SchedulerMixin, model_config: DiffusersModelConfig)
 
         QwenImage.set_timesteps(scheduler, model_config, get_device_name())
     else:
-        raise NotImplementedError("unsupported model for for setting steps.")
+        raise NotImplementedError("unsupported model for setting timesteps.")
 
 
 def forward_and_sample_previous_step(
@@ -41,7 +41,7 @@ def forward_and_sample_previous_step(
     step: int,
 ):
     """Forward the model and sample previous step.
-    This method is ususally used for RL-algorithms based on reversed-sampling process.
+    This method is usually used for RL-algorithms based on reversed-sampling process.
     Such as FlowGRPO, DanceGRPO, etc.
     """
     if model_config.path.endswith("Qwen-Image"):

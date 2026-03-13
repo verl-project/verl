@@ -2109,7 +2109,12 @@ def compute_policy_loss_flow_grpo(
     )
     pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
 
-    pg_metrics = {"actor/ppo_kl": pg_loss.detach().item()}
+    pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > config.clip_ratio).float())
+    ppo_kl = torch.mean(log_prob - old_log_prob)
+    pg_metrics = {
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+    }
     return pg_loss, pg_metrics
 
 

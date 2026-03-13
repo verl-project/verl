@@ -496,13 +496,9 @@ class DiffusersFSDPEngine(BaseEngine):
             if "model_output" in output:
                 for model_output_dict in output["model_output"]:
                     for key, val in model_output_dict.items():
-                        if key not in model_output_lst:
-                            model_output_lst[key] = []
-                        model_output_lst[key].append(val)
+                        model_output_lst.setdefault(key, []).append(val)
                 for key, val in model_output_lst.items():
-                    if key not in model_output:
-                        model_output[key] = []
-                    model_output[key].append(torch.stack(val, dim=1))  # (bsz, steps, ...)
+                    model_output.setdefault(key, []).append(torch.stack(val, dim=1))  # (bsz, steps, ...)
             # loss
             if "loss" in output:
                 losses.append(output["loss"])
@@ -524,6 +520,16 @@ class DiffusersFSDPEngine(BaseEngine):
 
         return output
 
+    @staticmethod
+    def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert a jagged nested tensor pair (embeds, mask) to dense padded tensors."""
+        batch_size = embeds.size(0)
+        max_seq_len = max(embeds.offsets().diff())
+        embed_dim = embeds.size(-1)
+        embeds = torch.nested.to_padded_tensor(embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim))
+        mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
+        return embeds, mask
+
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         latents = micro_batch["all_latents"]
         timesteps = micro_batch["all_timesteps"]
@@ -533,27 +539,11 @@ class DiffusersFSDPEngine(BaseEngine):
         negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
 
         if prompt_embeds.is_nested:
-            batch_size = prompt_embeds.size(0)
-            seq_len_effective = prompt_embeds.offsets().diff()
-            max_seq_len = max(seq_len_effective)
-            embed_dim = prompt_embeds.size(-1)
-            prompt_embeds = torch.nested.to_padded_tensor(
-                prompt_embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim)
-            )
-            prompt_embeds_mask = torch.nested.to_padded_tensor(
-                prompt_embeds_mask, padding=0, output_size=(batch_size, max_seq_len)
-            )
+            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
 
         if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
-            batch_size = negative_prompt_embeds.size(0)
-            seq_len_effective = negative_prompt_embeds.offsets().diff()
-            max_seq_len = max(seq_len_effective)
-            embed_dim = negative_prompt_embeds.size(-1)
-            negative_prompt_embeds = torch.nested.to_padded_tensor(
-                negative_prompt_embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim)
-            )
-            negative_prompt_embeds_mask = torch.nested.to_padded_tensor(
-                negative_prompt_embeds_mask, padding=0, output_size=(batch_size, max_seq_len)
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
+                negative_prompt_embeds, negative_prompt_embeds_mask
             )
 
         height = tu.get_non_tensor_data(data=micro_batch, key="height", default=None)
@@ -593,14 +583,13 @@ class DiffusersFSDPEngine(BaseEngine):
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
         log_prob, prev_sample_mean, std_dev_t = output
-        model_output = {}
-        model_output["log_probs"] = log_prob
-        model_output["prev_sample_mean"] = prev_sample_mean
-        model_output["std_dev_t"] = std_dev_t
-        return model_output
+        return {
+            "log_probs": log_prob,
+            "prev_sample_mean": prev_sample_mean,
+            "std_dev_t": std_dev_t,
+        }
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
-        device_name = get_device_name()
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
         raw_output = forward_and_sample_previous_step(

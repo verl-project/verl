@@ -231,7 +231,7 @@ def diffusion_loss(config: ActorConfig, model_output, data: TensorDict, dp_group
 
     loss_agg_mode = config.loss_agg_mode
 
-    loss_mode = config.policy_loss.get("loss_mode", "flowgrpo")
+    loss_mode = config.policy_loss.get("loss_mode", "flow_grpo")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     pg_loss, pg_metrics = policy_loss_fn(
