@@ -47,7 +47,7 @@ from verl.utils.rollout_trace import (
     rollout_trace_op,
 )
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config import DistillationConfig, DistillationLossConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
@@ -160,6 +160,41 @@ class AsyncLLMServerManager:
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+            return output
+        finally:
+            self._release_server(server_id)
+
+    async def compute_logprobs(
+        self,
+        request_id,
+        *,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        logprob_params: dict[str, Any],
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+    ) -> TokenOutput:
+        """Generate tokens from prompt ids.
+
+        Args:
+            request_id (str): request id for sticky session.
+            prompt_ids (List[int]): List of prompt token ids.
+            response_ids (List[int]): List of response token ids.
+            logprob_params (Dict[str, Any]): Parameters for computing logprobs.
+
+        Returns:
+            TokenOutput: token output
+        """
+        server_id, server = await self._acquire_server(request_id)
+        try:
+            output: TokenOutput = await server.compute_logprobs.remote(
+                request_id=uuid4().hex,  # use new request_id for each turn
+                prompt_ids=prompt_ids,
+                response_ids=response_ids,
+                logprob_params=logprob_params,
                 image_data=image_data,
                 video_data=video_data,
             )
@@ -411,8 +446,9 @@ class AgentLoopWorker:
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
+        teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
+        teacher_load_balancer_handle: ray.actor.ActorHandle = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
         Args:
@@ -420,12 +456,20 @@ class AgentLoopWorker:
             servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
             reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-            teacher_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming teacher computation.
+            teacher_servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each teacher server.
         """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
+        distillation_config = config.get("distillation", None)
+        if distillation_config is not None:
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
+            self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+            self.distillation_enabled = teacher_servers is not None
+        else:
+            self.distillation_config = None
+            self.distillation_enabled = False
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
@@ -434,11 +478,15 @@ class AgentLoopWorker:
                 servers,
                 load_balancer_handle=load_balancer_handle,
             )
+        if not hasattr(self, "teacher_server_manager") and self.distillation_enabled:
+            self.teacher_server_manager = AsyncLLMServerManager(
+                config,
+                teacher_servers,
+                load_balancer_handle=teacher_load_balancer_handle,
+            )
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles
-        self.teacher_loop_worker_handles = teacher_loop_worker_handles
-        self.distillation_enabled = self.teacher_loop_worker_handles is not None
 
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
@@ -807,21 +855,33 @@ class AgentLoopWorker:
             output.reward_score = result["reward_score"]
             output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
-    async def _compute_teacher_logprobs(self, output, prompt_ids, response_ids, validate):
+    async def _compute_teacher_logprobs(self, output: AgentLoopOutput, prompt_ids, response_ids, validate):
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
-            data = DataProto(
-                batch=TensorDict(
-                    {"prompt_ids": torch.tensor([prompt_ids]), "response_ids": torch.tensor([response_ids])},
-                    batch_size=1,
-                )
+            # This assumes that the teacher processes multi-modal data in the same way as the student
+            multi_modal_data = output.multi_modal_data
+            images = multi_modal_data.get("images")
+            videos = multi_modal_data.get("videos")
+            logprob_params = {
+                "use_topk": self.distillation_loss_config.loss_settings.use_topk,
+                "topk": self.distillation_loss_config.topk,
+            }
+            output = await self.teacher_server_manager.compute_logprobs(
+                request_id=uuid4().hex,
+                prompt_ids=prompt_ids,
+                response_ids=response_ids,
+                logprob_params=logprob_params,
+                image_data=images,
+                video_data=videos,
             )
-            selected_teacher_loop_worker_handle = random.choice(self.teacher_loop_worker_handles)
-            result = await selected_teacher_loop_worker_handle.compute_logprobs.remote(data)
-            response_ids, response_logprobs = (
-                result["response_ids"],
-                result["response_logprobs"],
-            )  # (1, S, K), S=sequence length, K=topk/1
+            response_ids_ls, response_logprobs_ls = (
+                output["response_ids"],
+                output["response_logprobs"],
+            )
+            # Shapes: # 1, S, (1 or K), where S is the response length, K is either 1 or topk depending on 
+            # the distillation loss settings.
+            response_ids = torch.tensor(response_ids_ls).unsqueeze(0)
+            response_logprobs = torch.tensor(response_logprobs_ls).unsqueeze(0)
 
             pad_size = self.config.actor_rollout_ref.rollout.response_length - response_ids.shape[1]
             padding = (0, 0, 0, pad_size)  # pad the sequence dimension
@@ -1064,6 +1124,15 @@ class AgentLoopManager:
         load_balancer_handle = self.global_load_balancer
         servers = list(zip(self.server_addresses, self.server_handles, strict=True))
 
+        if self.distillation_enabled:
+            teacher_server_handles = self.teacher_loop_manager.teacher_model_manager.server_handles
+            teacher_server_addresses = self.teacher_loop_manager.teacher_model_manager.server_addresses
+            teacher_servers = list(zip(teacher_server_addresses, teacher_server_handles, strict=True))
+            teacher_load_balancer_handle = self.teacher_global_load_balancer
+        else:
+            teacher_servers = None
+            teacher_load_balancer_handle = None
+
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
@@ -1078,8 +1147,9 @@ class AgentLoopManager:
                     self.config,
                     servers,
                     load_balancer_handle,
+                    teacher_servers,
+                    teacher_load_balancer_handle,
                     self.reward_loop_worker_handles,
-                    self.teacher_loop_manager.teacher_loop_workers if self.distillation_enabled else None,
                 )
             )
 
@@ -1088,6 +1158,11 @@ class AgentLoopManager:
             server_actor_ids=self.server_addresses,
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
         )
+        if self.distillation_enabled:
+            self.teacher_global_load_balancer = GlobalRequestLoadBalancer.remote(
+                server_actor_ids=self.teacher_loop_manager.teacher_model_manager.server_addresses,
+                max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+            )
 
     @auto_await
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
