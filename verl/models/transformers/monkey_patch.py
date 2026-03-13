@@ -283,6 +283,17 @@ def patch_forward_with_backends(
         raise ValueError(f"Unsupported fused_kernels_backend: {fused_kernels_backend}. Choose 'triton' or 'torch'.")
 
 
+def apply_monkey_patch_before_from_pretrained(model_config):
+    model_type = getattr(model_config, "model_type", None)
+    if model_type == "qwen3_next":
+        import transformers.models.qwen3_next.modeling_qwen3_next as qwen3_next_model
+
+        from verl.models.transformers.qwen3_next import PatchQwen3NextGatedDeltaNet
+
+        qwen3_next_model.Qwen3NextGatedDeltaNet = PatchQwen3NextGatedDeltaNet
+        print(f"Monkey patch Qwen3NextGatedDeltaNet in {qwen3_next_model.__name__}")
+
+
 def apply_monkey_patch(
     model: PreTrainedModel,
     ulysses_sp_size: int = 1,
@@ -479,6 +490,14 @@ def apply_monkey_patch(
             print("Not support fused kernels for KimiVL")
 
         return
+
+    elif model.config.model_type == "qwen3_next":
+        from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextDecoderLayer
+
+        from verl.models.transformers.qwen3_next import patch_qwen3_next_decoder_layer_forward
+
+        Qwen3NextDecoderLayer.forward = patch_qwen3_next_decoder_layer_forward
+        print(f"Monkey patch Qwen3NextDecoderLayer.forward in {model.__module__}")
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models

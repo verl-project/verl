@@ -117,7 +117,7 @@ def _unpad_tensor(x: Tensor, dim: int, padding_size: int) -> Tensor:
 def slice_input_tensor(x: Tensor, dim: int, padding: bool = True, group: ProcessGroup = None) -> Tensor:
     group = get_ulysses_sequence_parallel_group() if group is None else group
     sp_world_size = dist.get_world_size(group)
-    sp_rank = get_ulysses_sequence_parallel_rank()
+    sp_rank = get_ulysses_sequence_parallel_rank(group)
     dim_size = x.size(dim)
     # pad before slice
     if padding and dim_size % sp_world_size:
