@@ -147,7 +147,7 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
         for i in range(mask.shape[0]):
             curr_mask = mask[i].bool()
             embeds_list.append(embeds[i, curr_mask, :])
-            mask_list.append(curr_mask)
+            mask_list.append(curr_mask[curr_mask])
         return (
             torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged),
             torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
