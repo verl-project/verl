@@ -200,7 +200,12 @@ def get_moe_num_layers_to_build(
     """
     total_layers = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
 
-    layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
+    sig = inspect.signature(get_transformer_layer_offset)
+    if "vp_stage" in sig.parameters:
+        layer_offset = get_transformer_layer_offset(tf_config, vp_stage=vp_stage, pp_rank=pp_rank)
+    else:
+        layer_offset = get_transformer_layer_offset(tf_config, pp_rank=pp_rank)
+
     local_global_indices = range(layer_offset, layer_offset + total_layers)
 
     num_moe_layers = sum(1 for idx in local_global_indices if is_moe_layer(config, idx))
