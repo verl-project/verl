@@ -93,6 +93,25 @@ MEGATRON_ENGINE_CONFIG="\
     +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
     engine.use_mbridge=True"
 
+MEGATRON_FSDP_ENGINE_CONFIG="\
+    engine=megatron \
+    model=hf_model \
+    model.path=$MODEL_PATH \
+    optim=megatron \
+    optim.lr=1e-5 \
+    optim.lr_warmup_steps_ratio=0.2 \
+    optim.weight_decay=0.1 \
+    optim.betas="[0.9,0.95]" \
+    optim.clip_grad=1.0 \
+    optim.lr_warmup_init=0 \
+    optim.lr_decay_style=cosine \
+    optim.min_lr=1e-6 \
+    engine.tensor_model_parallel_size=${TP_SIZE} \
+    engine.pipeline_model_parallel_size=${PP_SIZE} \
+    engine.use_mbridge=True \
+    engine.vanilla_mbridge=True \
+    engine.use_megatron_fsdp=True"
+
 TORCHTITAN_ENGINE_CONFIG="\
     engine=${backend} \
     model=hf_model \
@@ -125,6 +144,10 @@ elif [ "$backend" = "torchtitan" ]; then
     ENGINE_CONFIG="$TORCHTITAN_ENGINE_CONFIG"
     echo "Using torchtitan engine"
     exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-dp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+elif [ "$backend" = "megatron_fsdp" ]; then
+    ENGINE_CONFIG="$MEGATRON_FSDP_ENGINE_CONFIG"
+    echo "Using megatron_fsdp engine"
+    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
 else
     ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
     echo "Using megatron engine"
