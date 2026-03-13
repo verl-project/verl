@@ -611,6 +611,93 @@ class vLLMHttpServer:
             extra_fields={"global_steps": self.global_steps},
         )
 
+    async def compute_logprobs(
+        self,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        logprob_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        priority: int = 0,
+    ) -> TokenOutput:
+        """Generate sequence with token-in-token-out."""
+
+        prompt_ids = normalize_token_ids(prompt_ids)
+        response_ids = normalize_token_ids(response_ids)
+        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        input_ids = prompt_ids + response_ids
+
+        # Calculate the maximum possible new tokens based on available context space
+        # This serves as a safety upper bound
+        max_possible_tokens = self.config.max_model_len - len(input_ids)
+        if max_possible_tokens < 0:
+            raise ValueError(
+                f"Prompt + response length ({len(prompt_ids)} + {len(response_ids)} = {len(input_ids)}) exceeds the model's maximum context length "
+                f"({self.config.max_model_len})."
+            )
+
+        use_topk = logprob_params["use_topk"]
+        if use_topk:
+            num_logprobs = topk = logprob_params["topk"]
+        else:
+            num_logprobs = 0
+
+        # TODO: we can add temperature if we potentially want a teacher temperature
+        sampling_params = SamplingParams(max_tokens=1, prompt_logprobs=num_logprobs)
+
+        multi_modal_data = {}
+        if image_data is not None:
+            multi_modal_data["image"] = image_data
+        if video_data is not None:
+            multi_modal_data["video"] = video_data
+
+        prompt = TokensPrompt(prompt_token_ids=input_ids, multi_modal_data=multi_modal_data)
+
+        if self.lora_as_adapter:
+            raise NotImplementedError("compute_logprobs with lora_as_adapter is not implemented yet")
+
+        generator = self.engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            priority=priority,
+        )
+
+        # Get final response
+        final_res: Optional[RequestOutput] = None
+        async for output in generator:
+            final_res = output
+        assert final_res is not None
+
+        # Extract response logprobs
+        response_length = len(response_ids)
+        response_logprob_dicts = final_res.prompt_logprobs[-response_length:]
+        response_logprobs_ls, response_ids_ls = [], []
+        for logprobs_dict in response_logprob_dicts:
+            if num_logprobs == 0:
+                token_id_str = list(logprobs_dict.keys())[0]
+                logprob = logprobs_dict[token_id_str].logprob
+                response_logprobs_ls.append([logprob])
+                response_ids_ls.append([int(token_id_str)])
+            else:
+                response_ids = [None] * topk
+                response_logprobs = [None] * topk
+                # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token
+                # is not in top-k)
+                assert len(logprobs_dict) in [topk, topk + 1], len(logprobs_dict)
+                for token_id_str, token_logprob in logprobs_dict.items():
+                    rank = token_logprob.rank
+                    if rank > topk:
+                        continue  # the sampled token is not in the top-k
+                    logprob = token_logprob.logprob
+                    response_ids[rank - 1] = int(token_id_str)
+                    response_logprobs[rank - 1] = logprob
+                response_logprobs_ls.append(response_logprobs)
+                response_ids_ls.append(response_ids)
+
+        return {"response_ids": response_ids_ls, "response_logprobs": response_logprobs_ls}
+
     async def wake_up(self):
         if self.node_rank != 0:
             return
