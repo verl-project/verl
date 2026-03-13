@@ -227,6 +227,9 @@ class vLLMColocateWorkerExtension:
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
+                self.sleep()
+                self.wake_up(tags=["kv_cache", "weights"])
+                patch_vllm_moe_model_weight_loader(self.model_runner.model)
                 self.model_runner.model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:
