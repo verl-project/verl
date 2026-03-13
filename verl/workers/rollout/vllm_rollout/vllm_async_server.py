@@ -679,7 +679,7 @@ class vLLMHttpServer:
         for logprobs_dict in response_logprob_dicts:
             if num_logprobs == 0:
                 token_id_str = list(logprobs_dict.keys())[0]
-                logprob = logprobs_dict[token_id_str]["logprob"]
+                logprob = logprobs_dict[token_id_str].logprob
                 response_logprobs_ls.append([logprob])
                 response_ids_ls.append([int(token_id_str)])
             else:
