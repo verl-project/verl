@@ -82,6 +82,7 @@ class HFModelConfig(BaseConfig):
         "architectures",
         "local_hf_config_path",
         "local_tokenizer_path",
+        "mtp",
     }
 
     path: str = MISSING
