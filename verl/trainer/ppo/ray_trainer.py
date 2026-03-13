@@ -831,15 +831,15 @@ class RayPPOTrainer:
 
         # initialize teacher loop manager
         if self.use_teacher_policy:
-            from verl.experimental.teacher_loop import TeacherLoopManager
+            from verl.experimental.teacher_loop import TeacherModelManager
 
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
-            self.teacher_loop_manager = TeacherLoopManager(
-                config=self.config,
-                teacher_resource_pool=teacher_resource_pool,
+            self.teacher_model_manager = TeacherModelManager(
+                config=self.config.distillation,
+                resource_pool=teacher_resource_pool,
             )
         else:
-            self.teacher_loop_manager = None
+            self.teacher_model_manager = None
 
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
@@ -863,7 +863,7 @@ class RayPPOTrainer:
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
-            teacher_loop_manager=self.teacher_loop_manager,
+            teacher_model_manager=self.teacher_model_manager,
         )
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
