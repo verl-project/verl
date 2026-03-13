@@ -131,6 +131,9 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
     Convert TensorDict from prompt embeds with padding to no-padding format.
     For diffusion model training only.
 
+    Currently we expect the prompt embedding mask to be [1111000...] format,
+    which means the valid tokens are continuous and start from the left.
+
     Args:
         data: TensorDict with "prompt_embeds", "prompt_embeds_mask",
               "negative_prompt_embeds", "negative_prompt_embeds_mask"
