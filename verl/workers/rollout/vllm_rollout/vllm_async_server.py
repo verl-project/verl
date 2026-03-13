@@ -352,6 +352,18 @@ class vLLMHttpServer:
             }
             args["speculative_config"] = speculative_config
 
+        # eagle3
+        if self.config.speculative.enable:
+            assert not self.config.mtp.enable, (
+                "MTP speculative decoding and Eagle3 speculative decoding cannot be enabled at the same time."
+            )
+            speculative_config = {
+                "method": self.config.speculative.method,
+                "num_speculative_tokens": self.config.speculative.num_speculative_tokens,
+                "model": self.config.speculative.draft_model_path,
+            }
+            args["speculative_config"] = speculative_config
+
         if self.config.expert_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
                 "gpus_per_node should be divisible by tensor_model_parallel_size"

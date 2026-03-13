@@ -300,6 +300,12 @@ actor_rollout_ref:
       backend: naive
       update_weights_bucket_megabytes: 2048
       engine_kwargs: {}
+    speculative:
+      _target_: verl.workers.config.SpeculativeConfig
+      enable: false
+      method: eagle3
+      num_speculative_tokens: 1
+      draft_model_path: ""
     trace:
       _target_: verl.workers.config.TraceConfig
       project_name: ${oc.select:trainer.project_name,null}
