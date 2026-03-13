@@ -16,9 +16,12 @@ import asyncio
 import logging
 import os
 
+from omegaconf import DictConfig
+
 from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.ray_utils import auto_await
-from verl.workers.config import DistillationTeacherModelConfig, HFModelConfig
+from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig, HFModelConfig
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
@@ -30,17 +33,19 @@ class TeacherModelManager:
 
     def __init__(
         self,
-        config: DistillationTeacherModelConfig,
+        config: DictConfig,
         resource_pool: RayResourcePool = None,
     ):
         """
         Initialize the teacher model manager.
 
         Args:
-            config (TeacherModelConfig): Teacher model configuration.
+            config (DictConfig): Teacher model configuration.
             resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
         """
-        self.config = config
+
+        # Need dataclass conversion for max_logprobs handling in post_init
+        self.config: DistillationConfig = omega_conf_to_dataclass(config)
         self.resource_pool = resource_pool
         self._initialize_llm_servers()
         self._initialize_router()
@@ -48,24 +53,25 @@ class TeacherModelManager:
         self.sleep()
 
     def _initialize_llm_servers(self):
-        teacher_world_size = self.config.inference.tensor_model_parallel_size
+        teacher_model_config: DistillationTeacherModelConfig = self.config.teacher_model
+        teacher_world_size = teacher_model_config.inference.tensor_model_parallel_size
         world_size = (
             self.resource_pool.world_size
             if self.resource_pool  # colocate mode
-            else self.config.n_gpus_per_node * self.config.nnodes  # standalone mode
+            else teacher_model_config.n_gpus_per_node * teacher_model_config.nnodes  # standalone mode
         )
         num_replicas = world_size // teacher_world_size
 
-        rollout_replica_class = get_rollout_replica_class(self.config.inference.name)
-        rollout_config = self.config.inference
-        model_config = HFModelConfig(path=self.config.model_path)
+        rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
+        rollout_config = teacher_model_config.inference
+        model_config = HFModelConfig(path=teacher_model_config.model_path)
         self.tokenizer = model_config.get_processor()
         self.rollout_replicas = [
             rollout_replica_class(
                 replica_rank=replica_rank,
                 config=rollout_config,
                 model_config=model_config,
-                gpus_per_node=self.config.n_gpus_per_node,
+                gpus_per_node=teacher_model_config.n_gpus_per_node,
                 is_teacher_model=True,
             )
             for replica_rank in range(num_replicas)

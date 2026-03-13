@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .teacher_loop import TeacherLoopManager
 from .teacher_model import TeacherModelManager
 
-__all__ = ["TeacherModelManager", "TeacherLoopManager"]
+__all__ = ["TeacherModelManager"]
