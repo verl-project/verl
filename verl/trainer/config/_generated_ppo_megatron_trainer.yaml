@@ -289,6 +289,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive
       update_weights_bucket_megabytes: 2048
+      enable_double_buffer: false
       engine_kwargs: {}
     trace:
       _target_: verl.workers.config.TraceConfig

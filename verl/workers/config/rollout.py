@@ -130,6 +130,8 @@ class CheckpointEngineConfig(BaseConfig):
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
+    # Enable double buffer optimization for weight transfer
+    enable_double_buffer: bool = False
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
 

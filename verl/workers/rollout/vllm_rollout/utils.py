@@ -152,7 +152,9 @@ class vLLMColocateWorkerExtension:
         # patch weight loader to support MoE model
         patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False, enable_double_buffer: bool = False
+    ):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
@@ -184,6 +186,7 @@ class vLLMColocateWorkerExtension:
             zmq_handle=self._get_zmq_handle(),
             device=self.device,
             use_shm=use_shm,
+            enable_double_buffer=enable_double_buffer,
         )
         receiver.receive_weights(
             on_bucket_received=lambda weights: self._update_weights(

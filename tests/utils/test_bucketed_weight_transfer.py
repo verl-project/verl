@@ -61,7 +61,7 @@ def _generate_weights(weight_specs, seed):
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------
-def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
+def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, enable_double_buffer=False):
     """Sender process: generate weights, move to device, send."""
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 
@@ -70,11 +70,12 @@ def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
         zmq_handle=zmq_handle,
         bucket_size_mb=bucket_size_mb,
         use_shm=use_shm,
+        enable_double_buffer=enable_double_buffer,
     )
     asyncio.run(sender.async_send_weights(iter(weights)))
 
 
-def _receiver_fn(zmq_handle, use_shm, result_queue):
+def _receiver_fn(zmq_handle, use_shm, result_queue, enable_double_buffer=False):
     """Receiver process: receive weights, send back via shared memory."""
     from multiprocessing import shared_memory
 
@@ -88,6 +89,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
         zmq_handle=zmq_handle,
         device=device,
         use_shm=use_shm,
+        enable_double_buffer=enable_double_buffer,
     )
     received = []
     receiver.receive_weights(on_bucket_received=lambda w: received.extend(w))
@@ -111,7 +113,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
 # ---------------------------------------------------------------------------
 # Test helper
 # ---------------------------------------------------------------------------
-def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
+def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm, enable_double_buffer=False):
     """Spawn sender + receiver processes, then validate received tensors."""
     from multiprocessing import shared_memory
 
@@ -124,11 +126,11 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 
     sender_p = ctx.Process(
         target=_sender_fn,
-        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm),
+        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, enable_double_buffer),
     )
     receiver_p = ctx.Process(
         target=_receiver_fn,
-        args=(zmq_handle, use_shm, result_queue),
+        args=(zmq_handle, use_shm, result_queue, enable_double_buffer),
     )
 
     # Start sender first (it binds), then receiver (it connects)
@@ -345,3 +347,72 @@ class TestBucketedWeightTransferIPC:
             ("large_fp32", (1024, 512), torch.float32),
         ]
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+
+# ---------------------------------------------------------------------------
+# Double buffer tests - Shared memory
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not (HAS_ACCELERATOR and not HAS_CUDA), reason="Requires shm (only tested on non-CUDA)")
+class TestBucketedWeightTransferSHMDoubleBuffer:
+    """Test BucketedWeightSender/Receiver with double buffer enabled via shared memory path."""
+
+    def test_single_small_weight(self):
+        specs = [("layer.weight", (32, 16), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, enable_double_buffer=True)
+
+    def test_multiple_buckets(self):
+        # ~64 KB each x 20 = ~1.25 MB, bucket = 1 MB => spans 2 buckets
+        specs = [(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, enable_double_buffer=True)
+
+    def test_large_tensor_chunked(self):
+        """Test a single tensor larger than bucket_size gets chunked correctly with double buffer."""
+        # 1 MB bucket; create a tensor that's ~3.5 MB (needs 4 chunks)
+        numel = (int(3.5 * (1 << 20))) // 4
+        specs = [("huge_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, enable_double_buffer=True)
+
+    def test_mixed_small_and_chunked_weights(self):
+        """Test a mix of normal weights and chunked large weights with double buffer."""
+        # 1 MB bucket
+        specs = [
+            ("small.weight", (64, 64), torch.float32),  # ~16 KB
+            ("large.weight", (1024, 512), torch.float32),  # ~2 MB (chunked)
+            ("another_small.bias", (128,), torch.float32),  # ~512 bytes
+            ("huge.weight", (2048, 512), torch.float32),  # ~4 MB (chunked)
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, enable_double_buffer=True)
+
+
+# ---------------------------------------------------------------------------
+# Double buffer tests - CUDA IPC
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not is_support_ipc(), reason="Requires IPC support")
+class TestBucketedWeightTransferIPCDoubleBuffer:
+    """Test BucketedWeightSender/Receiver with double buffer enabled via CUDA IPC path."""
+
+    def test_single_small_weight(self):
+        specs = [("layer.weight", (32, 16), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, enable_double_buffer=True)
+
+    def test_multiple_buckets(self):
+        specs = [(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, enable_double_buffer=True)
+
+    def test_large_tensor_chunked(self):
+        """Test a single tensor larger than bucket_size gets chunked correctly with double buffer."""
+        # 1 MB bucket; create a tensor that's ~3.5 MB (needs 4 chunks)
+        numel = (int(3.5 * (1 << 20))) // 4
+        specs = [("huge_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, enable_double_buffer=True)
+
+    def test_mixed_small_and_chunked_weights(self):
+        """Test a mix of normal weights and chunked large weights with double buffer."""
+        # 1 MB bucket
+        specs = [
+            ("small.weight", (64, 64), torch.float32),  # ~16 KB
+            ("large.weight", (1024, 512), torch.float32),  # ~2 MB (chunked)
+            ("another_small.bias", (128,), torch.float32),  # ~512 bytes
+            ("huge.weight", (2048, 512), torch.float32),  # ~4 MB (chunked)
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, enable_double_buffer=True)

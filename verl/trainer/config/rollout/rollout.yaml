@@ -272,6 +272,9 @@ checkpoint_engine:
   # when using Tensor Parallelism (TP) >= 8.
   update_weights_bucket_megabytes: 2048
 
+  # Enable double buffer optimization for naive weight transfer
+  enable_double_buffer: false
+
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
 
