@@ -29,7 +29,7 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
-from verl.workers.rollout.utils import qwen2_5_vl_dedup_image_tokens, get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)

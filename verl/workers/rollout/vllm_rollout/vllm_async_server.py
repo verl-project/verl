@@ -42,13 +42,12 @@ from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
     SuppressSignalInThread,
-    qwen2_5_vl_dedup_image_tokens,
     build_cli_args_from_config,
     get_vllm_max_lora_rank,
 )
