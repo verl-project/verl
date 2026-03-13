@@ -1639,7 +1639,9 @@ class CriticWorker(Worker, DistProfilerExtension):
         else:
             dp_group = torch.distributed.group.WORLD
         self.critic = DataParallelPPOCritic(
-            config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer,
+            config=self.config,
+            critic_module=self.critic_module,
+            critic_optimizer=self.critic_optimizer,
             dp_group=dp_group,
         )
 
