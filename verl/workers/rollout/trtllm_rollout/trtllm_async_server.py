@@ -16,6 +16,7 @@ import logging
 import os
 from typing import Any, Optional
 
+import numpy as np
 import ray
 import torch
 from omegaconf import DictConfig
@@ -30,10 +31,10 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
-import numpy as np
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
 
 def _qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
@@ -53,7 +54,8 @@ def _qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
         return prompt_ids[mask].tolist()
     else:
         return prompt_ids
-    
+
+
 @ray.remote
 class TRTLLMHttpServer:
     """TensorRT LLM HTTP server in single node.
@@ -224,8 +226,9 @@ class TRTLLMHttpServer:
 
         self.llm = await AsyncLLM(**llm_kwargs)
         import inspect
+
         init_params = inspect.signature(OpenAIServer.__init__).parameters
-        if 'generator' in init_params:
+        if "generator" in init_params:
             trtllm_server = OpenAIServer(
                 generator=self.llm,
                 model=self.model_config.local_path,
@@ -426,12 +429,7 @@ class TRTLLMReplica(RolloutReplica):
                 node_id=node_id,
                 soft=False,
             ),
-            runtime_env={
-                "env_vars": {
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    "NCCL_CUMEM_ENABLE": "0"
-                }
-            },
+            runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1", "NCCL_CUMEM_ENABLE": "0"}},
             name=name,
             max_concurrency=self.max_concurrency,
         ).remote(
