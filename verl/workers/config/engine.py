@@ -20,7 +20,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 
 from ...utils.profiler import ProfilerConfig
-from .model import HFModelConfig
+from .model import DiffusersModelConfig, HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
@@ -399,7 +399,7 @@ class TorchtitanEngineConfig(EngineConfig):
 @dataclass
 class TrainingWorkerConfig(BaseConfig):
     model_type: str = None  # model type (language_model/value_model)
-    model_config: HFModelConfig = None
+    model_config: HFModelConfig | DiffusersModelConfig = None
     engine_config: EngineConfig = None
     optimizer_config: OptimizerConfig = None
     checkpoint_config: CheckpointConfig = None

@@ -108,6 +108,7 @@ class AdvantageEstimator(str, Enum):
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
     TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
     GDPO = "gdpo"
+    FLOW_GRPO = "flow_grpo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -2062,6 +2063,56 @@ def compute_policy_loss_cispo(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("flow_grpo")
+def compute_policy_loss_flow_grpo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """
+    Compute the clipped policy objective and related metrics for FlowGRPO.
+    Adapted from
+    https://github.com/yifan123/flow_grpo/blob/main/scripts/train_sd3_fast.py#L885
+    Args:
+        old_log_prob (torch.Tensor):
+            Log-probabilities of actions under the old policy, shape (batch_size,).
+        log_prob (torch.Tensor):
+            Log-probabilities of actions under the current policy, shape (batch_size,).
+        response_mask (torch.Tensor):
+            Not used currently.
+        loss_agg_mode (str, optional):
+            Not used currently.
+        advantages (torch.Tensor):
+            Advantage estimates for each action, shape (batch_size,).
+        config: `(verl.trainer.config.ActorConfig)`:
+            config for the actor.
+        rollout_is_weights: `torch.Tensor, optional)`:
+            Not used currently.
+    """
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    advantages = torch.clamp(
+        advantages,
+        -config.clip_ratio_high,
+        config.clip_ratio_high,
+    )
+    ratio = torch.exp(log_prob - old_log_prob)
+    unclipped_loss = -advantages * ratio
+    clipped_loss = -advantages * torch.clamp(
+        ratio,
+        1.0 - config.clip_ratio,
+        1.0 + config.clip_ratio,
+    )
+    pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+
+    pg_metrics = {"actor/ppo_kl": pg_loss.detach().item()}
+    return pg_loss, pg_metrics
+
+
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
     """Compute categorical entropy loss (For backward compatibility)
 
@@ -2183,6 +2234,19 @@ def kl_penalty_forward(logprob: torch.FloatTensor, ref_logprob: torch.FloatTenso
         raise NotImplementedError
 
     raise NotImplementedError
+
+
+def kl_penalty_image(
+    prev_sample_mean: torch.Tensor, ref_prev_sample_mean: torch.Tensor, std_dev_t: torch.Tensor
+) -> torch.Tensor:
+    """Compute KL divergence given previous sample mean and reference previous sample mean (for images or videos).
+    Args:
+        prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
+        ref_prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
+        std_dev_t: (torch.Tensor) shape is (bs, 1, 1)
+    """
+    kl_loss = ((prev_sample_mean - ref_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t**2)
+    return kl_loss.mean()
 
 
 def compute_pf_ppo_reweight_data(

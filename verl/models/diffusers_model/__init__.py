@@ -1,4 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,14 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .transformer_impl import FSDPEngine, FSDPEngineWithLMHead
+from .utils import forward_and_sample_previous_step, set_timesteps
 
-__all__ = ["FSDPEngine", "FSDPEngineWithLMHead"]
-
-
-try:
-    from .diffusers_impl import DiffusersFSDPEngine
-
-    __all__ += ["DiffusersFSDPEngine"]
-except ImportError:
-    DiffusersFSDPEngine = None
+__all__ = ["set_timesteps", "forward_and_sample_previous_step"]

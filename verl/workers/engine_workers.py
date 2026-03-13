@@ -97,8 +97,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # we use the one defined in model
         # TODO: this is not elegant and should refactor later
-        self.engine_config.use_remove_padding = self.model_config.use_remove_padding
-        self.engine_config.use_fused_kernels = self.model_config.use_fused_kernels
+        self.engine_config.use_remove_padding = self.model_config.get("use_remove_padding", False)
+        self.engine_config.use_fused_kernels = self.model_config.get("use_fused_kernels", False)
 
         # TODO: add DistProfilerExtension
         self.profiler_config = self.config.profiler_config
@@ -127,7 +127,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             is_collect=self.engine.is_mp_src_rank_with_outputs(),
         )
 
-        self.flops_counter = FlopsCounter(self.model_config.hf_config)
+        if hasattr(self.model_config, "hf_config"):
+            self.flops_counter = FlopsCounter(self.model_config.hf_config)
+        else:
+            # for Diffusion models, FlopsCounter is not supported yet.
+            self.flops_counter = None
 
         self.loss_fn = None
 
@@ -198,7 +202,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
-        if global_token_num is not None:
+        if global_token_num is not None and self.flops_counter is not None:
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                 global_token_num, delta_time, images_seqlens=images_seqlens
             )
@@ -260,13 +264,17 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
                 # add global token num
-                global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
-                # allgather from dp rank
-                global_token_num_output = [None] * self.engine.get_data_parallel_size()
-                torch.distributed.all_gather_object(
-                    global_token_num_output, global_token_num, self.engine.get_data_parallel_group()
-                )
-                global_token_num = [x for xs in global_token_num_output for x in xs]
+                if "input_ids" in mini_batch_td:
+                    global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
+                    # allgather from dp rank
+                    global_token_num_output = [None] * self.engine.get_data_parallel_size()
+                    torch.distributed.all_gather_object(
+                        global_token_num_output, global_token_num, self.engine.get_data_parallel_group()
+                    )
+                    global_token_num = [x for xs in global_token_num_output for x in xs]
+                else:
+                    global_token_num = None
+
                 tu.assign_non_tensor(
                     mini_batch_td,
                     global_token_num=NonTensorData(global_token_num),
@@ -306,7 +314,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # inject engineering parameters if not specified
         default_keys = dict(
-            use_remove_padding=self.model_config.use_remove_padding,
+            use_remove_padding=self.model_config.get("use_remove_padding", False),
             use_dynamic_bsz=self.engine_config.use_dynamic_bsz,
             max_token_len_per_gpu=self.engine_config.max_token_len_per_gpu,
             micro_batch_size_per_gpu=self.engine_config.micro_batch_size_per_gpu,
@@ -360,7 +368,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
 
         default_keys = dict(
-            use_remove_padding=self.model_config.use_remove_padding,
+            use_remove_padding=self.model_config.get("use_remove_padding", False),
             use_dynamic_bsz=self.engine_config.use_dynamic_bsz,
             max_token_len_per_gpu=self.engine_config.infer_max_token_len_per_gpu,
             micro_batch_size_per_gpu=self.engine_config.infer_micro_batch_size_per_gpu,

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -24,7 +25,7 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
-__all__ = ["HFModelConfig", "MtpConfig"]
+__all__ = ["HFModelConfig", "MtpConfig", "DiffusersModelConfig"]
 
 
 @dataclass
@@ -204,6 +205,95 @@ class HFModelConfig(BaseConfig):
         # per model patch
         if getattr(self.hf_config, "model_type", None) == "kimi_vl":
             self.hf_config.text_config.topk_method = "greedy"
+
+        # Ensure target_modules is a str or list[str] (only if not None)
+        if self.target_modules is not None:
+            if not isinstance(self.target_modules, (str | list)):
+                raise TypeError(
+                    "target_modules must be a string or a list of strings, "
+                    f"but got {type(self.target_modules).__name__}"
+                )
+            if isinstance(self.target_modules, list):
+                for x in self.target_modules:
+                    if not isinstance(x, str):
+                        raise TypeError(
+                            f"All elements in target_modules list must be strings, but found {type(x).__name__}"
+                        )
+
+    def get_processor(self):
+        return self.processor if self.processor is not None else self.tokenizer
+
+
+@dataclass
+class DiffusersModelConfig(BaseConfig):
+    _mutable_fields = {
+        "tokenizer_path",
+        "tokenizer",
+        "processor",
+        "local_path",
+        "local_tokenizer_path",
+    }
+
+    path: str = MISSING
+    local_path: Optional[str] = None
+    tokenizer_path: Optional[str] = None
+    local_tokenizer_path: Optional[str] = None
+    model_type: str = "diffusion_model"
+
+    # whether to load tokenizer. This is useful when we only want to load model config
+    load_tokenizer: bool = True
+
+    tokenizer: Any = None
+    processor: Any = None
+
+    # whether to use shared memory
+    use_shm: bool = False
+    trust_remote_code: bool = False
+
+    # custom chat template for the model
+    custom_chat_template: Optional[str] = None
+
+    external_lib: Optional[str] = None
+
+    enable_gradient_checkpointing: bool = True
+
+    # lora related.
+    lora_rank: int = 32
+    lora_alpha: int = 64
+    lora_init_weights: str = "gaussian"
+    target_modules: Optional[Any] = "all-linear"  # allow both "all-linear" and ["q_proj","k_proj"]
+    target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
+    exclude_modules: Optional[str] = None
+    lora_adapter_path: Optional[str] = None
+
+    # commonly used sampling parameters for diffusion config.
+    height: int = 512
+    width: int = 512
+    num_inference_steps: int = 10
+    guidance_scale: float = 4.5
+
+    # extra configs for algorithm specific features.
+    extra_configs: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        import_external_libs(self.external_lib)
+        if self.tokenizer_path is None:
+            self.tokenizer_path = os.path.join(self.path, "tokenizer")
+        self.local_path = copy_to_local(self.path, use_shm=self.use_shm)
+
+        # construct tokenizer
+        if self.load_tokenizer:
+            self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
+            # see issue https://github.com/huggingface/tokenizers/issues/537, we use a non-fast tokenizer here
+            self.tokenizer = hf_tokenizer(
+                self.local_tokenizer_path, trust_remote_code=self.trust_remote_code, use_fast=False
+            )
+            if os.path.exists(os.path.join(self.local_path, "processor")):
+                self.processor = hf_processor(
+                    os.path.join(self.local_path, "processor"), trust_remote_code=self.trust_remote_code
+                )
+            else:
+                self.processor = None
 
         # Ensure target_modules is a str or list[str] (only if not None)
         if self.target_modules is not None:
