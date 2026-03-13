@@ -22,9 +22,10 @@ from types import MethodType
 from typing import Any, Literal, get_args
 
 import torch
+from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl.utils.device import is_npu_available
-from verl.utils.vllm import TensorLoRARequest, VLLMHijack
+from verl.utils.vllm import OmniTensorLoRARequest, TensorLoRARequest, VLLMHijack, VLLMOmniHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
 
@@ -228,6 +229,81 @@ class vLLMColocateWorkerExtension:
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
                 self.model_runner.model.load_weights(weights)
+
+    def _get_zmq_handle(self) -> str:
+        """Get ZMQ handle for communication."""
+        if not hasattr(self, "device_uuid") or not self.device_uuid:
+            self.device_uuid = get_device_uuid(self.device.index)
+        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+
+
+class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
+    """
+    The class for vLLM-Omni's worker to inherit from, in the colocate setting.
+    By defining an extension class, the code can work no matter what is
+    the underlying worker class. This way, the code can be compatible
+    with both vLLM V0 and V1.
+    NOTE: we define this class in a separate module, and the main module
+    should pass the full qualified name as `worker_extension_cls` argument.
+
+    Feature support:
+    1. LoRA
+    """
+
+    def __new__(cls, **kwargs):
+        set_death_signal()
+
+        # 1. patch for Lora
+        VLLMOmniHijack.hijack()
+
+        # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
+        # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
+        # This is only a fix for vllm version < v0.13.0.
+        if is_npu_available:
+            raise NotImplementedError("vLLMOmniColocateWorkerExtension is not supported on NPU currently.")
+
+        return super().__new__(cls)
+
+    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+        """Update the weights of the rollout model."""
+        from vllm.platforms import current_platform
+
+        from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
+
+        if current_platform.device_type == "npu" and self.device is None:
+            self.device = torch.device(f"npu:{self.local_rank}")
+
+        # In async mode, make sure the old lora is removed before adding the new one
+        if peft_config and base_sync_done:
+            self.remove_lora(VLLM_LORA_INT_ID)
+
+        assert self.device is not None
+        receiver = BucketedWeightReceiver(
+            zmq_handle=self._get_zmq_handle(),
+            device=self.device,
+            use_shm=use_shm,
+        )
+        receiver.receive_weights(
+            on_bucket_received=lambda weights: self._update_weights(
+                weights, peft_config=peft_config, base_sync_done=base_sync_done
+            )
+        )
+
+    def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
+        if peft_config and base_sync_done:
+            weights = dict(weights)
+            lora_request = OmniTensorLoRARequest(
+                lora_name=VLLM_LORA_NAME,
+                lora_int_id=VLLM_LORA_INT_ID,
+                lora_path=VLLM_LORA_PATH,
+                peft_config=peft_config,
+                lora_tensors=weights,
+            )
+            self.add_lora(lora_request)
+            logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
+        else:
+            logger.info("Loading standard weights (async)")
+            self.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""
