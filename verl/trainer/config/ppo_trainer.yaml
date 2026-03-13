@@ -296,8 +296,21 @@ global_profiler:
 # configs for TransferQueue
 transfer_queue:
 
-  # Whether to enable transfer queue
+  # Whether to enable TransferQueue
   enable: False
+
+  # Pluggable storage/transport backend of TransferQueue
+  backend:
+
+    # SimpleStorage with ZeroMQ
+    storage_backend: SimpleStorage
+
+    SimpleStorage:
+        # Total number of samples
+        total_storage_size: 100000
+
+        # Number of distributed storage units
+        num_data_storage_units: 8
 
 # configs related to ray
 ray_kwargs:

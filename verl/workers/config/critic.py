@@ -60,6 +60,7 @@ class CriticConfig(BaseConfig):
         "ppo_mini_batch_size",
         "ppo_micro_batch_size",
         "model_config",
+        "engine",
     }
 
     strategy: str = MISSING
@@ -202,6 +203,7 @@ class FSDPCriticConfig(CriticConfig):
     def __post_init__(self):
         """Validate FSDP critic configuration parameters."""
         super().__post_init__()
+        self.engine = self.model.fsdp_config
 
         if self.strategy in {"fsdp", "fsdp2"}:
             if self.ulysses_sequence_parallel_size > 1:

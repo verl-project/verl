@@ -42,6 +42,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
+from verl.utils.transferqueue_utils import tqbridge
 from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
@@ -218,6 +219,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": final_metrics})
         return final_output
 
+    @tqbridge(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"))
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def train_mini_batch(self, data: TensorDict) -> TensorDict:
         """Split a batch into N mini-batches run for multiple epochs
@@ -357,6 +359,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         return final_output
 
+    @tqbridge(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"))
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
         # add mfu calculator
@@ -586,6 +589,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
         aggressive_empty_cache(force_sync=True)
 
+    @tqbridge(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
@@ -593,6 +597,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
+    @tqbridge(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
@@ -601,6 +606,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return output.cpu() if output is not None else None
 
+    @tqbridge(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
