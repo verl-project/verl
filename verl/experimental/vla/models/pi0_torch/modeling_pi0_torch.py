@@ -361,31 +361,6 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
 
         return a0_hat, None
 
-    def _encode_critic_image_features(
-        self,
-        raw_images: torch.Tensor,
-        raw_image_masks: torch.Tensor,
-        use_target_network: bool,
-        requires_grad: bool,
-    ) -> torch.Tensor:
-        image_encoder = self.target_image_encoder if use_target_network else self.critic_image_encoder
-        for p in image_encoder.parameters():
-            p.requires_grad_(requires_grad)
-
-        batch_size, num_images, channels, height, width = raw_images.shape
-        flat_images = raw_images.reshape(batch_size * num_images, channels, height, width)
-        flat_images = flat_images.float()
-        if flat_images.max().item() > 1.5:
-            flat_images = flat_images / 255.0
-
-        encoded = image_encoder(flat_images)
-        encoded = encoded.reshape(batch_size, num_images, -1)
-
-        masks = raw_image_masks.to(encoded.device).to(encoded.dtype).unsqueeze(-1)
-        denom = masks.sum(dim=1).clamp_min(1.0)
-        pooled = (encoded * masks).sum(dim=1) / denom
-        return pooled
-
     @override
     def sac_forward_critic(
         self,
@@ -417,8 +392,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
     @override
     def sac_get_critic_parameters(self) -> list[torch.nn.Parameter]:
         critic_head_params = [p for head in self.critic_heads for p in head.parameters()]
-        critic_image_encoder_params = list(self.critic_image_encoder.parameters())
-        return critic_head_params + critic_image_encoder_params
+        return critic_head_params
 
     @override
     def sac_get_named_actor_parameters(self) -> list[tuple[str, torch.nn.Parameter]]:
