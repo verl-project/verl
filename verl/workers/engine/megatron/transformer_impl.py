@@ -57,7 +57,7 @@ from verl.utils.megatron_utils import (
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
 from verl.utils.seqlen_balancing import restore_dynamic_batch
-from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig, DistillationConfig
+from verl.workers.config import DistillationConfig, HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import postprocess_batch_func, prepare_micro_batches
