@@ -283,6 +283,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
         internal = await AgentLoopWorker._agent_loop_postprocess(
             _DummyWorker(),
             output,
+            validate=False,
             raw_prompt=[{"role": "user", "content": "hi"}],
         )
 
