@@ -22,7 +22,10 @@ from verl.workers.config import DiffusersModelConfig
 
 
 class DiffusionModelBase(ABC):
-    """Since the forward and sampling process of different diffusion models can be quite different,
+    """
+    Helper class to define the commonly used methods for diffusion model training.
+
+    Since the forward and sampling process of different diffusion models can be quite different,
     we define an abstract base class for diffusion models to implement their own forward and sampling process.
     Users can check the implementation of QwenImage for reference.
     """
@@ -30,7 +33,10 @@ class DiffusionModelBase(ABC):
     @classmethod
     @abstractmethod
     def set_timesteps(cls, scheduler: SchedulerMixin, model_config: DiffusersModelConfig, device: str):
-        """Abstract method for setting timesteps and sigmas for diffusion model schedulers."""
+        """
+        Abstract method for setting timesteps and sigmas for diffusion model schedulers during model init,
+        and move the timesteps and sigmas to the correct device.
+        """
         raise NotImplementedError
 
     @classmethod
@@ -45,5 +51,6 @@ class DiffusionModelBase(ABC):
         negative_model_inputs: Optional[dict],
         step: int,
     ):
-        """Abstract method for forwarding the model and sampling previous step."""
+        """Abstract method for forwarding the model and sampling previous step.
+        It is usually used for RL-algorithms based on reversed-sampling process."""
         raise NotImplementedError
