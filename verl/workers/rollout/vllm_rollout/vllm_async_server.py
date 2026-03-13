@@ -633,8 +633,8 @@ class vLLMHttpServer:
         max_possible_tokens = self.config.max_model_len - len(input_ids)
         if max_possible_tokens < 0:
             raise ValueError(
-                f"Prompt + response length ({len(prompt_ids)} + {len(response_ids)} = {len(input_ids)}) exceeds the model's maximum context length "
-                f"({self.config.max_model_len})."
+                f"Prompt + response length ({len(prompt_ids)} + {len(response_ids)} = {len(input_ids)})"
+                f" exceeds the model's maximum context length ({self.config.max_model_len})."
             )
 
         use_topk = logprob_params["use_topk"]
