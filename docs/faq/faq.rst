@@ -1,7 +1,10 @@
 Frequently Asked Questions
 ====================================
 
-Last updated: 09/24/2025.
+Last updated: 12/30/2025.
+
+.. note::
+   For memory-related issues (GPU OOM, CPU OOM), see the dedicated :doc:`resolving_oom` guide.
 
 Ray related
 ------------
