@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import json
 import os
+from io import BytesIO
 
 import aiohttp
+import numpy as np
+import torch
 from openai.types.chat import ChatCompletion
+from PIL import Image
 from transformers import PreTrainedTokenizer
 
 GRM_PROMPT_TEMPLATE = """
@@ -98,3 +103,86 @@ def compute_score_math_verify(
         model_output=solution_str,
         ground_truth=ground_truth,
     )
+
+
+def _pil_image_to_base64(image: Image.Image) -> str:
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    encoded_image_text = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    base64_image = f"data:image;base64,{encoded_image_text}"
+    return base64_image
+
+
+async def compute_score_ocr(
+    data_source: str,
+    solution_image: Image.Image | np.ndarray | torch.Tensor,
+    ground_truth: str,
+    extra_info: dict,
+    reward_router_address: str,
+    reward_model_tokenizer: PreTrainedTokenizer = None,
+    model_name: str = None,
+):
+    """Compute the reward score."""
+    import re
+
+    import Levenshtein
+
+    from verl.utils.ray_utils import get_event_loop
+
+    # preprocess image to base64
+    image = solution_image
+    if isinstance(image, torch.Tensor):
+        image = image.float().permute(1, 2, 0).cpu().numpy()
+    if isinstance(image, np.ndarray):
+        assert image.shape[-1] == 3, "must be in HWC format"
+        image = (image * 255).round().clip(0, 255).astype(np.uint8)
+        image = Image.fromarray(image)
+    assert isinstance(image, Image.Image)
+
+    image_base64 = await get_event_loop().run_in_executor(None, _pil_image_to_base64, image)
+
+    # prepare chat template
+    grm_prompt = "Please output only the text content from the image without any additional descriptions or formatting."
+    query = [
+        {
+            "type": "image_url",
+            "image_url": {"url": image_base64},
+        },
+        {"type": "text", "text": grm_prompt},
+    ]
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {
+            "role": "user",
+            "content": query,
+        },
+    ]
+
+    sampling_params = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 4096}
+    model_name = model_name or os.path.expanduser("~/models/Qwen/Qwen2.5-VL-3B-Instruct")
+    chat_complete_request = {
+        "messages": messages,
+        "model": model_name,
+        **sampling_params,
+    }
+    result = await chat_complete(
+        router_address=reward_router_address,
+        chat_complete_request=chat_complete_request,
+    )
+    grm_response = result.choices[0].message.content
+
+    # compute OCR score
+    text = grm_response
+    # remove any nonvisible characters and convert to lowercase
+    gt = re.sub(r"\s+", "", ground_truth).lower()
+    text = re.sub(r"\s+", "", text).lower()
+    if gt in text:
+        dist = 0
+    else:
+        dist = Levenshtein.distance(text, gt)
+
+    # recognized many unrelated characters, only add one character penalty
+    dist = min(dist, len(gt))
+    score = 1 - dist / len(gt)
+
+    return {"score": score, "acc": score == 1, "genrm_response": grm_response}

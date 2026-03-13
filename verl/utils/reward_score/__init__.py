@@ -114,6 +114,47 @@ def default_compute_score(
         return float(res[0])
 
 
+def default_compute_score_image(
+    data_source,
+    solution_image,
+    ground_truth,
+    extra_info=None,
+    sandbox_fusion_url=None,
+    concurrent_semaphore=None,
+    memory_limit_mb=None,
+    **kwargs,
+):
+    """Compute the score for a given solution based on the data source.
+
+    Args:
+        data_source (str): The source dataset identifier which determines the scoring method.
+        solution_image (Image.Image or torch.Tensor): The solution image to be evaluated.
+        ground_truth (str): The ground truth answer for comparison.
+        extra_info (dict, optional): Additional information that might be needed for scoring. Defaults to None.
+
+    Returns:
+        float: The computed score as a floating point number. If the result is a dictionary,
+               it returns the dictionary instead.
+
+    Raises:
+        NotImplementedError: If the reward function is not implemented for the given data source.
+    """
+    if data_source == "jpeg_compressibility":
+        from . import jpeg_compressibility
+
+        res = jpeg_compressibility.compute_score(solution_image)
+
+    else:
+        raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
+
+    if isinstance(res, dict):
+        return res
+    elif isinstance(res, int | float | bool):
+        return float(res)
+    else:
+        return float(res[0])
+
+
 @deprecated("verl.utils.reward_score.default_compute_score")
 def _default_compute_score(
     data_source,

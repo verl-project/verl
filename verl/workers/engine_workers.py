@@ -42,7 +42,14 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import (
+    ActorConfig,
+    DiffusersModelConfig,
+    DiffusionRolloutConfig,
+    HFModelConfig,
+    RolloutConfig,
+    TrainingWorkerConfig,
+)
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -134,7 +141,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
             is_collect=self.engine.is_mp_src_rank_with_outputs(),
         )
 
-        self.flops_counter = FlopsCounter(self.model_config.hf_config)
+        if hasattr(self.model_config, "hf_config"):
+            self.flops_counter = FlopsCounter(self.model_config.hf_config)
+        else:
+            self.flops_counter = None  # TODO: add diffusion flops counter later
 
         self.loss_fn = None
 
@@ -205,7 +215,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
-        if global_token_num is not None:
+        if global_token_num is not None and self.flops_counter is not None:
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                 global_token_num, delta_time, images_seqlens=images_seqlens
             )
@@ -267,7 +277,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
                 # add global token num
-                global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
+                if mini_batch_td["input_ids"].is_nested:
+                    global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
+                else:
+                    global_token_num = torch.sum(mini_batch_td["attention_mask"], dim=-1).tolist()
                 # allgather from dp rank
                 global_token_num_output = [None] * self.engine.get_data_parallel_size()
                 torch.distributed.all_gather_object(
@@ -467,7 +480,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
+        model_config: HFModelConfig | DiffusersModelConfig = omega_conf_to_dataclass(self.config.model)
 
         # 1. build reference model
         if "ref" in self.role:
@@ -484,8 +497,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_config.model_config = model_config
 
             # construct TrainingWorkerConfig
+            model_type = model_config.get("model_type", "language_model")
             ref_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=model_type,
                 model_config=ref_config.model_config,
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
@@ -508,8 +522,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+            model_type = model_config.get("model_type", "language_model")
             actor_training_config = TrainingWorkerConfig(
-                model_type="language_model",
+                model_type=model_type,
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
@@ -547,7 +562,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 3. build rollout engine
         if "rollout" in self.role:
-            rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
+            rollout_config: RolloutConfig | DiffusionRolloutConfig = omega_conf_to_dataclass(self.config.rollout)
 
             # TODO: move rollout_device_mesh into ServerAdapter
             # 3.1 build rollout device mesh (sglang need only)
