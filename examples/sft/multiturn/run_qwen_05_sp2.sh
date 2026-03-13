@@ -13,7 +13,7 @@ save_path=$2
 shift 2
 
 torchrun --nnodes=1 --nproc_per_node=$nproc_per_node \
-     -m verl.trainer.fsdp_sft_trainer \
+     -m verl.trainer.sft_trainer \
     data.train_files=$HOME/data/multiturn/train.parquet \
     data.val_files=$HOME/data/multiturn/test.parquet \
     data.multiturn.enable=true \

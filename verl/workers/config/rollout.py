@@ -80,6 +80,8 @@ class AgentLoopConfig(BaseConfig):
 
 @dataclass
 class TraceConfig(BaseConfig):
+    project_name: Optional[str] = None
+    experiment_name: Optional[str] = None
     backend: Optional[str] = None
     token2text: bool = False
     max_samples_per_step_per_worker: Optional[int] = None
@@ -125,7 +127,7 @@ class CheckpointEngineConfig(BaseConfig):
     """
 
     # Backend for checkpoint engine: naive, nccl, nixl, hccl
-    backend: Optional[str] = MISSING
+    backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
     # Additional keyword arguments for checkpoint engine
@@ -134,10 +136,12 @@ class CheckpointEngineConfig(BaseConfig):
 
 @dataclass
 class RolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format"}
+    _mutable_fields = {"max_model_len", "load_format", "expert_parallel_size", "moe_tensor_parallel_size"}
 
     name: Optional[str] = MISSING
     mode: str = "async"
+    nnodes: int = 0
+    n_gpus_per_node: int = 8
 
     temperature: float = 1.0
     top_k: int = -1
@@ -163,6 +167,7 @@ class RolloutConfig(BaseConfig):
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
     pipeline_model_parallel_size: int = 1
+    moe_tensor_parallel_size: int = 1
     max_num_batched_tokens: int = 8192
     logprobs_mode: Optional[str] = "processed_logprobs"
     scheduling_policy: Optional[str] = "fcfs"
@@ -238,6 +243,8 @@ class RolloutConfig(BaseConfig):
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
+    qat: Optional[dict] = None
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported
@@ -254,10 +261,30 @@ class RolloutConfig(BaseConfig):
                 stacklevel=2,
             )
 
-        if self.expert_parallel_size > 1:
+        if self.name != "trtllm" and self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"
             )
+
+        if self.moe_tensor_parallel_size is not None and self.moe_tensor_parallel_size > 1:
+            assert self.name == "trtllm", "moe_tensor_parallel_size is only supported for trtllm"
+
+        if self.name == "trtllm":
+            # If either expert_parallel_size or moe_tensor_parallel_size is at default 1,
+            # convert to None so TensorRT-LLM treats it as unspecified.
+            # When both unspecified: moe_ep_size=1, moe_tp_size=moe_world_size (no EP, all TP).
+            # When only one set: the other is auto-derived from tensor_model_parallel_size.
+            if self.expert_parallel_size is not None and self.expert_parallel_size == 1:
+                self.expert_parallel_size = None
+            if self.moe_tensor_parallel_size is not None and self.moe_tensor_parallel_size == 1:
+                self.moe_tensor_parallel_size = None
+            if self.expert_parallel_size is not None and self.moe_tensor_parallel_size is not None:
+                assert self.moe_tensor_parallel_size * self.expert_parallel_size == self.tensor_model_parallel_size, (
+                    "moe_tensor_parallel_size * expert_parallel_size must equal tensor_model_parallel_size "
+                    f"(got {self.moe_tensor_parallel_size} * {self.expert_parallel_size} = "
+                    f"{self.moe_tensor_parallel_size * self.expert_parallel_size}, "
+                    f"tensor_model_parallel_size={self.tensor_model_parallel_size})"
+                )
 
         if self.pipeline_model_parallel_size > 1:
             if self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":

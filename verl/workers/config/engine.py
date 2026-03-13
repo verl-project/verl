@@ -27,9 +27,11 @@ __all__ = [
     "FSDPEngineConfig",
     "McoreEngineConfig",
     "TrainingWorkerConfig",
+    "TorchtitanEngineConfig",
     "VeOmniEngineConfig",
     "EngineConfig",
     "EngineRouterReplayConfig",
+    "QATEngineConfig",
 ]
 
 
@@ -73,6 +75,8 @@ class EngineConfig(BaseConfig):
         "infer_micro_batch_size_per_gpu",
         "use_fused_kernels",
         "use_remove_padding",
+        "forward_only",
+        "param_offload",
     }
     # whether to offload param
     param_offload: bool = False
@@ -177,6 +181,27 @@ class McoreEngineConfig(EngineConfig):
 
 
 @dataclass
+class QATEngineConfig(BaseConfig):
+    """Configuration for QAT (Quantization-Aware Training) within an engine.
+
+    Args:
+        enable (bool): Whether to enable QAT, default False
+        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
+        group_size (int): Group size for blockwise quantization, default 16
+        ignore_patterns (list[str]): Module name patterns to exclude from quantization
+        activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
+        quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
+    """
+
+    enable: bool = False
+    mode: str = "w4a16"
+    group_size: int = 16
+    ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
+    activation_observer: str = "static_minmax"
+    quantization_config_path: Optional[str] = None
+
+
+@dataclass
 class FSDPEngineConfig(EngineConfig):
     """Configuration for FSDP (Fully Sharded Data Parallel).
 
@@ -198,6 +223,7 @@ class FSDPEngineConfig(EngineConfig):
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
+        qat (QATEngineConfig): QAT configuration, default disabled
     """
 
     # ulysses_sequence_parallel_size is mutable for backward compatibility
@@ -217,6 +243,7 @@ class FSDPEngineConfig(EngineConfig):
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "fsdp"
+    qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self):
         super().__post_init__()
@@ -235,15 +262,9 @@ class VeOmniEngineConfig(EngineConfig):
         optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
         offload_policy (bool): Whether to offload policy model parameters, default False
         reshard_after_forward (bool): Whether to reshard parameters after forward pass, default True
-        data_parallel_size (int): FSDP group size, default 1
-        data_parallel_replicate_size (int): Data parallel replicate size, default 1
-        data_parallel_shard_size (int): Data parallel shard degree, default 1
-        tensor_parallel_size (int): Tensor parallel size, default 1
-        expert_parallel_size (int): Expert parallel size, default 1
-        pipeline_parallel_size (int): Pipeline parallel size, default 1
-        context_parallel_size (int): Ring-attn context parallel size, default 1
+        fsdp_size (int): FSDP group size. -1 means use all available GPUs, default -1
         ulysses_parallel_size (int): Ulysses sequence parallel size, default 1
-        data_parallel_mode (str): Data parallel mode, default "fsdp"
+        expert_parallel_size (int): Expert parallel size, default 1
         init_device (str): Device to initialize model weights.
             1. `cpu`: Init parameters on CPU in rank0 only.
             2. `cuda`: Init parameters on GPU.
@@ -292,15 +313,9 @@ class VeOmniEngineConfig(EngineConfig):
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "veomni"
-    data_parallel_size: int = 1
-    data_parallel_replicate_size: int = 1
-    data_parallel_shard_size: int = 1
-    tensor_parallel_size: int = 1
-    expert_parallel_size: int = 1
-    pipeline_parallel_size: int = 1
-    context_parallel_size: int = 1
+    fsdp_size: int = -1
     ulysses_parallel_size: int = 1
-    data_parallel_mode: Literal["ddp", "fsdp1", "fsdp2"] = "fsdp"
+    expert_parallel_size: int = 1
     seed: int = 42
     full_determinism: bool = False
     mixed_precision: bool = False
@@ -319,6 +334,66 @@ class VeOmniEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class TorchtitanEngineConfig(EngineConfig):
+    """Configuration for Torchtitan.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        wrap_policy (Dict[str, Any]): Configuration for FSDP wrap policy.
+        reshard_after_forward (Literal["default", "always", "never"]): The policy for applying
+            `reshard_after_forward` within an FSDP setup, default "default"
+        forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
+        use_orig_params (bool): Whether to use original parameters when initialize FSDP, default False
+        mixed_precision (bool): Mixed precision configuration for FSDP, default False
+        offload_policy (bool): Whether to offload policy model parameters, default False
+        data_parallel_size (int): Data parallel group size, default 1
+        data_parallel_replicate_size (int): Data parallel replicate size, default 1
+        data_parallel_shard_size (int): Data parallel shard degree, default 1
+        tensor_parallel_size (int): Tensor parallel size, default 1
+        expert_parallel_size (int): Expert parallel size, default 1
+        expert_tensor_parallel_size (int): Expert tensor parallel size, default 1
+        pipeline_parallel_size (int): Pipeline parallel size, default 1
+        context_parallel_size (int): Context parallel size, default 1
+        attn_type (str): Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen"),
+            default "flex"
+        strategy (str): Strategy to use for distributed training, default "torchtitan"
+        seed (int): Random seed for reproducibility.
+        full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
+            in distributed training. Important: this will negatively impact performance, so only use it for
+            debugging.
+
+    """
+
+    wrap_policy: dict[str, Any] = field(default_factory=dict)
+    reshard_after_forward: Literal["default", "always", "never"] = "default"
+    forward_prefetch: bool = False
+    use_orig_params: bool = False
+    mixed_precision: bool = False
+    offload_policy: bool = False
+    use_torch_compile: bool = True
+    entropy_from_logits_with_chunking: bool = False
+    entropy_checkpointing: bool = False
+    data_parallel_size: int = 1
+    data_parallel_replicate_size: int = 1
+    data_parallel_shard_size: int = 1
+    tensor_parallel_size: int = 1
+    expert_parallel_size: int = 1
+    expert_tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    context_parallel_size: int = 1
+    attn_type: str = "flex"
+    max_seq_len: Optional[int] = None
+    strategy: str = "torchtitan"
+    seed: int = 42
+    full_determinism: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.strategy in ["torchtitan"], f"strategy {self.strategy} not supported"
 
 
 @dataclass

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import heapq
 import logging
 import os
 import random
@@ -35,60 +34,103 @@ from verl.experimental.agent_loop.prometheus_utils import update_prometheus_conf
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
-from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.chat_template import initialize_system_prompt
+from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
-from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.ray_utils import get_event_loop
+from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
     rollout_trace_op,
 )
-from verl.utils.transferqueue_utils import tqbridge
+from verl.utils.tokenizer import normalize_token_ids
+from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+DEFAULT_ROUTING_CACHE_SIZE = 10000
+
+
+@ray.remote
+class GlobalRequestLoadBalancer:
+    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers."""
+
+    def __init__(self, server_actor_ids: list[str], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
+        if not server_actor_ids:
+            raise ValueError("server_actor_ids must be non-empty")
+
+        self._inflight_requests: dict[str, int] = {sid: 0 for sid in server_actor_ids}
+        self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
+
+    def acquire_server(self, request_id: str) -> str:
+        """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
+        # request-level sticky (multi-turn: same conversation -> same server)
+        if request_id in self._request_id_to_server:
+            server_id = self._request_id_to_server[request_id]
+            self._inflight_requests[server_id] += 1
+            return server_id
+
+        # new request: route to least loaded server
+        server_id = min(self._inflight_requests, key=self._inflight_requests.get)
+        self._request_id_to_server[request_id] = server_id
+        self._inflight_requests[server_id] += 1
+        return server_id
+
+    def release_server(self, server_id: str) -> None:
+        """Release a server after a request completes, decrementing its inflight count."""
+        if server_id not in self._inflight_requests:
+            raise ValueError(f"Invalid server_id for release: {server_id}")
+        if self._inflight_requests[server_id] <= 0:
+            raise ValueError(f"Release called with no inflight requests on server {server_id}")
+        self._inflight_requests[server_id] -= 1
+
+
+def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictConfig]:
+    # TODO: backward compatibility, remove this once we switch to new trainer.
+    if config.get("actor_rollout_ref"):
+        return config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
+    else:
+        return config.rollout, config.model
+
 
 class AsyncLLMServerManager:
     """
     A class to manage multiple OpenAI compatible LLM servers. This class provides
-    - Load balance: least requests load balancing
+    - Load balance: least in-flight requests load balancing via global coordination
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
     """
 
-    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], max_cache_size: int = 10000):
+    def __init__(
+        self,
+        config: DictConfig,
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
+    ):
         """Initialize the AsyncLLMServerManager.
 
         Args:
-            config (DictConfig): YAML config.
-            server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.
+            config (DictConfig): whole config for main entrypoint.
+            servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
+            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
         """
         self.config = config
-        self.server_handles = server_handles
-        random.shuffle(self.server_handles)
+        self._load_balancer = load_balancer_handle
+        self._server_id_to_handle: dict[str, ray.actor.ActorHandle] = dict(servers)
 
-        # Least requests load balancing
-        self.weighted_serveres = [[0, idx, server] for idx, server in enumerate(self.server_handles)]
-        heapq.heapify(self.weighted_serveres)
+    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+        server_id = await self._load_balancer.acquire_server.remote(request_id=request_id)
+        handle = self._server_id_to_handle.get(server_id)
+        if handle is None:
+            raise RuntimeError(f"Unknown server_id returned by load balancer: {server_id}")
+        return server_id, handle
 
-        # LRU cache to map request_id to server
-        self.request_id_to_server = LRUCache(maxsize=max_cache_size)
-
-    def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
-        # TODO: implement server pressure awareness load balancing
-        if request_id in self.request_id_to_server:
-            return self.request_id_to_server[request_id]
-
-        _, _, server = self.weighted_serveres[0]
-        self.weighted_serveres[0][0] += 1
-        heapq.heapreplace(self.weighted_serveres, self.weighted_serveres[0])
-        self.request_id_to_server[request_id] = server
-        return server
+    def _release_server(self, server_id: str) -> None:
+        # Fire-and-forget: release is just a counter decrement, no need to await.
+        # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
+        self._load_balancer.release_server.remote(server_id=server_id)
 
     @rollout_trace_op
     async def generate(
@@ -110,15 +152,18 @@ class AsyncLLMServerManager:
         Returns:
             TokenOutput: token output
         """
-        server = self._choose_server(request_id)
-        output = await server.generate.remote(
-            request_id=uuid4().hex,  # use new request_id for each turn
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            image_data=image_data,
-            video_data=video_data,
-        )
-        return output
+        server_id, server = await self._acquire_server(request_id)
+        try:
+            output: TokenOutput = await server.generate.remote(
+                request_id=uuid4().hex,  # use new request_id for each turn
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+            return output
+        finally:
+            self._release_server(server_id)
 
 
 class AgentLoopMetrics(BaseModel):
@@ -190,7 +235,16 @@ class DictConfigWrap:
 
 class AgentLoopBase(ABC):
     """An agent loop takes an input message, chat with OpenAI compatible LLM server and interact with various
-    environments."""
+    environments.
+
+    Args:
+        trainer_config (DictConfig): whole config for main entrypoint.
+        server_manager (AsyncLLMServerManager): OpenAI compatible LLM server manager.
+        tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
+        processor (AutoProcessor): Processor for process messages.
+        dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
+        data_config (DictConfigWrap): Dataset config.
+    """
 
     def __init__(
         self,
@@ -199,26 +253,17 @@ class AgentLoopBase(ABC):
         tokenizer: AutoTokenizer,
         processor: AutoProcessor,
         dataset_cls: type[RLHFDataset],
-        dataset_config: DictConfigWrap,
+        data_config: DictConfigWrap,
         **kwargs,
     ):
-        """Initialize agent loop, each sample will have its own loop instance.
-
-        Args:
-            trainer_config (DictConfigWrap): trainer config.
-            server_manager (AsyncLLMServerManager): OpenAI compatible LLM server manager.
-            tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
-            processor (AutoProcessor): Processor for process messages.
-            dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
-            dataset_config (DictConfigWrap): Dataset config.
-        """
         self.config = trainer_config.config
+        self.rollout_config, _ = _get_rollout_and_model_config(self.config)
         self.server_manager = server_manager
         self.tokenizer = tokenizer
         self.processor = processor
         self.dataset_cls = dataset_cls
-        self.dataset_config = dataset_config.config
-        self.apply_chat_template_kwargs = self.dataset_config.get("apply_chat_template_kwargs", {})
+        self.data_config = data_config.config
+        self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
         self.system_prompt = initialize_system_prompt(self.tokenizer, **self.apply_chat_template_kwargs)
         self.loop = get_event_loop()
 
@@ -234,7 +279,7 @@ class AgentLoopBase(ABC):
         multi_modal_data = {}
         if self.processor is not None:
             images, videos = await self.dataset_cls.process_vision_info(
-                messages, image_patch_size=self.processor.image_processor.patch_size, config=self.dataset_config
+                messages, image_patch_size=self.processor.image_processor.patch_size, config=self.data_config
             )
             if images is not None:
                 multi_modal_data["images"] = images
@@ -266,7 +311,8 @@ class AgentLoopBase(ABC):
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,
-                lambda: self.processor.apply_chat_template(
+                lambda: apply_chat_template(
+                    self.processor,
                     messages,
                     tools=tools,
                     add_generation_prompt=True,
@@ -290,11 +336,12 @@ class AgentLoopBase(ABC):
                 return_tensors="pt",
                 do_sample_frames=False,
             )
-            prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
+            prompt_ids = normalize_token_ids(model_inputs.pop("input_ids"))
         else:
-            prompt_ids = await self.loop.run_in_executor(
+            tokenized_prompt = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.apply_chat_template(
+                lambda: apply_chat_template(
+                    self.tokenizer,
                     messages,
                     tools=tools,
                     add_generation_prompt=True,
@@ -302,6 +349,7 @@ class AgentLoopBase(ABC):
                     **self.apply_chat_template_kwargs,
                 ),
             )
+            prompt_ids = normalize_token_ids(tokenized_prompt)
 
         if remove_system_prompt:
             prompt_ids = prompt_ids[len(self.system_prompt) :]
@@ -342,56 +390,67 @@ def register(agent_name: str):
 
 
 class AgentLoopWorker:
-    """Agent loop worker takes a batch of messages and run each message in an agent loop."""
+    """Agent loop worker takes a batch of messages and run each message in an agent loop.
+
+    Args:
+        config (DictConfig): whole config for main entrypoint.
+        servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
+        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+    """
 
     def __init__(
         self,
         config: DictConfig,
-        server_handles: list[ray.actor.ActorHandle],
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
         Args:
             config (DictConfig): YAML config.
-            server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+            servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
+            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
+            reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
         """
         self.config = config
+        rollout_config, model_config = _get_rollout_and_model_config(config)
+        self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
+        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(config, server_handles)
+            self.server_manager = AsyncLLMServerManager(
+                config,
+                servers,
+                load_balancer_handle=load_balancer_handle,
+            )
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
-        model_path = config.actor_rollout_ref.model.path
-        self.model_name = "/".join(model_path.split("/")[-2:])
-        local_path = copy_to_local(config.actor_rollout_ref.model.path)
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
-        self.processor = hf_processor(local_path, trust_remote_code=True)
+        self.tokenizer = self.model_config.tokenizer
+        self.processor = self.model_config.processor
 
-        agent_loop_config_path = config.actor_rollout_ref.rollout.agent.agent_loop_config_path
+        agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
             agent_loop_configs = OmegaConf.load(resolved_path)
             for agent_loop_config in agent_loop_configs:
                 _agent_loop_registry[agent_loop_config.name] = agent_loop_config
-        if self.config.actor_rollout_ref.model.get("custom_chat_template", None) is not None:
-            if self.processor is not None:
-                self.processor.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
-            self.tokenizer.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
+        if self.model_config.get("custom_chat_template", None) is not None:
+            if self.model_config.processor is not None:
+                self.model_config.processor.chat_template = self.model_config.custom_chat_template
+            self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
 
-        trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
+        trace_config = self.rollout_config.trace
         RolloutTraceConfig.init(
-            self.config.trainer.project_name,
-            self.config.trainer.experiment_name,
+            self.rollout_config.trace.project_name,
+            self.rollout_config.trace.experiment_name,
             trace_config.get("backend"),
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
         )
 
-    @tqbridge()
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
 
@@ -413,7 +472,7 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
-        config = self.config.actor_rollout_ref.rollout
+        config = self.rollout_config
         sampling_params = dict(
             temperature=config.temperature,
             top_p=config.top_p,
@@ -502,7 +561,7 @@ class AgentLoopWorker:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 dataset_cls=self.dataset_cls,
-                dataset_config=DictConfigWrap(self.config.data),
+                data_config=DictConfigWrap(self.config.data),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, **kwargs)
@@ -536,7 +595,7 @@ class AgentLoopWorker:
         prompt_output = self.tokenizer.pad(
             {"input_ids": output.prompt_ids},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.prompt_length,
+            max_length=self.rollout_config.prompt_length,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -548,7 +607,7 @@ class AgentLoopWorker:
         response_output = self.tokenizer.pad(
             {"input_ids": output.response_ids},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.response_length,
+            max_length=self.rollout_config.response_length,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -559,7 +618,7 @@ class AgentLoopWorker:
         response_mask_output = self.tokenizer.pad(
             {"input_ids": output.response_mask},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.response_length,
+            max_length=self.rollout_config.response_length,
             return_tensors="pt",
             return_attention_mask=False,
         )
@@ -568,7 +627,7 @@ class AgentLoopWorker:
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.response_logprobs)
+            pad_size = self.rollout_config.response_length - len(output.response_logprobs)
             response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
@@ -580,7 +639,10 @@ class AgentLoopWorker:
             total_length = input_ids.shape[1]
             length, layer_num, topk_num = output.routed_experts.shape
             if isinstance(output.routed_experts, np.ndarray):
-                experts_tensor = torch.from_numpy(output.routed_experts)
+                routed_experts_array = output.routed_experts
+                if not routed_experts_array.flags.writeable:
+                    routed_experts_array = routed_experts_array.copy()
+                experts_tensor = torch.from_numpy(routed_experts_array)
             elif isinstance(output.routed_experts, torch.Tensor):
                 experts_tensor = output.routed_experts
             else:
@@ -668,15 +730,22 @@ class AgentLoopWorker:
         if self.processor is None:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
-        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
-        video_grid_thw = multi_modal_inputs.get("video_grid_thw")
+        multi_modal_kwargs = {
+            "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
+            "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+        }
+        # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
+        if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+            mm_token_type_ids = torch.zeros_like(input_ids)
+            mm_token_type_ids[0][input_ids[0] == self.processor.image_token_id] = 1
+            mm_token_type_ids[0][input_ids[0] == self.processor.video_token_id] = 2
+            multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         # Model's get_rope_index has been dynamically bind to the processor.
         vision_position_ids, _ = self.processor.get_rope_index(
             input_ids=input_ids,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
             attention_mask=attention_mask,
+            **multi_modal_kwargs,
         )
         vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
 
@@ -777,8 +846,16 @@ class AgentLoopWorker:
 
         metrics = [input.metrics.model_dump() for input in inputs]
         # Collect extra fields from all inputs and convert them to np.ndarray
+        # Keep a stable set of keys so downstream batch concat stays consistent across agent loops.
         extra_fields = {}
-        all_keys = set(key for input_item in inputs for key in input_item.extra_fields)
+        default_extra_keys = {
+            "turn_scores",
+            "tool_rewards",
+            "min_global_steps",
+            "max_global_steps",
+            "extras",
+        }
+        all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
         for key in all_keys:
             temp_arr = np.empty(len(inputs), dtype=object)
             temp_arr[:] = [input.extra_fields.get(key) for input in inputs]
@@ -797,20 +874,6 @@ class AgentLoopWorker:
             batch=batch,
             non_tensor_batch=non_tensor_batch,
             meta_info=meta_info,
-        )
-
-    def create_transferqueue_client(
-        self,
-    ):
-        """Create a client for data system (TransferQueue)."""
-        from verl.single_controller.ray.base import get_random_string
-        from verl.utils.transferqueue_utils import create_transferqueue_client
-
-        client_name = get_random_string(length=6)
-
-        self.tq_client = create_transferqueue_client(
-            client_id=f"AgentLoopWorker_{client_name}",
-            config=self.config.transfer_queue,
         )
 
 
@@ -837,7 +900,17 @@ async def get_trajectory_info(step, index, validate):
 
 
 class AgentLoopManager:
-    """Agent loop manager that manages a group of agent loop workers."""
+    """Agent loop manager that manages a group of agent loop workers.
+
+    - if worker_group is not None, rollout server is in hybrid mode, share GPUs with training engine.
+    - otherwise, rollout server is in standalone mode, use separate GPUs, e.g., one-step-off/fully async training.
+
+    Args:
+        config (DictConfig): whole config for main entrypoint.
+        worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
+        rollout_resource_pool (RayResourcePool): Resource pool for hybrid mode, only used by TensorRT-LLM.
+        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+    """
 
     def __init__(
         self,
@@ -846,63 +919,71 @@ class AgentLoopManager:
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        """Initialize agent loop manager.
-
-        Args:
-            config (DictConfig): trainer config.
-            worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
-            rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
-            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-        """
         self.config = config
+        self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
+        self.rollout_resource_pool = rollout_resource_pool
         self.reward_loop_worker_handles = reward_loop_worker_handles
+
+        assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
-            self.rollout_replica_class = get_rollout_replica_class(self.config.actor_rollout_ref.rollout.name)
+            self.rollout_replica_class = get_rollout_replica_class(self.rollout_config.name)
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
-        self._initialize_llm_servers(rollout_resource_pool)
-        self._init_agent_loop_workers()
+    @classmethod
+    @auto_await
+    async def create(
+        cls,
+        config: DictConfig,
+        worker_group: RayWorkerGroup = None,
+        rollout_resource_pool: RayResourcePool = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+    ):
+        """Create agent loop manager."""
+        instance = cls(config, worker_group, rollout_resource_pool, reward_loop_worker_handles)
+        await instance._initialize_llm_servers()
+        await instance._init_global_load_balancer()
+        await instance._init_agent_loop_workers()
+        return instance
 
-    def _initialize_llm_servers(self, rollout_resource_pool: RayResourcePool):
+    async def _initialize_llm_servers(self):
         rollout_world_size = (
-            self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-            * self.config.actor_rollout_ref.rollout.data_parallel_size
-            * self.config.actor_rollout_ref.rollout.pipeline_model_parallel_size
+            self.rollout_config.tensor_model_parallel_size
+            * self.rollout_config.data_parallel_size
+            * self.rollout_config.pipeline_model_parallel_size
         )
         world_size = (
             self.worker_group.world_size
             if self.worker_group
-            else self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+            else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
         )
         num_replicas = world_size // rollout_world_size
 
-        rollout_config = self.config.actor_rollout_ref.rollout
-        model_config = self.config.actor_rollout_ref.model
         self.rollout_replicas = [
             self.rollout_replica_class(
                 replica_rank=replica_rank,
-                config=rollout_config,
-                model_config=model_config,
-                gpus_per_node=self.config.trainer.n_gpus_per_node,
+                config=self.rollout_config,
+                model_config=self.model_config,
+                gpus_per_node=self.rollout_config.n_gpus_per_node,
             )
             for replica_rank in range(num_replicas)
         ]
 
-        if self.worker_group and rollout_config.name != "trtllm":
-            self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
-        elif self.worker_group and rollout_config.name == "trtllm":
-            self._run_all(
-                [
-                    server.init_hybrid_colocated(self.worker_group, rollout_resource_pool)
+        if self.worker_group and self.rollout_config.name != "trtllm":
+            await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
+        # TODO: unify trtllm to init_hybrid
+        elif self.worker_group and self.rollout_config.name == "trtllm":
+            await asyncio.gather(
+                *[
+                    server.init_hybrid_colocated(self.worker_group, self.rollout_resource_pool)
                     for server in self.rollout_replicas
                 ]
             )
         else:
-            self._run_all([server.init_standalone() for server in self.rollout_replicas])
+            await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
 
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
@@ -910,14 +991,16 @@ class AgentLoopManager:
         print(f"AgentLoopManager: {self.server_addresses}")
 
         # Update Prometheus configuration with server addresses
-        if rollout_config.prometheus.enable:
-            if rollout_config.disable_log_stats:
+        if self.rollout_config.prometheus.enable:
+            if self.rollout_config.disable_log_stats:
                 raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
-            update_prometheus_config(rollout_config.prometheus, self.server_addresses, rollout_config.name)
+            update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
 
-    def _init_agent_loop_workers(self):
+    async def _init_agent_loop_workers(self):
         self.agent_loop_workers = []
-        num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+        num_workers = self.rollout_config.agent.num_workers
+        load_balancer_handle = self.global_load_balancer
+        servers = list(zip(self.server_addresses, self.server_handles, strict=True))
 
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         for i in range(num_workers):
@@ -929,10 +1012,22 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
+                ).remote(
+                    self.config,
+                    servers,
+                    load_balancer_handle,
+                    self.reward_loop_worker_handles,
+                )
             )
 
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    async def _init_global_load_balancer(self) -> None:
+        self.global_load_balancer = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=self.server_addresses,
+            max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+        )
+
+    @auto_await
+    async def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 
         Args:
@@ -943,8 +1038,8 @@ class AgentLoopManager:
         """
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
-        outputs = ray.get(
-            [
+        outputs = await asyncio.gather(
+            *[
                 worker.generate_sequences.remote(chunk)
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
@@ -985,20 +1080,17 @@ class AgentLoopManager:
 
         return timing
 
-    def clear_kv_cache(self):
+    @auto_await
+    async def clear_kv_cache(self):
         """Clear all rollout kv cache, but don`t sleep."""
-        self._run_all([replica.clear_kv_cache() for replica in self.rollout_replicas])
+        await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
 
-    def start_profile(self, **kwargs):
+    @auto_await
+    async def start_profile(self, **kwargs):
         """Start profiling on all rollout replicas."""
-        self._run_all([replica.start_profile(**kwargs) for replica in self.rollout_replicas])
+        await asyncio.gather(*[replica.start_profile(**kwargs) for replica in self.rollout_replicas])
 
-    def stop_profile(self):
+    @auto_await
+    async def stop_profile(self):
         """Stop profiling on all rollout replicas."""
-        self._run_all([replica.stop_profile() for replica in self.rollout_replicas])
-
-    def _run_all(self, tasks: list[asyncio.Task]):
-        async def run_all():
-            await asyncio.gather(*tasks)
-
-        asyncio.run(run_all())
+        await asyncio.gather(*[replica.stop_profile() for replica in self.rollout_replicas])

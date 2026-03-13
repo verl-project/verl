@@ -22,6 +22,7 @@ from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
 from verl.utils import hf_tokenizer
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.tokenizer import normalize_token_ids
 
 
 def create_data_samples(tokenizer) -> DataProto:
@@ -64,8 +65,8 @@ def create_data_samples(tokenizer) -> DataProto:
     pad_token_id = tokenizer.pad_token_id
     prompts, responses, input_ids, attention_masks = [], [], [], []
     for conv in convs:
-        prompt_tokens = tokenizer.apply_chat_template(conv[:1], tokenize=True)
-        response_tokens = tokenizer.apply_chat_template(conv, tokenize=True)[len(prompt_tokens) :]
+        prompt_tokens = normalize_token_ids(tokenizer.apply_chat_template(conv[:1], tokenize=True))
+        response_tokens = normalize_token_ids(tokenizer.apply_chat_template(conv, tokenize=True))[len(prompt_tokens) :]
 
         padded_prompt = [pad_token_id] * (prompt_length - len(prompt_tokens)) + prompt_tokens
         padded_response = response_tokens + [pad_token_id] * (response_length - len(response_tokens))
@@ -122,21 +123,21 @@ def test_reward_model_manager():
     reward_model_name = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
 
     config.actor_rollout_ref.model.path = rollout_model_name
-    config.custom_reward_function.path = "tests/experimental/reward_loop/reward_fn.py"
-    config.custom_reward_function.name = "compute_score_gsm8k"
-    config.reward_model.reward_manager = "dapo"
-    config.reward_model.enable = True
-    config.reward_model.num_workers = 1
-    config.reward_model.enable_resource_pool = True
-    config.reward_model.n_gpus_per_node = 8
-    config.reward_model.nnodes = 1
-    config.reward_model.model_path = reward_model_name
-    config.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
-    config.reward_model.rollout.gpu_memory_utilization = 0.9
-    config.reward_model.rollout.tensor_model_parallel_size = 2
-    config.reward_model.rollout.skip_tokenizer_init = False
-    config.reward_model.rollout.prompt_length = 2048
-    config.reward_model.rollout.response_length = 4096
+    config.reward.custom_reward_function.path = "tests/experimental/reward_loop/reward_fn.py"
+    config.reward.custom_reward_function.name = "compute_score_gsm8k"
+    config.reward.num_workers = 1
+    config.reward.reward_manager.name = "dapo"
+    config.reward.reward_model.enable = True
+    config.reward.reward_model.enable_resource_pool = True
+    config.reward.reward_model.n_gpus_per_node = 8
+    config.reward.reward_model.nnodes = 1
+    config.reward.reward_model.model_path = reward_model_name
+    config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
+    config.reward.reward_model.rollout.gpu_memory_utilization = 0.9
+    config.reward.reward_model.rollout.tensor_model_parallel_size = 2
+    config.reward.reward_model.rollout.skip_tokenizer_init = False
+    config.reward.reward_model.rollout.prompt_length = 2048
+    config.reward.reward_model.rollout.response_length = 4096
 
     # 1. init reward model manager
     reward_loop_manager = RewardLoopManager(config)

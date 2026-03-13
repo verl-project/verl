@@ -75,7 +75,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl056.latest"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl059.dev2"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -113,7 +113,7 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install cupy-cuda12x pytest-asyncio
+          pip3 install cupy-cuda12x==13.6.0 pytest-asyncio
           pip3 install hf_transfer fastmcp pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
@@ -144,7 +144,7 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install cupy-cuda12x pytest-asyncio
+          pip3 install cupy-cuda12x==13.6.0 pytest-asyncio
           pip3 install hf_transfer fastmcp pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .

@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import logging
 import os
 import time
@@ -24,8 +23,12 @@ import zmq
 from vllm.distributed.utils import StatelessProcessGroup
 
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
+from verl.utils.device import is_torch_npu_available
 from verl.utils.distributed import stateless_init_process_group
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+
+if not is_torch_npu_available(check_device=False):
+    raise ImportError("HCCLCheckpointEngine is unavailable because the torch.npu module is not available.")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -67,8 +70,7 @@ class BroadcastOperation:
         self.socket = socket
         self.topic = topic
 
-        loop = asyncio.get_running_loop()
-        self._task = loop.run_in_executor(None, self._run)
+        self._run()
 
     def _run(self):
         # broadcast tensor meta via zeromq PUB/SUB
@@ -88,11 +90,10 @@ class BroadcastOperation:
         Returns:
             dict[str, TensorMeta]: The bucket meta after broadcast.
         """
-        await self._task
         return self.metadata
 
 
-@CheckpointEngineRegistry.register("hccl")
+@CheckpointEngineRegistry.register("nccl")
 class HCCLCheckpointEngine(CheckpointEngine):
     """HCCL checkpoint engine with collective communication.
 
@@ -148,6 +149,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
 
         self.send_buf = None
         self.recv_buf = None
+        torch.npu.empty_cache()
 
     @classmethod
     def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
@@ -165,7 +167,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
 
     def _start_zmq_server(self):
         self.ip = ray.util.get_node_ip_address().strip("[]")
-        self.zmq_port, self.listen_sock = get_free_port(self.ip)
+        self.zmq_port, _ = get_free_port(self.ip)
 
         context = zmq.Context()
         self.socket = context.socket(zmq.PUB)
