@@ -463,3 +463,123 @@ def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
             f"pixel_values: {pixel_values.shape} should have shape "
             f"({num_patches}, 3 * {temporal_patch_size} * {patch_size} * {patch_size})"
         )
+
+
+@pytest.mark.parametrize("model_path", ["Qwen/Qwen2.5-0.5B-Instruct"])
+def test_multiturn_sft_dataset_trainable_flag(model_path: str):
+    """Test the trainable flag functionality for masking assistant messages.
+    
+    This test verifies that:
+    1. By default (trainable not specified), all assistant messages have loss_mask=1
+    2. When trainable=False, the assistant message has loss_mask=0
+    3. When trainable=True, the assistant message has loss_mask=1
+    
+    This feature is useful for:
+    - Filtering low-quality trajectories
+    - Selective training on specific assistant responses
+    - Ignoring intermediate steps in long agent trajectories
+    """
+    print(f"Starting test... model_path={model_path}")
+    
+    # Test data with trainable flag
+    test_data = {
+        "messages": [
+            # Case 1: Default behavior (no trainable flag)
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+            ],
+            # Case 2: trainable=False - should be masked
+            [
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": "2+2 equals 5.", "trainable": False},  # Wrong answer, masked
+                {"role": "user", "content": "That's wrong."},
+                {"role": "assistant", "content": "Sorry, 2+2 equals 4.", "trainable": True},  # Corrected answer
+            ],
+            # Case 3: trainable=True explicitly
+            [
+                {"role": "user", "content": "Tell me a joke"},
+                {"role": "assistant", "content": "Why did the chicken?", "trainable": True},
+                {"role": "user", "content": "Why?"},
+                {"role": "assistant", "content": "To get to the other side!", "trainable": True},
+            ],
+            # Case 4: Mix of trainable and non-trainable
+            [
+                {"role": "user", "content": "Calculate 1+1"},
+                {"role": "assistant", "content": "1+1=3", "trainable": False},
+                {"role": "user", "content": "No"},
+                {"role": "assistant", "content": "1+1=2"},
+            ],
+        ]
+    }
+    
+    # Create test directory if it doesn't exist
+    os.makedirs("test_data", exist_ok=True)
+    test_file = "test_data/test_trainable.parquet"
+    
+    # Save test data to parquet
+    df = pd.DataFrame(test_data)
+    df.to_parquet(test_file)
+    
+    # Initialize tokenizer and dataset
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    config = {
+        "max_length": 512,
+        "truncation": "error",
+        "multiturn": {"messages_key": "messages"},
+    }
+    dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, config=config)
+    
+    # Test Case 1: Default behavior (no trainable flag)
+    item0 = dataset[0]
+    loss_mask0 = item0["loss_mask"]
+    assistant_positions0 = torch.where(loss_mask0 == 1)[0]
+    assert len(assistant_positions0) > 0, "Default: assistant should have loss_mask=1"
+    print(f"Case 1 (default): assistant loss_mask sum = {loss_mask0.sum().item()}")
+    
+    # Test Case 2: trainable=False should mask the message
+    item1 = dataset[1]
+    loss_mask1 = item1["loss_mask"]
+    input_ids1 = item1["input_ids"]
+    
+    # Decode to verify which assistant messages are present
+    assistant_text1 = tokenizer.decode(input_ids1[loss_mask1 == 1])
+    print(f"Case 2 (trainable=False): assistant text = '{assistant_text1}'")
+    
+    # The second assistant message (with trainable=False) should NOT be in the loss
+    assert "2+2 equals 5" not in assistant_text1, "trainable=False message should be masked"
+    assert "2+2 equals 4" in assistant_text1, "trainable=True message should be trained"
+    print(f"Case 2: loss_mask correctly masks trainable=False message")
+    
+    # Test Case 3: trainable=True explicitly
+    item2 = dataset[2]
+    loss_mask2 = item2["loss_mask"]
+    input_ids2 = item2["input_ids"]
+    
+    assistant_text2 = tokenizer.decode(input_ids2[loss_mask2 == 1])
+    print(f"Case 3 (trainable=True): assistant text = '{assistant_text2}'")
+    
+    # Both should be trained
+    assert "chicken" in assistant_text2, "First trainable=True message should be trained"
+    assert "other side" in assistant_text2, "Second trainable=True message should be trained"
+    print(f"Case 3: loss_mask correctly includes trainable=True messages")
+    
+    # Test Case 4: Mix of trainable and non-trainable (default is trainable=True for assistant)
+    item3 = dataset[3]
+    loss_mask3 = item3["loss_mask"]
+    input_ids3 = item3["input_ids"]
+    
+    assistant_text3 = tokenizer.decode(input_ids3[loss_mask3 == 1])
+    print(f"Case 4 (mixed): assistant text = '{assistant_text3}'")
+    
+    # First assistant has trainable=False, should be masked
+    # Second assistant has no trainable flag, default is trainable
+    assert "1+1=3" not in assistant_text3, "trainable=False message should be masked"
+    assert "1+1=2" in assistant_text3, "Default trainable message should be trained"
+    print(f"Case 4: loss_mask correctly handles mixed trainable flags")
+    
+    print("All test cases passed!")
+    
+    # Cleanup
+    import shutil
+    shutil.rmtree("test_data", ignore_errors=True)

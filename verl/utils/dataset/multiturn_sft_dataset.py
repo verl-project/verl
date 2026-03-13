@@ -232,6 +232,12 @@ class MultiTurnSFTDataset(Dataset):
             loss_mask = torch.ones_like(attention_mask)
             # mask out generation prompt if assistant message
             loss_mask[: len(self.generation_prompt)] = 0
+            
+            # Support trainable flag to mask specific assistant messages
+            # If trainable=False, the entire assistant response will be masked (loss=0)
+            trainable = message.get("trainable", None)
+            if trainable is False:
+                loss_mask = torch.zeros_like(attention_mask)
         else:
             loss_mask = torch.zeros_like(attention_mask)
 
