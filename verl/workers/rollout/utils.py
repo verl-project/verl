@@ -83,7 +83,7 @@ async def ensure_async_iterator(iterable):
             yield item
 
 
-def _qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
+def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
     <|image_pad|> and <|video_pad|> token by image_data.
     For example,
