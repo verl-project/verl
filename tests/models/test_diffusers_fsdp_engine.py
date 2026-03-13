@@ -139,6 +139,7 @@ def create_data_samples(num_device: int, model_config: DiffusersModelConfig) -> 
     data.meta_info["micro_batch_size_per_gpu"] = 4
     data.meta_info["height"] = height
     data.meta_info["width"] = width
+    data.meta_info["vae_scale_factor"] = vae_scale_factor
 
     return data
 
@@ -195,9 +196,6 @@ def test_diffusers_fsdp_engine(strategy):
         epochs=ppo_epochs,
         seed=seed,
         dataloader_kwargs={"shuffle": shuffle},
-        image_height=training_config.model_config.get("image_height", 512),
-        image_width=training_config.model_config.get("image_width", 512),
-        vae_scale_factor=training_config.model_config.get("vae_scale_factor", 8),
     )
     output = wg.train_mini_batch(data_td)
     output_dict = output.get()
