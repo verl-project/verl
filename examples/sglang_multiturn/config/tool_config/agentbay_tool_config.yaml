@@ -1,0 +1,21 @@
+tools:
+  - class_name: "verl.tools.agentbay_tool.AgentBayTool"
+    config:
+      image_id: "code_latest"
+      default_language: "python"
+      type: native
+    tool_schema:
+      type: "function"
+      function:
+        name: "code_interpreter"
+        description: "Execute code in a secure cloud sandbox. Supports Python and other languages."
+        parameters:
+          type: "object"
+          properties:
+            code:
+              type: "string"
+              description: "The code to execute."
+            language:
+              type: "string"
+              description: "Programming language (default: python)."
+          required: ["code"]
