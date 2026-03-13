@@ -1,0 +1,2 @@
+- name: multi_traj_test_agent
+  _target_: tests.special_e2e.multi_trajectory_group.multi_traj_agent_loop.MultiTrajTestAgentLoop
