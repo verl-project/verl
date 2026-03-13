@@ -57,7 +57,7 @@ policy_loss:
   # # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.PolicyLossConfig
 
-  # Loss function mode: vanilla / clip-cov / kl-cov /gpg from https://arxiv.org/abs/2505.22617
+  # Loss function mode: vanilla / clip-cov / kl-cov / gpg from https://arxiv.org/abs/2505.22617 / sdpo from https://arxiv.org/abs/2601.20802
   loss_mode: "vanilla"
 
   # Ratio of tokens to be clipped for clip-cov loss
@@ -132,11 +132,11 @@ checkpoint:
 
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
-  
+
   # Mbridge config extension.
   # when vanilla_mbridge=True, and your filesystem is a distributed filesystem,(which means you write a file in node A
   # and you can read the file in node B immediately)
-  # set `mbridge_config.distributed_filesystem=True` and `mbridge_config.memory_efficient=True` to 
+  # set `mbridge_config.distributed_filesystem=True` and `mbridge_config.memory_efficient=True` to
   # speed up the checkpoint saving by 10x speed.
   mbridge_config: {}
 
@@ -162,7 +162,7 @@ optim:
 # Whether to use custom fused kernels (e.g., FlashAttention, fused MLP)
 use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
 
-# profile the actor model in `update_policy` 
+# profile the actor model in `update_policy`
 profiler:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
@@ -174,7 +174,7 @@ profiler:
 
   # whether enable profile on Actor
   enable: False
-  
+
   # Whether to profile all ranks.
   all_ranks: False
 
@@ -192,10 +192,10 @@ profiler:
 
       # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
       _target_: verl.utils.profiler.config.NsightToolConfig
-    
+
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete}
-    
+
     # npu config
     npu:
 
@@ -214,7 +214,7 @@ profiler:
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: False
-    
+
     # torch profiler config
     torch:
 
@@ -240,6 +240,84 @@ profiler:
       # Stack trace depth for memory allocations
       stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
 
+# self-distillation config
+self_distillation:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.SelfDistillationConfig
+
+  # Distillation is enabled when policy_loss.loss_mode == "sdpo"
+
+  # Whether to use full-logit KL distillation
+  full_logit_distillation: True
+
+  # Top-k for logit distillation; null uses full logits
+  distillation_topk: 100
+
+  # Whether to add a tail bucket when using distillation_topk
+  distillation_add_tail: True
+
+  # KL interpolation coefficient: 0.0=forward KL, 1.0=reverse KL, in-between=JSD
+  alpha: 0.5
+
+  # Minimum sequence reward to be considered successful
+  success_reward_threshold: 0.5
+
+  # Teacher regularization mode
+  # Options: ema, trust_region, none
+  teacher_regularization: ema
+
+  # Teacher update/mixing rate in [0,1]
+  # If null, falls back to ema_update_rate for backward compatibility
+  teacher_update_rate: null
+
+  # Deprecated alias for teacher_update_rate
+  ema_update_rate: 0.05
+
+  # Maximum length of the reprompted prompt
+  max_reprompt_len: 10240
+
+  # Truncation method for the reprompted prompt
+  # Options: left, right
+  reprompt_truncation: right
+
+  # Whether to not reprompt on self-success
+  dont_reprompt_on_self_success: True
+
+  # Whether to remove <think>...</think> tags from successful demonstrations before reprompting
+  remove_thinking_from_demonstration: True
+
+  # Whether to include environment feedback in reprompting for wrong attempts
+  # If True and feedback exists: use reprompt_template_feedback_solution (with solution) or reprompt_template_feedback (without solution)
+  include_environment_feedback: True
+
+  # If True, only use feedback when no solution is available (ignore feedback when solution exists)
+  # Requires include_environment_feedback=True to have any effect
+  environment_feedback_only_without_solution: True
+
+  # IS clip for loss; null disables IS weighting
+  is_clip: 2
+
+  # Reprompting template - available variables: prompt, successful_previous_attempt, feedback
+  reprompt_template: |-
+    {prompt}{solution}{feedback}
+
+    Correctly solve the original question.
+
+  # Solution template - available variables: successful_previous_attempt
+  solution_template: |-
+
+    Correct solution:
+
+    {successful_previous_attempt}
+
+  # Feedback template - available variables: feedback_raw
+  feedback_template: |-
+
+    The following is feedback from your unsuccessful earlier attempt:
+
+    {feedback_raw}
+
 # Router replay configuration for MoE models
 router_replay:
 
@@ -258,4 +336,3 @@ router_replay:
   # File path to load recorded routing decisions for replay
   # Required when mode is 'replay'
   replay_file: null
-

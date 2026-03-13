@@ -22,7 +22,7 @@ from transformers import AutoModelForCausalLM, Qwen3Config
 from verl import DataProto
 from verl.utils.device import get_device_name
 from verl.workers.actor.dp_actor import DataParallelPPOActor
-from verl.workers.config import FSDPActorConfig, OptimizerConfig
+from verl.workers.config import FSDPActorConfig, OptimizerConfig, PolicyLossConfig, SelfDistillationConfig
 
 
 class MockTransformerModel(nn.Module):
@@ -298,6 +298,74 @@ class TestDataParallelPPOActor(unittest.TestCase):
             else:
                 self.assertIsInstance(metrics[key], (float, int))
                 self.assertTrue(torch.isfinite(torch.tensor(metrics[key])))
+
+    def test_update_policy_sdpo_branch(self):
+        """Test that SDPO update path runs and emits SDPO metrics with teacher batch keys."""
+        sdpo_config = FSDPActorConfig(
+            strategy="fsdp2",
+            ppo_mini_batch_size=4,
+            ppo_micro_batch_size_per_gpu=2,
+            ppo_epochs=1,
+            clip_ratio=0.2,
+            entropy_coeff=0.01,
+            grad_clip=1.0,
+            use_dynamic_bsz=False,
+            use_torch_compile=False,
+            ulysses_sequence_parallel_size=1,
+            optim=OptimizerConfig(lr=1e-6),
+            rollout_n=1,
+            policy_loss=PolicyLossConfig(loss_mode="sdpo"),
+            self_distillation=SelfDistillationConfig(
+                teacher_regularization="none",
+                full_logit_distillation=True,
+                distillation_topk=16,
+            ),
+        )
+        sdpo_model = MockTransformerModel(vocab_size=1000, hidden_size=64).to(self.device)
+        sdpo_optimizer = torch.optim.Adam(sdpo_model.parameters(), lr=1e-4)
+        sdpo_actor = DataParallelPPOActor(
+            config=sdpo_config,
+            actor_module=sdpo_model,
+            actor_optimizer=sdpo_optimizer,
+        )
+
+        batch_size = 4
+        prompt_length = 8
+        response_length = 4
+        total_length = prompt_length + response_length
+        vocab_size = 1000
+
+        input_ids = torch.randint(0, vocab_size, (batch_size, total_length)).to(self.device)
+        attention_mask = torch.ones(batch_size, total_length).to(self.device)
+        position_ids = torch.arange(total_length).unsqueeze(0).expand(batch_size, -1).to(self.device)
+        responses = input_ids[:, -response_length:]
+        response_mask = torch.ones(batch_size, response_length).to(self.device)
+        old_log_probs = torch.randn(batch_size, response_length).to(self.device) * 0.1
+        advantages = torch.randn(batch_size, response_length).to(self.device) * 0.5
+        self_distillation_mask = torch.ones(batch_size, dtype=torch.float32).to(self.device)
+
+        tensor_dict = TensorDict(
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "responses": responses,
+                "response_mask": response_mask,
+                "old_log_probs": old_log_probs,
+                "advantages": advantages,
+                "teacher_input_ids": input_ids.clone(),
+                "teacher_attention_mask": attention_mask.clone(),
+                "teacher_position_ids": position_ids.clone(),
+                "self_distillation_mask": self_distillation_mask,
+            },
+            batch_size=[batch_size],
+        )
+
+        data = DataProto(batch=tensor_dict, meta_info={"temperature": 1.0})
+        metrics = sdpo_actor.update_policy(data)
+        self.assertIn("actor/pg_loss", metrics)
+        self.assertIn("self_distillation/loss", metrics)
+        self.assertIn("self_distillation/empty_target_batch", metrics)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,26 @@
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    policy_loss:
+      loss_mode: sdpo
+    self_distillation:
+      teacher_regularization: ema
+      teacher_update_rate: 0.05
+      max_reprompt_len: 10240
+      is_clip: 2.0
+  rollout:
+    n: 8
+    calculate_log_probs: true
+
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: false
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+data:
+  train_batch_size: 32

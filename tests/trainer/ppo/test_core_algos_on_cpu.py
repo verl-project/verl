@@ -14,6 +14,7 @@
 
 import random
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ import torch
 
 import verl.trainer.ppo.core_algos
 from verl.trainer.ppo.core_algos import (
+    compute_self_distillation_loss,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
@@ -311,6 +313,140 @@ def test_grpo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert ret1.shape == ret2.shape == (batch_size, seq_len)
     assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
+def test_compute_self_distillation_loss_full_logit_alpha_endpoints():
+    student_all_log_probs = torch.log_softmax(torch.randn(2, 3, 7), dim=-1)
+    teacher_all_log_probs = torch.log_softmax(torch.randn(2, 3, 7), dim=-1)
+    student_log_probs = student_all_log_probs[..., 0]
+    teacher_log_probs = teacher_all_log_probs[..., 0]
+    response_mask = torch.ones(2, 3)
+
+    cfg_alpha_fwd = SimpleNamespace(
+        full_logit_distillation=True,
+        distillation_topk=None,
+        distillation_add_tail=True,
+        alpha=0.0,
+        is_clip=None,
+    )
+    cfg_alpha_rev = SimpleNamespace(
+        full_logit_distillation=True,
+        distillation_topk=None,
+        distillation_add_tail=True,
+        alpha=1.0,
+        is_clip=None,
+    )
+
+    loss_fwd, metrics_fwd = compute_self_distillation_loss(
+        student_log_probs=student_log_probs,
+        teacher_log_probs=teacher_log_probs,
+        response_mask=response_mask,
+        self_distillation_config=cfg_alpha_fwd,
+        student_all_log_probs=student_all_log_probs,
+        teacher_all_log_probs=teacher_all_log_probs,
+    )
+    loss_rev, metrics_rev = compute_self_distillation_loss(
+        student_log_probs=student_log_probs,
+        teacher_log_probs=teacher_log_probs,
+        response_mask=response_mask,
+        self_distillation_config=cfg_alpha_rev,
+        student_all_log_probs=student_all_log_probs,
+        teacher_all_log_probs=teacher_all_log_probs,
+    )
+
+    assert torch.isfinite(loss_fwd)
+    assert torch.isfinite(loss_rev)
+    assert not torch.allclose(loss_fwd, loss_rev)
+    assert "self_distillation/loss" in metrics_fwd
+    assert "self_distillation/kl_type_code" in metrics_rev
+
+
+def test_compute_self_distillation_loss_topk_and_masking():
+    student_topk_log_probs = torch.log_softmax(torch.randn(1, 4, 3), dim=-1)
+    teacher_topk_log_probs = torch.log_softmax(torch.randn(1, 4, 3), dim=-1)
+    student_log_probs = torch.randn(1, 4)
+    teacher_log_probs = torch.randn(1, 4)
+    response_mask = torch.ones(1, 4)
+
+    cfg = SimpleNamespace(
+        full_logit_distillation=True,
+        distillation_topk=3,
+        distillation_add_tail=True,
+        alpha=0.5,
+        is_clip=None,
+    )
+
+    loss_topk, metrics_topk = compute_self_distillation_loss(
+        student_log_probs=student_log_probs,
+        teacher_log_probs=teacher_log_probs,
+        response_mask=response_mask,
+        self_distillation_config=cfg,
+        student_topk_log_probs=student_topk_log_probs,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+    )
+    assert torch.isfinite(loss_topk)
+    assert metrics_topk["self_distillation/use_topk"] == 1.0
+
+    zero_mask = torch.zeros(1, dtype=torch.float32)
+    loss_masked, metrics_masked = compute_self_distillation_loss(
+        student_log_probs=student_log_probs,
+        teacher_log_probs=teacher_log_probs,
+        response_mask=response_mask,
+        self_distillation_config=cfg,
+        student_topk_log_probs=student_topk_log_probs,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+        self_distillation_mask=zero_mask,
+    )
+    assert torch.allclose(loss_masked, torch.tensor(0.0, dtype=loss_masked.dtype, device=loss_masked.device))
+    assert metrics_masked["self_distillation/mask_fraction"] == 0.0
+
+
+def test_compute_self_distillation_loss_optional_is_clip():
+    student_all_log_probs = torch.log_softmax(torch.randn(2, 3, 5), dim=-1)
+    teacher_all_log_probs = torch.log_softmax(torch.randn(2, 3, 5), dim=-1)
+    student_log_probs = student_all_log_probs[..., 0]
+    teacher_log_probs = teacher_all_log_probs[..., 0]
+    old_log_probs = student_log_probs + 5.0
+    response_mask = torch.ones(2, 3)
+
+    cfg_no_clip = SimpleNamespace(
+        full_logit_distillation=True,
+        distillation_topk=None,
+        distillation_add_tail=True,
+        alpha=0.5,
+        is_clip=None,
+    )
+    cfg_clip = SimpleNamespace(
+        full_logit_distillation=True,
+        distillation_topk=None,
+        distillation_add_tail=True,
+        alpha=0.5,
+        is_clip=2.0,
+    )
+
+    loss_no_clip, _ = compute_self_distillation_loss(
+        student_log_probs=student_log_probs,
+        teacher_log_probs=teacher_log_probs,
+        response_mask=response_mask,
+        self_distillation_config=cfg_no_clip,
+        old_log_probs=old_log_probs,
+        student_all_log_probs=student_all_log_probs,
+        teacher_all_log_probs=teacher_all_log_probs,
+    )
+    loss_clip, metrics_clip = compute_self_distillation_loss(
+        student_log_probs=student_log_probs,
+        teacher_log_probs=teacher_log_probs,
+        response_mask=response_mask,
+        self_distillation_config=cfg_clip,
+        old_log_probs=old_log_probs,
+        student_all_log_probs=student_all_log_probs,
+        teacher_all_log_probs=teacher_all_log_probs,
+    )
+
+    assert torch.isfinite(loss_no_clip)
+    assert torch.isfinite(loss_clip)
+    assert loss_clip < loss_no_clip
+    assert metrics_clip["self_distillation/is_clip"] == 2.0
 
 
 if __name__ == "__main__":

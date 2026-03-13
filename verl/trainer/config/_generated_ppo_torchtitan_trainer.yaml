@@ -117,6 +117,39 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+    self_distillation:
+      _target_: verl.workers.config.SelfDistillationConfig
+      full_logit_distillation: true
+      distillation_topk: 100
+      distillation_add_tail: true
+      alpha: 0.5
+      success_reward_threshold: 0.5
+      teacher_regularization: ema
+      teacher_update_rate: null
+      ema_update_rate: 0.05
+      max_reprompt_len: 10240
+      reprompt_truncation: right
+      dont_reprompt_on_self_success: true
+      remove_thinking_from_demonstration: true
+      include_environment_feedback: true
+      environment_feedback_only_without_solution: true
+      is_clip: 2
+      reprompt_template: '{prompt}{solution}{feedback}
+
+
+        Correctly solve the original question.'
+      solution_template: '
+
+        Correct solution:
+
+
+        {successful_previous_attempt}'
+      feedback_template: '
+
+        The following is feedback from your unsuccessful earlier attempt:
+
+
+        {feedback_raw}'
     router_replay:
       _target_: verl.workers.config.RouterReplayConfig
       mode: disabled
