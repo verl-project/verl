@@ -51,8 +51,6 @@ from verl.utils.fsdp_utils import (
     init_fn,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
-    merged_lora_context,
-    normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
     replace_lora_wrapper,
@@ -552,7 +550,7 @@ class DiffusersFSDPEngine(BaseEngine):
         img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]]
 
         if getattr(self.module.config, "guidance_embeds", False):
-            guidance = torch.full([1], self._guidance_scale, dtype=torch.float32)
+            guidance = torch.full([1], self._guidance_scale, device=timesteps.device, dtype=torch.float32)
         else:
             guidance = None
 
@@ -755,24 +753,18 @@ class DiffusersFSDPEngine(BaseEngine):
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
         peft_config = None
-        merge_lora = self.model_config.lora.get("merge", False)
 
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
-            if not merge_lora:
-                peft_config = peft_model.peft_config.get("default", None)
-                params = collect_lora_params(
-                    module=self.module,
-                    layered_summon=layered_summon,
-                    base_sync_done=base_sync_done,
-                    is_diffusers=True,
-                )
-                if not base_sync_done:
-                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
-            else:  # merge lora
-                with merged_lora_context(self.module, backup_adapters=True):
-                    params = self.module.state_dict()
-                    params = normalize_peft_param_name(params)
+            peft_config = peft_model.peft_config.get("default", None)
+            params = collect_lora_params(
+                module=self.module,
+                layered_summon=layered_summon,
+                base_sync_done=base_sync_done,
+                is_diffusers=True,
+            )
+            if not base_sync_done:
+                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
             params = self.module.state_dict()
 
