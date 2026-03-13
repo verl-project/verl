@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import gc
 import os
 from functools import partial
 
@@ -349,117 +350,134 @@ class SFTTrainer:
 
         train_time = 0
         total_tokens = 0
-        for epoch in range(start_epoch, self.config.trainer.total_epochs):
-            self.train_sampler.set_epoch(epoch=epoch)
 
-            aggressive_empty_cache(force_sync=True)
-            log_gpu_memory_usage(f"rank {self.rank}: At start of epoch {epoch}", logger=logger)
+        # gc_freq >= 0: Disable automatic GC, manually collect every gc_freq steps (0 = never).
+        # gc_freq < 0: Backward compatible, don't touch GC (Python's default automatic GC).
+        gc_freq = getattr(self.config.trainer, "gc_freq", -1)
+        if gc_freq >= 0:
+            gc.disable()
+            log_with_rank(f"GC disabled (gc_freq={gc_freq})", logger=logger, rank=0, log_only_rank_0=True)
 
-            for step_in_epoch, data in enumerate(
-                tqdm(
-                    self.train_dataloader,
-                    initial=global_step % self.steps_per_epoch if epoch == start_epoch else 0,
-                    total=self.steps_per_epoch,
-                    desc=f"Epoch {epoch + 1}/{self.config.trainer.total_epochs}",
-                    disable=not is_logging,
-                )
-            ):
-                global_step += 1
+        try:
+            for epoch in range(start_epoch, self.config.trainer.total_epochs):
+                self.train_sampler.set_epoch(epoch=epoch)
 
-                # construct tensordict
-                data = tu.get_tensordict(tensor_dict=data, non_tensor_dict=meta_info)
-                batch_seqlens = self._get_batch_seqlens(data=data)
-                # this is necessary. Otherwise, it is interpreted as NonTensorStack
-                batch_seqlens_ntd = NonTensorData(batch_seqlens)
+                aggressive_empty_cache(force_sync=True)
+                log_gpu_memory_usage(f"rank {self.rank}: At start of epoch {epoch}", logger=logger)
 
-                tu.assign_non_tensor(data, update_lr_scheduler=True, global_token_num=batch_seqlens_ntd)
+                for step_in_epoch, data in enumerate(
+                    tqdm(
+                        self.train_dataloader,
+                        initial=global_step % self.steps_per_epoch if epoch == start_epoch else 0,
+                        total=self.steps_per_epoch,
+                        desc=f"Epoch {epoch + 1}/{self.config.trainer.total_epochs}",
+                        disable=not is_logging,
+                    )
+                ):
+                    global_step += 1
 
-                # start profile in SPMD mode
-                if global_step == self.start_profile_step:
-                    self.training_client.start_profile()
-                # train for one batch
-                step_start = time.perf_counter()
-                output = self.training_client.train_batch(data=data)
-                step_time = time.perf_counter() - step_start
-                train_time += step_time
+                    # construct tensordict
+                    data = tu.get_tensordict(tensor_dict=data, non_tensor_dict=meta_info)
+                    batch_seqlens = self._get_batch_seqlens(data=data)
+                    # this is necessary. Otherwise, it is interpreted as NonTensorStack
+                    batch_seqlens_ntd = NonTensorData(batch_seqlens)
 
-                if global_step == self.end_profile_step:
-                    self.training_client.stop_profile()
+                    tu.assign_non_tensor(data, update_lr_scheduler=True, global_token_num=batch_seqlens_ntd)
 
-                if self.engine.is_mp_src_rank_with_outputs():
-                    metrics = tu.get(output, "metrics")
+                    # start profile in SPMD mode
+                    if global_step == self.start_profile_step:
+                        self.training_client.start_profile()
+                    # train for one batch
+                    step_start = time.perf_counter()
+                    output = self.training_client.train_batch(data=data)
+                    step_time = time.perf_counter() - step_start
+                    train_time += step_time
 
-                    # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
-                    for k in ["loss", "grad_norm", "lr", "mfu"]:
-                        if k in metrics.keys():
-                            value = metrics.pop(k)
-                            metrics[f"train/{k}"] = value
-
-                    metrics["train/time(s)"] = step_time
-
-                    # add sequence length statistics
-                    try:
-                        seq_lens = np.array(batch_seqlens)
-                        metrics.update(
-                            {
-                                "data/train_seq_len_count": len(seq_lens),
-                                "data/train_seq_len_min": int(seq_lens.min()),
-                                "data/train_seq_len_max": int(seq_lens.max()),
-                                "data/train_seq_len_mean": float(seq_lens.mean()),
-                                "data/train_seq_len_std": float(seq_lens.std()),
-                                "data/train_seq_len_median": float(np.median(seq_lens)),
-                            }
-                        )
-                    except Exception as e:
-                        logger.warning("Failed to compute seq_len stats: %s (batch_seqlens=%s)", e, batch_seqlens)
-
-                    metrics["train/global_tokens"] = torch.sum(
-                        torch.tensor(batch_seqlens, device=self.device_name)
-                    ).item()
-                    total_tokens += metrics["train/global_tokens"]
-                    metrics["train/total_tokens(B)"] = total_tokens / 1e9
-
-                    if self.engine.get_data_parallel_rank() == 0:
-                        tracking.log(data=metrics, step=global_step)
-
-                is_last_step = global_step >= self.total_training_steps
-                is_valid_step = global_step % self.test_freq == 0
-                is_save_step = global_step % self.save_freq == 0
-
-                # early exit or validation step
-                if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
-                    # Perform validation
-                    val_losses = []
-                    for val_data in self.val_dataloader:
-                        val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
-                        output = self.training_client.infer_batch(val_data)
-
-                        if self.engine.is_mp_src_rank_with_outputs():
-                            metrics = tu.get(output, "metrics")
-                            val_losses.append(metrics["loss"])
+                    if global_step == self.end_profile_step:
+                        self.training_client.stop_profile()
 
                     if self.engine.is_mp_src_rank_with_outputs():
-                        val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
-                        # average over data parallel group
-                        dp_group = self.engine.get_data_parallel_group()
-                        if dp_group is not None:
-                            torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
+                        metrics = tu.get(output, "metrics")
 
-                    if is_logging:
-                        metric = {"val/loss": val_loss.detach().item()}
-                        tracking.log(data=metric, step=global_step)
-                        last_valid_metric = metric
-                    torch.distributed.barrier()
+                        # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
+                        for k in ["loss", "grad_norm", "lr", "mfu"]:
+                            if k in metrics.keys():
+                                value = metrics.pop(k)
+                                metrics[f"train/{k}"] = value
 
-                if is_last_step or (self.save_freq > 0 and is_save_step):
-                    aggressive_empty_cache(force_sync=True)
-                    self.ckpt_handler.save_checkpoint(step=global_step)
+                        metrics["train/time(s)"] = step_time
 
-                if is_last_step:
-                    if is_logging:
-                        print(f"Total time for train steps: {train_time:.2f}s")
-                        print(f"Final validation metrics: {last_valid_metric}")
-                    return
+                        # add sequence length statistics
+                        try:
+                            seq_lens = np.array(batch_seqlens)
+                            metrics.update(
+                                {
+                                    "data/train_seq_len_count": len(seq_lens),
+                                    "data/train_seq_len_min": int(seq_lens.min()),
+                                    "data/train_seq_len_max": int(seq_lens.max()),
+                                    "data/train_seq_len_mean": float(seq_lens.mean()),
+                                    "data/train_seq_len_std": float(seq_lens.std()),
+                                    "data/train_seq_len_median": float(np.median(seq_lens)),
+                                }
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to compute seq_len stats: %s (batch_seqlens=%s)", e, batch_seqlens)
+
+                        metrics["train/global_tokens"] = torch.sum(
+                            torch.tensor(batch_seqlens, device=self.device_name)
+                        ).item()
+                        total_tokens += metrics["train/global_tokens"]
+                        metrics["train/total_tokens(B)"] = total_tokens / 1e9
+
+                        if self.engine.get_data_parallel_rank() == 0:
+                            tracking.log(data=metrics, step=global_step)
+
+                    if gc_freq > 0 and global_step % gc_freq == 0:
+                        gc.collect()
+
+                    is_last_step = global_step >= self.total_training_steps
+                    is_valid_step = global_step % self.test_freq == 0
+                    is_save_step = global_step % self.save_freq == 0
+
+                    # early exit or validation step
+                    if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
+                        # Perform validation
+                        val_losses = []
+                        for val_data in self.val_dataloader:
+                            val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
+                            output = self.training_client.infer_batch(val_data)
+
+                            if self.engine.is_mp_src_rank_with_outputs():
+                                metrics = tu.get(output, "metrics")
+                                val_losses.append(metrics["loss"])
+
+                        if self.engine.is_mp_src_rank_with_outputs():
+                            val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
+                            # average over data parallel group
+                            dp_group = self.engine.get_data_parallel_group()
+                            if dp_group is not None:
+                                torch.distributed.all_reduce(
+                                    val_loss, op=torch.distributed.ReduceOp.AVG, group=dp_group
+                                )
+
+                        if is_logging:
+                            metric = {"val/loss": val_loss.detach().item()}
+                            tracking.log(data=metric, step=global_step)
+                            last_valid_metric = metric
+                        torch.distributed.barrier()
+
+                    if is_last_step or (self.save_freq > 0 and is_save_step):
+                        aggressive_empty_cache(force_sync=True)
+                        self.ckpt_handler.save_checkpoint(step=global_step)
+
+                    if is_last_step:
+                        if is_logging:
+                            print(f"Total time for train steps: {train_time:.2f}s")
+                            print(f"Final validation metrics: {last_valid_metric}")
+                        return
+        finally:
+            if gc_freq >= 0:
+                gc.enable()
 
 
 def run_sft(config):
