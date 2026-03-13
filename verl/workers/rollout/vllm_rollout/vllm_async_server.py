@@ -20,7 +20,6 @@ import os
 from pprint import pprint
 from typing import Any, Callable, Optional
 
-import numpy as np
 import ray
 import vllm.entrypoints.cli.serve
 from packaging import version
@@ -49,6 +48,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
     SuppressSignalInThread,
+    _qwen2_5_vl_dedup_image_tokens,
     build_cli_args_from_config,
     get_vllm_max_lora_rank,
 )
@@ -940,31 +940,3 @@ class vLLMReplica(RolloutReplica):
                 return r
 
         return {"aborted": False, "request_id": request_id, "error": "Request not found on any server"}
-
-
-def _qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
-    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
-    <|image_pad|> and <|video_pad|> token by image_data.
-
-    For example,
-    ```
-    <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
-    =>
-    <|vision_start|><|image_pad|><|vision_end|>
-    ```
-    """
-    if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
-        prompt_ids = np.array(prompt_ids)
-
-        # Create a mask where True indicates elements to keep
-        mask = np.ones(len(prompt_ids), dtype=bool)
-
-        # Find where the array equals the value
-        is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-
-        # Find consecutive duplicates by checking if previous element is also the value
-        mask[1:] &= ~(is_value[1:] & is_value[:-1])
-
-        return prompt_ids[mask].tolist()
-    else:
-        return prompt_ids

@@ -16,7 +16,6 @@ import logging
 import os
 from typing import Any, Optional
 
-import numpy as np
 import ray
 import torch
 from omegaconf import DictConfig
@@ -30,30 +29,10 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import _qwen2_5_vl_dedup_image_tokens, get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
-
-
-def _qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
-    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
-    <|image_pad|> and <|video_pad|> token by image_data.
-    For example,
-    ```
-    <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
-    =>
-    <|vision_start|><|image_pad|><|vision_end|>
-    ```
-    """
-    if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
-        prompt_ids = np.array(prompt_ids)
-        mask = np.ones(len(prompt_ids), dtype=bool)
-        is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-        mask[1:] &= ~(is_value[1:] & is_value[:-1])
-        return prompt_ids[mask].tolist()
-    else:
-        return prompt_ids
 
 
 @ray.remote
