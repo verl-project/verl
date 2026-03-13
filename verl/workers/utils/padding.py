@@ -141,36 +141,24 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
           "negative_prompt_embeds", "negative_prompt_embeds_mask"
     """
 
-    prompt_embeds = data["prompt_embeds"]  # (bs, seq_len, dim)
-    prompt_embeds_mask = data["prompt_embeds_mask"]  # (bs, seq_len)
-    prompt_embeds_list = []
-    prompt_embeds_mask_list = []
-    for i in range(prompt_embeds_mask.shape[0]):
-        curr_mask = prompt_embeds_mask[i].bool()
-        curr_prompt_embeds = prompt_embeds[i, curr_mask, :]
-        prompt_embeds_list.append(curr_prompt_embeds)
-        prompt_embeds_mask_list.append(curr_mask)
-    prompt_embeds_nested = torch.nested.as_nested_tensor(prompt_embeds_list, layout=torch.jagged)
-    prompt_embeds_mask_nested = torch.nested.as_nested_tensor(prompt_embeds_mask_list, layout=torch.jagged)
-    data["prompt_embeds"] = prompt_embeds_nested
-    data["prompt_embeds_mask"] = prompt_embeds_mask_nested
+    def _to_nested(embeds: torch.Tensor, mask: torch.Tensor):
+        """Strip padding from (bs, seq_len, dim) embeds using the boolean mask and return nested tensors."""
+        embeds_list, mask_list = [], []
+        for i in range(mask.shape[0]):
+            curr_mask = mask[i].bool()
+            embeds_list.append(embeds[i, curr_mask, :])
+            mask_list.append(curr_mask)
+        return (
+            torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged),
+            torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
+        )
+
+    data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(data["prompt_embeds"], data["prompt_embeds_mask"])
 
     if isinstance(data.get("negative_prompt_embeds", None), torch.Tensor):
-        negative_prompt_embeds = data["negative_prompt_embeds"]  # (bs, seq_len, dim)
-        negative_prompt_embeds_mask = data["negative_prompt_embeds_mask"]  # (bs, seq_len)
-        negative_prompt_embeds_list = []
-        negative_prompt_embeds_mask_list = []
-        for i in range(negative_prompt_embeds_mask.shape[0]):
-            curr_mask = negative_prompt_embeds_mask[i].bool()
-            curr_negative_prompt_embeds = negative_prompt_embeds[i, curr_mask, :]
-            negative_prompt_embeds_list.append(curr_negative_prompt_embeds)
-            negative_prompt_embeds_mask_list.append(curr_mask)
-        negative_prompt_embeds_nested = torch.nested.as_nested_tensor(negative_prompt_embeds_list, layout=torch.jagged)
-        negative_prompt_embeds_mask_nested = torch.nested.as_nested_tensor(
-            negative_prompt_embeds_mask_list, layout=torch.jagged
+        data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(
+            data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"]
         )
-        data["negative_prompt_embeds"] = negative_prompt_embeds_nested
-        data["negative_prompt_embeds_mask"] = negative_prompt_embeds_mask_nested
 
     data["loss_mask"] = data["response_mask"]
 
