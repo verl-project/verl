@@ -293,7 +293,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 state_dict["lr_scheduler"] = lr_state_dict
 
         if not generate_model:
-            state_dict.pop("model", None)
+            if len(self.model) > 1:
+                for vpp_rank in range(len(self.model)):
+                    state_dict.pop(f"model{vpp_rank}", None)
+            else:
+                state_dict.pop("model", None)
 
         # RNG States State Dict
         if generate_extra:
