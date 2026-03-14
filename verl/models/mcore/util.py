@@ -422,12 +422,12 @@ def preprocess_thd_no_padding(
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
-        cu_seqlens_q=cu_seqlens_padded,
+        cu_seqlens_q=cu_seqlens_padded.cpu(),
         max_seqlen_q=max_seqlen_in_batch,
-        cu_seqlens_kv=cu_seqlens_padded,
+        cu_seqlens_kv=cu_seqlens_padded.cpu(),
         max_seqlen_kv=max_seqlen_in_batch,
-        cu_seqlens_q_padded=cu_seqlens_padded,
-        cu_seqlens_kv_padded=cu_seqlens_padded,
+        cu_seqlens_q_padded=cu_seqlens_padded.cpu(),
+        cu_seqlens_kv_padded=cu_seqlens_padded.cpu(),
     )
     if pre_process:
         return input_ids_rmpad.unsqueeze(0), packed_seq_params, position_ids_rmpad.unsqueeze(0)
