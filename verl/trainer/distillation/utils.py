@@ -22,7 +22,7 @@ from tensordict import TensorDict
 
 from verl.trainer.distillation.losses import DistillationLossSettings
 from verl.trainer.distillation.types import DistillationLossInputs
-from verl.utils.stages import Stage
+from verl.utils import tensordict_utils as tu
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
@@ -38,8 +38,7 @@ def prepare_student_distillation_inputs(
     logits: torch.Tensor, batch: TensorDict, cu_seqlens: torch.Tensor, config: Optional[DistillationConfig]
 ) -> dict[str, torch.Tensor]:
     """Prepare student distillation inputs."""
-    stage = None if "stage" not in batch else batch["stage"]
-    if not is_distillation_enabled(config) or stage != Stage.ACTOR_UPDATE:
+    if not (is_distillation_enabled(config) and tu.get_non_tensor_data(batch, "compute_loss", False)):
         return {}
     loss_config: DistillationLossConfig = config.distillation_loss
     distillation_settings: DistillationLossSettings = loss_config.loss_settings
