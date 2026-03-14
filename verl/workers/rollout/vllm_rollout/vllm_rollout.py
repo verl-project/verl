@@ -145,10 +145,33 @@ class ServerAdapter(BaseRollout):
         if self.config.free_cache_engine:
             await self._execute_method("wake_up", kwargs={"tags": tags})
 
-    async def release(self):
-        """Release weights and kv cache in GPU memory."""
-        if self.config.free_cache_engine:
-            await self._execute_method("sleep", kwargs={"level": self.sleep_level})
+    async def release(self, tags: list[str] | None = None):
+        """Release weights and/or kv cache in GPU memory.
+
+        Args:
+            tags: List of tags to release, e.g. ["weights"], ["kv_cache"], or
+                  ["kv_cache", "weights"]. If None (default), releases both.
+
+        Note:
+            vLLM uses sleep levels rather than tags. Level 1 releases kv_cache,
+            level 2 releases kv_cache + weights. Releasing only ["weights"]
+            without kv_cache is not supported by vLLM.
+        """
+        from verl.workers.rollout._tag_utils import validate_release_tags
+
+        tag_set = validate_release_tags(tags)
+        if not self.config.free_cache_engine:
+            return
+        if tag_set == {"kv_cache", "weights"}:
+            level = self.sleep_level
+        elif tag_set == {"kv_cache"}:
+            level = 1
+        else:
+            raise NotImplementedError(
+                f"vLLM release does not support tags={tags!r}; "
+                "only ['kv_cache', 'weights'] or ['kv_cache'] are supported"
+            )
+        await self._execute_method("sleep", kwargs={"level": level})
 
     @torch.no_grad()
     async def update_weights(

@@ -380,12 +380,25 @@ class ServerAdapter(BaseRollout):
             await self._init_server_adapter()
             await self._adapter.resume_memory_occupation(tags=tags)
 
-    async def release(self):
-        """Release weights and kv cache in GPU memory."""
-        if self.is_leader_rank and self.config.free_cache_engine:
-            await self._init_server_adapter()
-            tags = self._WEIGHTS_TAGS + ["kv_cache"]
-            await self._adapter.release_memory_occupation(tags=tags)
+    async def release(self, tags: list[str] | None = None):
+        """Release weights and/or kv cache in GPU memory.
+
+        Args:
+            tags: List of tags to release, e.g. ["weights"], ["kv_cache"], or
+                  ["kv_cache", "weights"]. If None (default), releases both.
+        """
+        from verl.workers.rollout._tag_utils import validate_release_tags
+
+        tag_set = validate_release_tags(tags)
+        if not self.is_leader_rank or not self.config.free_cache_engine:
+            return
+        await self._init_server_adapter()
+        resolved_tags = []
+        if "weights" in tag_set:
+            resolved_tags.extend(self._WEIGHTS_TAGS)
+        if "kv_cache" in tag_set:
+            resolved_tags.append("kv_cache")
+        await self._adapter.release_memory_occupation(tags=resolved_tags)
 
     async def update_weights_from_ipc_handles(self, device_handles):
         assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
