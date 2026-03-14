@@ -109,6 +109,11 @@ jobs:
           ray stop --force
           bash tests/special_npu/run_qwen2_5_05b_grpo.sh
           rm -rf $HOME/ckpts
+      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (skip actor update via critic warmup)
+        run: |
+          ray stop --force
+          bash tests/special_npu/run_qwen2_5_05b_grpo_critic_warmup_skip_actor.sh
+          rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
