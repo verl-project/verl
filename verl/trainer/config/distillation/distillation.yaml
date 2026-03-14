@@ -97,3 +97,4 @@ teacher_model:
 
     prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
     response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
+    temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
