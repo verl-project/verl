@@ -23,13 +23,13 @@ def vllm_ascend_select_moe_comm_method_wrapper(fn):
     def wrapper(self, num_tokens, with_prefill):
         moe_comm_method = fn(self, num_tokens, with_prefill)
         from vllm_ascend.ascend_forward_context import MoECommType
-        from vllm_ascend.utils import get_ascend_soc_version, AscendSocVersion
+        from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
         soc_version = get_ascend_soc_version()
 
         # AscendSocVersion.A2 is not support MC2 in Single-card multi-process scenario now.
         if soc_version in {AscendSocVersion.A2} and moe_comm_method == MoECommType.MC2:
-            quant_type = getattr(self.vllm_config.model_config.hf_config, 'moe_quantize', None)
+            quant_type = getattr(self.vllm_config.model_config.hf_config, "moe_quantize", None)
             # Currently, w4a8_dynamic does not support allgatherep
             if quant_type == "w4a8_dynamic":
                 moe_comm_method = MoECommType.ALLTOALL
@@ -50,7 +50,7 @@ def vllm_ascend_select_moe_comm_method_wrapper(fn):
 def vllm_ascend_matmul_and_reduce_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
-        from vllm_ascend.utils import get_ascend_soc_version, AscendSocVersion
+        from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
         soc_version = get_ascend_soc_version()
         # AscendSocVersion.A2 is not support MC2 in Single-card multi-process scenario now.

@@ -240,7 +240,7 @@ class vLLMHttpServer:
         quantization = self.config.quantization
         hf_overrides = {}
         if is_torch_npu_available(check_device=False):
-            from verl.utils.vllm.npu_vllm_patch import check_vllm_ascend_before_server_launch
+
             check_vllm_ascend_before_server_launch()
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
