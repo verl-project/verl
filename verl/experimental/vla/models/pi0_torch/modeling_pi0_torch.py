@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import torch
@@ -67,6 +68,10 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         self.action_unnormalize_transform = Unnormalize(self.action_norm_stats, use_quantiles=self.pi05_enabled)
 
         self._to(get_device_name())
+        self.flow_sde_enable = bool(getattr(config, "flow_sde_enable", True))
+        self.flow_sde_noise_level = float(getattr(config, "flow_sde_noise_level", 0.5))
+        self.flow_sde_rollout_noise_scale = float(getattr(config, "flow_sde_rollout_noise_scale", 1.0))
+        self.flow_sde_train_noise_scale = float(getattr(config, "flow_sde_train_noise_scale", 1.0))
 
         ##### SAC Algorithm Support #####
         if getattr(self.config, "sac_enable", False):
@@ -199,8 +204,22 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             {"task": pi0_input.task, "observation.state": state}, tokenizer
         )
 
-        # Inference
-        pred_action = self.model.sample_actions(images, pi0_input.img_masks, lang_tokens, lang_masks, state=state)
+        if self.flow_sde_enable:
+            prefix_features = self.model.embed_prefix(
+                images=images,
+                img_masks=pi0_input.img_masks,
+                lang_tokens=lang_tokens,
+                lang_masks=lang_masks,
+            )
+            pred_action, rollout_log_probs = self._sample_actions_flow_sde(
+                state_features=(prefix_features, state),
+                noise_scale=self.flow_sde_rollout_noise_scale,
+                requires_grad=False,
+                return_log_prob=True,
+            )
+        else:
+            pred_action = self.model.sample_actions(images, pi0_input.img_masks, lang_tokens, lang_masks, state=state)
+            rollout_log_probs = torch.zeros(pred_action.shape[0], device=pred_action.device, dtype=torch.float32)
 
         # Output transforms
         from .policy.libero_policy import LiberoPi0Output
@@ -217,6 +236,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         }
         a = {
             "full_action": pred_action,
+            "log_probs": rollout_log_probs,
         }
 
         return pi0_output, s, a
@@ -324,6 +344,96 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         )
         return pooled.squeeze(1)
 
+    def _gaussian_log_prob(
+        self,
+        sample: torch.Tensor,
+        mean: torch.Tensor,
+        std: torch.Tensor,
+    ) -> torch.Tensor:
+        std_safe = std.clamp_min(1e-6)
+        log_prob = -0.5 * (((sample - mean) / std_safe) ** 2 + 2.0 * torch.log(std_safe) + math.log(2.0 * math.pi))
+        zero_mask = std <= 0
+        log_prob = torch.where(zero_mask, torch.zeros_like(log_prob), log_prob)
+        return log_prob.mean(dim=(-1, -2))
+
+    def _sample_actions_flow_sde(
+        self,
+        state_features: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+        noise_scale: float,
+        requires_grad: bool,
+        return_log_prob: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        prefix_features, states = state_features
+        prefix_embs, prefix_pad_masks, _ = prefix_features
+        batch_size = prefix_embs.shape[0]
+        device = prefix_embs.device
+
+        past_key_values = self._build_kv_cache_from_prefix(prefix_features)
+        actions_shape = (batch_size, self.model.n_action_steps, self.model.max_action_dim)
+        x_t = self.model.sample_noise(actions_shape, device=device)
+
+        timesteps = torch.linspace(1.0, 0.0, self.model.num_steps + 1, dtype=torch.float32, device=device)
+        step_log_probs: list[torch.Tensor] = []
+
+        for idx in range(self.model.num_steps):
+            t_cur = timesteps[idx]
+            t_next = timesteps[idx + 1]
+            delta = (t_cur - t_next).clamp_min(1e-6)
+
+            if requires_grad:
+                v_t = self.model.denoise_step(
+                    states,
+                    prefix_pad_masks,
+                    past_key_values,
+                    x_t,
+                    t_cur.expand(batch_size),
+                )
+            else:
+                with torch.no_grad():
+                    v_t = self.model.denoise_step(
+                        states,
+                        prefix_pad_masks,
+                        past_key_values,
+                        x_t,
+                        t_cur.expand(batch_size),
+                    )
+
+            t_cur_safe = t_cur.clamp(min=1e-4, max=1.0 - 1e-4)
+            t_cur_exp = t_cur_safe.view(1, 1, 1)
+            t_next_exp = t_next.view(1, 1, 1)
+            delta_exp = delta.view(1, 1, 1)
+
+            x0_pred = x_t - v_t * t_cur_exp
+            x1_pred = x_t + v_t * (1.0 - t_cur_exp)
+
+            if noise_scale > 0:
+                sigma = self.flow_sde_noise_level * noise_scale * torch.sqrt(t_cur_safe / (1.0 - t_cur_safe))
+                sigma_exp = sigma.view(1, 1, 1)
+                x0_weight = 1.0 - t_next_exp
+                x1_weight = t_next_exp - sigma_exp.pow(2) * delta_exp / (2.0 * t_cur_exp)
+                x_mean = x0_pred * x0_weight + x1_pred * x1_weight
+                x_std = torch.sqrt(delta_exp) * sigma_exp
+                eps = self.model.sample_noise(x_t.shape, device=device)
+                x_next = x_mean + eps * x_std
+            else:
+                x0_weight = 1.0 - t_next_exp
+                x1_weight = t_next_exp
+                x_mean = x0_pred * x0_weight + x1_pred * x1_weight
+                x_std = torch.zeros_like(x_mean)
+                x_next = x_mean
+
+            if return_log_prob:
+                step_log_probs.append(self._gaussian_log_prob(x_next, x_mean, x_std))
+
+            x_t = x_next
+
+        if return_log_prob:
+            log_probs = torch.stack(step_log_probs, dim=1).sum(dim=1)
+        else:
+            log_probs = None
+
+        return x_t, log_probs
+
     def _build_kv_cache_from_prefix(
         self,
         prefix_features: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -365,49 +475,13 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             torch.Tensor,
         ],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        prefix_features, states = state_features
-
-        prefix_embs, prefix_pad_masks, _ = prefix_features
-        batch_size = prefix_embs.shape[0]
-        device = prefix_embs.device
-
-        past_key_values = self._build_kv_cache_from_prefix(prefix_features)
-
-        actions_shape = (batch_size, self.model.n_action_steps, self.model.max_action_dim)
-        dt = -1.0 / float(self.model.num_steps)
-        t_grid = torch.arange(1.0, -dt / 2, dt, dtype=torch.float32, device=device)
-
-        with torch.no_grad():
-            a0 = self.model.sample_noise(actions_shape, device=device)
-            for tt in t_grid:
-                v_prev = self.model.denoise_step(
-                    states,
-                    prefix_pad_masks,
-                    past_key_values,
-                    a0,
-                    tt.expand(batch_size),
-                )
-                a0 = a0 + dt * v_prev
-            a0 = a0.detach()
-
-        z = self.model.sample_noise(actions_shape, device=device)
-        gamma1 = torch.empty((batch_size,), device=device).uniform_(0, 1).pow(1 / 1.5)
-        gamma2 = torch.empty((batch_size,), device=device).uniform_(0, 1).pow(1 / 1.0)
-        t = (gamma1 / (gamma1 + gamma2)) * 0.999 + 0.001
-        t = t.to(dtype=torch.float32, device=device)
-        t_expanded = t[:, None, None]
-        a_t = (1.0 - t_expanded) * a0 + t_expanded * z
-
-        v_theta = self.model.denoise_step(
-            states,
-            prefix_pad_masks,
-            past_key_values,
-            a_t,
-            t,
+        actions, log_probs = self._sample_actions_flow_sde(
+            state_features=state_features,
+            noise_scale=self.flow_sde_train_noise_scale,
+            requires_grad=True,
+            return_log_prob=True,
         )
-        a0_hat = a_t - t_expanded * v_theta
-
-        return a0_hat, None
+        return actions, log_probs
 
     @override
     def sac_forward_critic(
