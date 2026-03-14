@@ -26,6 +26,7 @@ __all__ = [
     "build_optimizer",
     "VeOmniOptimizerConfig",
     "TorchtitanOptimizerConfig",
+    "MindSpeedLLMOptimizerConfig",
 ]
 
 
@@ -168,6 +169,36 @@ class TorchtitanOptimizerConfig(OptimizerConfig):
     eps: float = 1e-8
     decay_type: str = "linear"
     min_lr_factor: float = 0.0
+
+
+@dataclass
+class MindSpeedLLMOptimizerConfig(OptimizerConfig):
+    """Mcore optimizer configuration extending base OptimizerConfig.
+
+    Args:
+        optimizer (str): Optimizer name; default is "adam".
+        lr (float): Learning rate.
+        clip_grad (float): Gradient clipping norm.
+        lr_warmup_init (float): Initial learning rate for warmup; defaults to 0.0.
+        lr_decay_steps (Optional[int]): Number of decay steps.
+        lr_decay_style (str): LR decay style: "constant", "linear", "cosine", or "inverse_square_root".
+        min_lr (float): Minimum learning rate.
+        weight_decay_incr_style (str): Weight decay increment style: "constant" or "cosine".
+        lr_wsd_decay_style (str): Weight-standard-deviation decay style: "constant", "exponential", or "cosine".
+        lr_wsd_decay_steps (Optional[int]): Number of steps for weight-standard-deviation decay.
+        use_checkpoint_opt_param_scheduler (bool): Whether to use checkpoint optimizer parameter scheduler.
+    """
+
+    optimizer: str = "adam"
+    lr_warmup_init: float = 0.0
+    lr_decay_steps: Optional[int] = None
+    lr_decay_style: str = "linear"
+    min_lr: float = 0.0
+    weight_decay_incr_style: str = "constant"
+    lr_wsd_decay_style: str = "exponential"
+    lr_wsd_decay_steps: Optional[int] = None
+    use_checkpoint_opt_param_scheduler: bool = False
+    override_optimizer_config: Optional[dict] = None
 
 
 def build_optimizer(parameters, config: FSDPOptimizerConfig):

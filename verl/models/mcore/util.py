@@ -319,6 +319,22 @@ def preprocess_thd_no_padding(
     cu_seqlens_padded = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
 
+    try:
+        from mindspeed.core.context_parallel.get_batch_utils import set_actual_seq_len
+        set_actual_seq_len(cu_seqlens_padded)
+
+        # Generate position IDs within each padded segment
+        pack_length = int(seqlens_in_batch_padded.sum().item())
+        position_ids_packed = torch.zeros(pack_length, dtype=torch.int32, device=input_ids.device)
+        for i in range(batch_size):
+            start = cu_seqlens_padded[i].item()
+            end = cu_seqlens_padded[i + 1].item()
+            position_ids_packed[start:end] = torch.arange(end - start, dtype=torch.int32, device=input_ids.device)
+        from mindspeed.utils import set_position_ids
+        set_position_ids(position_ids_packed.unsqueeze(0).transpose(0, 1).contiguous())
+    except Exception as e:
+        logger.warning(f"Error when executing set_position_ids: {e}")
+
     if use_fp8_padding:
         # Pad the last sequence so total length is divisible by total_align for TE
         pad_size_last = (total_align - cu_seqlens_padded[-1] % total_align) % total_align

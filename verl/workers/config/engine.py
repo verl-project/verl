@@ -32,6 +32,7 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
+    "MindSpeedLLMEngineConfig",
 ]
 
 
@@ -394,6 +395,71 @@ class TorchtitanEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["torchtitan"], f"strategy {self.strategy} not supported"
+
+
+@dataclass
+class MindSpeedLLMEngineConfig(EngineConfig):
+    """Configuration for Megatron parallelism.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        param_offload (bool): Whether to offload parameters to CPU.
+        grad_offload (bool): Whether to offload gradients to CPU.
+        optimizer_offload (bool): Whether to offload optimizer states to CPU.
+        tensor_model_parallel_size (int): Tensor model parallel size.
+        expert_model_parallel_size (int): Expert model parallel size for MoE models.
+        expert_tensor_parallel_size (Optional[int]): Expert tensor parallel size for MoE models.
+        pipeline_model_parallel_size (int): Pipeline model parallel size.
+        virtual_pipeline_model_parallel_size (Optional[int]): Virtual pipeline model parallel size
+            for interleaved scheduling.
+        context_parallel_size (int): Context parallel size for long sequences.
+        sequence_parallel (bool): Whether to enable sequence parallelism.
+        use_distributed_optimizer (bool): Whether to use distributed optimizer.
+        use_dist_checkpointing (bool): Whether to use distributed checkpointing.
+        dist_checkpointing_path (Optional[str]): Path for distributed checkpointing.
+        dist_ckpt_optim_fully_reshardable (bool): Use fully reshardable optimizer checkpoints.
+        distrib_optim_fully_reshardable_mem_efficient (bool): Use memory-efficient fully reshardable format.
+        seed (int): Random seed for reproducibility.
+        override_ddp_config (dict[str, Any]): Override configuration for DDP.
+        override_transformer_config (dict[str, Any]): Override configuration for transformer.
+        use_mbridge (bool): Whether to use MBridge for communication.
+        dtype (str): Mixed precision training param dtype, default "bfloat16"
+        engine_kwargs (str): mindspeedllm engine kwargs.
+    """
+
+    # sequence_parallel is not listed as a frozen field for auto-correction purpose
+    _mutable_fields = EngineConfig._mutable_fields | {"sequence_parallel"}
+    # mcore parallelism
+    tensor_model_parallel_size: int = 1
+    expert_model_parallel_size: int = 1
+    expert_tensor_parallel_size: Optional[int] = None
+    pipeline_model_parallel_size: int = 1
+    virtual_pipeline_model_parallel_size: Optional[int] = None
+    context_parallel_size: int = 1
+    sequence_parallel: bool = True
+    use_distributed_optimizer: bool = True
+    use_dist_checkpointing: bool = False
+    dist_checkpointing_path: Optional[str] = None
+    dist_checkpointing_prefix: str = ""
+    dist_ckpt_optim_fully_reshardable: bool = False
+    distrib_optim_fully_reshardable_mem_efficient: bool = False
+    override_ddp_config: dict[str, Any] = field(default_factory=dict)
+    override_transformer_config: dict[str, Any] = field(default_factory=dict)
+    override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
+    use_mbridge: bool = True
+    vanilla_mbridge: bool = True
+    strategy: str = "mindspeedllm"
+    engine_kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        """config validation logics go here"""
+        assert self.strategy == "mindspeedllm"
+        assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if self.tensor_model_parallel_size == 1:
+            warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
+            self.sequence_parallel = False
 
 
 @dataclass

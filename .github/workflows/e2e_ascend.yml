@@ -123,6 +123,21 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/run_fully_async_policy.sh
+      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend)
+        run: |
+          ray stop --force
+          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
+          git clone https://gitcode.com/pengnuoheng/MindSpeed-LLM.git -b verl_support_llm /MindSpeed-LLM
+          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
+          bash tests/special_npu/run_qwen3_8b_grpo_mindspeedllm.sh
+      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend, MoE Model)
+        run: |
+          ray stop --force
+          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
+          git clone https://gitcode.com/pengnuoheng/MindSpeed-LLM.git -b verl_support_llm /MindSpeed-LLM
+          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
+          USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm bash tests/special_npu/run_qwen3_30b_grpo_mindspeedllm.sh
+
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
