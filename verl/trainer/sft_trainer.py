@@ -22,8 +22,10 @@ os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 import logging
+import time
 
 import hydra
+import numpy as np
 import torch
 import torch.distributed
 from omegaconf import OmegaConf
@@ -375,8 +377,11 @@ class SFTTrainer:
                 # start profile in SPMD mode
                 if global_step == self.start_profile_step:
                     self.training_client.start_profile()
-                # train for on batch
+                # train for one batch
+                step_start = time.perf_counter()
                 output = self.training_client.train_batch(data=data)
+                step_time = time.perf_counter() - step_start
+                train_time += step_time
 
                 if global_step == self.end_profile_step:
                     self.training_client.stop_profile()
@@ -389,6 +394,24 @@ class SFTTrainer:
                         if k in metrics.keys():
                             value = metrics.pop(k)
                             metrics[f"train/{k}"] = value
+
+                    metrics["train/time(s)"] = step_time
+
+                    # add sequence length statistics
+                    try:
+                        seq_lens = np.array(batch_seqlens)
+                        metrics.update(
+                            {
+                                "data/train_seq_len_count": len(seq_lens),
+                                "data/train_seq_len_min": int(seq_lens.min()),
+                                "data/train_seq_len_max": int(seq_lens.max()),
+                                "data/train_seq_len_mean": float(seq_lens.mean()),
+                                "data/train_seq_len_std": float(seq_lens.std()),
+                                "data/train_seq_len_median": float(np.median(seq_lens)),
+                            }
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to compute seq_len stats: %s (batch_seqlens=%s)", e, batch_seqlens)
 
                     metrics["train/global_tokens"] = torch.sum(
                         torch.tensor(batch_seqlens, device=self.device_name)
