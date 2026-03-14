@@ -73,6 +73,15 @@ class SACReplayPool:
                 f"task_ids length ({len(task_ids)}) must match batch size ({batch.batch_size[0]})."
             )
 
+        valid_mask = batch["valids"].to(torch.bool)
+        valid_indices = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
+        if valid_indices.numel() == 0:
+            return
+
+        batch = self._index_select_batch(batch, valid_indices.to(batch.device))
+        selected = valid_indices.cpu().tolist()
+        task_ids = [task_ids[i] for i in selected]
+
         positive_mask = self._extract_positive_mask(batch)
 
         grouped_indices: dict[str, dict[str, list[int]]] = {}
@@ -108,7 +117,8 @@ class SACReplayPool:
     ) -> TensorDict | tuple[TensorDict, dict]:
         """Sample a batch from all task-specific pools."""
 
-        assert self.size >= batch_size, "Not enough samples in replay pool to sample the requested batch size."
+        if self.size == 0:
+            raise ValueError("Replay pool is empty, unable to sample.")
 
         positive_sample_ratio = max(0.0, min(1.0, float(positive_sample_ratio)))
         target_positive = int(round(batch_size * positive_sample_ratio))
@@ -139,14 +149,13 @@ class SACReplayPool:
                 sampled_positive += extra_positive
                 deficit -= extra_positive
 
-        assert deficit == 0, "Unable to sample enough data from replay pool."
-
         sampled_parts = []
         if sampled_positive > 0:
             sampled_parts.append(self._sample_from_task_pools(sampled_positive, is_positive_pool=True))
         if sampled_negative > 0:
             sampled_parts.append(self._sample_from_task_pools(sampled_negative, is_positive_pool=False))
 
+        sampled_count = sampled_positive + sampled_negative
         if len(sampled_parts) == 1:
             sampled_batch = sampled_parts[0]
         else:
@@ -155,6 +164,15 @@ class SACReplayPool:
                     key: torch.cat([part[key] for part in sampled_parts], dim=0)
                     for key in sampled_parts[0].keys()
                 },
+                batch_size=[sampled_count],
+                device=self.sample_device,
+            )
+
+        if sampled_count < batch_size:
+            sampled_batch = self._pad_sampled_batch(sampled_batch, target_batch_size=batch_size)
+        else:
+            sampled_batch = TensorDict(
+                {key: value for key, value in sampled_batch.items()},
                 batch_size=[batch_size],
                 device=self.sample_device,
             )
@@ -348,6 +366,31 @@ class SACReplayPool:
         if positive_mask.ndim == 1:
             return positive_mask
         return positive_mask.reshape(positive_mask.shape[0], -1).any(dim=1)
+
+    def _pad_sampled_batch(self, sampled_batch: TensorDict, target_batch_size: int) -> TensorDict:
+        current_size = sampled_batch.batch_size[0]
+        if current_size >= target_batch_size:
+            return sampled_batch
+
+        pad_size = target_batch_size - current_size
+        pad_idx = torch.zeros(pad_size, dtype=torch.long, device=self.sample_device)
+        padded_batch = TensorDict(
+            {
+                key: torch.cat([value, value.index_select(0, pad_idx)], dim=0)
+                for key, value in sampled_batch.items()
+            },
+            batch_size=[target_batch_size],
+            device=self.sample_device,
+        )
+
+        valid_tensor = padded_batch["valids"].clone()
+        if valid_tensor.dtype == torch.bool:
+            valid_tensor[current_size:] = False
+        else:
+            valid_tensor[current_size:] = 0
+        padded_batch["valids"] = valid_tensor
+
+        return padded_batch
 
     def _index_select_batch(self, batch: TensorDict, idx: torch.Tensor) -> TensorDict:
         length = int(idx.numel())
