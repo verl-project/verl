@@ -564,7 +564,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
             )
 
-            # used for LoRA
+            # used for LoRA (base_sync_done is unused in merge-only mode but kept for Phase 2 adapter path)
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
@@ -622,6 +622,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
            - before update_weights: rollout should be in sleep mode.
            - after update_weights: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
+
+        LoRA handling: when model.lora.merge=True (peft_merge), LoRA is merged into
+        base weights before sync. The engine returns full HF-keyed params with
+        peft_config=None, so the rollout receives a standard weight update.
         """
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
@@ -633,12 +637,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(False)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
-        # 1. resume weights and update weights
+        # 1. resume rollout memory (weights were released during sleep)
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
-        # 2. get per tensor generator from engine, this will load model to gpu
+        # 2. get per tensor params from engine, this will load model to gpu
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon, base_sync_done=True
         )
@@ -646,23 +650,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         await self.rollout.update_weights(
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
-
-        do_lora_base_sync = False
-        if not self.peft_merge and peft_config is not None:
-            # set sleep level for LoRA adapter weights only sync
-            # TODO: make this configurable so that users with small
-            # main memory can trade sync time to avoid OOM
-            self.rollout.sleep_level = 1
-
-            do_lora_base_sync = (not self.base_sync_done) or (
-                self.rollout.sleep_level != 1 and self.config.rollout.free_cache_engine
-            )
-
-        if do_lora_base_sync:
-            per_tensor_base_params, _ = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon, base_sync_done=False
-            )
-            await self.rollout.update_weights(per_tensor_base_params, peft_config=peft_config, base_sync_done=False)
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
