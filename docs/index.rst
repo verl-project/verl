@@ -90,6 +90,7 @@ verl is fast with:
    workers/ray_trainer
    workers/fsdp_workers
    workers/megatron_workers
+   workers/automodel_workers
    workers/sglang_worker
    workers/trtllm_worker
    workers/model_engine
