@@ -85,11 +85,14 @@ class SupportSACTraining:
     def sac_forward_actor(
         self,
         state_features: Any,
+        is_first_micro_batch: bool = False,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], dict[str, float]]:
         """Compute actions and their log probabilities from state features.
 
         Args:
             state_features: Any data structure representing the processed state features.
+            is_first_micro_batch: Whether the current forward corresponds to the first
+                micro batch of the actor update step.
 
         Returns:
             actions: torch.Tensor of shape (B, n_action_steps, action_dim), sampled actions.

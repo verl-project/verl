@@ -325,7 +325,10 @@ class RobDataParallelSACActor(BaseSACActor):
                 state_features = self.actor_module.sac_forward_state_features(s)
                 s0_state_features, s1_state_features = split_nested_dicts_or_tuples(state_features, 2)
                 if resample:
-                    a1_actions, log_probs_1, _ = self.actor_module.sac_forward_actor(s1_state_features)
+                    a1_actions, log_probs_1, _ = self.actor_module.sac_forward_actor(
+                        s1_state_features,
+                        is_first_micro_batch=False,
+                    )
                     a1 = {"full_action": a1_actions}
                 else:
                     log_probs_1 = None
@@ -358,13 +361,17 @@ class RobDataParallelSACActor(BaseSACActor):
     def _forward_actor(
         self,
         micro_batch: TensorDict,
+        is_first_micro_batch: bool,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, dict[str, float]]:
         micro_batch = micro_batch.to(get_device_id())
         s0 = get_dict_from_prefix(micro_batch, "s0.")
 
         with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             s0_state_features = self.actor_module.sac_forward_state_features(s0)
-            a0_actions, log_probs_0, actor_forward_metrics = self.actor_module.sac_forward_actor(s0_state_features)
+            a0_actions, log_probs_0, actor_forward_metrics = self.actor_module.sac_forward_actor(
+                s0_state_features,
+                is_first_micro_batch=is_first_micro_batch,
+            )
             q_values_0 = self.actor_module.sac_forward_critic(
                 {"full_action": a0_actions},
                 s0_state_features,
@@ -459,7 +466,10 @@ class RobDataParallelSACActor(BaseSACActor):
                 logger.info(f"[{batch_idx + 1}/{len(micro_batches)}] actor micro batch ")
 
                 micro_batch = micro_batch.to(get_device_id())
-                raw_actor_loss, log_probs, q_values, actor_forward_metrics_mb = self._forward_actor(micro_batch)
+                raw_actor_loss, log_probs, q_values, actor_forward_metrics_mb = self._forward_actor(
+                    micro_batch,
+                    is_first_micro_batch=(batch_idx == 0),
+                )
                 (raw_actor_loss / grad_accum_steps).backward()
                 actor_loss_list.append(raw_actor_loss.detach().item())
                 if log_probs is not None:

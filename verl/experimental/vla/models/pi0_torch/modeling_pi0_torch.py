@@ -494,6 +494,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             tuple[torch.Tensor, torch.Tensor, torch.Tensor],
             torch.Tensor,
         ],
+        is_first_micro_batch: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, dict[str, float]]:
         actions, log_probs = self._sample_actions_flow_sde(
             state_features=state_features,
@@ -501,7 +502,8 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             requires_grad=True,
             return_log_prob=True,
         )
-        self.flow_sde_step.add_(1)
+        if is_first_micro_batch:
+            self.flow_sde_step.add_(1)
         actor_metrics: dict[str, float] = {}
         if self.flow_sde_enable:
             actor_metrics = {
