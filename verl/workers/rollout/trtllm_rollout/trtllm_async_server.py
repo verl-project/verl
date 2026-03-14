@@ -29,7 +29,7 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -204,13 +204,25 @@ class TRTLLMHttpServer:
             )
 
         self.llm = await AsyncLLM(**llm_kwargs)
-        trtllm_server = OpenAIServer(
-            generator=self.llm,
-            model=self.model_config.local_path,
-            tool_parser=None,
-            server_role=None,
-            metadata_server_cfg=None,
-        )
+        import inspect
+
+        init_params = inspect.signature(OpenAIServer.__init__).parameters
+        if "generator" in init_params:
+            trtllm_server = OpenAIServer(
+                generator=self.llm,
+                model=self.model_config.local_path,
+                tool_parser=None,
+                server_role=None,
+                metadata_server_cfg=None,
+            )
+        else:
+            trtllm_server = OpenAIServer(
+                llm=self.llm,
+                model=self.model_config.local_path,
+                tool_parser=None,
+                server_role=None,
+                metadata_server_cfg=None,
+            )
 
         app = trtllm_server.app
         self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
@@ -234,7 +246,8 @@ class TRTLLMHttpServer:
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
         if self.is_vlm_model and (image_data or video_data):
-            org_prompt = self.llm.tokenizer.decode(prompt_ids)
+            deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+            org_prompt = self.llm.tokenizer.decode(deduped_ids)
             input_dict = {
                 "prompt": org_prompt,
                 "multi_modal_data": {},
@@ -395,12 +408,7 @@ class TRTLLMReplica(RolloutReplica):
                 node_id=node_id,
                 soft=False,
             ),
-            runtime_env={
-                "env_vars": {
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    "NCCL_CUMEM_ENABLE": "0",
-                }
-            },
+            runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1", "NCCL_CUMEM_ENABLE": "0"}},
             name=name,
             max_concurrency=self.max_concurrency,
         ).remote(

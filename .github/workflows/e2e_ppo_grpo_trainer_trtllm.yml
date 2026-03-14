@@ -228,9 +228,11 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install qwen_vl_utils 
+          pip3 install mathruler
       - name: Prepare GEO3K dataset
         run: |
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/geo3k --local_save_dir ${PWD}/data/geo3k
+          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k
       - name: Running GEO3K E2E training tests with FSDP on 8 L20 GPUs (VLM)
         run: |
           ray stop --force
