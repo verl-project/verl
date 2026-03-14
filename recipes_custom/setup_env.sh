@@ -2,7 +2,7 @@
 # setup_env.sh — Set up environment for Qwen3.5 SFT (verl + megatron)
 #
 # Verified working versions:
-#   mbridge:                git@34a87c4a (PR#83, qwen3.5 support)
+#   mbridge:                git main (ISEEKYAN/mbridge)
 #   megatron-core:          0.16.0
 #   transformers:           5.2.0
 #   torch:                  2.9.0+cu129
@@ -35,13 +35,14 @@ echo " Qwen3.5 SFT environment setup"
 echo "============================================"
 
 # ----------------------------------------------------
-# 1. mbridge — must install from git; PyPI 0.15.1 does
-#    not register qwen3_5. Pinned to PR#83 merge commit.
+# 1. mbridge — install from git main. PyPI 0.15.1 is too old
+#    for newer Qwen3/Qwen3.5 configs.
 # ----------------------------------------------------
 echo ""
-echo "[1/5] Installing mbridge (qwen3.5 support, commit 34a87c4a)..."
-run pip install --no-deps \
-    "git+https://github.com/ISEEKYAN/mbridge.git@34a87c4a83d5a54599d48e8552982575b066c2f8"
+echo "[1/5] Installing mbridge from latest ISEEKYAN/mbridge..."
+run python -m pip uninstall -y mbridge
+run python -m pip install --no-cache-dir --no-deps \
+    "git+https://github.com/ISEEKYAN/mbridge.git"
 
 # ----------------------------------------------------
 # 2. megatron-core 0.16.0
