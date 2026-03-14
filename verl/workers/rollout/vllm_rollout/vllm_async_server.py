@@ -643,8 +643,12 @@ class vLLMHttpServer:
         else:
             num_logprobs = 0
 
+        temp = logprob_params["temperature"]
+        if temp != 1.0:
+            raise NotImplementedError(f"vLLM doesn't support temperature for prompt logprobs")
+
         # TODO: we can add temperature if we potentially want a teacher temperature
-        sampling_params = SamplingParams(max_tokens=1, prompt_logprobs=num_logprobs)
+        sampling_params = SamplingParams(max_tokens=1, prompt_logprobs=num_logprobs, temperature=temp)
 
         multi_modal_data = {}
         if image_data is not None:

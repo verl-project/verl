@@ -870,6 +870,7 @@ class AgentLoopWorker:
             logprob_params = {
                 "use_topk": self.distillation_loss_config.loss_settings.use_topk,
                 "topk": self.distillation_loss_config.topk,
+                "temperature": self.distillation_config.teacher_model.inference.temperature,
             }
             output = await self.teacher_server_manager.compute_logprobs(
                 request_id=uuid4().hex,
