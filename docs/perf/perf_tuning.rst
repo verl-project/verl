@@ -167,6 +167,47 @@ We support different model utilize different ulysses_sequence_parallel_size size
 
 To train long sequence (>32k), users may need to decrease the ``*micro_batch_size_per_gpu`` and ``*max_token_len_per_gpu`` to avoid OOM.
 
+Vision DP for VLM Training with Sequence Parallelism
+------------------------------------------------------
+
+When using Ulysses Sequence Parallelism (``ulysses_sequence_parallel_size > 1``) with Vision-Language Models (VLMs),
+the VisionTransformer (ViT) by default processes **all** images on every SP rank, wasting memory proportional to
+``total_images``.
+
+Vision DP distributes **whole images** (not patches) across SP ranks, reducing ViT memory from ``O(total_images)``
+to ``O(total_images / sp_size)``.
+
+To enable Vision DP, set ``vision_dp: True`` in the model config:
+
+.. code-block:: yaml
+
+   model:
+     vision_dp: True
+
+.. note::
+   Vision DP is only effective when ``ulysses_sequence_parallel_size > 1``. It has no effect when sequence
+   parallelism is disabled.
+
+**Supported models:**
+
+- Qwen2-VL
+- Qwen2.5-VL
+- Qwen3-VL (including deepstack)
+- GLM-4V
+
+**How it works:**
+
+1. **Image-level distribution**: Whole images are assigned to SP ranks via load-balanced contiguous bin-packing
+   (balanced by total patch count, not just image count).
+2. **Local ViT forward**: Each rank runs the VisionTransformer only on its assigned images.
+3. **All-gather**: Embeddings are gathered across ranks. Since assignment is contiguous, no reordering is needed.
+4. **Gradient sync**: ``all_reduce(SUM)`` in backward aggregates partial sequence gradients from all SP ranks,
+   recovering complete gradients for each image.
+
+**Precision**: Vision DP is numerically near-lossless. Language gradients are bitwise identical at pre-clip.
+Vision gradient differences are within bf16 precision (~1e-05 max) due to ``all_reduce(SUM)`` changing FP
+accumulation order.
+
 LigerKernel for SFT
 ----------------------
 

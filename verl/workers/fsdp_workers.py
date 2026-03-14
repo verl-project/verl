@@ -342,6 +342,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         use_prefix_grouper=False,
         use_tiled_mlp=False,
         tiled_mlp_shards=4,
+        vision_dp=False,
     ):
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from transformers import (
@@ -395,12 +396,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         actor_model_config = AutoConfig.from_pretrained(
             local_path, trust_remote_code=trust_remote_code, attn_implementation=attn_implementation
         )
-        # TODO: VL models use VisionAttention, which directly uses flash_attention in transformers>=4.53
-        # which will be patched by _ulysses_flash_attention_forward, but errorly misses position_ids
-        # Maybe support Ulysses in VisionAttention in the future and remove this patch
-        if self.ulysses_sequence_parallel_size > 1 and hasattr(actor_model_config, "vision_config"):
-            actor_model_config.vision_config._attn_implementation = "eager"
-
         # patch for qwen2.5-vl: when using flash_attention_3, set vision tower to use flash_attention_2
         # because the vision tower does not support flash_attention_3
         if (
@@ -494,6 +489,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 use_prefix_grouper=use_prefix_grouper,
                 use_tiled_mlp=use_tiled_mlp,
                 tiled_mlp_shards=tiled_mlp_shards,
+                vision_dp=vision_dp,
             )
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
@@ -904,6 +900,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 use_prefix_grouper=self.config.actor.get("use_prefix_grouper", False),
                 use_tiled_mlp=use_tiled_mlp,
                 tiled_mlp_shards=tiled_mlp_shards,
+                vision_dp=self.config.model.get("vision_dp", False),
             )
 
             # get the original unwrapped module
@@ -958,6 +955,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 use_prefix_grouper=use_prefix_grouper,
                 use_tiled_mlp=ref_use_tiled_mlp,
                 tiled_mlp_shards=ref_tiled_mlp_shards,
+                vision_dp=self.config.model.get("vision_dp", False),
             )[0]
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
@@ -1404,12 +1402,6 @@ class CriticWorker(Worker, DistProfilerExtension):
             attn_implementation=attn_implementation,
             trust_remote_code=config.model.get("trust_remote_code", False),
         )
-        # TODO: VL models use VisionAttention, which directly uses flash_attention in transformers>=4.53
-        # which will be patched by _ulysses_flash_attention_forward, but errorly misses position_ids
-        # Maybe support Ulysses in VisionAttention in the future and remove this patch
-        if self.ulysses_sequence_parallel_size > 1 and hasattr(critic_model_config, "vision_config"):
-            critic_model_config.vision_config._attn_implementation = "eager"
-
         critic_model_config.num_labels = 1
         # patch for kimi-vl
         if getattr(critic_model_config, "model_type", None) == "kimi_vl":
@@ -1449,6 +1441,7 @@ class CriticWorker(Worker, DistProfilerExtension):
                 ulysses_sp_size=self.ulysses_sequence_parallel_size,
                 use_tiled_mlp=use_tiled_mlp,
                 tiled_mlp_shards=tiled_mlp_shards,
+                vision_dp=config.model.get("vision_dp", False),
             )
 
             # some parameters may not in torch_dtype

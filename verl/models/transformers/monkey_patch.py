@@ -15,11 +15,14 @@
 Apply monkey-patch function to models
 """
 
+import logging
 import sys
 from types import SimpleNamespace
 from typing import Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel
 
@@ -292,6 +295,7 @@ def apply_monkey_patch(
     use_prefix_grouper: bool = False,
     use_tiled_mlp: bool = False,
     tiled_mlp_shards: int = 4,
+    vision_dp: bool = False,
 ):
     """
     Apply monkey patch to the models for ulysses sequence parallel, fused kernel, tiled MLP and prefix grouper.
@@ -307,6 +311,7 @@ def apply_monkey_patch(
         fused_kernels_backend: The backend to use for fused kernels.
         use_tiled_mlp: Whether to use TiledMLP for memory-efficient MLP computation.
         tiled_mlp_shards: Number of shards for TiledMLP (higher = lower memory, slightly slower).
+        vision_dp: Whether to enable Vision DP (distribute ViT across SP ranks by image).
     """
 
     # Apply TiledMLP monkey patch for memory-efficient MLP computation
@@ -403,6 +408,45 @@ def apply_monkey_patch(
             patch_vlm_for_ulysses_input_slicing(Qwen2_5_VLTextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen2VLTextModel)
 
+        # Step 4: patch VisionTransformer for Vision DP (image-level distribution)
+        if ulysses_sp_size > 1:
+            if vision_dp:
+                from verl.utils.vision_dp import create_dp_vision_forward
+
+                # Patch Qwen2-VL VisionTransformer
+                try:
+                    from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
+
+                    if not getattr(Qwen2VisionTransformerPretrainedModel, "_vision_dp_patched", False):
+                        original_vision_forward = Qwen2VisionTransformerPretrainedModel.forward
+                        Qwen2VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original_vision_forward)
+                        Qwen2VisionTransformerPretrainedModel._vision_dp_patched = True
+                        print(f"Monkey patch Qwen2VisionTransformerPretrainedModel.forward for Vision DP (dp_size={ulysses_sp_size})")
+                except ImportError:
+                    logger.warning(
+                        "Could not import Qwen2VisionTransformerPretrainedModel for Vision DP patching. "
+                        "Vision DP will NOT be applied for Qwen2-VL. "
+                        "Check your transformers version supports this model."
+                    )
+
+                # Patch Qwen2.5-VL VisionTransformer (uses a different class)
+                try:
+                    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+
+                    if not getattr(Qwen2_5_VisionTransformerPretrainedModel, "_vision_dp_patched", False):
+                        original_vision_forward_25 = Qwen2_5_VisionTransformerPretrainedModel.forward
+                        Qwen2_5_VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original_vision_forward_25)
+                        Qwen2_5_VisionTransformerPretrainedModel._vision_dp_patched = True
+                        print(f"Monkey patch Qwen2_5_VisionTransformerPretrainedModel.forward for Vision DP (dp_size={ulysses_sp_size})")
+                except ImportError:
+                    logger.warning(
+                        "Could not import Qwen2_5_VisionTransformerPretrainedModel for Vision DP patching. "
+                        "Vision DP will NOT be applied for Qwen2.5-VL. "
+                        "Check your transformers version supports this model."
+                    )
+            else:
+                print(f"Vision DP disabled (vision_dp=False). ViT runs replicated on all {ulysses_sp_size} SP ranks.")
+
     elif model.config.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
         # Step 1: patch model to support image-text mixed data
         from transformers.models.qwen3_vl.modeling_qwen3_vl import (
@@ -437,6 +481,28 @@ def apply_monkey_patch(
             patch_vlm_for_ulysses_input_slicing(Qwen3VLTextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3VLMoeTextModel)
 
+        # Step 4: patch VisionTransformer for Vision DP (image-level distribution)
+        if ulysses_sp_size > 1:
+            if vision_dp:
+                from verl.utils.vision_dp import create_dp_vision_forward
+
+                try:
+                    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
+
+                    if not getattr(Qwen3VLVisionModel, "_vision_dp_patched", False):
+                        original_vision_forward = Qwen3VLVisionModel.forward
+                        Qwen3VLVisionModel.forward = create_dp_vision_forward(original_vision_forward)
+                        Qwen3VLVisionModel._vision_dp_patched = True
+                        print(f"Monkey patch Qwen3VLVisionModel.forward for Vision DP (dp_size={ulysses_sp_size})")
+                except ImportError:
+                    logger.warning(
+                        "Could not import Qwen3VLVisionModel for Vision DP patching. "
+                        "Vision DP will NOT be applied for Qwen3-VL. "
+                        "Check your transformers version supports this model."
+                    )
+            else:
+                print(f"Vision DP disabled (vision_dp=False). ViT runs replicated on all {ulysses_sp_size} SP ranks.")
+
     elif model.config.model_type == "glm4v":
         # Step 1: patch model to support image-text mixed data
 
@@ -463,6 +529,28 @@ def apply_monkey_patch(
         # Step 3: patch input for multimodal sequence parallelism
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Glm4vTextModel)
+
+        # Step 4: patch VisionTransformer for Vision DP (image-level distribution)
+        if ulysses_sp_size > 1:
+            if vision_dp:
+                from verl.utils.vision_dp import create_dp_vision_forward
+
+                try:
+                    from transformers.models.glm4v.modeling_glm4v import Glm4vVisionModel
+
+                    if not getattr(Glm4vVisionModel, "_vision_dp_patched", False):
+                        original_vision_forward = Glm4vVisionModel.forward
+                        Glm4vVisionModel.forward = create_dp_vision_forward(original_vision_forward)
+                        Glm4vVisionModel._vision_dp_patched = True
+                        print(f"Monkey patch Glm4vVisionModel.forward for Vision DP (dp_size={ulysses_sp_size})")
+                except ImportError:
+                    logger.warning(
+                        "Could not import Glm4vVisionModel for Vision DP patching. "
+                        "Vision DP will NOT be applied for GLM4V. "
+                        "Check your transformers version supports this model."
+                    )
+            else:
+                print(f"Vision DP disabled (vision_dp=False). ViT runs replicated on all {ulysses_sp_size} SP ranks.")
 
     elif model.config.model_type == "kimi_vl":
         if use_remove_padding or ulysses_sp_size > 1:

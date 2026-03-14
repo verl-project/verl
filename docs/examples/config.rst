@@ -263,6 +263,12 @@ Actor/Rollout/Reference Policy
     the input. Higher values reduce peak memory but may slightly impact performance.
     Default is 4.
 
+- ``actor_rollout_ref.model.vision_dp``: Whether to enable Vision DP, which
+  distributes ViT computation across Ulysses SP ranks by whole images. This reduces
+  ViT memory from O(total_images) to O(total_images/sp_size). Only effective when
+  ``ulysses_sequence_parallel_size > 1``. Supported models: Qwen2-VL, Qwen2.5-VL,
+  Qwen3-VL, GLM-4V. Default is False.
+
 **Actor model**
 
 - ``actor_rollout_ref.actor.strategy``: fsdp or megatron. In this
