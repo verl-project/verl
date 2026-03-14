@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# setup_env.sh — 配置 Qwen3.5 SFT (verl + megatron) 运行环境
+# setup_env.sh — Set up environment for Qwen3.5 SFT (verl + megatron)
 #
-# 验证可用的环境版本：
-#   mbridge:                git@34a87c4a (PR#83, qwen3.5 支持)
+# Verified working versions:
+#   mbridge:                git@34a87c4a (PR#83, qwen3.5 support)
 #   megatron-core:          0.16.0
 #   transformers:           5.2.0
 #   torch:                  2.9.0+cu129
 #   flash_attn:             2.8.1
 #   flash-linear-attention: 0.4.1
 #
-# 用法：
-#   bash setup_env.sh            # 正常安装
-#   bash setup_env.sh --dry-run  # 只打印，不执行
+# Usage:
+#   bash setup_env.sh            # normal install
+#   bash setup_env.sh --dry-run  # print commands only, do not execute
 #
 set -euo pipefail
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
     DRY_RUN=true
-    echo "[dry-run] 只打印命令，不执行"
+    echo "[dry-run] printing commands only, not executing"
 fi
 
 run() {
@@ -31,24 +31,24 @@ run() {
 }
 
 echo "============================================"
-echo " Qwen3.5 SFT 环境初始化"
+echo " Qwen3.5 SFT environment setup"
 echo "============================================"
 
 # ----------------------------------------------------
-# 1. mbridge — 必须从 git 装，PyPI 版本不含 qwen3_5
-#    锁定 PR#83 merge commit: 34a87c4a
+# 1. mbridge — must install from git; PyPI 0.15.1 does
+#    not register qwen3_5. Pinned to PR#83 merge commit.
 # ----------------------------------------------------
 echo ""
-echo "[1/5] 安装 mbridge (qwen3.5 支持，commit 34a87c4a)..."
+echo "[1/5] Installing mbridge (qwen3.5 support, commit 34a87c4a)..."
 run pip install --no-deps \
     "git+https://github.com/ISEEKYAN/mbridge.git@34a87c4a83d5a54599d48e8552982575b066c2f8"
 
 # ----------------------------------------------------
 # 2. megatron-core 0.16.0
-#    attention_output_gate / GDN 选项需要此版本
+#    Required for attention_output_gate and GDN options.
 # ----------------------------------------------------
 echo ""
-echo "[2/5] 安装 megatron-core 0.16.0..."
+echo "[2/5] Installing megatron-core 0.16.0..."
 run pip install --no-deps \
     "git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0"
 
@@ -56,31 +56,32 @@ run pip install --no-deps \
 # 3. transformers 5.2.0
 # ----------------------------------------------------
 echo ""
-echo "[3/5] 安装 transformers 5.2.0..."
+echo "[3/5] Installing transformers 5.2.0..."
 run pip install "transformers==5.2.0"
 
 # ----------------------------------------------------
 # 4. flash-linear-attention 0.4.1
-#    Qwen3.5 GDN 层依赖
+#    Required for Qwen3.5 GDN layers.
 # ----------------------------------------------------
 echo ""
-echo "[4/5] 安装 flash-linear-attention 0.4.1..."
+echo "[4/5] Installing flash-linear-attention 0.4.1..."
 run pip install "flash-linear-attention==0.4.1"
 
 # ----------------------------------------------------
-# 5. 安装 verl 本身（不装依赖，依赖镜像已有）
+# 5. Install verl itself (no-deps; dependencies are
+#    already provided by the base Docker image).
 # ----------------------------------------------------
-VERL_DIR="$(cd "$(dirname "$0")" && pwd)"
+VERL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 echo ""
-echo "[5/5] 安装 verl (no-deps, editable): ${VERL_DIR}..."
+echo "[5/5] Installing verl (no-deps, editable): ${VERL_DIR}..."
 run pip install --no-deps -e "${VERL_DIR}"
 
 # ----------------------------------------------------
-# 完成，打印版本信息
+# Done — print installed versions
 # ----------------------------------------------------
 echo ""
 echo "============================================"
-echo " 安装完成，当前关键版本："
+echo " Done. Key package versions:"
 echo "============================================"
 if ! $DRY_RUN; then
     python -c "
