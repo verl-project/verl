@@ -1051,7 +1051,7 @@ class AgentLoopManager:
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
         self.teacher_model_manager = teacher_model_manager
-        self.distillation_enabled = self.config.get("distillation", None)
+        self.distillation_enabled = is_distillation_enabled(self.config.get("distillation", None))
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
