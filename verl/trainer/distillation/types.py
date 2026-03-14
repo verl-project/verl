@@ -12,23 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import actor, critic, engine, model, optimizer, reward, rollout
-from .actor import *  # noqa: F401
-from .critic import *  # noqa: F401
-from .distillation import *  # noqa: F401
-from .engine import *  # noqa: F401
-from .model import *  # noqa: F401
-from .optimizer import *  # noqa: F401
-from .reward import *  # noqa: F401
-from .rollout import *  # noqa: F401
+from dataclasses import dataclass
+from typing import Optional
 
-__all__ = (
-    actor.__all__
-    + critic.__all__
-    + reward.__all__
-    + engine.__all__
-    + optimizer.__all__
-    + rollout.__all__
-    + model.__all__
-    + distillation.__all__
-)
+import torch
+
+from verl.base_config import BaseConfig
+
+
+@dataclass
+class DistillationLossInputs(BaseConfig):
+    """Storage class for distillation loss inputs."""
+
+    student_log_probs: Optional[torch.Tensor] = None
+    teacher_log_probs: Optional[torch.Tensor] = None
+    student_logits: Optional[torch.Tensor] = None
+    teacher_topk_ids: Optional[torch.Tensor] = None
+    teacher_topk_log_probs: Optional[torch.Tensor] = None

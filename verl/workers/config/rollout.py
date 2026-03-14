@@ -136,7 +136,15 @@ class CheckpointEngineConfig(BaseConfig):
 
 @dataclass
 class RolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format", "expert_parallel_size", "moe_tensor_parallel_size"}
+    _mutable_fields = {
+        "max_model_len",
+        "load_format",
+        "engine_kwargs",
+        "prompt_length",
+        "response_length",
+        "expert_parallel_size",
+        "moe_tensor_parallel_size",
+    }
 
     name: Optional[str] = MISSING
     mode: str = "async"
