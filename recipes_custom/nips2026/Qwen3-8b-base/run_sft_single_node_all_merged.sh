@@ -9,7 +9,6 @@ MASTER_PORT=${MASTER_PORT:-8888}
 RAW_MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 MASTER_ADDR=$(python3 -c "import socket; print(socket.getaddrinfo('${RAW_MASTER_ADDR}', None, socket.AF_INET)[0][4][0])" 2>/dev/null || echo "${RAW_MASTER_ADDR}")
 
-ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer"}
 MODEL_ID=${MODEL_ID:-/llm-align/liuchonghan/Qwen3.5-2B}
 ALL_115700_DATASET=${ALL_115700_DATASET:-/llm-align/liuchonghan/ins_dataset/ins_dataset/all_115700_messages.parquet}
 TRAIN_FILES=${TRAIN_FILES:-"[/llm-align/liuchonghan/verl_parquet_merged/all_merged_to_eng.parquet,/llm-align/liuchonghan/ins_dataset/ins_dataset/tulu3_34999.parquet,${ALL_115700_DATASET}]"}
@@ -32,7 +31,7 @@ LR=${LR:-5e-6}
 MIN_LR=${MIN_LR:-5e-7}
 DTYPE=${DTYPE:-bfloat16}
 
-TP_SIZE=${TP_SIZE:-2}
+TP_SIZE=${TP_SIZE:-1}
 PP_SIZE=${PP_SIZE:-1}
 VPP_SIZE=${VPP_SIZE:-null}
 CP_SIZE=${CP_SIZE:-1}
@@ -69,8 +68,6 @@ MEGATRON_ENGINE_CONFIG="
     +engine.override_transformer_config.recompute_granularity=full \
     +engine.override_transformer_config.recompute_num_layers=1"
 
-ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
-
 mkdir -p "${CKPT_HOME}"
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_DIR=${WANDB_DIR:-${CKPT_HOME}/wandb}
@@ -81,12 +78,18 @@ export HYDRA_FULL_ERROR=1
 export PYTHONPATH=${PYTHONPATH:-}:/llm-align/liuchonghan/verl_lao
 mkdir -p "${WANDB_DIR}"
 
-echo "Launch config:"
-echo "BACKEND=${BACKEND} NNODES=${NNODES} NUM_GPUS=${NUM_GPUS} NODE_RANK=${NODE_RANK}"
-echo "MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}"
-echo "TP=${TP_SIZE} PP=${PP_SIZE} VPP=${VPP_SIZE} CP=${CP_SIZE} EP=${EP_SIZE} ETP=${ETP_SIZE}"
-echo "TRAIN_FILES=${TRAIN_FILES}"
-echo "TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE} MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU}"
+echo ">>> 数据文件: ${TRAIN_FILES}, total_epochs=${TOTAL_EPOCHS}"
+echo ">>> 节点信息: RANK ${NODE_RANK} / WORLD_SIZE ${NNODES}"
+echo ">>> 通信信息: MASTER ${MASTER_ADDR} : ${MASTER_PORT}"
+
+if [ "${NODE_RANK}" -eq 0 ]; then
+    mkdir -p "${CKPT_HOME}"
+fi
+
+if [ "${PAD_MODE}" != "no_padding" ]; then
+    echo "ERROR: PAD_MODE must be no_padding for Qwen3.5 megatron bshd path."
+    exit 1
+fi
 
 torchrun \
     --nproc_per_node=${NUM_GPUS} \
@@ -94,7 +97,7 @@ torchrun \
     --node_rank=${NODE_RANK} \
     --master_addr=${MASTER_ADDR} \
     --master_port=${MASTER_PORT} \
-    ${ENTRYPOINT} \
+    -m verl.trainer.sft_trainer \
     data.train_files="${TRAIN_FILES}" \
     data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
@@ -109,7 +112,7 @@ torchrun \
     model.use_remove_padding=True \
     model.trust_remote_code=True \
     model.enable_gradient_checkpointing=True \
-    ${ENGINE_CONFIG} \
+    ${MEGATRON_ENGINE_CONFIG} \
     trainer.test_freq=-1 \
     trainer.save_freq=500 \
     trainer.max_ckpt_to_keep=3 \
