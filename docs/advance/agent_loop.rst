@@ -1,7 +1,7 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 03/14/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
@@ -229,6 +229,24 @@ they can call ``AsyncLLMServerManager.generate`` to generate response_ids.
                List[int]: List of generated token ids.
            """
            ...
+
+Tracing in AsyncLLMServerManager
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``AsyncLLMServerManager.generate`` is decorated with ``rollout_trace_op`` and uses customized ``token2text_fields`` to decode token IDs. Since ``prompt_ids`` is an input argument (not part of the return value) and the output field is named ``token_ids`` (not ``response_ids``), the default token-to-text mapping does not apply. Instead, the decorator is configured with explicit field mappings:
+
+.. code:: python
+
+   from verl.utils.rollout_trace import rollout_trace_op, Token2TextField
+
+   @rollout_trace_op(token2text_fields=[
+       Token2TextField(source="input", field="prompt_ids", decode_to="prompt_text"),
+       Token2TextField(source="output", field="token_ids", decode_to="response_text"),
+   ])
+   async def generate(self, request_id, *, prompt_ids, sampling_params):
+       ...
+
+Since ``AsyncLLMServerManager`` does not carry its own tokenizer, the ``AgentLoopWorker`` passes its tokenizer to ``RolloutTraceConfig.init(tokenizer=...)`` at initialization time, making it available as a global fallback for all traced functions on the worker. See :doc:`Trace Function Usage Instructions <rollout_trace>` for more details.
 
 Next
 ----
