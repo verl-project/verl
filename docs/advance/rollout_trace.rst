@@ -1,7 +1,7 @@
 Trace Function Usage Instructions
 ========================================
 
-Last updated: 07/10/2025.
+Last updated: 03/14/2026.
 
 Applicable Scenarios
 --------------------
@@ -68,6 +68,48 @@ There are 2 functions used for tracing:
 1. ``rollout_trace_op``: This is a decorator function used to mark the functions to trace. In default, only few method has it, you can add it to more functions to trace more infor.
 2. ``rollout_trace_attr``: This function is used to mark the entry of a trajectory and input some info to trace. If you add new type of agent, you may need to add it to enable trace.
 
+Customized Token-to-Text Field Mapping
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, when ``token2text`` is enabled, ``rollout_trace_op`` looks for ``result.prompt_ids`` and ``result.response_ids`` in the decorated function's output and decodes them into ``prompt_text`` and ``response_text``. However, not all traced functions follow this convention — for example, ``AsyncLLMServerManager.generate`` takes ``prompt_ids`` as an **input** argument and returns ``token_ids`` as the output.
+
+To handle such cases, you can use the ``Token2TextField`` dataclass and the ``token2text_fields`` parameter of ``rollout_trace_op`` to customize which fields are decoded and where they come from.
+
+``Token2TextField`` has three attributes:
+
+- ``source``: Where to find the token IDs — ``"input"`` reads from the decorated function's arguments, ``"output"`` reads from its return value.
+- ``field``: Name of the field containing the token IDs.
+- ``decode_to``: Name of the target field for the decoded text in the trace output.
+
+Example usage:
+
+.. code-block:: python
+
+   from verl.utils.rollout_trace import rollout_trace_op, Token2TextField
+
+   # Default usage (backward compatible) — decodes result.prompt_ids and result.response_ids
+   @rollout_trace_op
+   async def run(self, ...):
+       ...
+
+   # Customized field mapping — decode prompt_ids from input and token_ids from output
+   @rollout_trace_op(token2text_fields=[
+       Token2TextField(source="input", field="prompt_ids", decode_to="prompt_text"),
+       Token2TextField(source="output", field="token_ids", decode_to="response_text"),
+   ])
+   async def generate(self, ...):
+       ...
+
+Global Tokenizer Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Previously, ``token2text`` required the traced class instance to have a ``self.tokenizer`` attribute. Now, a global tokenizer can be set via ``RolloutTraceConfig.init(tokenizer=...)`` as a fallback. The tokenizer resolution order is:
+
+1. ``self.tokenizer`` on the class instance (per-instance, supports multi-model setups).
+2. ``RolloutTraceConfig.get_tokenizer()`` — global fallback set at init time.
+
+This is useful for classes like ``AsyncLLMServerManager`` that do not carry their own tokenizer. The ``AgentLoopWorker`` passes its tokenizer to ``RolloutTraceConfig.init()`` so that all traced functions on the worker can decode token IDs.
+
 
 Usage of wandb weave
 --------------------
@@ -95,7 +137,7 @@ After executing the training, on the project page, you can see the WEAVE sidebar
 
 Each Trace project corresponds to a trajectory. You can filter and select the trajectories you need to view by step, sample_index, rollout_n, and experiment_name.
 
-After enabling token2text, prompt_text and response_text will be automatically added to the output of ToolAgentLoop.run, making it convenient to view the input and output content.
+After enabling token2text, prompt_text and response_text will be automatically added to the output of ToolAgentLoop.run, making it convenient to view the input and output content. With customized ``token2text_fields``, you can also decode token IDs from other traced functions (e.g., ``AsyncLLMServerManager.generate``).
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/weave_trace_list.png?raw=true
 
@@ -136,7 +178,7 @@ For example, searching for ``"tags.step = '1'"`` can display all trajectories of
 
 Opening one of the trajectories allows you to view each function call process within it.
 
-After enabling token2text, prompt_text and response_text will be automatically added to the output of ToolAgentLoop.run, making it convenient to view the content.
+After enabling token2text, prompt_text and response_text will be automatically added to the output of ToolAgentLoop.run, making it convenient to view the content. With customized ``token2text_fields``, you can also decode token IDs from other traced functions (e.g., ``AsyncLLMServerManager.generate``).
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/mlflow_trace_view.png?raw=true
 
