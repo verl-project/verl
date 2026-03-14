@@ -325,7 +325,7 @@ class RobDataParallelSACActor(BaseSACActor):
                 state_features = self.actor_module.sac_forward_state_features(s)
                 s0_state_features, s1_state_features = split_nested_dicts_or_tuples(state_features, 2)
                 if resample:
-                    a1_actions, log_probs_1 = self.actor_module.sac_forward_actor(s1_state_features)
+                    a1_actions, log_probs_1, _ = self.actor_module.sac_forward_actor(s1_state_features)
                     a1 = {"full_action": a1_actions}
                 else:
                     log_probs_1 = None
@@ -355,13 +355,16 @@ class RobDataParallelSACActor(BaseSACActor):
             )
         return critic_loss, q_values_0, q_values_1
 
-    def _forward_actor(self, micro_batch: TensorDict) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    def _forward_actor(
+        self,
+        micro_batch: TensorDict,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, dict[str, float]]:
         micro_batch = micro_batch.to(get_device_id())
         s0 = get_dict_from_prefix(micro_batch, "s0.")
 
         with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             s0_state_features = self.actor_module.sac_forward_state_features(s0)
-            a0_actions, log_probs_0 = self.actor_module.sac_forward_actor(s0_state_features)
+            a0_actions, log_probs_0, actor_forward_metrics = self.actor_module.sac_forward_actor(s0_state_features)
             q_values_0 = self.actor_module.sac_forward_critic(
                 {"full_action": a0_actions},
                 s0_state_features,
@@ -384,7 +387,7 @@ class RobDataParallelSACActor(BaseSACActor):
                 actor_loss = sac_loss + self.bc_loss_coef * bc_loss
             else:
                 actor_loss = sac_loss
-        return actor_loss, log_probs_0, q_values_0
+        return actor_loss, log_probs_0, q_values_0, actor_forward_metrics
 
     @override
     def update_policy(self, data: DataProto):
@@ -422,6 +425,7 @@ class RobDataParallelSACActor(BaseSACActor):
         actor_logprobs_list, actor_qvalues_list = [], []
         critic_qvalues_0_list, critic_qvalues_1_list = [], []
         actor_loss_list, critic_loss_list, alpha_loss_list = [], [], []
+        actor_forward_metrics: dict[str, float] = {}
 
         # Training critic
         self.critic_optimizer.zero_grad()
@@ -429,7 +433,7 @@ class RobDataParallelSACActor(BaseSACActor):
             logger.info(f"[{batch_idx + 1}/{len(micro_batches)}] critic micro batch ")
 
             micro_batch = micro_batch.to(get_device_id())
-            raw_critic_loss, q_values_0, q_values_1 = self._forward_critic(micro_batch, resample=global_steps > self.config.critic_warmup_steps)
+            raw_critic_loss, q_values_0, q_values_1 = self._forward_critic(micro_batch, resample=True)
             (raw_critic_loss / grad_accum_steps).backward()
             critic_loss_list.append(raw_critic_loss.detach().item())
             critic_qvalues_0_list.append(q_values_0.mean(dim=-1).detach())
@@ -455,12 +459,13 @@ class RobDataParallelSACActor(BaseSACActor):
                 logger.info(f"[{batch_idx + 1}/{len(micro_batches)}] actor micro batch ")
 
                 micro_batch = micro_batch.to(get_device_id())
-                raw_actor_loss, log_probs, q_values = self._forward_actor(micro_batch)
+                raw_actor_loss, log_probs, q_values, actor_forward_metrics_mb = self._forward_actor(micro_batch)
                 (raw_actor_loss / grad_accum_steps).backward()
                 actor_loss_list.append(raw_actor_loss.detach().item())
                 if log_probs is not None:
                     actor_logprobs_list.append(log_probs.detach())
                 actor_qvalues_list.append(q_values.detach())
+                actor_forward_metrics.update(actor_forward_metrics_mb)
             actor_grad_norm = self._optimizer_step()
             self._update_actor_ema()
             self._apply_actor_ema_to_actor_module()
@@ -553,6 +558,7 @@ class RobDataParallelSACActor(BaseSACActor):
                 "sac/alpha_loss": sum(alpha_loss_list) / len(alpha_loss_list) if self.auto_entropy and alpha_loss_list else 0.0,
                 "sac/alpha_grad_norm": alpha_grad_norm.detach().item() if self.auto_entropy and actor_logprobs_list else 0.0,
             })
+            metrics.update({f"actor/{k}": v for k, v in actor_forward_metrics.items()})
 
         return metrics
 

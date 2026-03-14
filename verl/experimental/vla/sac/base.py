@@ -85,7 +85,7 @@ class SupportSACTraining:
     def sac_forward_actor(
         self,
         state_features: Any,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], dict[str, float]]:
         """Compute actions and their log probabilities from state features.
 
         Args:
@@ -95,6 +95,7 @@ class SupportSACTraining:
             actions: torch.Tensor of shape (B, n_action_steps, action_dim), sampled actions.
             log_probs: Optional torch.Tensor of shape (B,), log probabilities of sampled actions.
                 Can be None when SAC is configured to train without entropy/log-prob terms.
+            metrics: Scalar metrics produced by actor forward, used by outer trainer for logging.
         """
 
         raise NotImplementedError("Subclasses must implement sac_forward_actor method.")

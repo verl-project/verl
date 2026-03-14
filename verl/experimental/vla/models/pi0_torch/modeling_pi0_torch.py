@@ -494,14 +494,21 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             tuple[torch.Tensor, torch.Tensor, torch.Tensor],
             torch.Tensor,
         ],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, dict[str, float]]:
         actions, log_probs = self._sample_actions_flow_sde(
             state_features=state_features,
             noise_scale=self.flow_sde_train_noise_scale,
             requires_grad=True,
             return_log_prob=True,
         )
-        return actions, log_probs
+        self.flow_sde_step.add_(1)
+        actor_metrics: dict[str, float] = {}
+        if self.flow_sde_enable:
+            actor_metrics = {
+                "flow_sde_beta": float(self.flow_sde_beta().item()),
+                "flow_sde_step": float(self.flow_sde_step.item()),
+            }
+        return actions, log_probs, actor_metrics
 
     @override
     def sac_forward_critic(
