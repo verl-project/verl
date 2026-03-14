@@ -255,6 +255,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
         _compute_position_ids = AgentLoopWorker._compute_position_ids
         _compute_score = AgentLoopWorker._compute_score
         _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        distillation_enabled = False
 
         def __init__(self):
             self.tokenizer = _FakeTokenizer()
