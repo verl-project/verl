@@ -92,7 +92,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
     critic.strategy=fsdp2 \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
@@ -146,7 +146,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.save_freq=-1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
@@ -155,8 +155,8 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes="${NNODES}" \
     rollout.n_gpus_per_node="${n_gpus_rollout}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
-    rollout.total_epochs=10 \
-    rollout.test_freq="${test_freq}" \
+    trainer.total_epochs=10 \
+    trainer.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \

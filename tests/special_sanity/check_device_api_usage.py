@@ -42,6 +42,8 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/workers/engine/utils.py",  # appear in enable_full_determinism
     "verl/workers/engine/fsdp/transformer_impl.py",  # appear in default device_name
     "verl/workers/engine/veomni/transformer_impl.py",  # appear in default device_name
+    "verl/workers/engine/torchtitan/transformer_impl.py",  # appear in default device_name
+    "verl/workers/engine/torchtitan/utils.py",  # appear in torch.cuda.empty_cache()
     "verl/workers/rollout/vllm_rollout/vllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/sglang_rollout/async_sglang_server.py",  # manually set CUDA_VISIBLE_DEVICES
     "verl/workers/rollout/trtllm_rollout/trtllm_async_server.py",  # appear in config.cudagraph_capture_sizes
@@ -53,7 +55,6 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
 NCCL_KEYWORD_CHECK_WHITELIST = [
     "verl/utils/device.py",
     "verl/third_party/sglang/parallel_state.py",  # appear in default backend
-    "verl/recipe/fully_async_policy/param_sync.py",  # fully_async_policy in default backend
 ]
 
 SEARCH_WHITELIST = CUDA_KEYWORD_CHECK_WHITELIST + NCCL_KEYWORD_CHECK_WHITELIST

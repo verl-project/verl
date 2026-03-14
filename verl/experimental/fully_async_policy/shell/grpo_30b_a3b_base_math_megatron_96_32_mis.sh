@@ -131,7 +131,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    async_training.compute_prox_log_prob=True \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_rs=${rollout_rs} \
     algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \
@@ -230,8 +229,8 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes="${NNODES_ROLLOUT}" \
     rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
-    rollout.total_epochs=10 \
-    rollout.test_freq="${test_freq}" \
+    trainer.total_epochs=10 \
+    trainer.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \

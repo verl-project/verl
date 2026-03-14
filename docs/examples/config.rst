@@ -130,12 +130,10 @@ Actor/Rollout/Reference Policy
       use_kl_loss: False # True for GRPO
       # Rollout Correction (corrects distribution mismatch between rollout and training)
       rollout_correction:
-        rollout_is: token # IS weights: token/sequence/null
+        rollout_is: token # IS weights
         rollout_is_threshold: 2.0 # Upper threshold for IS weights
-        rollout_rs: null # Rejection sampling: token/sequence/geometric/null
+        rollout_rs: null # Rejection sampling
         rollout_rs_threshold: null # RS upper threshold
-        rollout_rs_threshold_lower: null # RS lower threshold
-        rollout_token_veto_threshold: null # Per-token veto (null to disable)
       use_torch_compile: True # False to disable torch compile
       kl_loss_coef: 0.001 # for grpo
       kl_loss_type: low_var_kl # for grpo
@@ -534,12 +532,10 @@ Algorithm
        target_kl: 0.1
      # Rollout Correction
      rollout_correction:
-       rollout_is: null  # IS weights: token/sequence/null
+       rollout_is: null  # IS weights
        rollout_is_threshold: 2.0  # Upper threshold for IS weights
-       rollout_rs: null  # Rejection sampling: token/sequence/geometric/null
+       rollout_rs: null  # Rejection sampling
        rollout_rs_threshold: null  # RS upper threshold
-       rollout_rs_threshold_lower: null  # RS lower threshold
-       rollout_token_veto_threshold: null  # Per-token veto (null to disable)
 
 - ``gamma``: discount factor
 - ``lam``: Trade-off between bias and variance in the GAE estimator
@@ -557,12 +553,10 @@ Algorithm
 - ``rollout_correction``: Rollout Correction configuration (nested dict). Set to ``null`` to disable.
   When enabled, contains:
 
-  - ``rollout_is``: IS weights aggregation level: ``token``, ``sequence``, or ``null`` to disable IS weights.
+  - ``rollout_is``: IS weights aggregation level, ``null`` to disable IS weights.
   - ``rollout_is_threshold``: Upper threshold for IS weights (e.g., 2.0).
-  - ``rollout_rs``: Rejection sampling mode: ``token``, ``sequence``, ``geometric``, or ``null`` to disable RS.
+  - ``rollout_rs``: Rejection sampling mode, ``null`` to disable RS.
   - ``rollout_rs_threshold``: RS upper threshold.
-  - ``rollout_rs_threshold_lower``: RS lower threshold (null = auto-reciprocal).
-  - ``rollout_token_veto_threshold``: Per-token veto threshold for catastrophic outliers (null = disabled).
 
   Note: Rollout Correction requires setting ``actor_rollout_ref.rollout.calculate_log_probs=True``.
 

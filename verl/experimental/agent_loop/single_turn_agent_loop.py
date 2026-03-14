@@ -17,8 +17,8 @@ from typing import Any
 from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
-from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
+from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -30,12 +30,8 @@ class SingleTurnAgentLoop(AgentLoopBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
-        self.response_length = self.config.actor_rollout_ref.rollout.response_length
-
-        tool_config_path = self.config.data.tool_config_path
-        tool_list = initialize_tools_from_config(tool_config_path) if tool_config_path else []
-        self.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
+        self.prompt_length = self.rollout_config.prompt_length
+        self.response_length = self.rollout_config.response_length
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
@@ -48,7 +44,6 @@ class SingleTurnAgentLoop(AgentLoopBase):
         # 2. apply chat template and tokenize
         prompt_ids = await self.apply_chat_template(
             messages,
-            tools=self.tool_schemas,
             images=images,
             videos=videos,
         )
@@ -56,7 +51,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         # 3. generate sequences
         metrics = {}
         with simple_timer("generate_sequences", metrics):
-            output = await self.server_manager.generate(
+            output: TokenOutput = await self.server_manager.generate(
                 request_id=uuid4().hex,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
@@ -67,7 +62,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
         response_mask = [1] * len(output.token_ids)
 
-        output = AgentLoopOutput(
+        output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=output.token_ids[: self.response_length],
             response_mask=response_mask[: self.response_length],
@@ -80,6 +75,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
             multi_modal_data=multi_modal_data,
             num_turns=2,
             metrics=metrics,
+            extra_fields=output.extra_fields,
         )
 
         # keeping the schema consistent with tool_agent_loop

@@ -15,6 +15,7 @@ import functools
 import logging
 import os
 from contextlib import nullcontext
+from copy import deepcopy
 from functools import partial
 from itertools import chain
 
@@ -42,7 +43,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import ActorConfig, HFModelConfig, MtpConfig, RolloutConfig, TrainingWorkerConfig
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -179,17 +180,20 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # Here each metric in metrics can be a list (micro-batch metrics) or a singleton
         # we should always sum the loss of each micro-batch as we scale by global_bsz/global_token
         loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
-        torch.distributed.all_reduce(
-            loss, op=torch.distributed.ReduceOp.AVG, group=self.engine.get_data_parallel_group()
-        )
+        dp_group = self.engine.get_data_parallel_group()
+        if dp_group is not None:
+            torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
         loss = loss.item()
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
         lr = metrics.pop("lr", None)
 
-        # For other metrics, we perform all gather in dp group
-        final_metrics = allgather_dict_into_dict(data=metrics, group=self.engine.get_data_parallel_group())
+        # For other metrics, we perform all gather in dp group (only if DP > 1)
+        if dp_group is not None:
+            final_metrics = allgather_dict_into_dict(data=metrics, group=dp_group)
+        else:
+            final_metrics = metrics
         final_metrics["loss"] = loss
         if grad_norm is not None:
             final_metrics["grad_norm"] = grad_norm
@@ -478,7 +482,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
-            ref_config.model_config = model_config
+
+            # The ref model does not need to enable MTP; force it to false.
+            ref_config.model_config = deepcopy(model_config)
+            ref_config.model_config.mtp = MtpConfig(enable=False)
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
@@ -580,6 +587,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
             )
 
+        # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
+        aggressive_empty_cache(force_sync=True)
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
@@ -613,7 +623,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self):
+    async def update_weights(self, global_steps: int = None):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
@@ -621,11 +631,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
            - after update_weights: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
         """
-        assert self.checkpoint_engine is not None
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if self.config.rollout.checkpoint_engine.backend != "naive":
-            per_tensor_param, _ = self.engine.get_per_tensor_param()
+            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
@@ -642,7 +651,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon, base_sync_done=True
         )
 
-        await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=True)
+        await self.rollout.update_weights(
+            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+        )
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:

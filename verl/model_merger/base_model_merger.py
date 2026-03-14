@@ -14,6 +14,7 @@
 
 import argparse
 import os
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -28,6 +29,9 @@ from transformers import (
 )
 
 from verl.utils import hf_processor, hf_tokenizer
+from verl.utils.transformers_compat import get_auto_model_for_vision2seq
+
+AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
 def parse_args():
@@ -201,20 +205,9 @@ class BaseModelMerger(ABC):
                 case "AutoModelForTokenClassification":
                     return AutoModelForTokenClassification
                 case "AutoModelForVision2Seq":
-                    # Handle different transformers versions for Vision2Seq models
-                    import transformers
-                    from packaging import version
-
-                    if version.parse(transformers.__version__) >= version.parse("4.54.0"):
-                        # transformers >= 4.54.0 uses AutoModelForImageTextToText
-                        from transformers import AutoModelForImageTextToText
-
-                        return AutoModelForImageTextToText
-                    else:
-                        # transformers < 4.54.0 uses AutoModelForVision2Seq
-                        from transformers import AutoModelForVision2Seq
-
-                        return AutoModelForVision2Seq
+                    return AutoModelForVision2Seq
+                case "AutoModelForImageTextToText":
+                    return AutoModelForVision2Seq
                 case _:
                     raise NotImplementedError(f"Unknown auto class {auto_class}")
         else:
@@ -243,6 +236,47 @@ class BaseModelMerger(ABC):
                     f"generation config created from the model config."
                 )
         return model
+
+    def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
+        if not self.config.local_dir:
+            return None
+
+        meta_path = os.path.join(self.config.local_dir, "lora_train_meta.json")
+        if not os.path.exists(meta_path):
+            return None
+
+        import json
+
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                lora_meta = json.load(f)
+        except Exception as e:
+            warnings.warn(f"Failed to read LoRA metadata from {meta_path}: {e}", stacklevel=2)
+            return None
+
+        result = {}
+        if "r" in lora_meta:
+            try:
+                result["r"] = int(lora_meta["r"])
+            except (TypeError, ValueError):
+                warnings.warn(f"Invalid LoRA rank in {meta_path}: {lora_meta['r']}", stacklevel=2)
+
+        if "lora_alpha" in lora_meta:
+            try:
+                result["lora_alpha"] = int(lora_meta["lora_alpha"])
+            except (TypeError, ValueError):
+                warnings.warn(f"Invalid lora_alpha in {meta_path}: {lora_meta['lora_alpha']}", stacklevel=2)
+
+        if "task_type" in lora_meta:
+            task_type = lora_meta["task_type"]
+            if task_type is None:
+                pass
+            elif isinstance(task_type, str):
+                result["task_type"] = task_type
+            else:
+                warnings.warn(f"Invalid task_type in {meta_path}: {task_type}", stacklevel=2)
+
+        return result if len(result) > 0 else None
 
     def save_lora_adapter(self, state_dict: dict[str, torch.Tensor]):
         """
@@ -274,12 +308,46 @@ class BaseModelMerger(ABC):
             target_modules.add(lora_key.split(".")[-3])
             lora_params[lora_key] = state_dict.pop(name)
 
-        lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
+        inferred_lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
+        lora_meta = self._load_lora_train_meta()
+
+        lora_rank = inferred_lora_rank
+        lora_alpha = 0
+        task_type = None
+
+        if lora_meta is not None:
+            meta_rank = lora_meta.get("r")
+            if meta_rank is not None and meta_rank > 0:
+                if meta_rank != inferred_lora_rank:
+                    warnings.warn(
+                        f"LoRA rank mismatch between metadata ({meta_rank}) and adapter weights "
+                        f"({inferred_lora_rank}); using metadata rank.",
+                        stacklevel=2,
+                    )
+                lora_rank = meta_rank
+
+            meta_alpha = lora_meta.get("lora_alpha")
+            if meta_alpha is not None:
+                lora_alpha = meta_alpha
+
+            meta_task_type = lora_meta.get("task_type")
+            if meta_task_type is not None:
+                task_type = meta_task_type
+
+        if lora_alpha == 0:
+            warnings.warn(
+                "LoRA alpha metadata is missing or equals 0; falling back to lora_alpha=0. "
+                "Please verify checkpoint LoRA metadata (lora_train_meta.json).",
+                stacklevel=2,
+            )
+
         peft_dict = {
             "r": lora_rank,
-            "lora_alpha": 0,  # lora_alpha is not set. An error should be raised to inform the user to set it manually.
+            "lora_alpha": lora_alpha,
             "target_modules": list(target_modules),
         }
+        if task_type is not None:
+            peft_dict["task_type"] = task_type
         peft_config = peft.LoraConfig(**peft_dict).to_dict()
         peft_config["task_type"] = peft_config["task_type"].value if peft_config["task_type"] else None
         peft_config["peft_type"] = peft_config["peft_type"].value if peft_config["peft_type"] else None

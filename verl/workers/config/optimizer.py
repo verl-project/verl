@@ -19,7 +19,14 @@ from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
 
-__all__ = ["OptimizerConfig", "FSDPOptimizerConfig", "McoreOptimizerConfig", "build_optimizer", "VeOmniOptimizerConfig"]
+__all__ = [
+    "OptimizerConfig",
+    "FSDPOptimizerConfig",
+    "McoreOptimizerConfig",
+    "build_optimizer",
+    "VeOmniOptimizerConfig",
+    "TorchtitanOptimizerConfig",
+]
 
 
 @dataclass
@@ -88,6 +95,8 @@ class FSDPOptimizerConfig(OptimizerConfig):
         min_lr_ratio (Optional[float]): Minimum LR ratio for cosine schedule.
         lr_scheduler_type (str): LR scheduler type: "constant" or "cosine".
         num_cycles (float): Number of cosine cycles in LR schedule.
+        zero_indexed_step (bool): Whether the LR schedule uses 0-indexed steps. If True (default),
+            step counting starts at 0. If False, step counting starts at 1.
     """
 
     _mutable_fields = OptimizerConfig._mutable_fields.copy()
@@ -101,6 +110,7 @@ class FSDPOptimizerConfig(OptimizerConfig):
     lr_scheduler_type: str = "constant"
     num_cycles: float = 0.5
     override_optimizer_config: Optional[dict] = None
+    zero_indexed_step: bool = True
 
     def __post_init__(self):
         if self.warmup_style is not None:
@@ -141,6 +151,23 @@ class McoreOptimizerConfig(OptimizerConfig):
     lr_wsd_decay_steps: Optional[int] = None
     use_checkpoint_opt_param_scheduler: bool = False
     override_optimizer_config: Optional[dict] = None
+
+
+@dataclass
+class TorchtitanOptimizerConfig(OptimizerConfig):
+    """Torchtitan optimizer configuration extending base OptimizerConfig.
+
+    Args:
+        name (str): Optimizer name; default is "AdamW".
+        eps (float): Epsilon value for AdamW optimizer, default 1e-8.
+        decay_type (str): Weight decay type: "linear", "sqrt", or "cosine".
+        min_lr_factor (float): Minimum learning rate factor.
+    """
+
+    name: str = "AdamW"
+    eps: float = 1e-8
+    decay_type: str = "linear"
+    min_lr_factor: float = 0.0
 
 
 def build_optimizer(parameters, config: FSDPOptimizerConfig):

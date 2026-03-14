@@ -217,7 +217,7 @@ Important code files in the repository are organized as below:
        main_ppo.py  # the entrypoint for RL training
        ppo
          ray_trainer.py  # the training loop for RL algorithms such as PPO
-       fsdp_sft_trainer.py  # the SFT trainer with FSDP backend
+       sft_trainer.py  # the SFT trainer with FSDP backend
      config
        generation.yaml  # configuration template for rollout
        ppo_trainer.yaml  # configuration template for the RL trainer

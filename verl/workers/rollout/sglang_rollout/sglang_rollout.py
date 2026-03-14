@@ -98,6 +98,7 @@ class ServerAdapter(BaseRollout):
         config: RolloutConfig,
         model_config: HFModelConfig,
         device_mesh: DeviceMesh,
+        replica_rank: int = -1,
     ):
         if config.get("quantization", None) == "fp8":
             import sglang
@@ -120,7 +121,10 @@ class ServerAdapter(BaseRollout):
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
         rollout_world_size = self.config.tensor_model_parallel_size * self.config.data_parallel_size
-        self.replica_rank = rank // rollout_world_size
+        if replica_rank == -1:
+            self.replica_rank = rank // rollout_world_size
+        else:
+            self.replica_rank = replica_rank
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
         self.local_rank = self.rollout_rank % local_world_size
@@ -176,7 +180,9 @@ class ServerAdapter(BaseRollout):
         if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
             await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
 
-    async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
+    async def update_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+    ):
         """
         Update model weights using tensor buckets, similar to THUDM/slime's implementation.
 
@@ -193,12 +199,12 @@ class ServerAdapter(BaseRollout):
 
         update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
         if self.config.get("quantization", None) == "fp8":
-            from verl.utils.sglang.sglang_fp8_utils import quant_weights_by_name
+            from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
             logger.info("Convert bf16 weights to fp8 format before loading")
-            weights = quant_weights_by_name(
+            fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+            weights = fp8_quantizer_helper.quant_weights_by_name(
                 weights,
-                self.model_config.hf_config.quantization_config,
                 dtype=self.model_config.hf_config.dtype,
             )
         else:
@@ -214,3 +220,5 @@ class ServerAdapter(BaseRollout):
 
         if self.device_mesh["infer_tp"].get_local_rank() == 0:
             await self._engine.flush_cache()
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)

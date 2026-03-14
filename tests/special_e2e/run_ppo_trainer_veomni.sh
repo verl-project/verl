@@ -8,12 +8,13 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 
 TRAIN_FILES=${TRAIN_FILES:-${HOME}/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-${HOME}/data/gsm8k/test.parquet}
-VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
+VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-True}
 NUM_GPUS=${NUM_GPUS:-8}
 FSDP_SIZE=${FSDP_SIZE:-4}
 SP_SIZE=${SP_SIZE:-2}
-EP_SIZE=${EP_SIZE:-2}
-VERL_EXP_NAME=${VERL_EXP_NAME:-qwen2.5-0.5b-function-reward-minimal-fsdp-size8}
+EP_SIZE=${EP_SIZE:-1}
+MODEL_NAME_ONLY=${MODEL_ID##*/}
+VERL_EXP_NAME=${VERL_EXP_NAME:-${MODEL_NAME_ONLY}-function-reward-minimal-fsdp-size${FSDP_SIZE}}
 
 python3 -m verl.trainer.main_ppo \
     model_engine=veomni \
@@ -48,7 +49,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.name=vllm \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.enforce_eager=True \
@@ -59,7 +59,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger=console \
-    trainer.project_name='verl_grpo_example_gsm8k' \
+    trainer.project_name='verl_veomni_test' \
     trainer.experiment_name="${VERL_EXP_NAME}" \
     trainer.n_gpus_per_node="${NUM_GPUS}" \
     trainer.val_before_train="${VAL_BEFORE_TRAIN}" \

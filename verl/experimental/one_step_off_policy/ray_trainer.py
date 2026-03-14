@@ -27,12 +27,10 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf
-from ray.util.collective import collective
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.experimental.one_step_off_policy.utils import need_critic
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
@@ -41,7 +39,7 @@ from verl.trainer.ppo.ray_trainer import (
     compute_response_mask,
 )
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -88,6 +86,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert not self.hybrid_engine
 
+        # Skip rollout worker mapping and let agentloop create it.
+        role_worker_mapping.pop(Role.Rollout, None)
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
@@ -138,14 +138,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         self.reward_tensor = None
         self.reward_extra_infos_dict = {}
 
-    def _validate(self):
-        self.actor_rollout_wg = self.rollout_wg
-        ret = super()._validate()
-        self.actor_rollout_wg = self.actor_wg
-        return ret
-
     def _create_actor_rollout_classes(self):
-        for role in [Role.Actor, Role.Rollout]:
+        for role in [Role.Actor]:
             resource_pool = self.resource_pool_manager.get_resource_pool(role)
             role_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[role],
@@ -169,13 +163,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             self.rm_wg.init_model()
 
         self.actor_wg = self.all_wg[str(Role.Actor)]
-        self.rollout_wg = self.all_wg[str(Role.Rollout)]
         self.actor_wg.init_model()
-        self.rollout_wg.init_model()
         self.actor_rollout_wg = self.actor_wg
-        weights_info = self.actor_wg.get_actor_weights_info()[0]
-        self.rollout_wg.set_actor_weights_info(weights_info)
-        self._create_weight_sync_group()
 
     def _init_async_rollout_manager(self):
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
@@ -189,49 +178,12 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
-        from verl.experimental.one_step_off_policy.agent_loop import OneStepOffAgentLoopManager
+        from verl.experimental.agent_loop import AgentLoopManager
 
         self.async_rollout_mode = True
-        self.async_rollout_manager = OneStepOffAgentLoopManager(
-            config=self.config, worker_group=self.rollout_wg, reward_loop_worker_handles=reward_loop_worker_handles
+        self.async_rollout_manager = AgentLoopManager.create(
+            config=self.config, reward_loop_worker_handles=reward_loop_worker_handles
         )
-
-    def _create_weight_sync_group(self):
-        from verl.utils.device import get_nccl_backend
-
-        actor_rollout_workers = self.actor_wg.workers + self.rollout_wg.workers
-        n_workers = len(actor_rollout_workers)
-
-        if self.device_name == "npu":
-            master_address = ray.get(self.actor_wg.workers[0]._get_node_ip.remote()).strip("[]")
-            master_port = ray.get(self.actor_wg.workers[0]._get_free_port.remote())
-            self.actor_wg.create_weight_sync_group(
-                master_address,
-                master_port,
-                0,
-                n_workers,
-            )
-            ray.get(
-                self.rollout_wg.create_weight_sync_group(
-                    master_address,
-                    master_port,
-                    len(self.actor_wg.workers),
-                    n_workers,
-                )
-            )
-        else:
-            # Create Ray collective group for fallback communication
-            collective.create_collective_group(
-                actor_rollout_workers,
-                n_workers,
-                list(range(0, n_workers)),
-                backend=get_nccl_backend(),
-                group_name="actor_rollout",
-            )
-
-    def sync_rollout_weights(self):
-        self.actor_wg.sync_rollout_weights()
-        ray.get(self.rollout_wg.sync_rollout_weights())
 
     def _create_continuous_iterator(self):
         """
@@ -271,7 +223,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         # async generation
         with marked_timer("generate_async", timing_raw, color="purple"):
-            gen_batch_output = await self.async_rollout_manager.generate_sequences_async(gen_batch_output)
+            gen_batch_output = await self.async_rollout_manager.generate_sequences(gen_batch_output)
 
         # repeat to align with repeated responses in rollout
         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
@@ -394,7 +346,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             # Prevents computations in a certain phase from blocking the entire asynchronous workflow
             #
             # The purpose here is to ensure that after triggering
-            # `self.async_rollout_manager.generate_sequences_async(gen_batch_output)`,
+            # `self.async_rollout_manager.generate_sequences(gen_batch_output)`,
             # the subsequent relevant logic can proceed in a timely manner
             await asyncio.sleep(0)
             batch = self._fit_compute_reward(batch)
@@ -434,6 +386,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         with marked_timer("gen", timing_raw, color="red"):
             _metrics, _timing_raw, epoch, batch, future_reward = await batch_data_future
+            batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             timing_raw.update(batch.meta_info["timing"])
             timing_raw.update(_timing_raw)
             metrics.update(_metrics)
@@ -452,8 +405,3 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             batch_data_future = None
 
         return batch, batch_data_future
-
-    def _fit_update_weights(self):
-        # TODO: use checkpoint engine to update weight
-        # self.sync_rollout_weights()
-        pass
