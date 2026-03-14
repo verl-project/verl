@@ -661,6 +661,7 @@ distillation:
       skip_tokenizer_init: false
       prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
       response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
+      temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
 trainer:
   balance_batch: true
   total_epochs: 30
