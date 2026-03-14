@@ -81,6 +81,18 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _apply_temperature(logits: torch.Tensor, temperature) -> torch.Tensor:
+    """Apply temperature scaling, handling activation-offloaded views correctly.
+
+    FSDP2 + activation_offload wraps squeeze() in a custom autograd Function.
+    Inplace div_() on such views raises RuntimeError. Use non-inplace division
+    when gradients are enabled (training), inplace when disabled (compute_log_prob).
+    """
+    if torch.is_grad_enabled():
+        return logits / temperature
+    return logits.div_(temperature)
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -1009,7 +1021,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
-                logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
+                logits_rmpad = _apply_temperature(
+                    logits_rmpad, temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype)
+                )
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                 inplace_backward = True
@@ -1068,7 +1082,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 logits = output.logits  # (bsz, response_length, vocab_size)
                 temperature = output_args["temperature"]  # (bsz,)
                 temperature = temperature.unsqueeze(-1).unsqueeze(-1)
-                logits.div_(temperature.clamp(min=1e-8).to(logits.dtype))
+                logits = _apply_temperature(logits, temperature.clamp(min=1e-8).to(logits.dtype))
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
