@@ -1534,6 +1534,12 @@ class RayPPOTrainer:
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+                    elif self.config.actor_rollout_ref.rollout.free_cache_engine:
+                        # Rollout replicas were put to sleep after generation. When actor update is
+                        # skipped by critic warmup, there is no trailing update_weights() call to
+                        # wake them back up for the next step.
+                        with marked_timer("wake_up_rollout", timing_raw, color="red"):
+                            self.checkpoint_manager.wake_up_replicas(self.global_steps)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
