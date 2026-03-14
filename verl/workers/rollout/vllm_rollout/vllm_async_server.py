@@ -613,6 +613,96 @@ class vLLMHttpServer:
             extra_fields={"global_steps": self.global_steps},
         )
 
+    async def compute_logprobs(
+        self,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        logprob_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        priority: int = 0,
+    ) -> TokenOutput:
+        """Generate sequence with token-in-token-out."""
+
+        prompt_ids = normalize_token_ids(prompt_ids)
+        response_ids = normalize_token_ids(response_ids)
+        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        input_ids = prompt_ids + response_ids
+
+        # Calculate the maximum possible new tokens based on available context space
+        # This serves as a safety upper bound
+        max_possible_tokens = self.config.max_model_len - len(input_ids)
+        if max_possible_tokens < 0:
+            raise ValueError(
+                f"Prompt + response length ({len(prompt_ids)} + {len(response_ids)} = {len(input_ids)})"
+                f" exceeds the model's maximum context length ({self.config.max_model_len})."
+            )
+
+        use_topk = logprob_params["use_topk"]
+        if use_topk:
+            num_logprobs = topk = logprob_params["topk"]
+        else:
+            num_logprobs = 0
+
+        temp = logprob_params["temperature"]
+        if temp != 1.0:
+            raise NotImplementedError("vLLM doesn't support temperature for prompt logprobs")
+
+        sampling_params = SamplingParams(max_tokens=1, prompt_logprobs=num_logprobs, temperature=temp)
+
+        multi_modal_data = {}
+        if image_data is not None:
+            multi_modal_data["image"] = image_data
+        if video_data is not None:
+            multi_modal_data["video"] = video_data
+
+        prompt = TokensPrompt(prompt_token_ids=input_ids, multi_modal_data=multi_modal_data)
+
+        if self.lora_as_adapter:
+            raise NotImplementedError("compute_logprobs with lora_as_adapter is not implemented yet")
+
+        generator = self.engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            priority=priority,
+        )
+
+        # Get final response
+        final_res: Optional[RequestOutput] = None
+        async for output in generator:
+            final_res = output
+        assert final_res is not None
+
+        # Extract response logprobs
+        response_length = len(response_ids)
+        response_logprob_dicts = final_res.prompt_logprobs[-response_length:]
+        response_logprobs_ls, response_ids_ls = [], []
+        for logprobs_dict in response_logprob_dicts:
+            if num_logprobs == 0:
+                token_id_str = list(logprobs_dict.keys())[0]
+                logprob = logprobs_dict[token_id_str].logprob
+                response_logprobs_ls.append([logprob])
+                response_ids_ls.append([int(token_id_str)])
+            else:
+                response_ids = [None] * topk
+                response_logprobs = [None] * topk
+                # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token
+                # is not in top-k)
+                assert len(logprobs_dict) in [topk, topk + 1], len(logprobs_dict)
+                for token_id_str, token_logprob in logprobs_dict.items():
+                    rank = token_logprob.rank
+                    if rank > topk:
+                        continue  # the sampled token is not in the top-k
+                    logprob = token_logprob.logprob
+                    response_ids[rank - 1] = int(token_id_str)
+                    response_logprobs[rank - 1] = logprob
+                response_logprobs_ls.append(response_logprobs)
+                response_ids_ls.append(response_ids)
+
+        return {"response_ids": response_ids_ls, "response_logprobs": response_logprobs_ls}
+
     async def wake_up(self):
         if self.node_rank != 0:
             return
@@ -797,8 +887,9 @@ class vLLMReplica(RolloutReplica):
         model_config: HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
     ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
         self.server_class = ray.remote(vLLMHttpServer)
 
     async def launch_servers(self):
@@ -837,12 +928,12 @@ class vLLMReplica(RolloutReplica):
                 worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
-            name = (
-                f"vllm_server_{self.replica_rank}_{node_rank}"
-                if not self.is_reward_model
-                else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
-            )
-
+            if self.is_reward_model:
+                name = f"vllm_server_reward_{self.replica_rank}_{node_rank}"
+            elif self.is_teacher_model:
+                name = f"vllm_server_teacher_{self.replica_rank}_{node_rank}"
+            else:
+                name = f"vllm_server_{self.replica_rank}_{node_rank}"
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
