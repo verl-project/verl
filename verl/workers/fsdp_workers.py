@@ -79,7 +79,14 @@ from verl.utils.fsdp_utils import (
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
+from verl.utils.profiler import (
+    PROFILER_TOOL_NAMES,
+    DistProfiler,
+    DistProfilerExtension,
+    ProfilerConfig,
+    log_gpu_memory_usage,
+    simple_timer,
+)
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
 
@@ -225,7 +232,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # omega_profiler_config is DictConfig
         # profiler_config is a ProfilerConfig dataclass
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+        if omega_profiler_config.get("tool", None) in PROFILER_TOOL_NAMES:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
@@ -1284,7 +1291,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         Worker.__init__(self)
         omega_profiler_config = config.get("profiler", {})
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+        if omega_profiler_config.get("tool", None) in PROFILER_TOOL_NAMES:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
