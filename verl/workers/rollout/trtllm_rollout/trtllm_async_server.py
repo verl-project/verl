@@ -117,6 +117,7 @@ class TRTLLMHttpServer:
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
         from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
+        from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType, SleepConfig
         from tensorrt_llm.serve import OpenAIServer
 
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
@@ -164,7 +165,14 @@ class TRTLLMHttpServer:
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
             "per_worker_gpu_share": per_worker_gpu_share,
-            "enable_sleep": self.config.enable_sleep_mode,
+            "sleep_config": SleepConfig(
+                restore_modes={
+                    ExecutorMemoryType.MODEL_WEIGHTS_MAIN: "NONE",
+                    ExecutorMemoryType.KV_CACHE: "NONE",
+                }
+            )
+            if self.config.enable_sleep_mode
+            else None,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,
@@ -332,8 +340,8 @@ class TRTLLMReplica(RolloutReplica):
             local_bundle_index = self.world_size * self.replica_rank
 
         while local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
-            start_pg_index += 1
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
+            start_pg_index += 1
         assert (
             start_pg_index < len(self.resource_pool.pgs)
             and local_bundle_index < self.resource_pool.pgs[start_pg_index].bundle_count
@@ -370,7 +378,6 @@ class TRTLLMReplica(RolloutReplica):
         return pgs, bundle_indices
 
     async def launch_servers(self):
-        assert self.nnodes == 1, "TRTLLMReplica doesn't support multiple nodes for single replica yet."
         assert self.resource_pool.pgs is not None, "placement groups are not initialized"
 
         pgs, bundle_indices = self.get_pgs_and_bundle_indices()
