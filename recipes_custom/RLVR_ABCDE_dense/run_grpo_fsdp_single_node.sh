@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -xeuo pipefail
+
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export VLLM_USE_V1=1
+export VERL_USE_GPT_OSS=0
+export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_API_KEY=${WANDB_API_KEY:-}
+export WANDB_DIR=${WANDB_DIR:-/llm-align/liuchonghan/wandb}
+unset WANDB_PROXY_URL HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+export NO_PROXY=${NO_PROXY:-"localhost,127.0.0.1,::1,10.,172.16.,172.17.,172.18.,172.19.,192.168.,.svc,.cluster.local,.hbox-aigc.svc"}
+export no_proxy=${no_proxy:-"$NO_PROXY"}
+export PYTHONPATH=/llm-align/liuchonghan/verl_lao:${PYTHONPATH:-}
+export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
+export GLOO_IPV6=${GLOO_IPV6:-"0"}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth0}
+export RAY_TMPDIR=/dev/shm/ray
+export TMPDIR=/dev/shm/tmp
+
+mkdir -p "$WANDB_DIR" "$RAY_TMPDIR" "$TMPDIR"
+
+ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.main_ppo"}
+TRAIN_FILES=${TRAIN_FILES:-/llm-align/liuchonghan/all_data_merged_rlhf.json}
+MODEL_ID=${MODEL_ID:-/llm-align/liuchonghan/Qwen3-8B}
+PROJECT_NAME=${PROJECT_NAME:-rlvr_8b}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-rlvr_8b_grpo_fsdp_single}
+DEFAULT_LOCAL_DIR=${DEFAULT_LOCAL_DIR:-/llm-align/liuchonghan/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}}
+
+NNODES=${NNODES:-4}
+NODE_RANK=${NODE_RANK:-0}
+# FSDP cluster: Ray head + torch master live on the FSDP master node by default.
+MASTER_ADDR=${MASTER_ADDR:-10.178.131.202}
+MASTER_PORT=${MASTER_PORT:-23457}
+N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
+
+FSDP_STRATEGY=${FSDP_STRATEGY:-fsdp2}
+FSDP_SIZE=${FSDP_SIZE:-8}
+ACTOR_OFFLOAD=${ACTOR_OFFLOAD:-False}
+REF_OFFLOAD=${REF_OFFLOAD:-False}
+CRITIC_OFFLOAD=${CRITIC_OFFLOAD:-False}
+
+rollout_mode=${ROLLOUT_MODE:-async}
+USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-True}
+RETURN_RAW_CHAT=${RETURN_RAW_CHAT:-True}
+RAY_ADDRESS=${RAY_ADDRESS:-10.178.131.202:6379}
+ACTOR_LR=${ACTOR_LR:-1e-6}
+MIN_LR=${MIN_LR:-1e-7}
+LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-cosine}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.35}
+UPDATE_WEIGHTS_BUCKET_MB=${UPDATE_WEIGHTS_BUCKET_MB:-4096}
+
+MIN_LR_RATIO=${MIN_LR_RATIO:-0.1}
+
+python3 $ENTRYPOINT --config-path=/llm-align/liuchonghan/verl_lao/verl/trainer/config \
+    --config-name='ppo_trainer.yaml' \
+    algorithm.adv_estimator=grpo \
+    data.train_files=$TRAIN_FILES \
+    data.val_files=$TRAIN_FILES \
+    data.val_max_samples=2048 \
+    data.return_raw_chat=$RETURN_RAW_CHAT \
+    data.train_batch_size=32 \
+    data.max_prompt_length=1024 \
+    data.max_response_length=1024 \
+    data.filter_overlong_prompts=False \
+    data.truncation='error' \
+    actor_rollout_ref.model.path=$MODEL_ID \
+    actor_rollout_ref.model.use_fused_kernels=$USE_FUSED_KERNELS \
+    actor_rollout_ref.actor.strategy=$FSDP_STRATEGY \
+    actor_rollout_ref.actor.fsdp_config.fsdp_size=$FSDP_SIZE \
+    actor_rollout_ref.actor.fsdp_config.param_offload=$ACTOR_OFFLOAD \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=$ACTOR_OFFLOAD \
+    actor_rollout_ref.actor.optim.lr=$ACTOR_LR \
+    actor_rollout_ref.actor.optim.min_lr_ratio=$MIN_LR_RATIO \
+    actor_rollout_ref.actor.optim.lr_scheduler_type=$LR_SCHEDULER_TYPE \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.kl_loss_coef=0.0 \
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.entropy_coeff=0 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.mode=$rollout_mode \
+    actor_rollout_ref.rollout.gpu_memory_utilization=$GPU_MEMORY_UTILIZATION \
+    actor_rollout_ref.rollout.n=16 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=10384 \
+    actor_rollout_ref.rollout.max_model_len=2048 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=$UPDATE_WEIGHTS_BUCKET_MB \
+    actor_rollout_ref.ref.fsdp_config.fsdp_size=$FSDP_SIZE \
+    actor_rollout_ref.ref.fsdp_config.param_offload=$REF_OFFLOAD \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+    critic.strategy=$FSDP_STRATEGY \
+    critic.model.fsdp_config.fsdp_size=$FSDP_SIZE \
+    critic.model.fsdp_config.param_offload=$CRITIC_OFFLOAD \
+    critic.model.fsdp_config.optimizer_offload=$CRITIC_OFFLOAD \
+    algorithm.use_kl_in_reward=False \
+    trainer.critic_warmup=0 \
+    trainer.logger='["console","wandb"]' \
+    trainer.project_name=$PROJECT_NAME \
+    trainer.experiment_name=$EXPERIMENT_NAME \
+    trainer.default_local_dir=$DEFAULT_LOCAL_DIR \
+    trainer.val_before_train=True \
+    trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
+    trainer.nnodes=$NNODES \
+    trainer.save_freq=300 \
+    trainer.test_freq=300 \
+    trainer.total_epochs=5 \
+    +ray_kwargs.ray_init._temp_dir=$RAY_TMPDIR \
+    +ray_kwargs.ray_init.address=$RAY_ADDRESS \
+    +ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=${PYTHONPATH:-} \
+    +ray_kwargs.ray_init.runtime_env.env_vars.MASTER_ADDR=$MASTER_ADDR \
+    +ray_kwargs.ray_init.runtime_env.env_vars.MASTER_PORT=\"$MASTER_PORT\" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME \
+    +ray_kwargs.ray_init.runtime_env.env_vars.GLOO_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME \
+    +ray_kwargs.ray_init.runtime_env.env_vars.GLOO_IPV6=\"${GLOO_IPV6}\" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.WANDB_MODE=$WANDB_MODE \
+    +ray_kwargs.ray_init.runtime_env.env_vars.WANDB_API_KEY=$WANDB_API_KEY \
+    +ray_kwargs.ray_init.runtime_env.env_vars.WANDB_DIR=$WANDB_DIR \
+    +ray_kwargs.ray_init.runtime_env.env_vars.TMPDIR=$TMPDIR \
+    +ray_kwargs.ray_init.runtime_env.env_vars.WANDB_PROXY_URL=\"\" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.HTTP_PROXY=\"\" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.HTTPS_PROXY=\"\" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.http_proxy=\"\" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.https_proxy=\"\" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.NO_PROXY=\"${NO_PROXY}\" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.no_proxy=\"${no_proxy}\" \
+    custom_reward_function.path=/llm-align/liuchonghan/verl_lao/recipes_custom/RLVR_ABCDE_dense/reward_function.py \
+    custom_reward_function.name=char_count_reward_function

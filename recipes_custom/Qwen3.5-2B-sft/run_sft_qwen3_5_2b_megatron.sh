@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -xeuo pipefail
+
+
+NUM_GPUS=${NUM_GPUS:-8}
+NNODES=${WORLD_SIZE:-${NNODES:-1}}
+NODE_RANK=${RANK:-${NODE_RANK:-0}}
+MASTER_PORT=${MASTER_PORT:-8888}
+
+RAW_MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+MASTER_ADDR=$(python3 -c "import socket; print(socket.getaddrinfo('${RAW_MASTER_ADDR}', None, socket.AF_INET)[0][4][0])" 2>/dev/null || echo "${RAW_MASTER_ADDR}")
+
+TRAIN_FILES=${TRAIN_FILES:-/llm-align/liuchonghan/train_1.7b_trans_total_v3.parquet}
+
+MODEL_PATH=${MODEL_PATH:-/llm-align/liuchonghan/Qwen3.5-2B}
+
+TP_SIZE=${TP_SIZE:-1}
+PP_SIZE=${PP_SIZE:-1}
+VPP_SIZE=${VPP_SIZE:-null}
+CP_SIZE=${CP_SIZE:-1}
+EP_SIZE=${EP_SIZE:-1}
+ETP_SIZE=${ETP_SIZE:-1}
+
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-256}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-8}
+MAX_LENGTH=${MAX_LENGTH:-2048}
+MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-${MAX_LENGTH}}
+PAD_MODE=${PAD_MODE:-no_padding}
+TRUNCATION=${TRUNCATION:-right}
+NUM_WORKERS=${NUM_WORKERS:-0}
+LR=${LR:-5e-6}
+MIN_LR=${MIN_LR:-5e-7}
+DTYPE=${DTYPE:-bfloat16}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-2}
+
+echo ">>> 数据文件: ${TRAIN_FILES}, total_epochs=${TOTAL_EPOCHS}"
+
+BACKEND=megatron
+RESUME_MODE=${RESUME_MODE:-disable}
+
+project_name=verl_sft_qwen3_5_2b
+exp_name=qwen3_5_2b-${BACKEND}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}
+ckpts_home=${ckpts_home:-/llm-align/liuchonghan/ckpt_verl/sft/${project_name}/${exp_name}}
+
+echo ">>> 节点信息: RANK ${NODE_RANK} / WORLD_SIZE ${NNODES}"
+echo ">>> 通信信息: MASTER ${MASTER_ADDR} : ${MASTER_PORT}"
+
+if [ "${NODE_RANK}" -eq 0 ]; then
+    mkdir -p "${ckpts_home}"
+fi
+
+# Qwen3.5 GDN + megatron bshd path currently requires no_padding + static bsz.
+if [ "${PAD_MODE}" != "no_padding" ]; then
+    echo "ERROR: PAD_MODE must be no_padding for Qwen3.5 megatron bshd path."
+    exit 1
+fi
+
+export WANDB_MODE=${WANDB_MODE:-offline}
+export NCCL_DEBUG=WARN
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export HYDRA_FULL_ERROR=1
+export PYTHONPATH=${PYTHONPATH:-}:/llm-align/liuchonghan/verl_lao
+
+# Key Qwen3.5 settings:
+#   engine.use_remove_padding=False   - GDN requires bshd format (no THD)
+#   engine.vanilla_mbridge=True       - use mbridge (not megatron-bridge)
+ENGINE_CONFIG="\
+    engine=${BACKEND} \
+    optim=${BACKEND} \
+    optim.lr=${LR} \
+    optim.min_lr=${MIN_LR} \
+    optim.lr_warmup_steps=20 \
+    optim.weight_decay=0.1 \
+    optim.betas='[0.9,0.95]' \
+    optim.clip_grad=1.0 \
+    optim.lr_warmup_init=0 \
+    optim.lr_decay_style=cosine \
+    +optim.override_optimizer_config.optimizer_offload_fraction=0 \
+    +optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=False \
+    +optim.override_optimizer_config.use_precision_aware_optimizer=True \
+    +optim.override_optimizer_config.optimizer_cpu_offload=False \
+    engine.tensor_model_parallel_size=${TP_SIZE} \
+    engine.pipeline_model_parallel_size=${PP_SIZE} \
+    engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
+    engine.context_parallel_size=${CP_SIZE} \
+    engine.expert_model_parallel_size=${EP_SIZE} \
+    engine.expert_tensor_parallel_size=${ETP_SIZE} \
+    engine.use_mbridge=True \
+    engine.vanilla_mbridge=True \
+    engine.dtype=${DTYPE} \
+    engine.use_remove_padding=False \
+    engine.override_transformer_config.attention_backend=auto \
+    +engine.override_transformer_config.recompute_method=uniform \
+    +engine.override_transformer_config.recompute_granularity=full \
+    +engine.override_transformer_config.recompute_num_layers=1"
+
+torchrun \
+    --nproc_per_node=${NUM_GPUS} \
+    --nnodes=${NNODES} \
+    --node_rank=${NODE_RANK} \
+    --master_addr=${MASTER_ADDR} \
+    --master_port=${MASTER_PORT} \
+    -m verl.trainer.sft_trainer \
+    data.train_files="${TRAIN_FILES}" \
+    data.train_batch_size=${TRAIN_BATCH_SIZE} \
+    data.micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
+    data.max_length=${MAX_LENGTH} \
+    data.pad_mode=${PAD_MODE} \
+    data.truncation=${TRUNCATION} \
+    data.use_dynamic_bsz=False \
+    data.max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
+    data.num_workers=${NUM_WORKERS} \
+    data.messages_key=messages \
+    model.path=${MODEL_PATH} \
+    model.use_remove_padding=True \
+    model.trust_remote_code=True \
+    model.enable_gradient_checkpointing=True \
+    ${ENGINE_CONFIG} \
+    trainer.test_freq=-1 \
+    trainer.save_freq=500 \
+    trainer.max_ckpt_to_keep=3 \
+    trainer.logger="['console']" \
+    trainer.project_name="${project_name}" \
+    trainer.experiment_name="${exp_name}" \
+    trainer.total_epochs=${TOTAL_EPOCHS} \
+    trainer.default_local_dir="${ckpts_home}" \
+    trainer.resume_mode=${RESUME_MODE} \
+    'checkpoint.save_contents=[model,optimizer,extra,hf_model]'
