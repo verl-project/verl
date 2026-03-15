@@ -18,7 +18,7 @@ Contains utilities/classes for on-policy distillation
 from typing import Optional
 
 import torch
-from tensordict import TensorDict
+from tensordict import NonTensorStack, TensorDict
 
 from verl.trainer.distillation.losses import DistillationLossSettings
 from verl.trainer.distillation.types import DistillationLossInputs
@@ -64,9 +64,15 @@ def prepare_distillation_inputs(
     """Prepare distillation loss inputs for loss computation. Called in ppo_loss before computing distillation loss."""
     loss_config: DistillationLossConfig = config.distillation_loss
     distillation_settings: DistillationLossSettings = loss_config.loss_settings
+    task_labels = tu.get_non_tensor_data(data=data, key=config.task_key, default=None)
+    if not isinstance(task_labels, NonTensorStack):
+        raise TypeError(f"Expected task_labels to be a NonTensorStack, but got {type(task_labels)}.")
+    task_labels = task_labels.tolist()
     if distillation_settings.use_estimator:
         return DistillationLossInputs(
-            student_log_probs=log_prob, teacher_log_probs=data["teacher_logprobs"].squeeze(-1)
+            student_log_probs=log_prob,
+            teacher_log_probs=data["teacher_logprobs"].squeeze(-1),
+            task_labels=task_labels,
         )
     elif distillation_settings.use_topk:
         teacher_topk_log_probs = data["teacher_logprobs"]
@@ -76,6 +82,7 @@ def prepare_distillation_inputs(
             student_logits=student_logits,
             teacher_topk_log_probs=teacher_topk_log_probs,
             teacher_topk_ids=teacher_topk_ids,
+            task_labels=task_labels,
         )
     else:
         raise ValueError

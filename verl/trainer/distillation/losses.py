@@ -109,6 +109,33 @@ def compute_distillation_loss_range(
     }
 
 
+def compute_task_distillation_loss_metrics(
+    distillation_losses: torch.Tensor, response_mask: torch.Tensor, task_labels: list[str]
+) -> dict[str, Metric]:
+    """Compute per-task mean distillation loss over valid response tokens.
+    Note: because we don't have per-task token counts across ranks, this will result
+    in a incorrect estimate of the true per-task mean when ranks have uneven number of tokens
+    per task, since metrics per rank will be aggregated using simple mean instead of weighted mean.
+    """
+    if len(task_labels) != len(distillation_losses):
+        raise ValueError(
+            f"Expected one task label per sample, but got {len(task_labels)=} and "
+            f"batch size {len(distillation_losses)}."
+        )
+
+    metrics = {}
+    for task in sorted(set(task_labels)):
+        task_mask = torch.tensor(
+            [label == task for label in task_labels], device=response_mask.device, dtype=torch.bool
+        )
+        task_response_mask = response_mask[task_mask]
+        if not task_response_mask.any():
+            continue
+        task_losses = distillation_losses[task_mask][task_response_mask]
+        metrics[f"distillation/loss/{task}"] = Metric(AggregationType.MEAN, task_losses.mean())
+    return metrics
+
+
 def distillation_loss(
     inputs: DistillationLossInputs,
     old_log_prob: torch.Tensor,
@@ -157,6 +184,13 @@ def distillation_loss(
 
     distillation_metrics.update(
         compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
+    )
+    distillation_metrics.update(
+        compute_task_distillation_loss_metrics(
+            distillation_losses=distillation_losses,
+            response_mask=response_mask,
+            task_labels=inputs.task_labels,
+        )
     )
     if loss_config.loss_max_clamp is not None:
         # clamping min is for k1 loss which can be negative
