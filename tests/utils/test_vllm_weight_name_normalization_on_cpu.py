@@ -31,6 +31,12 @@ class _FakeModel:
     def __init__(self):
         self.hf_to_vllm_mapper = _FakeMapper(
             {
+                "model.language_model.layers.0.mlp.experts.base_layer.w13_weight": (
+                    "language_model.model.layers.0.mlp.experts.base_layer.w13_weight"
+                ),
+                "model.language_model.layers.0.mlp.experts.base_layer.w2_weight": (
+                    "language_model.model.layers.0.mlp.experts.base_layer.w2_weight"
+                ),
                 "model.language_model.layers.0.self_attn.qkv_proj.base_layer.weight": (
                     "language_model.model.layers.0.self_attn.qkv_proj.base_layer.weight"
                 ),
@@ -86,6 +92,23 @@ def test_normalize_base_sync_weight_names_handles_bridge_inserted_base_layer_on_
     assert [name for name, _ in normalized_weights] == [
         "model.language_model.layers.0.mlp.experts.gate_up_proj",
         "model.language_model.layers.0.mlp.experts.down_proj",
+    ]
+
+
+def test_normalize_base_sync_weight_names_handles_fused_expert_leaf_params():
+    worker = _make_worker(_FakeModel())
+    tensor = torch.empty(0)
+
+    normalized_weights = worker._normalize_base_sync_weight_names(
+        [
+            ("model.language_model.layers.0.mlp.experts.w13_weight", tensor),
+            ("model.language_model.layers.0.mlp.experts.base_layer.w2_weight", tensor),
+        ]
+    )
+
+    assert [name for name, _ in normalized_weights] == [
+        "model.language_model.layers.0.mlp.experts.base_layer.w13_weight",
+        "model.language_model.layers.0.mlp.experts.base_layer.w2_weight",
     ]
 
 

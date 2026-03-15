@@ -267,7 +267,8 @@ class vLLMColocateWorkerExtension:
 
     @staticmethod
     def _is_leaf_weight_or_bias_name(weight_name: str) -> bool:
-        return weight_name.rsplit(".", 1)[-1] in {"weight", "bias"}
+        leaf = weight_name.rsplit(".", 1)[-1]
+        return leaf in {"weight", "bias"} or leaf.endswith(("_weight", "_bias"))
 
     @classmethod
     def _strip_bridge_base_layer_from_expert_alias(cls, weight_name: str) -> str:
