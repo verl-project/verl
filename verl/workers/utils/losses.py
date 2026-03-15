@@ -158,7 +158,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
-        metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
+        metrics["actor/entropy_loss"] = Metric(value=entropy[response_mask], aggregation=AggregationType.MEAN)
 
     # add kl loss
     if config.use_kl_loss:
@@ -170,7 +170,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         )
 
         policy_loss += kl_loss * config.kl_loss_coef
-        metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
+        metrics["kl_loss"] = Metric(value=kld[response_mask], aggregation=AggregationType.MEAN)
         metrics["kl_coef"] = config.kl_loss_coef
 
     return policy_loss, metrics
