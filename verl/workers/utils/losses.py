@@ -145,7 +145,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
     # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
-    pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+    pg_metrics = {key: Metric(AggregationType.MEAN, value) for key, value in pg_metrics.items()}
 
     metrics.update(pg_metrics)
     metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
