@@ -16,6 +16,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Optional
+from verl.utils.config import omega_conf_to_dataclass
 
 from verl.base_config import BaseConfig
 
@@ -115,25 +116,22 @@ class DistillationLossConfig(BaseConfig):
 class DistillationTeacherModelConfig(BaseConfig):
     """Configuration for on-policy distillation teacher.
 
-    enable_resource_pool (bool):
-        Whether to enable separate resource pool for teacher model(s).
-    n_gpus_per_node (int):
-        Number of GPUs per node to use for distillation teacher model(s).
-    nnodes (int):
-        Number of nodes to use for distillation teacher model(s).
+    task (str):
+        Task label served by this teacher.
     model_path (str, optional):
         Model path for the teacher model. Can be a local path or a Hugging Face model
-    inference (RolloutConfig):
-        Rollout configuration for the teacher model inference during distillation.
     """
 
     _mutable_fields = BaseConfig._mutable_fields
 
-    enable_resource_pool: bool = False
-    n_gpus_per_node: int = 0
-    nnodes: int = 0
+    task: str = ""
     model_path: Optional[str] = None
-    inference: RolloutConfig = field(default_factory=RolloutConfig)
+
+    def __post_init__(self):
+        if not self.task:
+            raise ValueError("DistillationTeacherModelConfig.task must be non-empty.")
+        if not self.model_path:
+            raise ValueError("DistillationTeacherModelConfig.model_path must be non-empty.")
 
 
 @dataclass
@@ -144,25 +142,48 @@ class DistillationConfig(BaseConfig):
         Whether on-policy distillation is enabled.
     num_workers (int):
         Number of teacher model replicas.
-    teacher_model (TeacherModelConfig):
-        Configuration for the teacher model used for distillation.
+    task_key (str):
+        Key in non_tensor_batch used to route each sample to the matching teacher task.
+    enable_resource_pool (bool):
+        Whether to enable a separate resource pool for teacher model(s).
+    n_gpus_per_node (int):
+        Number of GPUs per node to use for teacher model(s).
+    nnodes (int):
+        Number of nodes to use for teacher model(s).
+    inference (RolloutConfig):
+        Shared rollout configuration for teacher model inference during distillation.
+    teacher_models (dict[str, DistillationTeacherModelConfig]):
+        Teacher-specific task/model configuration keyed by teacher name.
     distillation_loss (DistillationLossConfig):
         Configuration for distillation loss settings.
     """
 
-    _mutable_fields = BaseConfig._mutable_fields
+    _mutable_fields = BaseConfig._mutable_fields | {"teacher_models"}
 
     enabled: bool = False
     num_workers: int = 8
-    teacher_model: DistillationTeacherModelConfig = field(default_factory=DistillationTeacherModelConfig)
+    task_key: str = "data_source"
+    enable_resource_pool: bool = False
+    n_gpus_per_node: int = 0
+    nnodes: int = 0
+    inference: RolloutConfig = field(default_factory=RolloutConfig)
+    teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
+        self.teacher_models = {teacher_name: omega_conf_to_dataclass(teacher_config, DistillationTeacherModelConfig) for teacher_name, teacher_config in self.teacher_models.items()}
+
+        if self.enabled and not self.teacher_models:
+            raise ValueError("distillation.teacher_models must be non-empty when distillation is enabled.")
+        task_map = {teacher_name: teacher_config.task for teacher_name, teacher_config in self.teacher_models.items()}
+        if len(set(task_map.values())) != len(task_map):
+            raise ValueError(f"Duplicate teacher tasks found in teacher_models: {task_map}. Each teacher must serve a unique task.")
+
         # Prompt + Response from student are fed into teacher as context
-        max_model_len = self.teacher_model.inference.max_model_len
-        max_num_batched_tokens = self.teacher_model.inference.max_num_batched_tokens
-        student_prompt_length = self.teacher_model.inference.prompt_length
-        student_response_length = self.teacher_model.inference.response_length
+        max_model_len = self.inference.max_model_len
+        max_num_batched_tokens = self.inference.max_num_batched_tokens
+        student_prompt_length = self.inference.prompt_length
+        student_response_length = self.inference.response_length
         if self.enabled:
             required_context_len = student_prompt_length + student_response_length + 1
             if max_model_len is not None and required_context_len > max_model_len:
@@ -179,14 +200,14 @@ class DistillationConfig(BaseConfig):
                     f"{max_num_batched_tokens=}."
                 )
 
-        self.teacher_model.inference.prompt_length = (
-            self.teacher_model.inference.prompt_length + self.teacher_model.inference.response_length
+        self.inference.prompt_length = (
+            self.inference.prompt_length + self.teacher_model.inference.response_length
         )
-        self.teacher_model.inference.response_length = 1
+        self.inference.response_length = 1
 
         # Ensure max log probs is aligned with top-k
-        engine_name = self.teacher_model.inference.name
-        engine_kwargs = self.teacher_model.inference.engine_kwargs
+        engine_name = self.inference.name
+        engine_kwargs = self.inference.engine_kwargs
         if not self.distillation_loss.loss_settings.use_topk or self.distillation_loss.topk is None or not self.enabled:
             return
         match engine_name:
@@ -204,5 +225,5 @@ class DistillationConfig(BaseConfig):
                 engine_kwargs["vllm"] = vllm_engine_kwargs
             case _:
                 raise NotImplementedError(
-                    f"DistillationTeacherModelConfig does not support inference engine {engine_name}"
+                    f"DistillationConfig does not support inference engine {engine_name}"
                 )
