@@ -16,9 +16,9 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Optional
-from verl.utils.config import omega_conf_to_dataclass
 
 from verl.base_config import BaseConfig
+from verl.utils.config import omega_conf_to_dataclass
 
 from .rollout import RolloutConfig
 
@@ -171,13 +171,18 @@ class DistillationConfig(BaseConfig):
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
-        self.teacher_models = {teacher_name: omega_conf_to_dataclass(teacher_config, DistillationTeacherModelConfig) for teacher_name, teacher_config in self.teacher_models.items()}
+        self.teacher_models = {
+            teacher_name: omega_conf_to_dataclass(teacher_config, DistillationTeacherModelConfig)
+            for teacher_name, teacher_config in self.teacher_models.items()
+        }
 
         if self.enabled and not self.teacher_models:
             raise ValueError("distillation.teacher_models must be non-empty when distillation is enabled.")
         task_map = {teacher_name: teacher_config.task for teacher_name, teacher_config in self.teacher_models.items()}
         if len(set(task_map.values())) != len(task_map):
-            raise ValueError(f"Duplicate teacher tasks found in teacher_models: {task_map}. Each teacher must serve a unique task.")
+            raise ValueError(
+                f"Duplicate teacher tasks found in teacher_models: {task_map}. Each teacher must serve a unique task."
+            )
 
         # Prompt + Response from student are fed into teacher as context
         self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
@@ -202,6 +207,4 @@ class DistillationConfig(BaseConfig):
                     )
                 engine_kwargs["vllm"] = vllm_engine_kwargs
             case _:
-                raise NotImplementedError(
-                    f"DistillationConfig does not support inference engine {engine_name}"
-                )
+                raise NotImplementedError(f"DistillationConfig does not support inference engine {engine_name}")
