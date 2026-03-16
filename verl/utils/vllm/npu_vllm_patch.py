@@ -15,6 +15,7 @@
 # limitations under the License.
 import os
 from functools import wraps
+
 from verl.utils.device import is_torch_npu_available
 
 
@@ -38,6 +39,7 @@ def vllm_ascend_select_moe_comm_method_wrapper(fn):
 
         if with_prefill:
             from vllm_ascend.utils import enable_sp
+
             if enable_sp():
                 moe_comm_method = MoECommType.ALLGATHER
             else:
@@ -46,6 +48,7 @@ def vllm_ascend_select_moe_comm_method_wrapper(fn):
         return moe_comm_method
 
     return wrapper
+
 
 def vllm_ascend_matmul_and_reduce_wrapper(fn):
     @wraps(fn)
@@ -56,6 +59,7 @@ def vllm_ascend_matmul_and_reduce_wrapper(fn):
         # AscendSocVersion.A2 is not support MC2 in Single-card multi-process scenario now.
         if soc_version in {AscendSocVersion.A2}:
             from vllm.forward_context import get_forward_context
+
             try:
                 forward_context = get_forward_context()
                 forward_context.mmrs_fusion = False
@@ -70,6 +74,7 @@ def vllm_ascend_matmul_and_reduce_wrapper(fn):
 def check_vllm_ascend_before_server_launch():
     import torch_npu
     from vllm_ascend.utils import AscendSocVersion
+
     def get_ascend_soc_version_local():
         soc_version = torch_npu.npu.get_soc_version()
         if 220 <= soc_version <= 225:
@@ -79,6 +84,7 @@ def check_vllm_ascend_before_server_launch():
         else:
             _ascend_soc_version = AscendSocVersion.UNDEFINED
         return _ascend_soc_version
+
     soc_version = get_ascend_soc_version_local()
     if soc_version in {AscendSocVersion.A2}:
         VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE = bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0")))
