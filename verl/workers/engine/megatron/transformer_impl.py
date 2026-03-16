@@ -54,6 +54,7 @@ from verl.utils.megatron_utils import (
     register_megatron_training_hooks,
     unwrap_model,
 )
+from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
 from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
@@ -505,6 +506,7 @@ class MegatronEngine(BaseEngine):
         torch.distributed.barrier()
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.module)
+        aggressive_empty_cache(force_sync=True)
 
     def load_checkpoint(
         self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: bool = True, **kwargs
