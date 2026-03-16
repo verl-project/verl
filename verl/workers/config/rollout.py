@@ -165,6 +165,7 @@ class RolloutConfig(BaseConfig):
     free_cache_engine: bool = True
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     tensor_model_parallel_size: int = 2
     pipeline_model_parallel_size: int = 1
     moe_tensor_parallel_size: int = 1

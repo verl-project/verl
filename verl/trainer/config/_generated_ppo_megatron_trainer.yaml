@@ -232,6 +232,7 @@ actor_rollout_ref:
     tensor_model_parallel_size: 2
     data_parallel_size: 1
     expert_parallel_size: 1
+    enable_expert_parallel: false
     pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null

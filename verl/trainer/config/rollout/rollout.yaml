@@ -61,6 +61,9 @@ data_parallel_size: 1
 # EP size for rollout
 expert_parallel_size: 1
 
+# Whether to use EP(True) or ETP(False) for fused MoE in vllm
+enable_expert_parallel: False
+
 # PP size for rollout.
 pipeline_model_parallel_size: 1
 
