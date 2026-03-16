@@ -130,6 +130,16 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
+    if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
+        export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+        )
+        actor_offload=True
+    fi
+
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
@@ -157,13 +167,15 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
-    extra_flash_args=()
-
-    if [ "$device_name" == "npu" ]; then
-        echo "Detect NPU device, enabling FlashAttention..."
-        extra_flash_args+=(
-            ++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+    if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
+        export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
         )
+        train_tp=2
+        actor_offload=True
     fi
 
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
@@ -183,7 +195,6 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
-        "${extra_flash_args[@]}" \
         actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
