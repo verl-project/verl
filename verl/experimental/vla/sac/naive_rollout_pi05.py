@@ -57,7 +57,12 @@ class PI0RolloutRob(NaiveRolloutRob):
 
         with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             prompts.to(get_device_id())
-            output, s, a = self.module.sample_actions(prompts, tokenizer=self.tokenizer)
+            validate = bool(prompts.meta_info.get("validate", False))
+            output, s, a = self.module.sample_actions(
+                prompts,
+                tokenizer=self.tokenizer,
+                validate=validate,
+            )
             state_features = self.module.sac_forward_state_features(s)
             critic_value = self.module.sac_forward_critic(
                 {"full_action": a["full_action"]},

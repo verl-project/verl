@@ -184,6 +184,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         self,
         env_obs: DataProto,
         tokenizer,
+        validate: bool = False,
     ) -> tuple[Pi0Output, dict, dict]:
         """Run one forward pass from raw inputs to final action sequence.
 
@@ -215,7 +216,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
             {"task": pi0_input.task, "observation.state": state}, tokenizer
         )
 
-        if self.flow_sde_enable:
+        if self.flow_sde_enable and not validate:
             prefix_features = self.model.embed_prefix(
                 images=images,
                 img_masks=pi0_input.img_masks,
