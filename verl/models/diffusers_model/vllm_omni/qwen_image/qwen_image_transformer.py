@@ -26,6 +26,7 @@ from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
     QwenTimestepProjEmbeddings,
 )
 
+
 # This class is need because there is bug in vllm-omni
 # TODO: Remove this class after the bug is fixed and vllm-omni is updated to the fixed version
 class QwenImageTransformer2DModelFixed(QwenImageTransformer2DModel):
