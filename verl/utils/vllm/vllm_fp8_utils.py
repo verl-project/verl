@@ -241,12 +241,12 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
 
     weight_block_size = None
-    # if quant_config.weight_block_size is None:
-    #     raise ValueError("Currently only support blockwise quantization, please set weight_block_size in quant_config")
     if hasattr(quant_config, "weight_block_size"):
         weight_block_size = quant_config.weight_block_size
     elif is_mxfp8_npu:
         weight_block_size = MXFP8_BLOCK_QUANT_KWARGS["weight_block_size"]
+    else:
+        raise ValueError("Currently only support blockwise quantization, please set weight_block_size in quant_config")
 
     is_vllm_11_or_later = version.parse(vllm.__version__) >= version.parse("0.11.0")
 
@@ -273,15 +273,16 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         # Yield the quantized weight
         yield (k, param_lp)
 
-        # Yield the scale with appropriate naming based on vLLM versio
-        yield (k + "_scale", param_scale)
-        # if is_vllm_11_or_later:
-        #     if "expert" in k:
+        # Yield the scale with appropriate naming based on vLLM version
+        if is_mxfp8_npu:
+            yield (k + "_scale", param_scale)
+        elif is_vllm_11_or_later:
+            if "expert" in k:
                 
-        #     else:
-        #         yield (k + "_scale", param_scale)
-        # else:
-        #     yield (k + "_scale_inv", param_scale)
+            else:
+                yield (k + "_scale", param_scale)
+        else:
+            yield (k + "_scale_inv", param_scale)
 
         # Explicitly delete original tensor reference to help GC
         del v, param_lp, param_scale

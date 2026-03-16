@@ -281,7 +281,7 @@ class vLLMHttpServer:
                 quant_config_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
                 apply_vllm_fp8_patches()
                 # for subprocesses patching
-                # os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+                os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
             elif quantization in ["mxfp8", "ascend"]:
                 # Both mxfp8 and ascend use MXFP8_BLOCK_QUANT_KWARGS
