@@ -93,6 +93,7 @@ jobs:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       ACTOR_STRATEGY: "fsdp2"
+      device_name: "npu"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -137,6 +138,7 @@ jobs:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       ACTOR_STRATEGY: "megatron"
+      device_name: "npu"
     steps:
       - name: Check npu and CANN info
         run: |

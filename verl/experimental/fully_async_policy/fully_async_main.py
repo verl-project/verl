@@ -27,8 +27,8 @@ from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncT
 from verl.experimental.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
 from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
 from verl.trainer.ppo.utils import Role
-from verl.utils.fs import copy_to_local
 from verl.utils.device import auto_set_device
+from verl.utils.fs import copy_to_local
 
 
 @ray.remote(num_cpus=1)
