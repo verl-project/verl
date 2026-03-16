@@ -201,10 +201,13 @@ def get_moe_num_layers_to_build(
     total_layers = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
 
     sig = inspect.signature(get_transformer_layer_offset)
-    if "vp_stage" in sig.parameters:
+    # core 0.12.1 is not support vp_stage and pp_rank as parameters
+    if "vp_stage" in sig.parameters and "pp_rank" in sig.parameters:
         layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
-    else:
+    elif "pp_rank" in sig.parameters:
         layer_offset = get_transformer_layer_offset(config, pp_rank=pp_rank)
+    else:
+        layer_offset = get_transformer_layer_offset(config)
 
     local_global_indices = range(layer_offset, layer_offset + total_layers)
 
