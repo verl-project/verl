@@ -365,7 +365,7 @@ class vLLMHttpServer:
                 "data_parallel_size_local": data_parallel_size_local,
                 "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
                 "data_parallel_address": self._master_address,
-                "data_parallel_rpc_port": self._master_port,
+                "data_parallel_rpc_port": self._dp_rpc_port,
             }
             args.update(dp_args)
 
