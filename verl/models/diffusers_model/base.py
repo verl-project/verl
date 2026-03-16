@@ -31,7 +31,8 @@ class DiffusionModelBase(ABC):
     Users can check the implementation of QwenImage for reference.
 
     To register a new model, decorate the subclass with ``@DiffusionModelBase.register("your-model-name")``.
-    The name is matched against ``model_config.path`` via ``str.endswith``.
+    The name must match the pipeline ``_class_name`` from ``model_index.json`` (i.e.
+    the ``architecture`` field of ``DiffusersModelConfig``, which is auto-detected by default).
     """
 
     _registry: dict[str, type["DiffusionModelBase"]] = {}
@@ -55,15 +56,19 @@ class DiffusionModelBase(ABC):
 
     @classmethod
     def get_class(cls, model_config: DiffusersModelConfig) -> type["DiffusionModelBase"]:
-        """Return the registered subclass for *model_config*.
+        """Return the registered subclass for *model_config.architecture*.
 
         Raises:
-            NotImplementedError: if no registered name matches ``model_config.path``.
+            NotImplementedError: if ``model_config.architecture`` is not in the registry.
         """
-        for name, klass in cls._registry.items():
-            if model_config.path.endswith(name):
-                return klass
-        raise NotImplementedError(f"No registered diffusion model matches path: {model_config.path!r}")
+        try:
+            return cls._registry[model_config.architecture]
+        except KeyError:
+            registered = list(cls._registry)
+            raise NotImplementedError(
+                f"No diffusion model registered for architecture={model_config.architecture!r}. "
+                f"Registered: {registered}"
+            ) from None
 
     @classmethod
     @abstractmethod

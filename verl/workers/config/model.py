@@ -226,15 +226,12 @@ class HFModelConfig(BaseConfig):
 
 @dataclass
 class DiffusersModelConfig(BaseConfig):
-    _mutable_fields = {
-        "tokenizer_path",
-        "tokenizer",
-        "processor",
-        "local_path",
-        "local_tokenizer_path",
-    }
+    _mutable_fields = {"tokenizer_path", "tokenizer", "processor", "local_path", "local_tokenizer_path", "architecture"}
 
     path: str = MISSING
+    # Handler key matched against @DiffusionModelBase.register(name).
+    # When None (the default), it is auto-detected from model_index.json's ``_class_name``.
+    architecture: Optional[str] = None
     local_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
@@ -280,6 +277,13 @@ class DiffusersModelConfig(BaseConfig):
         if self.tokenizer_path is None:
             self.tokenizer_path = os.path.join(self.path, "tokenizer")
         self.local_path = copy_to_local(self.path, use_shm=self.use_shm)
+
+        if self.architecture is None:
+            import json
+
+            model_index_path = os.path.join(self.local_path, "model_index.json")
+            with open(model_index_path) as f:
+                self.architecture = json.load(f)["_class_name"]
 
         # construct tokenizer
         if self.load_tokenizer:
