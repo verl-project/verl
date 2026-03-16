@@ -626,7 +626,7 @@ class vLLMHttpServer:
 
         prompt_ids = normalize_token_ids(prompt_ids)
         response_ids = normalize_token_ids(response_ids)
-        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         input_ids = prompt_ids + response_ids
 
         # Calculate the maximum possible new tokens based on available context space
