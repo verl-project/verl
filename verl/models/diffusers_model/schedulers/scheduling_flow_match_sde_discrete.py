@@ -167,14 +167,14 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             if timestep is None:
                 sigma_idx = self.step_index
                 sigma = self.sigmas[sigma_idx]
-                sigma_next = self.sigmas[sigma_idx + 1]
+                sigma_prev = self.sigmas[sigma_idx + 1]
             else:
                 sigma_idx = torch.tensor([self.index_for_timestep(t) for t in timestep])
                 sigma = self.sigmas[sigma_idx].view(-1, *([1] * (len(sample.shape) - 1)))
-                sigma_next = self.sigmas[sigma_idx + 1].view(-1, *([1] * (len(sample.shape) - 1)))
+                sigma_prev = self.sigmas[sigma_idx + 1].view(-1, *([1] * (len(sample.shape) - 1)))
 
             sigma_max = self.sigmas[1]
-            dt = sigma_next - sigma
+            dt = sigma_prev - sigma
 
         if sde_type == "sde":
             std_dev_t = torch.sqrt(sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))) * noise_level
@@ -203,11 +203,11 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 log_prob = None
 
         elif sde_type == "cps":
-            std_dev_t = sigma_next * math.sin(noise_level * math.pi / 2)
+            std_dev_t = sigma_prev * math.sin(noise_level * math.pi / 2)
             pred_original_sample = sample - sigma * model_output
             noise_estimate = sample + model_output * (1 - sigma)
-            prev_sample_mean = pred_original_sample * (1 - sigma_next) + noise_estimate * torch.sqrt(
-                sigma_next**2 - std_dev_t**2
+            prev_sample_mean = pred_original_sample * (1 - sigma_prev) + noise_estimate * torch.sqrt(
+                sigma_prev**2 - std_dev_t**2
             )
 
             if prev_sample is None:
