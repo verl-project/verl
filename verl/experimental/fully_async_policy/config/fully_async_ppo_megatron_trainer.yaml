@@ -60,6 +60,10 @@ actor_rollout_ref:
     # Must use rollout log probs for training
     use_rollout_log_probs: True
 
+  model:
+    # To use remove padding (thd)
+    use_remove_padding: True
+
 # Only then will the use of log probs be correct.
 # And it can be used in conjunction with other rollout_correction algorithms.
 algorithm:

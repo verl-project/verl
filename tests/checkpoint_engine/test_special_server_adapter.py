@@ -106,7 +106,7 @@ async def _run_server_manager_without_resume(
             )
 
         # wait a while and update weights to interrupt the generation
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         await checkpoint_manager.update_weights(global_steps=global_steps)
 
         outputs = await asyncio.gather(*tasks)
@@ -149,7 +149,7 @@ async def _run_server_manager_with_resume(
     # 2. trainer update weights to rollout multiple times
     for global_steps in range(initial_steps, initial_steps + train_steps):
         # wait a while and update weights to interrupt the generation
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         await checkpoint_manager.update_weights(global_steps=global_steps)
 
     # 3. wait for rollout generate responses finished

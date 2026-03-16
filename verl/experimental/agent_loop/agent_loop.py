@@ -34,7 +34,7 @@ from verl.experimental.agent_loop.prometheus_utils import update_prometheus_conf
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
-from verl.utils.chat_template import initialize_system_prompt
+from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
@@ -311,7 +311,8 @@ class AgentLoopBase(ABC):
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,
-                lambda: self.processor.apply_chat_template(
+                lambda: apply_chat_template(
+                    self.processor,
                     messages,
                     tools=tools,
                     add_generation_prompt=True,
@@ -339,7 +340,8 @@ class AgentLoopBase(ABC):
         else:
             tokenized_prompt = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.apply_chat_template(
+                lambda: apply_chat_template(
+                    self.tokenizer,
                     messages,
                     tools=tools,
                     add_generation_prompt=True,
@@ -637,7 +639,10 @@ class AgentLoopWorker:
             total_length = input_ids.shape[1]
             length, layer_num, topk_num = output.routed_experts.shape
             if isinstance(output.routed_experts, np.ndarray):
-                experts_tensor = torch.from_numpy(output.routed_experts)
+                routed_experts_array = output.routed_experts
+                if not routed_experts_array.flags.writeable:
+                    routed_experts_array = routed_experts_array.copy()
+                experts_tensor = torch.from_numpy(routed_experts_array)
             elif isinstance(output.routed_experts, torch.Tensor):
                 experts_tensor = output.routed_experts
             else:
@@ -725,15 +730,22 @@ class AgentLoopWorker:
         if self.processor is None:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
-        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
-        video_grid_thw = multi_modal_inputs.get("video_grid_thw")
+        multi_modal_kwargs = {
+            "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
+            "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+        }
+        # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
+        if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+            mm_token_type_ids = torch.zeros_like(input_ids)
+            mm_token_type_ids[0][input_ids[0] == self.processor.image_token_id] = 1
+            mm_token_type_ids[0][input_ids[0] == self.processor.video_token_id] = 2
+            multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         # Model's get_rope_index has been dynamically bind to the processor.
         vision_position_ids, _ = self.processor.get_rope_index(
             input_ids=input_ids,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
             attention_mask=attention_mask,
+            **multi_modal_kwargs,
         )
         vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
 

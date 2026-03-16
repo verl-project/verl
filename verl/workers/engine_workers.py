@@ -15,6 +15,7 @@ import functools
 import logging
 import os
 from contextlib import nullcontext
+from copy import deepcopy
 from functools import partial
 from itertools import chain
 
@@ -24,10 +25,6 @@ from omegaconf import DictConfig, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
-try:
-    from verl.workers.engine.mindspeed.transformer_impl import repatch
-except ImportError:
-    repatch = None
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
@@ -42,7 +39,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
-from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import ActorConfig, HFModelConfig, MtpConfig, RolloutConfig, TrainingWorkerConfig
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -102,10 +99,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # TODO: this is not elegant and should refactor later
         self.engine_config.use_remove_padding = self.model_config.use_remove_padding
         self.engine_config.use_fused_kernels = self.model_config.use_fused_kernels
-
-        if repatch is not None:
-            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
-            repatch(self.engine_config.get("override_transformer_config", {}))
 
         # TODO: add DistProfilerExtension
         self.profiler_config = self.config.profiler_config
@@ -481,7 +474,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
-            ref_config.model_config = model_config
+
+            # The ref model does not need to enable MTP; force it to false.
+            ref_config.model_config = deepcopy(model_config)
+            ref_config.model_config.mtp = MtpConfig(enable=False)
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(

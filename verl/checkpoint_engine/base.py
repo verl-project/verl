@@ -393,10 +393,12 @@ class CheckpointEngineManager:
     @auto_await
     async def sleep_replicas(self):
         """Sleep all rollout replicas: free weight and kv_cache device memory."""
-        # skip sleep replicas for disaggregated rollout
-        if self.backend != "naive":
-            return
         await asyncio.gather(*[r.sleep() for r in self.replicas])
+
+    @auto_await
+    async def wake_up_replicas(self):
+        """Resume all rollout replicas: recover kv_cache and weights device memory."""
+        await asyncio.gather(*[r.wake_up() for r in self.replicas])
 
     @auto_await
     async def update_weights(self, global_steps: int = None):
@@ -421,17 +423,23 @@ class CheckpointEngineManager:
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
         trainer = self.trainer
 
-        # 3. build process group
+        # 3. sleep replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
+        await self.sleep_replicas()
+
+        # 4. build process group
         self.build_process_group(rollout)
 
-        # 4. update weights of all workers
+        # 5. update weights of all workers
         ray.get(trainer.update_weights(global_steps=global_steps) + rollout.update_weights(global_steps=global_steps))
 
-        # 5. finalize all workers
+        # 6. finalize all workers
         ray.get(
             trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
             + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
         )
 
-        # 6. resume all unfinished requests for partial rollout
+        # 7. resume replicas to recover kv_cache (for free_cache_engine scenarios)
+        await self.wake_up_replicas()
+
+        # 8. resume all unfinished requests for partial rollout
         await asyncio.gather(*[r.resume_generation() for r in self.replicas])

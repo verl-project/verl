@@ -306,7 +306,10 @@ class SGLangHttpServer:
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
-            logger.info("skip wake_up in standalone mode")
+            # In standalone mode, resume kv_cache if free_cache_engine is enabled
+            obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
+            await self.tokenizer_manager.resume_memory_occupation(obj, None)
+            await self.tokenizer_manager.flush_cache()
 
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -319,7 +322,9 @@ class SGLangHttpServer:
             obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache", "weights"])
             await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.STANDALONE:
-            logger.info("skip sleep in standalone mode")
+            # In standalone mode, resume kv_cache if free_cache_engine is enabled
+            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
+            await self.tokenizer_manager.release_memory_occupation(obj, None)
 
     async def clear_kv_cache(self):
         if self.node_rank == 0:
