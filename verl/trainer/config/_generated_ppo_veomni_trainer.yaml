@@ -678,7 +678,7 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_legacy_worker_impl: auto
+  use_legacy_worker_impl: disable
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
