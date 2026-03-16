@@ -158,6 +158,15 @@ class HFModelConfig(BaseConfig):
             self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
             self.processor = hf_processor(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
 
+        # If processor exists but has no chat_template (e.g. base models like Qwen3.5-2b-Base),
+        # sync it from the tokenizer so that processor.apply_chat_template() works.
+        if (
+            self.processor is not None
+            and not getattr(self.processor, "chat_template", None)
+            and getattr(self.tokenizer, "chat_template", None)
+        ):
+            self.processor.chat_template = self.tokenizer.chat_template
+
         if self.custom_chat_template is not None:
             if self.processor is not None:
                 self.processor.chat_template = self.custom_chat_template
