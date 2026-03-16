@@ -35,7 +35,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword
+from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
@@ -351,26 +351,25 @@ class vLLMHttpServer:
             }
             args["speculative_config"] = speculative_config
 
-        if self.config.expert_parallel_size > 1:
+        if self.config.data_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
                 "gpus_per_node should be divisible by tensor_model_parallel_size"
             )
             data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
             assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
-                f"num workers ({len(self.workers)}) should be equal to dp_size_local "
+                f"num workers ({len(self.workers)}) should be equal to "
+                f"dp_size_local ({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
             )
-            f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
+            dp_args = {
+                "data_parallel_size": self.config.data_parallel_size,
+                "data_parallel_size_local": data_parallel_size_local,
+                "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
+                "data_parallel_address": self._master_address,
+                "data_parallel_rpc_port": self._dp_rpc_port,
+            }
+            args.update(dp_args)
 
-            args.update(
-                {
-                    "enable_expert_parallel": self.config.expert_parallel_size > 1,
-                    "data_parallel_size": self.config.data_parallel_size,
-                    "data_parallel_size_local": data_parallel_size_local,
-                    "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
-                    "data_parallel_address": self._master_address,
-                    "data_parallel_rpc_port": self._dp_rpc_port,
-                }
-            )
+        args.update({"enable_expert_parallel": self.config.expert_parallel_size > 1})
 
         # used for torch.distributed.init_process_group
         if self.nnodes > 1:
@@ -633,7 +632,7 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here
             # lora only update adapter weights, so set sleep level to 1
-            if self.lora_as_adapter:
+            if self.lora_as_adapter or is_npu_available:
                 sleep_level = 1
             else:
                 sleep_level = 2

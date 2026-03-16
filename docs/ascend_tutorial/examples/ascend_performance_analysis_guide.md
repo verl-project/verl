@@ -20,7 +20,7 @@ Last updated: 02/24/2026.
 
 ### 使能方法
 
-使能和配置教程可参考：[verl/docs/ascend_tutorial/ascend_profiling_zh.rst at main · verl-project/verl](https://github.com/verl-project/verl/raw/main/docs/ascend_tutorial/ascend_profiling_zh.rst)
+使能和配置教程可参考：[verl/docs/ascend_tutorial/profiling/ascend_profiling_zh.rst at main · verl-project/verl](https://github.com/verl-project/verl/raw/main/docs/ascend_tutorial/profiling/ascend_profiling_zh.rst)
 
 ## 性能分析方法论
 
