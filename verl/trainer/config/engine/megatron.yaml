@@ -82,9 +82,13 @@ override_transformer_config:
 override_mcore_model_config: {}
 
 # oc.select: default val for ref.megatron.use_mbridge
+# When enabled, model weights are loaded/saved in HF format via mbridge (bridge.save_weights),
+# which means checkpoint.save_contents='hf_model' is redundant and will be silently ignored.
+# Use 'model' in save_contents instead — it already saves HF format when mbridge is active.
 use_mbridge: True
 
 # oc.select: default val for ref.megatron.vanilla_mbridge
+# True: use vanilla mbridge (AutoBridge); False: use megatron-bridge provider
 vanilla_mbridge: True
 
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
