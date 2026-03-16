@@ -54,7 +54,7 @@ class DistillationLossSettings(BaseConfig):
 
     def __post_init__(self):
         self.names = [self.names] if isinstance(self.names, str) else self.names
-        if sum([self.use_topk, self.use_estimator]) > 1:
+        if sum([self.use_topk, self.use_estimator]) != 1:
             raise ValueError(
                 f"Expected only one of use_estimator, use_topk, but got {self.use_estimator=}, {self.use_topk=}."
             )
