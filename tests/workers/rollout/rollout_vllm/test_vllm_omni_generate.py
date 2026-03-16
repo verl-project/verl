@@ -48,13 +48,9 @@ def _tokenize_prompt(text: str) -> list[int]:
     (it drops the first 34 chat-template prefix tokens).
     The prompt text must be long enough so the total token count exceeds 34.
     """
-    tokenizer = AutoTokenizer.from_pretrained(
-        os.path.join(MODEL_PATH, "tokenizer"), trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(os.path.join(MODEL_PATH, "tokenizer"), trust_remote_code=True)
     messages = [{"role": "user", "content": text}]
-    token_ids = normalize_token_ids(
-        tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
-    )
+    token_ids = normalize_token_ids(tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False))
     assert len(token_ids) > _MIN_PROMPT_TOKENS, (
         f"Prompt too short ({len(token_ids)} tokens, need >{_MIN_PROMPT_TOKENS}). "
         f"The pipeline drops the first 34 chat-template prefix tokens; "
