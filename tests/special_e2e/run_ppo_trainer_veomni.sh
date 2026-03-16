@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+
 SAVE_PATH=tests/utils/ci/profiler_data
 rm -rf "$SAVE_PATH"
 
