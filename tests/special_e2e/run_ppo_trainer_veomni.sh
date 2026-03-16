@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+SAVE_PATH=tests/utils/ci/profiler_data
+rm -rf "$SAVE_PATH"
+
+CONTENTS=['cuda']
+PROFILE_STEPS=[1]
+PROFILE_RANKS_ALL=False
+PROFILE_RANKS=[0]
+DISCRETE=True
+
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
