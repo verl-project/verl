@@ -312,7 +312,7 @@ class vLLMHttpServer:
             "enable_chunked_prefill": self.config.enable_chunked_prefill,
             "max_num_batched_tokens": self.config.max_num_batched_tokens,
             "enable_prefix_caching": self.config.enable_prefix_caching,
-            "enable__mode": self.config.enable__mode,
+            "enable_sleep_mode": self.config.enable_sleep_mode,
             "logprobs_mode": self.config.logprobs_mode,
             "enforce_eager": self.config.enforce_eager,
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
@@ -436,7 +436,7 @@ class vLLMHttpServer:
             await self.run_server(server_args)
         else:
             # TODO: avoid connect before master_sock close
-            await asyncio.(3)
+            await asyncio.sleep(3)
             await self.run_headless(server_args)
 
     async def run_server(self, args: argparse.Namespace):
@@ -627,13 +627,13 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
-    async def (self):
+    async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
-            # Don't use engine.(level=2) here
-            # lora only update adapter weights, so set  level to 1
+            # Don't use engine.sleep(level=2) here
+            # lora only update adapter weights, so set sleep level to 1
             if self.lora_as_adapter or is_npu_available:
                 sleep_level = 1
             else:
