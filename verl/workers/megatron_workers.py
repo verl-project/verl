@@ -1283,6 +1283,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
         self.checkpoint_mananager.save_checkpoint(
             local_path=checkpoint_path, hdfs_path=hdfs_path, global_step=global_steps, max_ckpt_to_keep=max_ckpt_to_keep
         )
+        torch.distributed.barrier()
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
         aggressive_empty_cache(force_sync=True)

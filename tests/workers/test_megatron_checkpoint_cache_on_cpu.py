@@ -17,7 +17,6 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -30,11 +29,7 @@ def _load_method(path: Path, class_name: str, method_name: str):
                     fn_node = deepcopy(item)
                     fn_node.decorator_list = []
                     fn_node.returns = None
-                    for arg in (
-                        fn_node.args.posonlyargs
-                        + fn_node.args.args
-                        + fn_node.args.kwonlyargs
-                    ):
+                    for arg in fn_node.args.posonlyargs + fn_node.args.args + fn_node.args.kwonlyargs:
                         arg.annotation = None
                     if fn_node.args.vararg is not None:
                         fn_node.args.vararg.annotation = None
@@ -103,6 +98,7 @@ def test_critic_checkpoint_save_clears_cache_after_save():
 
     save_checkpoint.__globals__.update(
         {
+            "torch": _build_torch(events),
             "load_megatron_model_to_gpu": lambda module: events.append(f"load_model:{module}"),
             "offload_megatron_model_to_cpu": lambda module: events.append(f"offload_model:{module}"),
             "aggressive_empty_cache": lambda force_sync=True: events.append(f"empty_cache:{force_sync}"),
@@ -123,6 +119,7 @@ def test_critic_checkpoint_save_clears_cache_after_save():
     assert events == [
         "load_model:critic_module",
         "save:9",
+        "barrier",
         "offload_model:critic_module",
         "empty_cache:True",
     ]
