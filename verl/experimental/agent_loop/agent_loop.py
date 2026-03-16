@@ -1035,15 +1035,6 @@ class AgentLoopManager:
         teacher_model_manager: TeacherModelManager = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        """Initialize agent loop manager.
-
-        Args:
-            config (DictConfig): trainer config.
-            worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
-            rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
-            teacher_model_manager (TeacherModelManager): Manager for streaming teacher computation.
-            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-        """
         self.config = config
         self.rollout_config, self.model_config = _get_rollout_and_model_config(config)
         self.worker_group = worker_group
@@ -1181,7 +1172,7 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
-        if self.distillation_enabled:  # TODO: need same for reward loop workers
+        if self.distillation_enabled:
             await self.teacher_model_manager.wake_up()
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
@@ -1190,7 +1181,7 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        if self.distillation_enabled:  # TODO: need same for reward loop workers
+        if self.distillation_enabled:
             await self.teacher_model_manager.sleep()
         output = DataProto.concat(outputs)
 
