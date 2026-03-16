@@ -15,6 +15,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
+import torch
 from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
 
@@ -36,8 +37,13 @@ class DiffusionModelBase(ABC):
         """
         Abstract method for setting timesteps and sigmas for diffusion model schedulers during model init,
         and move the timesteps and sigmas to the correct device.
+
+        Args:
+            scheduler (SchedulerMixin): the scheduler used for the diffusion process.
+            model_config (DiffusersModelConfig): the configuration of the diffusion model.
+            device (str): the device to move the timesteps and sigmas to.
         """
-        raise NotImplementedError
+        pass
 
     @classmethod
     @abstractmethod
@@ -46,11 +52,22 @@ class DiffusionModelBase(ABC):
         module: ModelMixin,
         scheduler: SchedulerMixin,
         model_config: DiffusersModelConfig,
-        micro_batch: TensorDict,
-        model_inputs: dict,
-        negative_model_inputs: Optional[dict],
+        model_inputs: dict[str, torch.Tensor],
+        negative_model_inputs: Optional[dict[str, torch.Tensor]],
+        scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
         step: int,
     ):
         """Abstract method for forwarding the model and sampling previous step.
-        It is usually used for RL-algorithms based on reversed-sampling process."""
-        raise NotImplementedError
+        It is usually used for RL-algorithms based on reversed-sampling process.
+
+        Args:
+            module (ModelMixin): the diffusion model to be forwarded.
+            scheduler (SchedulerMixin): the scheduler used for the diffusion process.
+            model_config (DiffusersModelConfig): the configuration of the diffusion model.
+            model_inputs (dict[str, torch.Tensor]): the inputs to the diffusion model.
+            negative_model_inputs (Optional[dict[str, torch.Tensor]]): the negative inputs for guidance.
+            scheduler_inputs (Optional[TensorDict | dict[str, torch.Tensor]]): the extra inputs for the scheduler,
+                which may contain the latents and timesteps.
+            step (int): the current step in the diffusion process.
+        """
+        pass

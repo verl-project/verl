@@ -14,6 +14,7 @@
 
 from typing import Optional
 
+import torch
 from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
 
@@ -35,9 +36,9 @@ def forward_and_sample_previous_step(
     module: ModelMixin,
     scheduler: SchedulerMixin,
     model_config: DiffusersModelConfig,
-    micro_batch: TensorDict,
     model_inputs: dict,
     negative_model_inputs: Optional[dict],
+    scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
     step: int,
 ):
     """Forward the model and sample previous step.
@@ -48,7 +49,7 @@ def forward_and_sample_previous_step(
         from .qwen_image import QwenImage
 
         return QwenImage.forward_and_sample_previous_step(
-            module, scheduler, model_config, micro_batch, model_inputs, negative_model_inputs, step
+            module, scheduler, model_config, model_inputs, negative_model_inputs, scheduler_inputs, step
         )
     else:
         raise NotImplementedError("unsupported model for sampling previous step.")

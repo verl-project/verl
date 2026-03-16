@@ -594,9 +594,9 @@ class DiffusersFSDPEngine(BaseEngine):
             module=self.module,
             scheduler=self.scheduler,
             model_config=self.model_config,
-            micro_batch=micro_batch,
             model_inputs=model_inputs,
             negative_model_inputs=negative_model_inputs,
+            scheduler_inputs=micro_batch,
             step=step,
         )
         model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)

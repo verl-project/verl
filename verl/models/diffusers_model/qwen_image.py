@@ -51,13 +51,14 @@ class QwenImage(DiffusionModelBase):
         module: QwenImageTransformer2DModel,
         scheduler: FlowMatchSDEDiscreteScheduler,
         model_config: DiffusersModelConfig,
-        micro_batch: TensorDict,
-        model_inputs: dict,
-        negative_model_inputs: Optional[dict],
+        model_inputs: dict[str, torch.Tensor],
+        negative_model_inputs: Optional[dict[str, torch.Tensor]],
+        scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
         step: int,
     ):
-        latents = micro_batch["all_latents"]
-        timesteps = micro_batch["all_timesteps"]
+        assert scheduler_inputs is not None
+        latents = scheduler_inputs["all_latents"]
+        timesteps = scheduler_inputs["all_timesteps"]
 
         noise_pred = module(**model_inputs)[0]
         if model_config.guidance_scale > 1.0:
