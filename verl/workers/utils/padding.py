@@ -42,7 +42,7 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
         curr_mask = prompt_embeds_mask[i].bool()
         curr_prompt_embeds = prompt_embeds[i, curr_mask, :]
         prompt_embeds_list.append(curr_prompt_embeds)
-        prompt_embeds_mask_list.append(curr_mask)
+        prompt_embeds_mask_list.append(curr_mask[curr_mask])
     prompt_embeds_nested = torch.nested.as_nested_tensor(prompt_embeds_list, layout=torch.jagged)
     prompt_embeds_mask_nested = torch.nested.as_nested_tensor(prompt_embeds_mask_list, layout=torch.jagged)
     data["prompt_embeds"] = prompt_embeds_nested
@@ -57,7 +57,7 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
             curr_mask = negative_prompt_embeds_mask[i].bool()
             curr_negative_prompt_embeds = negative_prompt_embeds[i, curr_mask, :]
             negative_prompt_embeds_list.append(curr_negative_prompt_embeds)
-            negative_prompt_embeds_mask_list.append(curr_mask)
+            negative_prompt_embeds_mask_list.append(curr_mask[curr_mask])
         negative_prompt_embeds_nested = torch.nested.as_nested_tensor(negative_prompt_embeds_list, layout=torch.jagged)
         negative_prompt_embeds_mask_nested = torch.nested.as_nested_tensor(
             negative_prompt_embeds_mask_list, layout=torch.jagged
