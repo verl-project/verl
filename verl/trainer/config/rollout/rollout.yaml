@@ -59,10 +59,9 @@ tensor_model_parallel_size: 2
 data_parallel_size: 1
 
 # EP size for rollout
+# For MoE models in vllm, EP=1 refers to ETP parallel in fused_moe with TP*DP weight splits,
+# EP>1 (should satisfy EP=TP*DP) refers to EP parallel in fused_moe
 expert_parallel_size: 1
-
-# Whether to use EP(True) or ETP(False) for fused MoE in vllm
-enable_expert_parallel: False
 
 # PP size for rollout.
 pipeline_model_parallel_size: 1

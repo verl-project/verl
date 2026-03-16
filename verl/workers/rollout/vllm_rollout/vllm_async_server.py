@@ -369,7 +369,7 @@ class vLLMHttpServer:
             }
             args.update(dp_args)
 
-        args.update({"enable_expert_parallel": self.config.enable_expert_parallel})
+        args.update({"enable_expert_parallel": self.config.expert_parallel_size > 1})
 
         # used for torch.distributed.init_process_group
         if self.nnodes > 1:
