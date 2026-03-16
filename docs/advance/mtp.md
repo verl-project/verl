@@ -14,7 +14,7 @@ Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek s
 
 - **Dependency Versions**:
 
-    - mbridge: Apply the patches and review suggestions from PR: [#62](https://github.com/ISEEKYAN/mbridge/pull/62) (will be merged into the main branch in the future);
+    - mbridge: Apply the patches and review suggestions from PR: [#62](https://github.com/ISEEKYAN/mbridge/pull/62) (Already merged into the main branch);
 
     - Megatron-Bridge: Apply the patches and review suggestions from PR if you want to try out mimo-7B-RL: [#2387](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/2387) (will be merged into the main branch in the future);
 
@@ -70,6 +70,11 @@ Only the following configuration will have a noticeable impact on training resul
 It is recommended to adopt the `detach_encoder=True` approach for MTP training.
 
 # 4. Performance Notes for MTP in Rollout Inference
+
+Enabling MTP improves the rollout acceptance rate by around 14%. However, on H20 GPUs, overall throughput does not increase and even decreases slightly.
+
+![spec_log](
+https://github.com/ArronHZG/verl-community/blob/main/docs/spec_log.png?raw=true)
 
 The effectiveness of MTP-accelerated Rollout is significantly affected by **model size** and **inference hardware**. Key reference information is as follows:
 

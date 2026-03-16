@@ -63,10 +63,10 @@ permissions:
 jobs:
   model_rmpad_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2-8
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -112,10 +112,10 @@ jobs:
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2-8
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:

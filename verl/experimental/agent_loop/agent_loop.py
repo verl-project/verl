@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import heapq
 import logging
 import os
 import random
@@ -35,7 +34,7 @@ from verl.experimental.agent_loop.prometheus_utils import update_prometheus_conf
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
-from verl.utils.chat_template import initialize_system_prompt
+from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
@@ -52,6 +51,42 @@ from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+DEFAULT_ROUTING_CACHE_SIZE = 10000
+
+
+@ray.remote
+class GlobalRequestLoadBalancer:
+    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers."""
+
+    def __init__(self, server_actor_ids: list[str], max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE):
+        if not server_actor_ids:
+            raise ValueError("server_actor_ids must be non-empty")
+
+        self._inflight_requests: dict[str, int] = {sid: 0 for sid in server_actor_ids}
+        self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
+
+    def acquire_server(self, request_id: str) -> str:
+        """Acquire a server for the given request, reusing the same server for multi-turn conversations."""
+        # request-level sticky (multi-turn: same conversation -> same server)
+        if request_id in self._request_id_to_server:
+            server_id = self._request_id_to_server[request_id]
+            self._inflight_requests[server_id] += 1
+            return server_id
+
+        # new request: route to least loaded server
+        server_id = min(self._inflight_requests, key=self._inflight_requests.get)
+        self._request_id_to_server[request_id] = server_id
+        self._inflight_requests[server_id] += 1
+        return server_id
+
+    def release_server(self, server_id: str) -> None:
+        """Release a server after a request completes, decrementing its inflight count."""
+        if server_id not in self._inflight_requests:
+            raise ValueError(f"Invalid server_id for release: {server_id}")
+        if self._inflight_requests[server_id] <= 0:
+            raise ValueError(f"Release called with no inflight requests on server {server_id}")
+        self._inflight_requests[server_id] -= 1
+
 
 def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictConfig]:
     # TODO: backward compatibility, remove this once we switch to new trainer.
@@ -64,39 +99,38 @@ def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictC
 class AsyncLLMServerManager:
     """
     A class to manage multiple OpenAI compatible LLM servers. This class provides
-    - Load balance: least requests load balancing
+    - Load balance: least in-flight requests load balancing via global coordination
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
     """
 
-    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], max_cache_size: int = 10000):
+    def __init__(
+        self,
+        config: DictConfig,
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
+    ):
         """Initialize the AsyncLLMServerManager.
 
         Args:
             config (DictConfig): whole config for main entrypoint.
-            server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.
+            servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
+            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
         """
         self.config = config
-        self.server_handles = server_handles
-        random.shuffle(self.server_handles)
+        self._load_balancer = load_balancer_handle
+        self._server_id_to_handle: dict[str, ray.actor.ActorHandle] = dict(servers)
 
-        # Least requests load balancing
-        self.weighted_serveres = [[0, idx, server] for idx, server in enumerate(self.server_handles)]
-        heapq.heapify(self.weighted_serveres)
+    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+        server_id = await self._load_balancer.acquire_server.remote(request_id=request_id)
+        handle = self._server_id_to_handle.get(server_id)
+        if handle is None:
+            raise RuntimeError(f"Unknown server_id returned by load balancer: {server_id}")
+        return server_id, handle
 
-        # LRU cache to map request_id to server
-        self.request_id_to_server = LRUCache(maxsize=max_cache_size)
-
-    def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
-        # TODO: implement server pressure awareness load balancing
-        if request_id in self.request_id_to_server:
-            return self.request_id_to_server[request_id]
-
-        _, _, server = self.weighted_serveres[0]
-        self.weighted_serveres[0][0] += 1
-        heapq.heapreplace(self.weighted_serveres, self.weighted_serveres[0])
-        self.request_id_to_server[request_id] = server
-        return server
+    def _release_server(self, server_id: str) -> None:
+        # Fire-and-forget: release is just a counter decrement, no need to await.
+        # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
+        self._load_balancer.release_server.remote(server_id=server_id)
 
     @rollout_trace_op
     async def generate(
@@ -118,15 +152,18 @@ class AsyncLLMServerManager:
         Returns:
             TokenOutput: token output
         """
-        server = self._choose_server(request_id)
-        output = await server.generate.remote(
-            request_id=uuid4().hex,  # use new request_id for each turn
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            image_data=image_data,
-            video_data=video_data,
-        )
-        return output
+        server_id, server = await self._acquire_server(request_id)
+        try:
+            output: TokenOutput = await server.generate.remote(
+                request_id=uuid4().hex,  # use new request_id for each turn
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+            return output
+        finally:
+            self._release_server(server_id)
 
 
 class AgentLoopMetrics(BaseModel):
@@ -274,7 +311,8 @@ class AgentLoopBase(ABC):
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,
-                lambda: self.processor.apply_chat_template(
+                lambda: apply_chat_template(
+                    self.processor,
                     messages,
                     tools=tools,
                     add_generation_prompt=True,
@@ -302,7 +340,8 @@ class AgentLoopBase(ABC):
         else:
             tokenized_prompt = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.apply_chat_template(
+                lambda: apply_chat_template(
+                    self.tokenizer,
                     messages,
                     tools=tools,
                     add_generation_prompt=True,
@@ -355,16 +394,24 @@ class AgentLoopWorker:
 
     Args:
         config (DictConfig): whole config for main entrypoint.
-        server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
+        servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
     """
 
     def __init__(
         self,
         config: DictConfig,
-        server_handles: list[ray.actor.ActorHandle],
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
+        """Initialize agent loop manager.
+        Args:
+            config (DictConfig): YAML config.
+            servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
+            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
+            reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+        """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
@@ -372,7 +419,11 @@ class AgentLoopWorker:
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(config, server_handles)
+            self.server_manager = AsyncLLMServerManager(
+                config,
+                servers,
+                load_balancer_handle=load_balancer_handle,
+            )
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles
@@ -588,7 +639,10 @@ class AgentLoopWorker:
             total_length = input_ids.shape[1]
             length, layer_num, topk_num = output.routed_experts.shape
             if isinstance(output.routed_experts, np.ndarray):
-                experts_tensor = torch.from_numpy(output.routed_experts)
+                routed_experts_array = output.routed_experts
+                if not routed_experts_array.flags.writeable:
+                    routed_experts_array = routed_experts_array.copy()
+                experts_tensor = torch.from_numpy(routed_experts_array)
             elif isinstance(output.routed_experts, torch.Tensor):
                 experts_tensor = output.routed_experts
             else:
@@ -676,15 +730,22 @@ class AgentLoopWorker:
         if self.processor is None:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
-        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
-        video_grid_thw = multi_modal_inputs.get("video_grid_thw")
+        multi_modal_kwargs = {
+            "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
+            "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+        }
+        # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
+        if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+            mm_token_type_ids = torch.zeros_like(input_ids)
+            mm_token_type_ids[0][input_ids[0] == self.processor.image_token_id] = 1
+            mm_token_type_ids[0][input_ids[0] == self.processor.video_token_id] = 2
+            multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         # Model's get_rope_index has been dynamically bind to the processor.
         vision_position_ids, _ = self.processor.get_rope_index(
             input_ids=input_ids,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
             attention_mask=attention_mask,
+            **multi_modal_kwargs,
         )
         vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
 
@@ -790,9 +851,8 @@ class AgentLoopWorker:
         default_extra_keys = {
             "turn_scores",
             "tool_rewards",
-            "is_cancel",
-            "param_version_start",
-            "param_version_end",
+            "min_global_steps",
+            "max_global_steps",
             "extras",
         }
         all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
@@ -885,6 +945,7 @@ class AgentLoopManager:
         """Create agent loop manager."""
         instance = cls(config, worker_group, rollout_resource_pool, reward_loop_worker_handles)
         await instance._initialize_llm_servers()
+        await instance._init_global_load_balancer()
         await instance._init_agent_loop_workers()
         return instance
 
@@ -938,6 +999,8 @@ class AgentLoopManager:
     async def _init_agent_loop_workers(self):
         self.agent_loop_workers = []
         num_workers = self.rollout_config.agent.num_workers
+        load_balancer_handle = self.global_load_balancer
+        servers = list(zip(self.server_addresses, self.server_handles, strict=True))
 
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         for i in range(num_workers):
@@ -949,8 +1012,19 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
+                ).remote(
+                    self.config,
+                    servers,
+                    load_balancer_handle,
+                    self.reward_loop_worker_handles,
+                )
             )
+
+    async def _init_global_load_balancer(self) -> None:
+        self.global_load_balancer = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=self.server_addresses,
+            max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+        )
 
     @auto_await
     async def generate_sequences(self, prompts: DataProto) -> DataProto:

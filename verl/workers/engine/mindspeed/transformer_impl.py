@@ -41,7 +41,8 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
     ):
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
 
-        repatch_config = {"use_flash_attn": True}
+        repatch_config = self.engine_config.get("override_transformer_config", {})
+        repatch_config["use_flash_attn"] = True
         if self.engine_config.context_parallel_size > 1:
             repatch_config["context_parallel_size"] = self.engine_config.context_parallel_size
 

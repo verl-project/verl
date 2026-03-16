@@ -199,12 +199,12 @@ class ServerAdapter(BaseRollout):
 
         update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
         if self.config.get("quantization", None) == "fp8":
-            from verl.utils.sglang.sglang_fp8_utils import quant_weights_by_name
+            from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
             logger.info("Convert bf16 weights to fp8 format before loading")
-            weights = quant_weights_by_name(
+            fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+            weights = fp8_quantizer_helper.quant_weights_by_name(
                 weights,
-                self.model_config.hf_config.quantization_config,
                 dtype=self.model_config.hf_config.dtype,
             )
         else:

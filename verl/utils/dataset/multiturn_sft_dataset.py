@@ -32,7 +32,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.models.transformers.qwen2_vl import get_rope_index
 from verl.utils import hf_tokenizer
-from verl.utils.chat_template import extract_system_prompt_and_generation
+from verl.utils.chat_template import apply_chat_template, extract_system_prompt_and_generation
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
@@ -208,8 +208,9 @@ class MultiTurnSFTDataset(Dataset):
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
 
-        inputs = processor.apply_chat_template(
-            [message],
+        inputs = apply_chat_template(
+            processor,
+            messages=[message],
             tools=tools,
             add_generation_prompt=False,
             tokenize=True,
@@ -254,13 +255,15 @@ class MultiTurnSFTDataset(Dataset):
 
         image_offset, video_offset = 0, 0
         for message in messages:
-            if self.image_key not in example and self.video_key not in example:
-                continue
-            assert self.processor is not None, "processor is needed to process image and video"
-
             content = message["content"]
             if not isinstance(content, str):
                 continue
+
+            if self.image_key not in example and self.video_key not in example:
+                if self.processor is not None:
+                    message["content"] = [{"type": "text", "text": content}]
+                continue
+            assert self.processor is not None, "processor is needed to process image and video"
 
             content_list = []
             segments = re.split("(<image>|<video>)", content)
@@ -391,6 +394,8 @@ class MultiTurnSFTDataset(Dataset):
                 res["multi_modal_inputs"] = multi_modal_inputs
             return res
         elif self.pad_mode == DatasetPadMode.NO_PADDING:
+            if sequence_length > self.max_length and self.truncation == "error":
+                raise ValueError(f"{sequence_length=} is larger than {self.max_length=}")
             # truncate input_ids if it is longer than max_length
             if len(input_ids) > self.max_length:
                 input_ids = input_ids[: self.max_length]

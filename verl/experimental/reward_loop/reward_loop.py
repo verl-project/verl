@@ -44,7 +44,7 @@ def migrate_legacy_reward_impl(config):
     if config.reward_model.num_workers is not None:
         config.reward.num_workers = config.reward_model.num_workers
 
-    # 2.reward manager migration
+    # 2. reward manager migration
     # config.reward_model.reward_manager -> config.reward.reward_manager
     if config.reward_model.reward_manager is not None:
         config.reward.reward_manager.name = config.reward_model.reward_manager
@@ -294,6 +294,7 @@ class RewardLoopManager:
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
+
             self.reward_loop_workers.append(
                 self.reward_loop_workers_class.options(
                     name=f"reward_loop_worker_{i}",

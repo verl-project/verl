@@ -199,6 +199,10 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        # GDPO: pass raw data for per-dimension reward extraction
+        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
+            adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
+            adv_kwargs["batch"] = data.batch
         # Add sum_pi_squared for Optimal Token Baseline
         if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
             # Check if sum_pi_squared is available
@@ -837,7 +841,6 @@ class RayPPOTrainer:
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
-
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
@@ -1139,12 +1142,18 @@ class RayPPOTrainer:
             # gather output
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
+            routed_experts = tu.get(output, "routed_experts")
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
             entropy = no_padding_2_padding(entropy, batch_td)
             log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
-            old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
+            if routed_experts is not None:
+                old_log_prob = tu.get_tensordict(
+                    {"old_log_probs": log_probs.float(), "entropys": entropy.float(), "routed_experts": routed_experts}
+                )
+            else:
+                old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
             old_log_prob = DataProto.from_tensordict(old_log_prob)
         else:
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
@@ -1409,13 +1418,13 @@ class RayPPOTrainer:
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
                             if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
-                                router_mode = getattr(
-                                    self.config.actor_rollout_ref.actor.router_replay, "mode", "disabled"
+                                raise ValueError(
+                                    "Detected conflicting router replay configuration: "
+                                    "router_replay.mode='R2' and enable_rollout_routing_replay=True "
+                                    "cannot be enabled simultaneously. "
+                                    "The enable_rollout_routing_replay option is only used in R3 mode; "
+                                    "it should not be set when using R2 mode."
                                 )
-                                if router_mode == "R2":
-                                    batch.batch.pop("routed_experts")
-                                else:
-                                    old_log_prob.batch.pop("routed_experts")
                             batch = batch.union(old_log_prob)
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
@@ -1567,6 +1576,16 @@ class RayPPOTrainer:
                 )
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                # GDPO per-component reward metrics
+                gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
+                if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
+                    for key in gdpo_reward_keys:
+                        if key in batch.non_tensor_batch:
+                            vals = np.asarray(batch.non_tensor_batch[key], dtype=np.float32)
+                            metrics[f"gdpo/{key}/mean"] = float(np.mean(vals))
+                            metrics[f"gdpo/{key}/std"] = float(np.std(vals))
+                            metrics[f"gdpo/{key}/max"] = float(np.max(vals))
+                            metrics[f"gdpo/{key}/min"] = float(np.min(vals))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
