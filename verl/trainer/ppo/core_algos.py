@@ -1941,7 +1941,8 @@ def compute_policy_loss_geo_mean(
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
         loss_agg_mode (str, optional):
-            not used
+            Not directly used (geo_mean operates at sequence level), but the function
+            performs DP-aware aggregation using config.global_batch_info.
     """
 
     assert config is not None
@@ -1987,7 +1988,15 @@ def compute_policy_loss_geo_mean(
         )
         pg_losses = pg_losses * seq_is_weights
 
-    pg_loss = torch.mean(pg_losses)
+    # DP-aware sequence-level aggregation (pg_losses is already per-sequence)
+    seq_mask = (response_mask.sum(dim=-1) > 0).float()
+    global_batch_size = config.global_batch_info.get("global_batch_size", None)
+    dp_size = config.global_batch_info.get("dp_size", 1)
+    if global_batch_size is None:
+        if dp_size > 1:
+            raise ValueError("global_batch_size is required when dp_size > 1 for geo_mean loss")
+        global_batch_size = seq_mask.sum()
+    pg_loss = (pg_losses * seq_mask).sum() / global_batch_size * dp_size
 
     # higher: ratio is too large that need clamp to clip_high (when adv > 0)
     clipped = torch.ne(negative_approx_kl, negative_approx_kl_clamp)
