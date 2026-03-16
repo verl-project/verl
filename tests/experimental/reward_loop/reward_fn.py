@@ -138,7 +138,7 @@ async def compute_score_ocr(
 
     import Levenshtein
 
-    from verl.utils.experimental.reward_utils import _pil_image_to_base64
+    from verl.utils.experimental.reward_utils import pil_image_to_base64
     from verl.utils.ray_utils import get_event_loop
 
     # preprocess image to base64
@@ -151,7 +151,7 @@ async def compute_score_ocr(
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
 
-    image_base64 = await get_event_loop().run_in_executor(None, _pil_image_to_base64, image)
+    image_base64 = await get_event_loop().run_in_executor(None, pil_image_to_base64, image)
 
     # prepare chat template
     grm_prompt = "Please output only the text content from the image without any additional descriptions or formatting."

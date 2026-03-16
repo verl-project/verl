@@ -28,7 +28,7 @@ from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils import hf_tokenizer
-from verl.utils.experimental.reward_utils import _pil_image_to_base64, _prepare_query_for_multi_modal
+from verl.utils.experimental.reward_utils import pil_image_to_base64, prepare_query_for_multi_modal
 from verl.utils.fs import copy_to_local
 from verl.utils.ray_utils import get_event_loop
 
@@ -213,8 +213,8 @@ class RewardLoopWorker:
             response_image = (response_image * 255).round().clip(0, 255).astype(np.uint8)
             response_image = Image.fromarray(response_image)
 
-            image_base64 = await self.loop.run_in_executor(None, _pil_image_to_base64, response_image)
-            query = _prepare_query_for_multi_modal(image_base64)
+            image_base64 = await self.loop.run_in_executor(None, pil_image_to_base64, response_image)
+            query = prepare_query_for_multi_modal(image_base64)
 
             chat.append({"role": "assistant", "content": query})
         else:

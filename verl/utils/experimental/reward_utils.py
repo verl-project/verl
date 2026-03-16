@@ -18,7 +18,7 @@ from io import BytesIO
 from PIL import Image
 
 
-def _pil_image_to_base64(image: Image.Image) -> str:
+def pil_image_to_base64(image: Image.Image) -> str:
     buffered = BytesIO()
     image.save(buffered, format="PNG")
     encoded_image_text = base64.b64encode(buffered.getvalue()).decode("utf-8")
@@ -26,7 +26,7 @@ def _pil_image_to_base64(image: Image.Image) -> str:
     return base64_image
 
 
-def _prepare_query_for_multi_modal(image_base64: str) -> list:
+def prepare_query_for_multi_modal(image_base64: str) -> list:
     query = [
         {
             "type": "image_url",
