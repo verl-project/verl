@@ -54,7 +54,11 @@ class TeacherModelManager:
 
     def _initialize_llm_servers(self):
         teacher_model_config: DistillationTeacherModelConfig = self.config.teacher_model
-        teacher_world_size = teacher_model_config.inference.tensor_model_parallel_size
+        teacher_world_size = (
+            teacher_model_config.inference.tensor_model_parallel_size
+            * teacher_model_config.inference.data_parallel_size
+            * teacher_model_config.inference.pipeline_model_parallel_size
+        )
         world_size = (
             self.resource_pool.world_size
             if self.resource_pool  # colocate mode
