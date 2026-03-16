@@ -170,11 +170,11 @@ if self.overlong_buffer_cfg.enable:
 
 Most experiments in the paper, including the best-performant one, are run without Overlong Filtering because it's somehow overlapping with Overlong Reward Shaping in terms of properly learning from the longest outputs. So we don't implement it here.
 
-### What's the difference between [the `recipe/dapo` directory in the `main` branch](https://github.com/volcengine/verl-recipe/tree/main/dapo) and the [`recipe/dapo` branch](https://github.com/verl-project/verl-recipe/tree/main/dapo/recipe/dapo)?
+### What's the difference between [the `recipe/dapo` directory in the `main` branch](https://github.com/verl-project/verl-recipe/tree/main/dapo) and the [`recipe/dapo` branch](https://github.com/verl-project/verl-recipe/tree/main/dapo/recipe/dapo)?
 
 [The `recipe/dapo` branch](https://github.com/verl-project/verl-recipe/tree/main/dapo/recipe/dapo) is for **as-is reproduction** and thus won't be updated with new features.
 
-[The `recipe/dapo` directory in the `main` branch](https://github.com/volcengine/verl-recipe/tree/main/dapo) works as an example of how to extend the latest `verl` to implement an algorithm recipe, which will be maintained with new features.
+[The `recipe/dapo` directory in the `main` branch](https://github.com/verl-project/verl-recipe/tree/main/dapo) works as an example of how to extend the latest `verl` to implement an algorithm recipe, which will be maintained with new features.
 
 ### Why can't I produce similar results after modifications?
 

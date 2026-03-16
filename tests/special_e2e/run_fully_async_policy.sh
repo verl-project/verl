@@ -58,9 +58,10 @@ n_resp_per_prompt=16
 train_prompt_mini_bsz=16
 total_rollout_steps=$(((128)))
 test_freq=-1
-staleness_threshold=0.1
+staleness_threshold=0.5
 trigger_parameter_sync_step=4
 partial_rollout=True
+use_trainer_do_validate=False
 
 exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${ACTOR_STRATEGY}-minimal"
 
@@ -127,13 +128,13 @@ common_params=(
     rollout.nnodes=1
     rollout.n_gpus_per_node=${n_gpus_rollout}
     rollout.total_rollout_steps=${total_rollout_steps}
-    rollout.total_epochs=2
-    rollout.test_freq=${test_freq}
+    trainer.total_epochs=2
+    trainer.test_freq=${test_freq}
     # Fully async specific configurations
     async_training.staleness_threshold=${staleness_threshold}
     async_training.partial_rollout="${partial_rollout}"
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
-    # GPU specific configurations
+    async_training.use_trainer_do_validate=${use_trainer_do_validate}
     actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )

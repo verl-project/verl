@@ -68,9 +68,9 @@ jobs:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models
     runs-on: linux-aarch64-a2-8
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
@@ -117,14 +117,12 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           USE_DIST_CKPT=True bash tests/special_npu/run_qwen2_5_05b_grpo_mindspeed.sh
           rm -rf $HOME/dist_ckpt/qwen2_5_05b_grpo_mindspeed
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |
           ray stop --force
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
       - name: Running the E2E test with fully_async_policy algorithm (FSDP2)
         run: |
@@ -135,9 +133,9 @@ jobs:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
     runs-on: linux-aarch64-a2-8
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:

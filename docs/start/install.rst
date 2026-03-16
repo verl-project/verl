@@ -93,8 +93,8 @@ After pulling the desired Docker image and installing desired inference and trai
 
     # install the nightly version (recommended)
     git clone https://github.com/volcengine/verl && cd verl
-    pip3 install -e .[vllm]
-    pip3 install -e .[sglang]
+    pip3 install -e ".[vllm]"
+    pip3 install -e ".[sglang]"
 
 
 Install from custom environment

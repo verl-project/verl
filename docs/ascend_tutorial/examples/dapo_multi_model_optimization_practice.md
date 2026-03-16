@@ -2,7 +2,7 @@
 
 ## DAPO 介绍
 
-Last updated: 01/27/2026.
+Last updated: 03/04/2026.
 
 DAPO的论文可以参考：[DAPO](https://arxiv.org/pdf/2503.14476)，其中包含以下几个关键技术。
 
@@ -191,7 +191,7 @@ trainer.save_freq=-1
 对于单机任务 Qwen3-VL-30B , 修改脚本中参数`trainer.nnodes`为 1， `trainer.n_gpus_per_node` 为16，然后直接bash执行verl仓上示例脚本
 
 ```
-bash recipe/dapo/run dapo_qwen3_vl_30b_fsdp2_npu.sh
+bash recipe/dapo/run_dapo_qwen3_vl_30b_fsdp2_npu.sh
 ```
 对于多节点任务 Qwen3-VL-30B ，我们推荐使用以下脚本进行大规模多节点训练拉起
 

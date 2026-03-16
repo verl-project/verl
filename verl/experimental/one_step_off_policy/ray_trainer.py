@@ -31,7 +31,6 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.experimental.one_step_off_policy.utils import need_critic
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
@@ -40,7 +39,7 @@ from verl.trainer.ppo.ray_trainer import (
     compute_response_mask,
 )
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -179,10 +178,10 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
-        from verl.experimental.one_step_off_policy.agent_loop import OneStepOffAgentLoopManager
+        from verl.experimental.agent_loop import AgentLoopManager
 
         self.async_rollout_mode = True
-        self.async_rollout_manager = OneStepOffAgentLoopManager.create(
+        self.async_rollout_manager = AgentLoopManager.create(
             config=self.config, reward_loop_worker_handles=reward_loop_worker_handles
         )
 
@@ -224,7 +223,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         # async generation
         with marked_timer("generate_async", timing_raw, color="purple"):
-            gen_batch_output = await self.async_rollout_manager.generate_sequences_async(gen_batch_output)
+            gen_batch_output = await self.async_rollout_manager.generate_sequences(gen_batch_output)
 
         # repeat to align with repeated responses in rollout
         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
@@ -347,7 +346,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             # Prevents computations in a certain phase from blocking the entire asynchronous workflow
             #
             # The purpose here is to ensure that after triggering
-            # `self.async_rollout_manager.generate_sequences_async(gen_batch_output)`,
+            # `self.async_rollout_manager.generate_sequences(gen_batch_output)`,
             # the subsequent relevant logic can proceed in a timely manner
             await asyncio.sleep(0)
             batch = self._fit_compute_reward(batch)
