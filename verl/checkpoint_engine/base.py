@@ -266,6 +266,16 @@ class CheckpointEngineWorker(Worker):
         backend = self.rollout_config.checkpoint_engine.backend
         bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
         engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
+        # If set, import the module so custom backends can register themselves
+        # in CheckpointEngineRegistry before the backend is instantiated.
+        custom_backend_module = self.rollout_config.checkpoint_engine.custom_backend_module
+        if custom_backend_module:
+            import importlib
+
+            try:
+                importlib.import_module(custom_backend_module)
+            except ImportError as e:
+                raise ImportError(f"Failed to import custom backend module '{custom_backend_module}': {e}") from e
         self.checkpoint_engine: CheckpointEngine = CheckpointEngineRegistry.new(
             backend, bucket_size=bucket_size, **engine_kwargs
         )

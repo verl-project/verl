@@ -575,6 +575,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             backend = checkpoint_engine_config.backend
             bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
             engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
+            # If set, import the module so custom backends can register themselves
+            # in CheckpointEngineRegistry before the backend is instantiated.
+            custom_backend_module = checkpoint_engine_config.custom_backend_module
+            if custom_backend_module:
+                import importlib
+
+                try:
+                    importlib.import_module(custom_backend_module)
+                except ImportError as e:
+                    raise ImportError(f"Failed to import custom backend module '{custom_backend_module}': {e}") from e
             self.checkpoint_engine = CheckpointEngineRegistry.new(
                 backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
             )
