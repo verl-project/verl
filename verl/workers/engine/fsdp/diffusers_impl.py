@@ -465,6 +465,7 @@ class DiffusersFSDPEngine(BaseEngine):
         ctx = torch.no_grad() if forward_only else nullcontext()
 
         for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
             meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
             # Forward and backward for each timestep
             for step in range(micro_batch["all_timesteps"].shape[1]):
@@ -588,7 +589,6 @@ class DiffusersFSDPEngine(BaseEngine):
         }
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
-        micro_batch = micro_batch.to(get_device_id())
         model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
         raw_output = forward_and_sample_previous_step(
             module=self.module,
