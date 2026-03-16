@@ -14,7 +14,7 @@ TRAIN_FILES=${TRAIN_FILES:-"[/llm-align/liuchonghan/ins_dataset/ins_dataset/verl
 
 MODEL_PATH=${MODEL_PATH:-/llm-align/liuchonghan/qwen3_5_27b_sft_global_step_8000}
 
-TP_SIZE=${TP_SIZE:-8}
+TP_SIZE=${TP_SIZE:-4}
 PP_SIZE=${PP_SIZE:-1}
 VPP_SIZE=${VPP_SIZE:-null}
 CP_SIZE=${CP_SIZE:-1}
