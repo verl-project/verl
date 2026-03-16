@@ -29,7 +29,41 @@ class DiffusionModelBase(ABC):
     Since the forward and sampling process of different diffusion models can be quite different,
     we define an abstract base class for diffusion models to implement their own forward and sampling process.
     Users can check the implementation of QwenImage for reference.
+
+    To register a new model, decorate the subclass with ``@DiffusionModelBase.register("your-model-name")``.
+    The name is matched against ``model_config.path`` via ``str.endswith``.
     """
+
+    _registry: dict[str, type["DiffusionModelBase"]] = {}
+
+    @classmethod
+    def register(cls, name: str):
+        """Class decorator that registers a subclass under *name*.
+
+        Example::
+
+            @DiffusionModelBase.register("MyModel")
+            class MyModel(DiffusionModelBase):
+                ...
+        """
+
+        def decorator(subclass: type["DiffusionModelBase"]) -> type["DiffusionModelBase"]:
+            cls._registry[name] = subclass
+            return subclass
+
+        return decorator
+
+    @classmethod
+    def get_class(cls, model_config: DiffusersModelConfig) -> type["DiffusionModelBase"]:
+        """Return the registered subclass for *model_config*.
+
+        Raises:
+            NotImplementedError: if no registered name matches ``model_config.path``.
+        """
+        for name, klass in cls._registry.items():
+            if model_config.path.endswith(name):
+                return klass
+        raise NotImplementedError(f"No registered diffusion model matches path: {model_config.path!r}")
 
     @classmethod
     @abstractmethod

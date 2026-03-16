@@ -21,15 +21,18 @@ from tensordict import TensorDict
 from verl.utils.device import get_device_name
 from verl.workers.config import DiffusersModelConfig
 
+from .base import DiffusionModelBase
+
 
 def set_timesteps(scheduler: SchedulerMixin, model_config: DiffusersModelConfig):
-    """Set correct timesteps and sigmas for diffusion model schedulers."""
-    if model_config.path.endswith("Qwen-Image"):
-        from .qwen_image import QwenImage
+    """Set correct timesteps and sigmas for diffusion model schedulers.
 
-        QwenImage.set_timesteps(scheduler, model_config, get_device_name())
-    else:
-        raise NotImplementedError("unsupported model for setting timesteps.")
+    Args:
+        scheduler (SchedulerMixin): the scheduler used for the diffusion process.
+        model_config (DiffusersModelConfig): the configuration of the diffusion model.
+        device (str): the device to move the timesteps and sigmas to.
+    """
+    DiffusionModelBase.get_class(model_config).set_timesteps(scheduler, model_config, get_device_name())
 
 
 def forward_and_sample_previous_step(
@@ -44,12 +47,17 @@ def forward_and_sample_previous_step(
     """Forward the model and sample previous step.
     This method is usually used for RL-algorithms based on reversed-sampling process.
     Such as FlowGRPO, DanceGRPO, etc.
-    """
-    if model_config.path.endswith("Qwen-Image"):
-        from .qwen_image import QwenImage
 
-        return QwenImage.forward_and_sample_previous_step(
-            module, scheduler, model_config, model_inputs, negative_model_inputs, scheduler_inputs, step
-        )
-    else:
-        raise NotImplementedError("unsupported model for sampling previous step.")
+    Args:
+        module (ModelMixin): the diffusion model to be forwarded.
+        scheduler (SchedulerMixin): the scheduler used for the diffusion process.
+        model_config (DiffusersModelConfig): the configuration of the diffusion model.
+        model_inputs (dict[str, torch.Tensor]): the inputs to the diffusion model.
+        negative_model_inputs (Optional[dict[str, torch.Tensor]]): the negative inputs for guidance.
+        scheduler_inputs (Optional[TensorDict | dict[str, torch.Tensor]]): the extra inputs for the scheduler,
+            which may contain the latents and timesteps.
+        step (int): the current step in the diffusion process.
+    """
+    return DiffusionModelBase.get_class(model_config).forward_and_sample_previous_step(
+        module, scheduler, model_config, model_inputs, negative_model_inputs, scheduler_inputs, step
+    )

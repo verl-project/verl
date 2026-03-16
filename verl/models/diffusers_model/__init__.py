@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Import model subclasses so they self-register via @DiffusionModelBase.register.
+from . import qwen_image  # noqa: F401
 from .utils import forward_and_sample_previous_step, set_timesteps
 
 __all__ = ["set_timesteps", "forward_and_sample_previous_step"]

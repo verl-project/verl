@@ -26,6 +26,7 @@ from .base import DiffusionModelBase
 from .schedulers import FlowMatchSDEDiscreteScheduler
 
 
+@DiffusionModelBase.register("Qwen-Image")
 class QwenImage(DiffusionModelBase):
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusersModelConfig, device: str):
