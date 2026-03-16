@@ -16,6 +16,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.trainer.distillation import distillation_loss, is_distillation_enabled, prepare_distillation_inputs
@@ -57,13 +58,53 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
+def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
+    """Slice response from unpad model output.
+
+    Args:
+        tensor: model output tensor of shape [bsz, 1]
+        data: TensorDict with "prompt_ids", "response_ids", "attention_mask"
+
+    Returns:
+        tensor: sliced response tensor of shape [bsz, max_response_len]
+    """
+    values = tensor.values() if tensor.is_nested else tensor
+    prompt_ids = data["prompts"]
+    response_ids = data["responses"]
+    attention_mask = data["attention_mask"]
+
+    if prompt_ids.is_nested:
+        prompt_lens = prompt_ids.offsets().diff()
+        response_lens = response_ids.offsets().diff()
+        max_response_len = response_ids.offsets().max().item()
+    else:
+        assert not attention_mask.is_nested
+        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
+        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
+        max_response_len = response_ids.shape[1]
+
+    sequence_lens = prompt_lens + response_lens
+    sequence_offsets = sequence_lens.cumsum(dim=0)
+    assert sequence_offsets[-1].item() == values.shape[0]
+
+    response_list = []
+    for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
+        pad_size = max_response_len - resp_len
+        # left-shift model output by one token for log_probs/values
+        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
+
+    output = torch.stack(response_list, dim=0)
+    return output
+
+
 def ppo_loss(
     config: ActorConfig,
     distillation_config: Optional[DistillationConfig],
-    model_output: dict[str, torch.Tensor],
+    model_output,
     data: TensorDict,
     dp_group=None,
 ):
+    """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
     distillation_enabled = is_distillation_enabled(distillation_config)
     if distillation_enabled:
         distillation_loss_config: DistillationLossConfig = distillation_config.distillation_loss
@@ -186,7 +227,7 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     Returns:
         value loss
     """
-    vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
+    vpreds = _slice_response_from_unpad_output(model_output["values"], data)  # (bsz, response_length)
 
     values = data["values"]
     returns = data["returns"]
