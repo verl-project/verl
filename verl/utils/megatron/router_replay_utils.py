@@ -202,9 +202,9 @@ def get_moe_num_layers_to_build(
 
     sig = inspect.signature(get_transformer_layer_offset)
     if "vp_stage" in sig.parameters:
-        layer_offset = get_transformer_layer_offset(tf_config, vp_stage=vp_stage, pp_rank=pp_rank)
+        layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
     else:
-        layer_offset = get_transformer_layer_offset(tf_config, pp_rank=pp_rank)
+        layer_offset = get_transformer_layer_offset(config, pp_rank=pp_rank)
 
     local_global_indices = range(layer_offset, layer_offset + total_layers)
 
