@@ -219,6 +219,8 @@ class RolloutConfig(BaseConfig):
 
     enable_chunked_prefill: bool = True
 
+    enable_expert_parallel: bool = True
+
     enable_prefix_caching: bool = True
 
     load_format: str = "dummy"
