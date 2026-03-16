@@ -32,6 +32,7 @@ def _maybe_to_cpu(v):
         return v.detach().cpu()
     return v
 
+
 # Custom pipeline class for QwenImage that returns log probabilities during the diffusion process.
 # This is compatible with API of vllm-omni
 class QwenImagePipelineWithLogProb(QwenImagePipeline):

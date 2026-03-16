@@ -446,4 +446,3 @@ class vLLMReplica(BaseVLLMReplica):
             assert _VLLM_VERSION >= version.parse("0.11.1"), (
                 "For multi-node MP Executor, either (1) set data_parallel_size > 1 or (2) upgrade vLLM to >= 0.11.1"
             )
-
