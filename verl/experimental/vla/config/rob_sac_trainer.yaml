@@ -64,6 +64,7 @@ actor_rollout_ref:
       target_entropy: -64.0
     critic_lr: 0.0001
     critic_weight_decay: 0
+    warm_rollout_steps: 23
     critic_warmup_steps: 200
     actor_update_interval: 1
     actor_ema_enabled: true

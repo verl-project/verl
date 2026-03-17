@@ -304,8 +304,9 @@ class RobRaySACTrainer(RayPPOTrainer):
                     batch = None
                     gen_batch = None
 
-                    need_rollout = (training_step == 0) or self.global_steps < 23
-                    if 23 <= self.global_steps < self.config.actor_rollout_ref.actor.critic_warmup_steps:
+                    warm_rollout_steps = int(getattr(self.config.actor_rollout_ref.actor, "warm_rollout_steps", 0))
+                    need_rollout = (training_step == 0) or self.global_steps < warm_rollout_steps
+                    if warm_rollout_steps <= self.global_steps < self.config.actor_rollout_ref.actor.critic_warmup_steps:
                         need_rollout = False
 
                     is_last_step = self.global_steps >= self.total_training_steps
