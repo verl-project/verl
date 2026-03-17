@@ -74,62 +74,63 @@ def test_single_turn(init_config):
             }
         }
     )
+    try:
+        agent_loop_manager = AgentLoopManager.create(init_config)
 
-    agent_loop_manager = AgentLoopManager.create(init_config)
-
-    system_prompt = (
-        "Describe the image by detailing the color, shape, size, texture, quantity, text, "
-        "spatial relationships of the objects and background:"
-    )
-    user_prompts = ["A photo of cute cat with long fur and big eyes.", "A photo of cute dog with short hair."]
-
-    raw_prompts = []
-    for user_prompt in user_prompts:
-        raw_prompts.append(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
+        system_prompt = (
+            "Describe the image by detailing the color, shape, size, texture, quantity, text, "
+            "spatial relationships of the objects and background:"
         )
+        user_prompts = ["A photo of cute cat with long fur and big eyes.", "A photo of cute dog with short hair."]
 
-    raw_negative_prompts = []
-    for user_prompt in user_prompts:
-        raw_negative_prompts.append(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": " "},
-            ]
+        raw_prompts = []
+        for user_prompt in user_prompts:
+            raw_prompts.append(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+
+        raw_negative_prompts = []
+        for user_prompt in user_prompts:
+            raw_negative_prompts.append(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": " "},
+                ]
+            )
+
+        batch = DataProto(
+            non_tensor_batch={
+                "raw_prompt": np.array(raw_prompts),
+                "raw_negative_prompt": np.array(raw_negative_prompts),
+                "data_source": np.array(["jpeg_compressibility"] * len(raw_prompts)),
+                "reward_model": np.array([{"style": "rule", "ground_truth": ""}] * len(raw_prompts)),
+            },
         )
+        n = init_config.actor_rollout_ref.rollout.n
+        batch = batch.repeat(n)
+        result = agent_loop_manager.generate_sequences(prompts=batch)
+        assert len(result) == len(raw_prompts) * n
 
-    batch = DataProto(
-        non_tensor_batch={
-            "raw_prompt": np.array(raw_prompts),
-            "raw_negative_prompt": np.array(raw_negative_prompts),
-            "data_source": np.array(["jpeg_compressibility"] * len(raw_prompts)),
-            "reward_model": np.array([{"style": "rule", "ground_truth": ""}] * len(raw_prompts)),
-        },
-    )
-    n = init_config.actor_rollout_ref.rollout.n
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
-    assert len(result) == len(raw_prompts) * n
+        expected_batch_keys = [
+            "responses",
+            "all_latents",
+            "all_timesteps",
+            "prompt_embeds",
+            "prompt_embeds_mask",
+            "input_ids",
+            "attention_mask",
+            "rollout_log_probs",
+        ]
+        for key in expected_batch_keys:
+            assert key in result.batch, f"Key {key} not found in result batch with keys {list(result.batch.keys())}."
 
-    expected_batch_keys = [
-        "responses",
-        "all_latents",
-        "all_timesteps",
-        "prompt_embeds",
-        "prompt_embeds_mask",
-        "input_ids",
-        "attention_mask",
-        "rollout_log_probs",
-    ]
-    for key in expected_batch_keys:
-        assert key in result.batch, f"Key {key} not found in result batch with keys {list(result.batch.keys())}."
+        # check turns
+        num_turns = result.non_tensor_batch["__num_turns__"]
+        assert np.all(num_turns == 2)
 
-    # check turns
-    num_turns = result.non_tensor_batch["__num_turns__"]
-    assert np.all(num_turns == 2)
-
-    print("Test passed!")
-    ray.shutdown()
+        print("Test passed!")
+    finally:
+        ray.shutdown()
