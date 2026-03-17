@@ -264,13 +264,13 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         policy.model = PI0Model.from_pretrained(pretrained_model_name_or_path)
         return policy
 
-    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
-        filtered_state_dict = {
-            key: value
-            for key, value in state_dict.items()
-            if key.startswith("model.")
-        }
-        return super().load_state_dict(filtered_state_dict, strict=False, assign=assign)
+    # def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+    #     filtered_state_dict = {
+    #         key: value
+    #         for key, value in state_dict.items()
+    #         if key.startswith("model.")
+    #     }
+    #     return super().load_state_dict(filtered_state_dict, strict=False, assign=assign)
 
     def freeze_vision_tower(self) -> None:
         """Freeze the vision tower parameters."""

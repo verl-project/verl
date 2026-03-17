@@ -16,6 +16,7 @@ import asyncio
 import uuid
 from collections import defaultdict
 from pprint import pprint
+from typing import Optional
 
 import numpy as np
 import torch
@@ -26,50 +27,12 @@ from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo.metric_utils import (
-    compute_throughout_metrics,
-    process_validation_metrics,
-)
+from verl.trainer.ppo.metric_utils import process_validation_metrics
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import Role
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
-
-
-def compute_response_mask(config, data: DataProto) -> torch.Tensor:
-    """Compute the attention mask for the response part of the sequence.
-
-    This function extracts the portion of the attention mask that corresponds to the model's response,
-    which is used for masking computations that should only apply to response tokens.
-
-    Args:
-        data (DataProto): The data containing batched model outputs and inputs.
-
-    Returns:
-        torch.Tensor: The attention mask for the response tokens.
-    """
-    complete = data.batch["complete"]  # shape: [batch_size, num_steps, chunk_size]
-
-    complete_traj = complete.view(complete.shape[0], -1)  # # shape: [batch_size, num_steps * chunk_size]
-    batch_size, action_steps = complete_traj.shape
-
-    step_indices = torch.arange(action_steps, device=complete.device).unsqueeze(0).expand(batch_size, -1)
-
-    first_true_idx_approx = torch.argmax(complete_traj.long(), dim=1)
-
-    has_any_true = complete_traj.any(dim=1)
-
-    final_first_true_idx = torch.where(
-        has_any_true, first_true_idx_approx, torch.tensor(action_steps - 1, device=complete.device)
-    )
-
-    mask_traj = step_indices <= final_first_true_idx.unsqueeze(1)
-
-    mask = mask_traj.view(complete.shape)  # shape: [batch_size, num_steps, chunk_size]
-    mask = mask.repeat_interleave(config.env.actor.model.action_dim, dim=-1)  # eapand to action dim
-    return mask
-
 
 def compute_avg_positive_trajectory_length(batch: DataProto) -> float:
     dones = batch.batch["dones"].bool()                    # (B, T)
@@ -240,6 +203,56 @@ class RobRaySACTrainer(RayPPOTrainer):
         reset_prompts = DataProto.from_dict(non_tensors={"state_ids": initial_state_ids, "task_ids": task_ids})
         reset_future = self.env_wg.reset_envs_to_state_ids(reset_prompts)
         return reset_future
+    
+    def _next_rollout_batch(self, train_iter) -> Optional[DataProto]: 
+        try:
+            batch_dict = next(train_iter)
+        except StopIteration:
+            return None
+
+        rollout_batch = DataProto.from_single_dict(batch_dict)
+        rollout_batch = self._get_gen_batch(rollout_batch)        
+        rollout_batch = rollout_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+        rollout_batch.meta_info["task_ids"] = np.asarray(rollout_batch.non_tensor_batch["task_ids"], dtype=np.int64)
+        rollout_batch.meta_info["global_steps"] = self.global_steps
+
+        return rollout_batch
+    
+    def _prepare_actor_input(self, rollout_output: Optional[DataProto]) -> DataProto:
+        # dones
+        complete_any = rollout_output.batch["complete"].any(dim=-1)  # (B, T)
+        dones_step = complete_any.clone()
+        dones_step[:, -2] = True
+        rollout_output.batch["dones"] = dones_step.float()
+
+        # reward (sparse reward with step penalty)
+        sparse_rewards = complete_any.float()
+        rollout_output.batch["valids"] = (~rollout_output.batch["complete"]).any(dim=-1).float()
+        step_penalty = float(self.config.env.train.get("step_penalty", 0.0))
+        rollout_output.batch["rewards"] = sparse_rewards - step_penalty * rollout_output.batch["valids"]
+        rollout_output.batch["rewards"][:, -2] = -1.0
+
+        # mark samples in successful trajectories as positive samples
+        rollout_output.batch["positive_sample_mask"] = sparse_rewards.any(dim=-1).unsqueeze(-1).repeat_interleave(
+            rollout_output.batch["action"].shape[1], dim=-1
+        )
+        
+        # task id
+        rollout_output.batch["task_ids"] = torch.as_tensor(
+            rollout_output.meta_info["task_ids"],
+            dtype=torch.long,
+            device=rollout_output.batch["action"].device,
+        )
+
+        rollout_output.meta_info["global_token_num"] = [0]
+        rollout_output.meta_info["data/trajectory_avg_reward"] = sparse_rewards.any(dim=-1).mean(dtype=torch.float32).item()
+        rollout_output.meta_info["data/avg_positive_trajectory_length"] = compute_avg_positive_trajectory_length(rollout_output)
+
+        rollout_output = add_transition_prefixes(rollout_output)
+        rollout_output = flatten_trajectories(rollout_output)
+
+        return rollout_output
+
 
     def fit(self):
         from omegaconf import OmegaConf
@@ -287,31 +300,18 @@ class RobRaySACTrainer(RayPPOTrainer):
 
         for epoch in range(self.config.trainer.total_epochs):
             train_iter = iter(self.train_dataloader)
-            try:
-                next_batch_dict = next(train_iter)
-            except:
-                continue
-            dataloader_len = len(self.train_dataloader)
-            print(f"Starting epoch {epoch}, dataloader length: {dataloader_len}")
-            need_reset_for_rollout = True
             reset_future = None
-
-            for dataloader_step in range(dataloader_len):
+            next_rollout_batch = self._next_rollout_batch(train_iter)
+            if next_rollout_batch is None:
+                continue
+            
+            print(f"Starting epoch {epoch}, dataloader length: {len(self.train_dataloader)}")
+            while next_rollout_batch is not None: 
                 for training_step in range(self.config.trainer.rollout_interval):
                     metrics = {}
                     timing_raw = {}
-                    task_ids_from_dataloader = None
-                    batch = None
-                    gen_batch = None
 
-                    warm_rollout_steps = int(getattr(self.config.actor_rollout_ref.actor, "warm_rollout_steps", 0))
-                    need_rollout = (training_step == 0) or self.global_steps < warm_rollout_steps
-                    if warm_rollout_steps <= self.global_steps < self.config.actor_rollout_ref.actor.critic_warmup_steps:
-                        need_rollout = False
-
-                    is_last_step = self.global_steps >= self.total_training_steps
-
-                    # start profiling
+                    # === start profiling === 
                     with marked_timer("start_profile", timing_raw):
                         self._start_profiling(
                             not prev_step_profile and curr_step_profile
@@ -319,104 +319,49 @@ class RobRaySACTrainer(RayPPOTrainer):
                             else curr_step_profile
                         )
 
-                    # prepare rollout batch
-                    if need_rollout:
-                        batch_dict = next_batch_dict
-                        try:
-                            next_batch_dict = next(train_iter)
-                        except StopIteration:
-                            next_batch_dict = None
-
-                        if batch_dict is None:
-                            continue
-
-                        task_ids_from_dataloader = [
-                            batch_dict["extra_info"][task_i]["task_ids"]
-                            for task_i in range(len(batch_dict["extra_info"]))
-                        ]
-
-                        batch = DataProto.from_single_dict(batch_dict)
-                        batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
-
-                        gen_batch = self._get_gen_batch(batch)
-                        gen_batch.meta_info["global_steps"] = self.global_steps
-                        gen_batch.meta_info["do_sample"] = True
-                        gen_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-                        gen_batch.meta_info["prompt_length"] = self.config.actor_rollout_ref.rollout.prompt_length
-                        gen_batch.meta_info["eos_token_id"] = self.tokenizer.eos_token_id
-                        gen_batch.meta_info["n_samples"] = self.config.actor_rollout_ref.rollout.n
-                        gen_batch.meta_info["pad_token_id"] = self.tokenizer.pad_token_id
-                        gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                        if need_reset_for_rollout:
-                            reset_future = self._reset_envs(gen_batch)
-                            need_reset_for_rollout = False
-                        elif reset_future is None:
-                            reset_future = self._reset_envs(gen_batch)
-
                     with marked_timer("step", timing_raw):
+                        # === rollout ===
+                        # Determine whether to perform rollout:
+                        # enable at start and early warmup, disable during critic warmup phase
+                        warm_rollout_steps = int(getattr(self.config.actor_rollout_ref.actor, "warm_rollout_steps", 0))
+                        need_rollout = (training_step == 0) or self.global_steps < warm_rollout_steps
+                        if warm_rollout_steps <= self.global_steps < self.config.actor_rollout_ref.actor.critic_warmup_steps:
+                            need_rollout = False
+
+                        actor_input = None
                         if need_rollout:
-                            # generate a batch
-                            with marked_timer("gen", timing_raw, color="red"):
-                                batch = self.async_rollout_manager.generate_sequences(gen_batch, reset_future)
+                            with marked_timer("rollout", timing_raw):
+                                # execute rollout
+                                rollout_batch = next_rollout_batch
+                                assert rollout_batch is not None
+                                if reset_future is None:
+                                    reset_future = self._reset_envs(rollout_batch)
+                                with marked_timer("generate", timing_raw, color="red"):
+                                    rollout_output = self.async_rollout_manager.generate_sequences(rollout_batch, reset_future)
 
-                            # prepare for next batch's env reset
-                            if dataloader_step != dataloader_len - 1 and next_batch_dict is not None:
-                                next_batch: DataProto = DataProto.from_single_dict(next_batch_dict)
-                                next_gen_batch = self._get_gen_batch(next_batch)
-                                next_gen_batch = next_gen_batch.repeat(
-                                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                                )
-                                reset_future = self._reset_envs(next_gen_batch)
+                                # prepare for next batch's env reset
+                                next_rollout_batch = self._next_rollout_batch(train_iter)
+                                if next_rollout_batch is not None:
+                                    reset_future = self._reset_envs(next_rollout_batch)
 
-                            complete_any = batch.batch["complete"].any(dim=-1)  # (B, T)
-                            dones_step = complete_any.clone()
-                            dones_step[:, -2] = True
-                            batch.batch["dones"] = dones_step.float()
-                            sparse_rewards = complete_any.float()
-                            batch.batch["valids"] = (~batch.batch["complete"]).any(dim=-1).float()
-                            step_penalty = float(self.config.env.train.get("step_penalty", 0.0))
-                            batch.batch["rewards"] = sparse_rewards - step_penalty * batch.batch["valids"]
-                            batch.batch["rewards"][:, -2] = -1.0
-                            batch.batch["positive_sample_mask"] = sparse_rewards.any(dim=-1).unsqueeze(-1).repeat_interleave(
-                                batch.batch["action"].shape[1], dim=-1
-                            )
-
-                            average_reward = sparse_rewards.any(dim=-1).mean(dtype=torch.float32).item()
-                            metrics["data/trajectory_avg_reward"] = average_reward
-                            metrics["data/avg_positive_trajectory_length"] = compute_avg_positive_trajectory_length(batch)
-
-                            batch = add_transition_prefixes(batch)
-                            assert task_ids_from_dataloader is not None
-                            rollout_level_task_ids = [
-                                task_id
-                                for task_id in task_ids_from_dataloader
-                                for _ in range(self.config.actor_rollout_ref.rollout.n)
-                            ]
-                            batch.batch["task_ids"] = torch.tensor(
-                                rollout_level_task_ids,
-                                dtype=torch.long,
-                                device=batch.batch["dones"].device,
-                            )
-                            batch = flatten_trajectories(batch)
-
-                            batch.meta_info["global_token_num"] = [0]
-
-                            # update actor
-                            with marked_timer("update_actor", timing_raw, color="red"):
-                                actor_output = self.actor_rollout_wg.update_actor(batch)
-                            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        else:
-                            with marked_timer("update_actor", timing_raw, color="red"):
+                                # compute rewards and other metrics, and prepare for actor update
+                                actor_input = self._prepare_actor_input(rollout_output)
+                        
+                        # === update policy ===
+                        with marked_timer("update_actor", timing_raw, color="red"):
+                            if actor_input is not None:
+                                actor_output = self.actor_rollout_wg.update_actor(actor_input)
+                            else:
                                 actor_output = self.actor_rollout_wg.update_actor(DataProto(meta_info={
                                     "empty_batch": True, 
                                     "global_steps": self.global_steps, 
                                     "global_token_num": [0]
                                 }))
-                            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-
+                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
-                    # validate
+                    # === validate ===
+                    is_last_step = self.global_steps >= self.total_training_steps
                     if (
                         self.config.trainer.test_freq > 0
                         and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
@@ -427,8 +372,9 @@ class RobRaySACTrainer(RayPPOTrainer):
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
-                        need_reset_for_rollout = True
+                        reset_future = None
 
+                    # === save checkpoint ===          
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                     esi_close_to_expiration = should_save_ckpt_esi(
                         max_steps_duration=self.max_steps_duration,
@@ -449,6 +395,7 @@ class RobRaySACTrainer(RayPPOTrainer):
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
 
+                    # === stop profiling === 
                     with marked_timer("stop_profile", timing_raw):
                         next_step_profile = (
                             self.global_steps + 1 in self.config.global_profiler.steps
@@ -466,26 +413,17 @@ class RobRaySACTrainer(RayPPOTrainer):
                     steps_duration = timing_raw["step"]
                     self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
-                    # training metrics
+                    # === training metrics ===
                     metrics.update(
                         {
                             "training/global_step": self.global_steps,
                             "training/epoch": epoch,
                         }
                     )
-                    # collect metrics
-                    # metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
-                    # metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-                    # TODO: implement actual tflpo and theoretical tflpo
-
-                    # n_gpus = self.resource_pool_manager.get_n_gpus()
-                    # metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-
-                    # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-                    # if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    #     self.train_dataloader.sampler.update(batch=batch)
-
-                    # TODO: make a canonical logger that supports various backend
+                    metrics.update({f"timing_s/{name}": value for name, value in timing_raw.items()})
+                    if actor_input is not None:
+                        metrics["data/trajectory_avg_reward"] = actor_input.meta_info["data/trajectory_avg_reward"] 
+                        metrics["data/avg_positive_trajectory_length"] = actor_input.meta_info["data/avg_positive_trajectory_length"] 
                     logger.log(data=metrics, step=self.global_steps)
 
                     progress_bar.update(1)
