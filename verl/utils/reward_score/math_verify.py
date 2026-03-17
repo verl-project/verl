@@ -23,9 +23,10 @@ _GOLD_TARGETS = (LatexExtractionConfig(),)
 _PRED_TARGETS = (ExprExtractionConfig(), LatexExtractionConfig())
 
 
-def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0) -> bool:
+def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0) -> float:
     ret_score = 0.0
 
+    # Wrap the ground truth in \boxed{} format for verification
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
     try:
         # Use parsing_timeout=None and timeout_seconds=None to disable
