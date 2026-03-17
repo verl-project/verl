@@ -116,7 +116,8 @@ def check_vllm_ascend_before_server_launch():
         VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE = bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0")))
         if VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE:
             raise AssertionError(
-                "AscendSocVersion.A2 is not support VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE in Single-card multi-process scenario now. "
+                "AscendSocVersion.A2 is not support VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE \
+                in Single-card multi-process scenario now. "
             )
 
 
