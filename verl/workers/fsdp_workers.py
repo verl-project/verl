@@ -56,6 +56,7 @@ from verl.utils.device import (
     get_torch_device,
     set_expandable_segments,
 )
+from verl.utils.distributed import set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
@@ -151,6 +152,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.config = config
         import torch.distributed
+
+        set_numa_affinity()
 
         if not torch.distributed.is_initialized():
             rank = int(os.environ.get("RANK", 0))
@@ -1288,6 +1291,9 @@ class CriticWorker(Worker, DistProfilerExtension):
         import torch.distributed
 
         self.config = config
+
+        set_numa_affinity()
+
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(
                 backend=get_nccl_backend(),

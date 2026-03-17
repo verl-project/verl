@@ -423,6 +423,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
+        set_numa_affinity()
         self.config = config
         self.role = role
         self.actor: TrainingWorker = None
