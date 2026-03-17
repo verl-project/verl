@@ -23,8 +23,8 @@ from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineL
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
-from verl.models.diffusers_model.schedulers import FlowMatchSDEDiscreteScheduler
-from verl.models.diffusers_model.vllm_omni.qwen_image.qwen_image_transformer import QwenImageTransformer2DModelFixed
+from verl.models.diffusion.schedulers import FlowMatchSDEDiscreteScheduler
+from verl.models.diffusion.vllm_omni.qwen_image.qwen_image_transformer import QwenImageTransformer2DModelFixed
 
 
 def _maybe_to_cpu(v):

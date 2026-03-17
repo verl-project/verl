@@ -145,7 +145,7 @@ def init_server():
             "calculate_log_probs": True,
             "engine_kwargs": {
                 "vllm_omni": {
-                    "custom_pipeline": "verl.models.diffusers_model.vllm_omni.QwenImagePipelineWithLogProb",
+                    "custom_pipeline": "verl.models.diffusion.vllm_omni.QwenImagePipelineWithLogProb",
                 }
             },
         }
