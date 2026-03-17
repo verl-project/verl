@@ -285,6 +285,13 @@ class TRTLLMHttpServer:
                 sampling_params=trt_llm_sampling_params,
             )
         token_ids = outputs.outputs[0].token_ids
+        if outputs.outputs[0].finish_reason == "cancelled":
+            return TokenOutput(
+                token_ids=token_ids,
+                stop_reason="aborted",
+                extra_fields={"global_steps": self.global_steps},
+            )
+
         log_probs = None
         if outputs.outputs[0].logprobs is not None:
             # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position
@@ -296,10 +303,12 @@ class TRTLLMHttpServer:
         self.global_steps = global_steps
 
     async def abort_all_requests(self):
-        raise NotImplementedError
+        """Abort all in-flight requests and block new ones. Call resume_generation() to unblock."""
+        await self.llm.pause_generation()
 
     async def resume_generation(self):
-        raise NotImplementedError
+        """Unblock new generation requests after abort_all_requests()."""
+        await self.llm.resume_generation()
 
     async def wake_up(self):
         from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
