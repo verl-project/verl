@@ -225,11 +225,21 @@ class RLHFDataset(Dataset):
                             videos = None
                             videos_kwargs = {}
 
-                        return len(
-                            processor(text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs)[
-                                "input_ids"
-                            ][0]
-                        )
+                        if images is None and videos is None:
+                            # only text prompt
+                            return len(processor.tokenizer(
+                                text=raw_prompt,
+                                add_special_tokens=False,  # avoid adding special tokens
+                                return_attention_mask=False
+                            )["input_ids"])
+                        else:
+                            # multi-modal prompt
+                            return len(processor(
+                                text=[raw_prompt], 
+                                images=images, 
+                                videos=videos, 
+                                videos_kwargs=videos_kwargs
+                            )["input_ids"][0])
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()
