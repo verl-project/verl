@@ -20,22 +20,21 @@ Usage:
     python tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
 """
 
+import atexit
 import os
 import shutil
-import atexit
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import ray
-from omegaconf import OmegaConf
 from huggingface_hub import snapshot_download
+from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import ImageOutput, RolloutMode
 from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
-
 
 # ---------------------------------------------------------------------
 #                👇 Model Caching & Auto‑Download Logic 👇
@@ -91,13 +90,9 @@ _MIN_PROMPT_TOKENS = 35
 
 def _tokenize_prompt(text: str) -> list[int]:
     """Tokenize a text prompt into valid token IDs for the model."""
-    tokenizer = AutoTokenizer.from_pretrained(
-        os.path.join(MODEL_PATH, "tokenizer"), trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(os.path.join(MODEL_PATH, "tokenizer"), trust_remote_code=True)
     messages = [{"role": "user", "content": text}]
-    token_ids = normalize_token_ids(
-        tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
-    )
+    token_ids = normalize_token_ids(tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False))
     assert len(token_ids) > _MIN_PROMPT_TOKENS, (
         f"Prompt too short ({len(token_ids)} tokens, need >{_MIN_PROMPT_TOKENS}). "
         f"The pipeline drops the first 34 chat‑template prefix tokens; "

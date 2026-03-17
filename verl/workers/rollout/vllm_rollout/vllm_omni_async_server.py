@@ -201,7 +201,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
         negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
 
-        extra_info = {
+        extra_fields = {
             "all_latents": all_latents[0] if all_latents is not None else None,
             "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
             "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
@@ -235,7 +235,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             log_probs=log_probs,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
-            extra_info=extra_info,
+            extra_fields=extra_fields,
         )
 
 
