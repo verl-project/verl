@@ -29,7 +29,7 @@ from vllm_omni.outputs import OmniRequestOutput
 
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import DiffusersModelConfig, DiffusionRolloutConfig
+from verl.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl.workers.rollout.replica import ImageOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -55,8 +55,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     def _init_model_config(self, model_config):
-        """Use DiffusersModelConfig instead of HFModelConfig."""
-        return omega_conf_to_dataclass(model_config, dataclass_type=DiffusersModelConfig)
+        """Use DiffusionModelConfig instead of HFModelConfig."""
+        return omega_conf_to_dataclass(model_config, dataclass_type=DiffusionModelConfig)
 
     def _validate_configs(self) -> None:
         """No-op: diffusion models don't have max_position_embeddings."""
@@ -70,6 +70,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
     # launch_server hooks
     # -----------------------------------------------------------------------
+
+    def _get_override_generation_config(self) -> dict:
+        """Diffusion models have no LLM sampling params; return empty dict."""
+        return {}
 
     def _get_engine_kwargs_key(self) -> str:
         return "vllm_omni"
@@ -244,7 +248,7 @@ class vLLMOmniReplica(vLLMReplica):
         self,
         replica_rank: int,
         config: DiffusionRolloutConfig,
-        model_config: DiffusersModelConfig,
+        model_config: DiffusionModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
     ):

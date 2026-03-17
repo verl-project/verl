@@ -153,7 +153,7 @@ def init_server():
 
     model_cfg = OmegaConf.create(
         {
-            "_target_": "verl.workers.config.DiffusersModelConfig",
+            "_target_": "verl.workers.config.DiffusionModelConfig",
             "path": model_path,
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
