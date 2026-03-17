@@ -1174,7 +1174,6 @@ class DiffusionAgentLoopWorker:
             extra_fields=extra_fields,
         )
 
-
     async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, kwargs):
         """Compute reward score for single sample."""
         enable_async_reward = self.reward_loop_worker_handles is not None
