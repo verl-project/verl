@@ -24,7 +24,6 @@ from tqdm import tqdm
 
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
-from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.metric_utils import (
@@ -288,7 +287,10 @@ class RobRaySACTrainer(RayPPOTrainer):
 
         for epoch in range(self.config.trainer.total_epochs):
             train_iter = iter(self.train_dataloader)
-            next_batch_dict = next(train_iter)
+            try:
+                next_batch_dict = next(train_iter)
+            except:
+                continue
             dataloader_len = len(self.train_dataloader)
             print(f"Starting epoch {epoch}, dataloader length: {dataloader_len}")
             need_reset_for_rollout = True
@@ -302,8 +304,10 @@ class RobRaySACTrainer(RayPPOTrainer):
                     batch = None
                     gen_batch = None
 
-                    need_rollout = (training_step == 0)
-                    # need_rollout = False
+                    need_rollout = (training_step == 0) or self.global_steps < 23
+                    if 23 <= self.global_steps < self.config.actor_rollout_ref.actor.critic_warmup_steps:
+                        need_rollout = False
+
                     is_last_step = self.global_steps >= self.total_training_steps
 
                     # start profiling
@@ -321,6 +325,9 @@ class RobRaySACTrainer(RayPPOTrainer):
                             next_batch_dict = next(train_iter)
                         except StopIteration:
                             next_batch_dict = None
+
+                        if batch_dict is None:
+                            continue
 
                         task_ids_from_dataloader = [
                             batch_dict["extra_info"][task_i]["task_ids"]
@@ -352,7 +359,7 @@ class RobRaySACTrainer(RayPPOTrainer):
                                 batch = self.async_rollout_manager.generate_sequences(gen_batch, reset_future)
 
                             # prepare for next batch's env reset
-                            if dataloader_step != dataloader_len - 1:
+                            if dataloader_step != dataloader_len - 1 and next_batch_dict is not None:
                                 next_batch: DataProto = DataProto.from_single_dict(next_batch_dict)
                                 next_gen_batch = self._get_gen_batch(next_batch)
                                 next_gen_batch = next_gen_batch.repeat(
@@ -412,6 +419,7 @@ class RobRaySACTrainer(RayPPOTrainer):
                     if (
                         self.config.trainer.test_freq > 0
                         and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                        and self.global_steps >= self.config.actor_rollout_ref.actor.critic_warmup_steps
                     ):
                         with marked_timer("testing", timing_raw, color="green"):
                             val_metrics: dict = self._validate()

@@ -395,11 +395,18 @@ class RobDataParallelSACActor(BaseSACActor):
             else:
                 actor_loss = sac_loss
         return actor_loss, log_probs_0, q_values_0, actor_forward_metrics
+    
+    def _force_set_lr(self, opt: torch.optim.Optimizer, lr: float):
+        for pg in opt.param_groups:
+            pg["lr"] = lr
 
     @override
     def update_policy(self, data: DataProto):
         if not self.actor_ema_initialized:
             self._init_actor_ema()
+
+        self._force_set_lr(self.actor_optimizer, 5e-6)
+        self._force_set_lr(self.critic_optimizer, 1e-4)
 
         if "empty_batch" not in data.meta_info:
             task_ids = data.batch["task_ids"]
@@ -529,7 +536,6 @@ class RobDataParallelSACActor(BaseSACActor):
         metrics = {
             "data/reward_mean": valid_mean(critic_batch["rewards"], critic_batch["valids"]).detach().item(),
             "data/valid_ratio": critic_batch["valids"].float().mean().item(),
-            "data/positive_sample_ratio": valid_mean(critic_batch["positive_sample_mask"].float(), critic_batch["valids"]).detach().item(),
             "sac/critic_replay_sampled_ratio": critic_replay_sample_info["actual_positive_sample_ratio"],
             "sac/actor_replay_sampled_ratio": actor_replay_sample_info["actual_positive_sample_ratio"] if update_actor else 0.0,
             "sac/replay_pool_positive_size": critic_replay_sample_info["positive_size"],

@@ -64,14 +64,14 @@ actor_rollout_ref:
       target_entropy: -64.0
     critic_lr: 0.0001
     critic_weight_decay: 0
-    critic_warmup_steps: 500
+    critic_warmup_steps: 200
     actor_update_interval: 1
     actor_ema_enabled: true
     actor_ema_decay: 0.95
-    replay_pool_save_interval: 300
+    replay_pool_save_interval: 500
     num_images_in_input: 1
     traj_mini_batch_size: 16
-    replay_pool_single_size: 1000
+    replay_pool_single_size: 2000
     replay_pool_save_dir: /tmp/replay_pools
     fsdp_config:
       wrap_policy:
