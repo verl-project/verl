@@ -975,15 +975,6 @@ class DiffusionAgentLoopWorker:
                 self.model_config.processor.chat_template = self.model_config.custom_chat_template
             self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
 
-        trace_config = self.rollout_config.trace
-        RolloutTraceConfig.init(
-            self.rollout_config.trace.project_name,
-            self.rollout_config.trace.experiment_name,
-            trace_config.get("backend"),
-            trace_config.get("token2text", False),
-            trace_config.get("max_samples_per_step_per_worker", None),
-        )
-
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
 
@@ -1030,40 +1021,10 @@ class DiffusionAgentLoopWorker:
             default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
-        if "index" in batch.non_tensor_batch:
-            index = batch.non_tensor_batch["index"]
-        else:
-            index = np.arange(len(batch))
-
-        max_samples_per_worker = RolloutTraceConfig.get_instance().max_samples_per_step_per_worker
-
-        # For n rollouts per sample, we trace all n rollouts for selected samples
-        # Note: This sampling happens per-worker, so total traces = max_samples_per_worker * num_workers * n
-        if max_samples_per_worker is not None:
-            unique_sample_indices = np.unique(index)
-            if max_samples_per_worker < len(unique_sample_indices):
-                selected_samples = set(
-                    np.random.choice(unique_sample_indices, max_samples_per_worker, replace=False).tolist()
-                )
-                traced_indices = set(i for i in range(len(batch)) if index[i] in selected_samples)
-            else:
-                traced_indices = set(range(len(batch)))
-        else:
-            traced_indices = set(range(len(batch)))
-
-        trajectory_info = await get_trajectory_info(
-            batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
-        )
-
         tasks = []
         for i in range(len(batch)):
-            trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            tasks.append(
-                asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
-                )
-            )
+            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
@@ -1073,36 +1034,26 @@ class DiffusionAgentLoopWorker:
     async def _run_agent_loop(
         self,
         sampling_params: dict[str, Any],
-        trajectory: dict[str, Any],
         *,
         agent_name: str,
-        trace: bool = True,
         **kwargs,
     ) -> _InternalDiffusionAgentLoopOutput:
-        with rollout_trace_attr(
-            step=trajectory["step"],
-            sample_index=trajectory["sample_index"],
-            rollout_n=trajectory["rollout_n"],
-            validate=trajectory["validate"],
-            name="agent_loop",
-            trace=trace,
-        ):
-            assert agent_name in _agent_loop_registry, (
-                f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
-            )
+        assert agent_name in _agent_loop_registry, (
+            f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
+        )
 
-            agent_loop_config = _agent_loop_registry[agent_name]
-            agent_loop = hydra.utils.instantiate(
-                config=agent_loop_config,
-                trainer_config=DictConfigWrap(config=self.config),
-                server_manager=self.server_manager,
-                tokenizer=self.tokenizer,
-                processor=self.processor,
-                dataset_cls=self.dataset_cls,
-                data_config=DictConfigWrap(self.config.data),
-            )
-            output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-            return await self._agent_loop_postprocess(output, **kwargs)
+        agent_loop_config = _agent_loop_registry[agent_name]
+        agent_loop = hydra.utils.instantiate(
+            config=agent_loop_config,
+            trainer_config=DictConfigWrap(config=self.config),
+            server_manager=self.server_manager,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            dataset_cls=self.dataset_cls,
+            data_config=DictConfigWrap(self.config.data),
+        )
+        output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+        return await self._agent_loop_postprocess(output, **kwargs)
 
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalDiffusionAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""

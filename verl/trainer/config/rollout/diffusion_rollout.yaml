@@ -253,24 +253,6 @@ checkpoint_engine:
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
 
-# trace rollout data
-# trace:
-
-#   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-#   _target_: verl.workers.config.TraceConfig
-
-#   # trace backend, support mlflow, weave
-#   backend: null
-
-#   # whether translate token id to text in output
-#   token2text: False
-
-#   # Maximum number of unique samples to trace per agent worker per training step.
-#   # If null, all samples are traced. If set to N, each agent loop worker will randomly
-#   # select N unique samples to trace (including all their rollouts for GRPO).
-#   # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
-#   max_samples_per_step_per_worker: null
-
 # Whether to enable rollout routing replay for MoE models
 # When enabled (True), the rollout will record the routing decisions.
 enable_rollout_routing_replay: False
