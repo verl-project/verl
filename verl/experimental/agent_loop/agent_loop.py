@@ -1136,8 +1136,6 @@ class DiffusionAgentLoopWorker:
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
             prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
-        self.tokenizer.padding_side = "right"
-
         response_image = torch.tensor(output.response_image)
         if response_image.dim() == 3:
             response_image = response_image.unsqueeze(0)
