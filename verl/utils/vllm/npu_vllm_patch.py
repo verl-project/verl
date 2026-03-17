@@ -25,14 +25,13 @@ def vllm_ascend_v011_select_moe_comm_method_wrapper(fn):
     def wrapper(self, num_tokens, with_prefill):
         moe_comm_method = fn(self, num_tokens, with_prefill)
         from vllm_ascend.ascend_forward_context import MoECommType
-        from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
-        from vllm_ascend.utils import enable_sp
+        from vllm_ascend.utils import AscendSocVersion, enable_sp, get_ascend_soc_version
 
         soc_version = get_ascend_soc_version()
 
         # AscendSocVersion.A2 is not support MC2 in Single-card multi-process scenario now.
         if soc_version in {AscendSocVersion.A2} and moe_comm_method == MoECommType.MC2:
-            quant_type = getattr(self.vllm_config.model_config.hf_config, 'moe_quantize', None)
+            quant_type = getattr(self.vllm_config.model_config.hf_config, "moe_quantize", None)
             # Currently, w4a8_dynamic does not support allgatherep
             if quant_type == "w4a8_dynamic":
                 moe_comm_method = MoECommType.ALLTOALL
@@ -49,6 +48,7 @@ def vllm_ascend_v011_select_moe_comm_method_wrapper(fn):
 
     return wrapper
 
+
 def vllm_ascend_v011_matmul_and_reduce_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
@@ -58,6 +58,7 @@ def vllm_ascend_v011_matmul_and_reduce_wrapper(fn):
         # AscendSocVersion.A2 is not support MC2 in Single-card multi-process scenario now.
         if soc_version in {AscendSocVersion.A2}:
             from vllm.forward_context import get_forward_context
+
             try:
                 forward_context = get_forward_context()
                 forward_context.mmrs_fusion = False
@@ -72,7 +73,7 @@ def vllm_ascend_v011_matmul_and_reduce_wrapper(fn):
 def check_vllm_ascend_before_server_launch():
     import torch_npu
     import vllm
-    
+
     def _is_ascend_soc_version_A2_v011_local():
         from vllm_ascend.utils import AscendSocVersion
 
@@ -124,6 +125,7 @@ def vllm_ascend_v013_select_moe_comm_method_wrapper(fn):
         moe_comm_method = fn(*args, **kwargs)
         from vllm_ascend.ascend_forward_context import MoECommType
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
         ascend_device_type = get_ascend_device_type()
 
         # AscendSocVersion.A2 is not support MC2 in Single-card multi-process scenario now.
@@ -139,10 +141,12 @@ def vllm_ascend_v013_matmul_and_reduce_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
         ascend_device_type = get_ascend_device_type()
         # AscendSocVersion.A2 is not support MC2 in Single-card multi-process scenario now.
         if ascend_device_type in {AscendDeviceType.A2}:
             from vllm.forward_context import get_forward_context
+
             try:
                 forward_context = get_forward_context()
                 forward_context.mmrs_fusion = False
@@ -162,7 +166,7 @@ if is_torch_npu_available(check_device=False):
         if vllm.__version__ == "0.11.0":
             from vllm_ascend.ops.linear_op import SequenceRowParallelOp
             from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-            
+
             NPUModelRunner._select_moe_comm_method = vllm_ascend_v011_select_moe_comm_method_wrapper(
                 NPUModelRunner._select_moe_comm_method
             )
@@ -172,6 +176,7 @@ if is_torch_npu_available(check_device=False):
         elif vllm.__version__ == "0.13.0":
             from vllm_ascend import ascend_forward_context
             from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+
             ascend_forward_context.select_moe_comm_method = vllm_ascend_v013_select_moe_comm_method_wrapper(
                 ascend_forward_context.select_moe_comm_method
             )
