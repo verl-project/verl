@@ -11,19 +11,17 @@ class StrategyInterface(ABC):
         pass
 
     @abstractmethod
-    def preorder(self, num, order_map):
+    def preorder(self, num):
         pass
 
 
 class StrategyFactory:
     @staticmethod
     def create(node):
-        if node.is_root() or node.is_leaf():
-            return CommonStrategy(node)
-        elif node.block_size > 1:
-            return BlockStrategy(node)
+        if node.block_size > 1:
+            return BlockStrategy(node, node.block_size)
         else:
-            raise ValueError("Invalid node")
+            return CommonStrategy(node)
 
 
 class CommonStrategy(StrategyInterface):
@@ -39,7 +37,7 @@ class CommonStrategy(StrategyInterface):
         for child in self.node.children:
             self.total_nodes += child.strategy.total_nodes
 
-    def preorder(self, num, order_map):
+    def preorder(self, num):
         return self.total_nodes
 
 class BlockStrategy(StrategyInterface):
@@ -57,9 +55,7 @@ class BlockStrategy(StrategyInterface):
             self.total_nodes += child.strategy.total_nodes // self.block_size * self.block_size
         self.node.children.sort(key=lambda x: x.strategy.total_nodes, reverse=False)
 
-    def preorder(self, num , order_map):
-        if order_map is None:
-            order_map = {}
+    def preorder(self, num):
         if self.node.is_leaf():
             return num
         child_array = sorted(self.node.children, key=lambda x: x.strategy.total_nodes, reverse=False)

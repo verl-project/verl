@@ -25,7 +25,7 @@ class Node:
         self.strategy.update()
 
     def set_strategy_by_layer(self):
-        StrategyFactory.create(self)
+        self.set_strategy(StrategyFactory.create(self))
 
     def add_child(self, node):
         self.children.append(node)
