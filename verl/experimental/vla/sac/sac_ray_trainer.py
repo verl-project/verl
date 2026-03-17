@@ -32,7 +32,6 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
-from verl.trainer.ppo.reward import compute_reward
 from verl.trainer.ppo.utils import Role
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.debug import marked_timer
@@ -262,7 +261,7 @@ class RobRaySACTrainer(RayPPOTrainer):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -411,8 +410,7 @@ class RobRaySACTrainer(RayPPOTrainer):
 
                     # validate
                     if (
-                        self.val_reward_fn is not None
-                        and self.config.trainer.test_freq > 0
+                        self.config.trainer.test_freq > 0
                         and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
                     ):
                         with marked_timer("testing", timing_raw, color="green"):
