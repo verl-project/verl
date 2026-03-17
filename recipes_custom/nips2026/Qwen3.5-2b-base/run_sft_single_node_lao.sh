@@ -14,7 +14,7 @@ ALL_115700_DATASET=${ALL_115700_DATASET:-/llm-align/liuchonghan/ins_dataset/ins_
 TRAIN_FILES=${TRAIN_FILES:-"[/llm-align/liuchonghan/ins_dataset/ins_dataset/tulu3_34999.parquet,${ALL_115700_DATASET},/llm-align/liuchonghan/verl_parquet_merged/lao_Laoo_to_eng.parquet]"}
 
 PROJECT_NAME=${PROJECT_NAME:-nips2026_qwen3_5_2b_base}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-no_lao_to_eng}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-lao_to_eng}
 CKPT_HOME=${CKPT_HOME:-/llm-align/liuchonghan/ckpt_verl/sft/${PROJECT_NAME}/${EXPERIMENT_NAME}}
 RESUME_MODE=${RESUME_MODE:-disable}
 
