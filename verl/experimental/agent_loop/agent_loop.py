@@ -156,7 +156,7 @@ class AsyncLLMServerManager:
         """
         server_id, server = await self._acquire_server(request_id)
         try:
-            output = await server.generate.remote(
+            output: TokenOutput | ImageOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
