@@ -168,41 +168,6 @@ class AsyncLLMServerManager:
         finally:
             self._release_server(server_id)
 
-    async def compute_logprobs(
-        self,
-        request_id,
-        *,
-        prompt_ids: list[int],
-        response_ids: list[int],
-        logprob_params: dict[str, Any],
-        image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
-    ) -> TokenOutput:
-        """Generate tokens from prompt ids.
-
-        Args:
-            request_id (str): request id for sticky session.
-            prompt_ids (List[int]): List of prompt token ids.
-            response_ids (List[int]): List of response token ids.
-            logprob_params (Dict[str, Any]): Parameters for computing logprobs.
-
-        Returns:
-            TokenOutput: token output
-        """
-        server_id, server = await self._acquire_server(request_id)
-        try:
-            output: TokenOutput = await server.compute_logprobs.remote(
-                request_id=uuid4().hex,  # use new request_id for each turn
-                prompt_ids=prompt_ids,
-                response_ids=response_ids,
-                logprob_params=logprob_params,
-                image_data=image_data,
-                video_data=video_data,
-            )
-            return output
-        finally:
-            self._release_server(server_id)
-
 
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
@@ -867,22 +832,29 @@ class AgentLoopWorker:
             multi_modal_data = output.multi_modal_data
             images = multi_modal_data.get("images")
             videos = multi_modal_data.get("videos")
-            logprob_params = {
-                "use_topk": self.distillation_loss_config.loss_settings.use_topk,
-                "topk": self.distillation_loss_config.topk,
+
+            if self.distillation_config.teacher_model.inference.temperature != 1.0:
+                raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
+
+            num_logprobs = (
+                self.distillation_loss_config.topk if self.distillation_loss_config.loss_settings.use_topk else 0
+            )
+            sampling_params = {
+                "max_tokens": 1,
                 "temperature": self.distillation_config.teacher_model.inference.temperature,
+                "prompt_logprobs": num_logprobs,
+                "_response_length_for_prompt_logprobs": len(response_ids),
             }
-            output = await self.teacher_server_manager.compute_logprobs(
+            teacher_output = await self.teacher_server_manager.generate(
                 request_id=uuid4().hex,
-                prompt_ids=prompt_ids,
-                response_ids=response_ids,
-                logprob_params=logprob_params,
+                prompt_ids=prompt_ids + response_ids,
+                sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
             )
             response_ids_ls, response_logprobs_ls = (
-                output["response_ids"],
-                output["response_logprobs"],
+                teacher_output.extra_fields["response_ids"],
+                teacher_output.extra_fields["response_logprobs"],
             )
             # Shapes: # 1, S, (1 or K), where S is the response length, K is either 1 or topk depending on
             # the distillation loss settings.
