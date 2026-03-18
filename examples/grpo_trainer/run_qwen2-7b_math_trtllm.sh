@@ -5,7 +5,6 @@ for v in $(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print $1}'); do
     unset "$v"
 done
 
-export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
 export RAY_DEDUP_LOGS=0
 
 # -----
@@ -56,7 +55,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=0.001 \
+    actor_rollout_ref.actor.kl_loss_coef=0.01 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -75,7 +74,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.rollout.update_weights_bucket_megabytes=4096 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \

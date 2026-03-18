@@ -49,9 +49,8 @@ from verl.utils.megatron.router_replay_utils import (
     set_router_replay_data,
 )
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
-from verl.utils.megatron_utils import get_model_config, unwrap_model
+from verl.utils.megatron_utils import get_megatron_mtp_loss, get_model_config, unwrap_model
 from verl.utils.profiler import GPUMemoryLogger
-from verl.utils.profiler.profile import Profiler
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import broadcast_dict_tensor
@@ -135,18 +134,16 @@ class MegatronPPOActor(BasePPOActor):
         self.mtp_config = mtp_config
         self.actor_module = actor_module
         self.actor_optimizer: DistributedOptimizer = actor_optimizer
-        self.use_torch_profiler = self.config.profiler.get("tool") == "torch"
-        if self.use_torch_profiler:
-            self.prof = Profiler(
-                self.config.profiler, tool_config=self.config.profiler.get("tool_config", {}).get("torch", {})
-            )
-        else:
-            self.prof = None
 
         if self.mtp_config:
             assert self.mtp_config.enable, "MTP requires mtp_config.enable to be True"
 
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
+        if getattr(self.mtp_config, "enable", False) and self.use_fused_kernels:
+            self.use_fused_kernels = False
+            logger.warning_once(
+                "MTP is not compatible with fused kernels for now. Automatically disable use_fused_kernels."
+            )
         if self.use_fused_kernels and not getattr(self.config, "overlap_moe_expert_parallel_comm", False):
             # do not patch if overlap_moe_expert_parallel_comm is enabled
             logger.warning_once(
@@ -442,6 +439,7 @@ class MegatronPPOActor(BasePPOActor):
         temperature = data.meta_info["temperature"]
         if use_dynamic_bsz:
             assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
+            dp_group = mpu.get_data_parallel_group()
             vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
             if vpp_size is not None and vpp_size > 1:
                 microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
@@ -449,13 +447,16 @@ class MegatronPPOActor(BasePPOActor):
                     batch=mini_batch.batch,
                     num_batches_divided_by=microbatch_group_size_per_vp_stage,
                     max_token_len=max_token_len,
+                    dp_group=dp_group,
                 )
                 assert len(micro_batches) % self.tf_config.microbatch_group_size_per_vp_stage == 0, (
                     f"micro_batches {micro_batches} must be divisible by microbatch_group_size_per_vp_stage "
                     f"{microbatch_group_size_per_vp_stage} for megatron backend"
                 )
             else:
-                micro_batches, indices = rearrange_micro_batches(batch=mini_batch.batch, max_token_len=max_token_len)
+                micro_batches, indices = rearrange_micro_batches(
+                    batch=mini_batch.batch, max_token_len=max_token_len, dp_group=dp_group
+                )
             total_seqlen = max_token_len
         else:
             assert micro_batch_size is not None, (
@@ -755,27 +756,8 @@ class MegatronPPOActor(BasePPOActor):
 
         # Collect and pass MTP metrics to losses_reduced
         if not forward_only and self.mtp_config and self.mtp_config.enable_train:
-            from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
-
-            # Calculate MTP loss scale similar to Megatron-LM implementation
-            mtp_loss_scale = 1.0 / n_micro_batch
-
-            # Create a dummy total_loss_dict to collect MTP metrics
-            total_loss_dict = {}
-
-            # Track MTP metrics - this will populate total_loss_dict with MTP losses
-            MTPLossLoggingHelper.track_mtp_metrics(
-                loss_scale=mtp_loss_scale, iteration=0, writer=None, wandb_writer=None, total_loss_dict=total_loss_dict
-            )
-            # Add MTP metrics to losses_reduced if any were collected
-            # total_loss_dict: {'mtp_1 loss': tensor(value, device='cuda:0')}
-            if total_loss_dict:
-                mtp_metrics = {}
-                for key, value in total_loss_dict.items():
-                    # Convert key to have proper prefix and format
-                    formatted_key = f"mtp_losses/{key.replace(' ', '_')}"
-                    mtp_metrics[formatted_key] = [value.cpu().item()]
-                losses_reduced["mtp_losses"] = [mtp_metrics]
+            metrics = get_megatron_mtp_loss(n_micro_batch)
+            losses_reduced["mtp_losses"] = [metrics]
 
         return losses_reduced
 
@@ -795,8 +777,6 @@ class MegatronPPOActor(BasePPOActor):
 
         """
         metrics = {}
-        if self.use_torch_profiler and self.prof and self.prof.enable:
-            self.prof.start()
         for data in dataloader:
             if self.config.router_replay.mode in ["R2", "R3"]:
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
@@ -843,16 +823,11 @@ class MegatronPPOActor(BasePPOActor):
                 pass
             else:
                 raise NotImplementedError
-            if self.use_torch_profiler and self.prof and self.prof.enable:
-                self.prof.step()
 
             if self.config.router_replay.mode in ["R2", "R3"]:
                 RouterReplay.clear_global_router_replay_action()
                 RouterReplay.clear_global_indices()
 
-        # add empty cache after each compute
-        if self.use_torch_profiler and self.prof and self.prof.enable:
-            self.prof.stop_and_save()
-            self.prof.stop_trace()
+        self.actor_optimizer.zero_grad()
         get_torch_device().empty_cache()
         return metrics

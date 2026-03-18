@@ -64,6 +64,7 @@ $PYTHON -m verl.experimental.vla.main_ppo \
     env.train.seed=42 \
     env.disagg_sim.enable=True \
     env.disagg_sim.nnodes=$SIM_NODES \
+    +actor_rollout_ref.algorithm='grpo' \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.rollout.mode=async_envloop \

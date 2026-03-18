@@ -16,6 +16,7 @@ import logging
 import os
 import socket
 from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
@@ -86,11 +87,25 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
 
 
 @ray.remote
-def get_master_addr_port() -> tuple[str, str]:
+def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
     addr = ray.util.get_node_ip_address().strip("[]")
-    with socket.socket() as sock:
-        sock.bind(("", 0))
-        port = sock.getsockname()[1]
+
+    if master_port_range is None:
+        with socket.socket() as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+    else:
+        port = master_port_range[0]
+        while port < master_port_range[1]:
+            try:
+                with socket.socket() as s:
+                    s.bind(("", port))
+                    break
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d", port - 1, port)
+        else:
+            raise RuntimeError(f"Could not find a free port in range {master_port_range}")
     return addr, str(port)
 
 
@@ -161,6 +176,63 @@ class SubRayResourcePool(RayResourcePool):
     @property
     def world_size(self):
         return self.subgroup_world_size
+
+
+@dataclass
+class ResourcePoolManager:
+    """
+    Define a resource pool specification. Resource pool will be initialized first.
+    """
+
+    resource_pool_spec: dict[str, list[int]]
+    mapping: dict[int, str]
+    resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+
+    def create_resource_pool(self):
+        """Create Ray resource pools for distributed training.
+
+        Initializes resource pools based on the resource pool specification,
+        with each pool managing GPU resources across multiple nodes.
+        For FSDP backend, uses max_colocate_count=1 to merge WorkerGroups.
+        For Megatron backend, uses max_colocate_count>1 for different models.
+        """
+        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
+            # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
+            # For FSDP backend, using max_colocate_count=3: actor_critic_ref, rollout, reward model (optional)
+            # For Megatron backend, we recommend using max_colocate_count>1
+            # that can utilize different WorkerGroup for differnt models
+            resource_pool = RayResourcePool(
+                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
+            )
+            self.resource_pool_dict[resource_pool_name] = resource_pool
+
+        self._check_resource_available()
+
+    def get_resource_pool(self, role) -> RayResourcePool:
+        """Get the resource pool of the worker_cls"""
+        return self.resource_pool_dict[self.mapping[role]]
+
+    def get_n_gpus(self) -> int:
+        """Get the number of gpus in this cluster."""
+        return sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
+
+    def _check_resource_available(self):
+        """Check if the resource pool can be satisfied in this ray cluster."""
+        node_available_resources = ray._private.state.available_resources_per_node()
+        node_available_gpus = {
+            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
+            for node, node_info in node_available_resources.items()
+        }
+
+        # check total required gpus can be satisfied
+        total_available_gpus = sum(node_available_gpus.values())
+        total_required_gpus = sum(
+            [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
+        )
+        if total_available_gpus < total_required_gpus:
+            raise ValueError(
+                f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
+            )
 
 
 def extract_pg_from_exist(
@@ -371,12 +443,13 @@ class RayWorkerGroup(WorkerGroup):
         self._master_addr = kwargs.pop("master_addr", None)
         self._master_port = kwargs.pop("master_port", None)
         self.use_gpu = kwargs.pop("use_gpu", resource_pool.use_gpu if resource_pool is not None else True)
+        self._ray_master_port_range = kwargs.pop("master_port_range", None)
         super().__init__(resource_pool=resource_pool, **kwargs)
         self.ray_cls_with_init = ray_cls_with_init
         self.name_prefix = get_random_string(length=6) if name_prefix is None else name_prefix
         self._ray_wait_register_center_timeout = ray_wait_register_center_timeout
         # Whether the WorkerGroup is a Colocate WorkerGroup created by FusedWorker.
-        self.fused_worker_used = ray_cls_with_init.fused_worker_used
+        self.fused_worker_used = False if ray_cls_with_init is None else ray_cls_with_init.fused_worker_used
         # if a WorkerGroup is spawned from Colocate WorkerGroup, this indicates which sub-class is binded to
         # this WorkerGroup.
         self.sub_cls_name = ""
@@ -435,9 +508,9 @@ class RayWorkerGroup(WorkerGroup):
         # https://github.com/ray-project/ray/pull/45699
         workers = worker_handles if worker_handles else [ray.get_actor(name=name) for name in worker_names]
         self._workers = workers
-        self._world_size = len(worker_names)
+        self._world_size = len(workers)
 
-    def _get_master_addr_port(self, pg, bundle_index=0):
+    def _get_master_addr_port(self, pg, bundle_index=0, master_port_range=None):
         """Get master addr and port for this worker group"""
         if self._master_addr is None and self._master_port is None:
             self._master_addr, self._master_port = ray.get(
@@ -445,7 +518,7 @@ class RayWorkerGroup(WorkerGroup):
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg, placement_group_bundle_index=bundle_index
                     ),
-                ).remote()
+                ).remote(master_port_range=master_port_range)
             )
         elif self._master_addr is not None and self._master_port is not None:
             logger.debug(f"{self._master_addr=} {self._master_port=}")
@@ -455,7 +528,14 @@ class RayWorkerGroup(WorkerGroup):
                 "or neither should be provided to use Ray's default assignment."
             )
 
-    def _init_with_resource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None):
+    def _init_with_resource_pool(
+        self,
+        resource_pool,
+        ray_cls_with_init,
+        bin_pack,
+        detached,
+        worker_env=None,
+    ):
         """Initialize the worker group by creating new workers from a resource pool.
 
         Args:
@@ -465,7 +545,6 @@ class RayWorkerGroup(WorkerGroup):
             detached: Whether workers should be detached
         """
         self.resource_pool = resource_pool
-
         strategy = "PACK"
         if bin_pack:
             strategy = "STRICT_PACK"
@@ -479,7 +558,7 @@ class RayWorkerGroup(WorkerGroup):
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
             if pg_idx == 0:
-                self._get_master_addr_port(pg)
+                self._get_master_addr_port(pg, bundle_index=0, master_port_range=self._ray_master_port_range)
 
             for local_rank in range(local_world_size):
                 rank += 1
@@ -513,7 +592,8 @@ class RayWorkerGroup(WorkerGroup):
         local_world_size = resource_pool.store[0]
         self._get_master_addr_port(
             pgs[resource_pool.start_bundle_index // local_world_size],
-            resource_pool.start_bundle_index % local_world_size,
+            bundle_index=resource_pool.start_bundle_index % local_world_size,
+            master_port_range=self._ray_master_port_range,
         )
         for curr_rank in range(resource_pool.start_bundle_index, resource_pool.start_bundle_index + world_size):
             pg_idx = curr_rank // local_world_size

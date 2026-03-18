@@ -42,13 +42,14 @@ verl is fast with:
 - **Efficient actor model resharding with 3D-HybridEngine**: Eliminates memory redundancy and significantly reduces communication overhead during transitions between training and generation phases.
 
 <div align="center">
- <img src="https://github.com/wuxibin89/verl/blob/wuxibin/doc_images/docs/_static/verl-arch.png?raw=true" width="400" alt="verl-arch.png">
+ <img src="https://github.com/verl-project/verl-data/blob/main/images/verl-arch.png?raw=true" width="400" alt="verl-arch.png">
 </div>
 
 </p>
 
 ## News
 
+- [2026/01] verl has been migrated to the [verl-project](https://github.com/verl-project)
 - [2026/01] verl first meetup was successfully held in Shanghai on 01/10, hosted by Volcengine and NVIDIA, the slides has been uploaded to [verl-data](https://github.com/verl-project/verl-data).
 - [2026/01] The `recipe` directory has been migrated to a dedicated repository: [verl-recipe](https://github.com/verl-project/verl-recipe) and added as a submodule. See https://github.com/volcengine/verl/pull/4795. It can be used as it was after `git submodule update --init --recursive recipe`. Note that [`transfer_queue`](verl/experimental/transfer_queue), [`fully_async_policy`](verl/experimental/fully_async_policy), [`one_step_off_policy`](verl/experimental/one_step_off_policy) and [`vla`](verl/experimental/vla) are kept under [`verl/experimental`](verl/experimental) since they are planned to be merged into the main library. Use them through `verl.experimental.{module}`.
 - [2025/12] [Mind Lab](https://macaron.im/mindlab) successfully used [verl](https://github.com/volcengine/verl) and [Megatron-bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) to train GRPO Lora for Trillion-parameter model on 64 H800 - See their [techblog](https://macaron.im/mindlab/research/building-trillion-parameter-reasoning-rl-with-10-gpus).
@@ -88,7 +89,7 @@ verl is fast with:
 - Compatible with Hugging Face Transformers and Modelscope Hub: [Qwen-3](https://github.com/volcengine/verl/blob/main/examples/grpo_trainer/run_qwen3-8b.sh), Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
 - Supervised fine-tuning.
 - Reinforcement learning with [PPO](examples/ppo_trainer/), [GRPO](examples/grpo_trainer/), [GSPO](https://github.com/verl-project/verl-recipe/tree/main/gspo/), [ReMax](examples/remax_trainer/), [REINFORCE++](https://verl.readthedocs.io/en/latest/examples/config.html#algorithm), [RLOO](examples/rloo_trainer/), [PRIME](https://github.com/verl-project/verl-recipe/tree/main/prime/), [DAPO](https://github.com/verl-project/verl-recipe/tree/main/dapo/), [DrGRPO](https://github.com/verl-project/verl-recipe/tree/main/drgrpo), [KL_Cov & Clip_Cov](https://github.com/verl-project/verl-recipe/tree/main/entropy) etc.
-  - Support model-based reward and function-based reward (verifiable reward) for math, [coding](https://github.com/volcengine/verl-recipe/tree/main/dapo), etc
+  - Support model-based reward and function-based reward (verifiable reward) for math, [coding](https://github.com/verl-project/verl-recipe/tree/main/dapo), etc
   - Support vision-language models (VLMs) and [multi-modal RL](examples/grpo_trainer/run_qwen2_5_vl-7b.sh) with Qwen2.5-vl, Kimi-VL
   - [Multi-turn with tool calling](https://github.com/volcengine/verl/tree/main/examples/sglang_multiturn)
 - LLM alignment recipes such as [Self-play preference optimization (SPPO)](https://github.com/verl-project/verl-recipe/tree/main/sppo)
@@ -96,7 +97,7 @@ verl is fast with:
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/volcengine/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
-- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/volcengine/verl/blob/main/docs/ascend_tutorial/ascend_quick_start.rst)
+- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/volcengine/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
 
 ## Upcoming Features and Changes
 
@@ -181,7 +182,6 @@ verl is fully embracing FSDP2! FSDP2 is recommended by torch distributed team, p
 actor_rollout_ref.ref.strategy=fsdp2
 actor_rollout_ref.actor.strategy=fsdp2
 critic.strategy=fsdp2
-reward_model.strategy=fsdp2
 ```
 
 Furthermore, FSDP2 cpu offloading is compatible with gradient accumulation. You can turn it on to save memory with `actor_rollout_ref.actor.fsdp_config.offload_policy=True`. For more details, see https://github.com/volcengine/verl/pull/1026
@@ -237,6 +237,7 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [DeepResearcher](https://github.com/GAIR-NLP/DeepResearcher): Scaling deep research via reinforcement learning in real-world environments ![GitHub Repo stars](https://img.shields.io/github/stars/GAIR-NLP/DeepResearcher)
 - [VAGEN](https://github.com/RAGEN-AI/VAGEN): Training VLM agents with multi-turn reinforcement learning ![GitHub Repo stars](https://img.shields.io/github/stars/RAGEN-AI/VAGEN)
 - [RM-R1](https://arxiv.org/abs/2505.02387): RL training of reasoning reward models ![GitHub Repo stars](https://img.shields.io/github/stars/RM-R1-UIUC/RM-R1)
+- [Dr. MAS](https://arxiv.org/pdf/2602.08847): Stable **end-to-end RL** post-training for **multi-agent LLM systems** ![GitHub Repo stars](https://img.shields.io/github/stars/langfengQ/DrMAS)
 - [LUFFY](https://arxiv.org/pdf/2504.14945): Learning to Reason under Off-Policy Guidance![GitHub Repo stars](https://img.shields.io/github/stars/ElliottYan/LUFFY)
 - [DeepMath](https://github.com/zwhe99/DeepMath): DeepMath-103K data and series models for math reasoning![GitHub Repo stars](https://img.shields.io/github/stars/zwhe99/DeepMath)
 - [PACS](https://github.com/ritzz-ai/PACS): Implicit Actor Critic Coupling via a Supervised Learning Framework for RLVR ![GitHub Repo stars](https://img.shields.io/github/stars/ritzz-ai/PACS)
@@ -281,6 +282,9 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [deepscaler](https://github.com/agentica-project/rllm/tree/deepscaler): iterative context scaling with GRPO ![GitHub Repo stars](https://img.shields.io/github/stars/agentica-project/deepscaler)
 - [DAPO](https://dapo-sia.github.io/): the fully open source SOTA RL algorithm that beats DeepSeek-R1-zero-32B ![GitHub Repo stars](https://img.shields.io/github/stars/volcengine/verl)
 - [NoisyRollout](https://github.com/NUS-TRAIL/NoisyRollout): Reinforcing Visual Reasoning with Data Augmentation ![GitHub Repo stars](https://img.shields.io/github/stars/NUS-TRAIL/NoisyRollout)
+- [SPEAR](https://github.com/TencentYoutuResearch/SPEAR): **Self-imitation** with **Progressive Exploration** for Agentic Reinforcement Learning (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/TencentYoutuResearch/SPEAR)
+- [RuleReasoner](https://github.com/bigai-nlco/RuleReasoner): **RuleReasoner:** Reinforced Rule-based Reasoning via **Domain-aware Dynamic Sampling** (ICLR 2026) ![GitHub Repo stars](https://img.shields.io/github/stars/bigai-nlco/RuleReasoner)
+- [MetaphorStar](https://metaphorstar.github.io/): **Image Metaphor** Understanding and Reasoning with End-to-End **Visual Reinforcement Learning** ![GitHub Repo stars](https://img.shields.io/github/stars/MING-ZCH/MetaphorStar)
 
 ## Contribution Guide
 

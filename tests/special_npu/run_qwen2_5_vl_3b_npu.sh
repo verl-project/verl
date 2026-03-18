@@ -39,6 +39,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.enforce_eager=True \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.n=2 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \

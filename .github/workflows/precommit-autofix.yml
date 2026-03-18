@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   precommit:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
 
     steps:

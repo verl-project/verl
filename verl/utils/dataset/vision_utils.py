@@ -29,7 +29,11 @@ def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Imag
         assert "image" not in image, "Cannot have both `bytes` and `image`"
         image["image"] = Image.open(BytesIO(image["bytes"]))
 
-    return fetch_image(image, image_patch_size=image_patch_size)
+    try:
+        ans = fetch_image(image, image_patch_size=image_patch_size)
+    except Exception:
+        ans = fetch_image(image)
+    return ans
 
 
 VIDEO_FORMAT_HELP = """Currently, we only support the video formats introduced in qwen2-vl.

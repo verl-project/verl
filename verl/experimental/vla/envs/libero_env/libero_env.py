@@ -33,9 +33,7 @@ from verl.experimental.vla.envs.action_utils import (
     tile_images,
     to_tensor,
 )
-from verl.experimental.vla.envs.libero_env.utils import (
-    get_libero_image,
-)
+from verl.experimental.vla.envs.libero_env.utils import get_libero_image, get_libero_wrist_image, quat2axisangle
 from verl.experimental.vla.envs.libero_env.venv import ReconfigureSubprocEnv
 
 logger = logging.getLogger(__name__)
@@ -235,11 +233,12 @@ class LiberoEnv(gym.Env):
     def _extract_image_and_state(self, obs):
         return {
             "full_image": get_libero_image(obs),
+            "wrist_image": get_libero_wrist_image(obs),
             "state": np.concatenate(
                 [
                     obs["robot0_eef_pos"],
-                    # quat2axisangle(obs["robot0_eef_quat"]),
-                    # obs["robot0_gripper_qpos"],
+                    quat2axisangle(obs["robot0_eef_quat"]),
+                    obs["robot0_gripper_qpos"],
                 ]
             ),
         }

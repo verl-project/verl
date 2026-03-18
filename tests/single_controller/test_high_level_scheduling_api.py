@@ -48,10 +48,6 @@ def test():
     critic_wg = RayWorkerGroup(
         resource_pool, class_with_args, name_prefix="hight_level_api_critic", device_name=get_device_name()
     )
-    print("create rm worker group")
-    rm_wg = RayWorkerGroup(
-        resource_pool, class_with_args, name_prefix="high_level_api_rm", device_name=get_device_name()
-    )
     print("create ref worker group")
     ref_wg = RayWorkerGroup(
         resource_pool, class_with_args, name_prefix="high_level_api_ref", device_name=get_device_name()
@@ -59,12 +55,10 @@ def test():
 
     assert actor_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
     assert critic_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
-    assert rm_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
     assert ref_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
 
     del actor_wg
     del critic_wg
-    del rm_wg
     del ref_wg
     gc.collect()  # make sure ray actors are deleted
 
@@ -88,16 +82,12 @@ def test():
     critic_wg = RayWorkerGroup(
         total_resource_pool, class_with_args, name_prefix="high_level_api_critic", device_name=get_device_name()
     )
-    rm_wg = RayWorkerGroup(
-        rm_resource_pool, class_with_args, name_prefix="high_level_api_rm", device_name=get_device_name()
-    )
     ref_wg = RayWorkerGroup(
         ref_resource_pool, class_with_args, name_prefix="high_level_api_ref", device_name=get_device_name()
     )
 
     assert actor_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
     assert critic_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
-    assert rm_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(4)]
     assert ref_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(4, 8)]
 
     ray.shutdown()

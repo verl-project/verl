@@ -65,8 +65,8 @@ class AggregationType(Enum):
     MAX = "max"
 
 
-NumericType = int, float, torch.Tensor
-Numeric = int | float | torch.Tensor
+NumericType = int, float, torch.Tensor, np.ndarray
+Numeric = int | float | torch.Tensor | np.ndarray
 
 
 class Metric:
@@ -121,25 +121,39 @@ class Metric:
             self.append(value)
 
     def aggregate(self) -> float:
-        match self.aggregation:
-            case AggregationType.MEAN:
-                return np.mean(self.values)
-            case AggregationType.SUM:
-                return np.sum(self.values)
-            case AggregationType.MIN:
-                return np.min(self.values)
-            case AggregationType.MAX:
-                return np.max(self.values)
+        return self._aggregate(self.values, self.aggregation)
 
     @classmethod
-    def chain(cls, metric_lists: list["Metric"]) -> "Metric":
-        if len(metric_lists) == 0:
-            return cls(aggregation=AggregationType.MEAN)
+    def _aggregate(cls, values: list[Numeric], aggregation: AggregationType) -> float:
+        match aggregation:
+            case AggregationType.MEAN:
+                return np.mean(values)
+            case AggregationType.SUM:
+                return np.sum(values)
+            case AggregationType.MIN:
+                return np.min(values)
+            case AggregationType.MAX:
+                return np.max(values)
+
+    @classmethod
+    def aggregate_dp(cls, metric_lists: list["Metric"]) -> float:
+        if not metric_lists:
+            raise ValueError("Cannot aggregate an empty list of metrics.")
+        value_lists = [ml.values for ml in metric_lists]
+        if not all(len(ls) == len(value_lists[0]) for ls in value_lists):
+            raise ValueError(
+                f"All Metric instances must have the same number of values "
+                f"for dp aggregation: {[len(ls) for ls in value_lists]}"
+            )
+        value_arrays = np.array(value_lists)  # [num_dp, num_grad_accumulation]
         aggregation = metric_lists[0].aggregation
-        chained = cls(aggregation=aggregation)
-        for ml in metric_lists:
-            chained.extend(ml)
-        return chained
+        match aggregation:
+            case AggregationType.SUM | AggregationType.MEAN:
+                return cls._aggregate(
+                    values=np.mean(value_arrays, axis=0), aggregation=aggregation
+                )  # mean over dp ranks
+            case AggregationType.MIN | AggregationType.MAX:
+                return cls._aggregate(values=value_arrays.flatten(), aggregation=aggregation)  # min/max over all values
 
     @classmethod
     def from_dict(cls, data: dict[str, Numeric], aggregation: str | AggregationType) -> dict[str, "Metric"]:

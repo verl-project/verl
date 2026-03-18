@@ -27,14 +27,9 @@ try:
 except ImportError as e:
     raise ImportError("FP8 quantization not available") from e
 
-logger = logging.getLogger(__name__)
+from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 
-FP8_BLOCK_QUANT_KWARGS = {
-    "activation_scheme": "dynamic",
-    "fmt": "e4m3",
-    "quant_method": "fp8",
-    "weight_block_size": [128, 128],
-}
+logger = logging.getLogger(__name__)
 
 
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
@@ -106,100 +101,52 @@ def is_fp8_weight(name, model):
     return name in fp8_state.fp8_param_names
 
 
-def scaled_fp8_blockwise(
-    data_hp,
-    weight_block_size,
-):
-    # cast tensor from high precision to FP8 with 128*128 blockwise quantization.
-    assert len(data_hp.shape) == 2, "Only 2d input tensor is supported"
-
-    block_size1 = weight_block_size[1]
-    block_size0 = weight_block_size[0]
-
-    # Save unpadded shape for later cropping
-    unpadded_shape = data_hp.shape
-
-    # Pad dimensions to be multiples of block size if needed
-    pad_dim0 = (block_size0 - data_hp.shape[0] % block_size0) % block_size0
-    pad_dim1 = (block_size1 - data_hp.shape[1] % block_size1) % block_size1
-
-    if pad_dim0 > 0 or pad_dim1 > 0:
-        logger.debug(
-            f"Padding weight from {data_hp.shape} to "
-            f"({data_hp.shape[0] + pad_dim0}, {data_hp.shape[1] + pad_dim1}) "
-            f"for blockwise FP8 quantization"
-        )
-        data_hp = torch.nn.functional.pad(data_hp, (0, pad_dim1, 0, pad_dim0), mode="constant", value=0)
-
-    # FP8
-    max_dtype = torch.finfo(torch.float8_e4m3fn).max
-
-    padded_shape = data_hp.shape
-    blk_m, blk_n = data_hp.shape[0] // block_size0, data_hp.shape[1] // block_size1
-
-    assert block_size1 == block_size0
-    data_hp = data_hp.reshape(blk_m, block_size0, blk_n, block_size1)
-
-    # Permute to (BLK_M, BLK_N, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    data_hp = data_hp.permute(0, 2, 1, 3)
-    # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N)
-    data_hp = data_hp.to(torch.float32).contiguous().flatten(start_dim=2)
-
-    # Calculate max absolute value per block
-    max_abs = torch.amax(torch.abs(data_hp), dim=-1, keepdim=True)
-
-    # Use FP32 scale
-    scale_fp = max_dtype / max_abs
-    scale_fp = torch.where(max_abs == 0, 1.0, scale_fp)
-    # preserve the behavior for 0 amax case
-    scale_fp = torch.where(max_abs == torch.inf, 1.0, scale_fp)
-
-    descale_fp = torch.reciprocal(scale_fp)
-
-    # Scale and saturate cast the data elements to max of target dtype
-    data_lp = torch.clamp(data_hp * scale_fp, min=-1 * max_dtype, max=max_dtype)
-
-    fp_data = data_lp.to(torch.float8_e4m3fn)
-
-    # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
-    fp_data = fp_data.reshape(blk_m, blk_n, block_size0, block_size1).permute(0, 2, 1, 3).reshape(padded_shape)
-
-    # Remove padding to restore original shape
-    fp_data = fp_data[: unpadded_shape[0], : unpadded_shape[1]]
-
-    # Convert to target format, but still in original precision container
-    return fp_data, descale_fp
-
-
 def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
-    weights_quantized = []
+    """Quantize weights to FP8 format using a memory-efficient generator.
+
+
+    Args:
+        weights: Generator or iterable of (name, tensor) pairs
+        model: The model to check for FP8 weight names
+        quant_config: Quantization configuration with weight_block_size
+        dtype: Data type for intermediate computation (default: bfloat16)
+
+    Yields:
+        Tuples of (name, tensor) for each weight and its scale
+    """
+    if quant_config.weight_block_size is None:
+        raise ValueError("Currently only support blockwise quantization, please set weight_block_size in quant_config")
+
+    # vLLM v0.11-v0.12 renamed weight_scale_inv → weight_scale in process_weights_after_loading,
+    # so load_weights expects "_scale" suffix. v0.14+ keeps weight_scale_inv, so expects "_scale_inv".
+    _use_scale_not_scale_inv = version.parse("0.11.0") <= version.parse(vllm.__version__) < version.parse("0.14.0")
+
     for k, v in weights:
         if not is_fp8_weight(k, model):
-            weights_quantized.append((k, v))
+            yield (k, v)
             continue
+
         # Cast the weight into fp8 and its scale factor
-        if quant_config.weight_block_size is not None:
-            logger.info("Using blockwise quantization")
-            param_lp, param_scale = scaled_fp8_blockwise(
-                v.to(dtype),
-                weight_block_size=quant_config.weight_block_size,
-            )
-            param_scale = param_scale.squeeze(-1)
-            weights_quantized.append([k, param_lp])
-            if version.parse(vllm.__version__) >= version.parse("0.11.0"):
-                if "expert" in k:
-                    weights_quantized.append([k + "_scale_inv", param_scale])
-                else:
-                    weights_quantized.append([k + "_scale", param_scale])
-            else:
-                weights_quantized.append([k + "_scale_inv", param_scale])
+        if torch.distributed.get_rank() == 0:
+            logger.debug(f"Quantizing to FP8 blockwise: {k}")
 
+        param_lp, param_scale = scaled_fp8_blockwise(
+            v.to(dtype),
+            weight_block_size=quant_config.weight_block_size,
+        )
+        param_scale = param_scale.squeeze(-1)
+
+        # Yield the quantized weight
+        yield (k, param_lp)
+
+        # Yield the scale with appropriate naming based on vLLM version
+        if _use_scale_not_scale_inv and "expert" not in k:
+            yield (k + "_scale", param_scale)
         else:
-            raise ValueError(
-                "Currently only support blockwise quantization, please set weight_block_size in quant_config"
-            )
+            yield (k + "_scale_inv", param_scale)
 
-    return weights_quantized
+        # Explicitly delete original tensor reference to help GC
+        del v, param_lp, param_scale
 
 
 def load_quanted_weights(weights, model_runner):
@@ -341,6 +288,68 @@ def process_weights_after_loading_for_vllm11(self, layer) -> None:
         maybe_post_process_fp8_weight_block(layer)
 
 
+def process_weights_after_loading_for_vllm14(self, layer) -> None:
+    """process_weights_after_loading for vLLM >= 0.14.
+
+    Starting from v0.14, vLLM keeps the scale parameter as `weight_scale_inv`
+    (instead of renaming it to `weight_scale` like v0.11-v0.12), and `apply()`
+    accesses `layer.weight_scale_inv`. We preserve `weight_loader` and
+    `subclass_type` attributes so that refit (repeated weight sync) works.
+    """
+    from torch.nn import Parameter
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        maybe_post_process_fp8_weight_block,
+        process_fp8_weight_block_strategy,
+    )
+    from vllm.model_executor.parameter import (
+        BlockQuantScaleParameter,
+        ModelWeightParameter,
+    )
+
+    assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
+    assert self.quant_config.activation_scheme == "dynamic"
+
+    def _create_param_from_subclass_attributes(custom_param):
+        param = Parameter(custom_param.data, requires_grad=False)
+        base_param_dir = dir(torch.nn.Parameter)
+        custom_param_dir = dir(custom_param)
+        custom_attributes = [
+            attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
+        ]
+        for attr in custom_attributes:
+            setattr(param, attr, getattr(custom_param, attr))
+
+        param.subclass_type = type(custom_param)
+        return param
+
+    weight, weight_scale_inv = process_fp8_weight_block_strategy(layer.weight, layer.weight_scale_inv)
+
+    layer.weight = _create_param_from_subclass_attributes(
+        ModelWeightParameter(
+            data=weight.data,
+            output_dim=0,
+            input_dim=1,
+            weight_loader=layer.weight.weight_loader,
+        )
+    )
+    layer.weight_scale_inv = _create_param_from_subclass_attributes(
+        BlockQuantScaleParameter(
+            data=weight_scale_inv.data,
+            output_dim=0,
+            input_dim=1,
+            weight_loader=layer.weight_scale_inv.weight_loader,
+        )
+    )
+
+    # vLLM v0.17 removed the `else: register_parameter("input_scale", None)` from
+    # create_weights() for dynamic activation, but apply() still accesses layer.input_scale.
+    # Since block_quant always uses dynamic activation, ensure the attribute exists.
+    if not hasattr(layer, "input_scale"):
+        layer.input_scale = None
+
+    maybe_post_process_fp8_weight_block(layer)
+
+
 def process_weights_after_loading_moe_for_vllm10(self, layer) -> None:
     """This function is used to process the weights after loading for a FusedMoE layer, it is used for vllm v0.10"""
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
@@ -475,21 +484,91 @@ def process_weights_after_loading_moe_for_vllm11(self, layer) -> None:
             layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
 
+def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
+    # removed the reentrancy guard here for refit
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        convert_to_fp8_moe_kernel_format,
+        make_fp8_moe_kernel,
+    )
+
+    # Allow for accessing weights and scales in standard way.
+    w13 = layer.w13_weight
+    w2 = layer.w2_weight
+    w13_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+    w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+    w13_input_scale = layer.w13_input_scale
+    w2_input_scale = layer.w2_input_scale
+
+    # Shuffle weights to runtime format and setup kernel.
+    w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+        fp8_backend=self.fp8_backend,
+        layer=layer,
+        w13=w13,
+        w2=w2,
+        w13_scale=w13_scale,
+        w2_scale=w2_scale,
+        w13_input_scale=w13_input_scale,
+        w2_input_scale=w2_input_scale,
+    )
+    from torch.nn import Parameter
+
+    def _create_param_from_subclass_attributes(custom_data, custom_weight):
+        param = Parameter(custom_data, requires_grad=False)
+        base_param_dir = dir(torch.nn.Parameter)
+        custom_weight_dir = dir(custom_weight)
+        # Find the attributes that are unique to the custom parameter
+        custom_attributes = [
+            attr for attr in custom_weight_dir if attr not in base_param_dir and not attr.startswith("__")
+        ]
+        # Set the custom attributes into the base parameter object
+        for attr in custom_attributes:
+            setattr(param, attr, getattr(custom_weight, attr))
+
+        return param
+
+    # Replace parameters with updated versions. Note that this helper
+    # function ensures the replacement is compatible with RL weight reloads.
+    layer.w13_weight = _create_param_from_subclass_attributes(w13, layer.w13_weight)
+    layer.w2_weight = _create_param_from_subclass_attributes(w2, layer.w2_weight)
+    layer.w13_weight_scale_inv = _create_param_from_subclass_attributes(w13_scale, layer.w13_weight_scale_inv)
+    layer.w2_weight_scale_inv = _create_param_from_subclass_attributes(w2_scale, layer.w2_weight_scale_inv)
+
+    self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+    if self.moe_quant_config:
+        assert self.experts_cls is not None
+
+        self.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+        )
+
+
 def apply_vllm_fp8_patches():
     logger.info("Applying vllm fp8 patches for blockwise quantization")
+    vllm_ver = version.parse(vllm.__version__)
+
+    # Linear patch: v0.14+ keeps weight_scale_inv, v0.11-v0.12 renames to weight_scale
     func1_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
-    patcher1 = patch(
-        func1_path,
-        process_weights_after_loading_for_vllm11
-        if version.parse(vllm.__version__) >= version.parse("0.11.0")
-        else process_weights_after_loading_for_vllm10,
-    )
+    if vllm_ver >= version.parse("0.14.0"):
+        linear_patch_fn = process_weights_after_loading_for_vllm14
+    elif vllm_ver >= version.parse("0.11.0"):
+        linear_patch_fn = process_weights_after_loading_for_vllm11
+    else:
+        linear_patch_fn = process_weights_after_loading_for_vllm10
+    patcher1 = patch(func1_path, linear_patch_fn)
     patcher1.start()
+
+    # MoE patch
     func2_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
-    patcher2 = patch(
-        func2_path,
-        process_weights_after_loading_moe_for_vllm11
-        if version.parse(vllm.__version__) >= version.parse("0.11.0")
-        else process_weights_after_loading_moe_for_vllm10,
-    )
+    if vllm_ver >= version.parse("0.14.0"):
+        moe_patch_fn = process_weights_after_loading_moe_for_vllm14
+    elif vllm_ver >= version.parse("0.11.0"):
+        moe_patch_fn = process_weights_after_loading_moe_for_vllm11
+    else:
+        moe_patch_fn = process_weights_after_loading_moe_for_vllm10
+    patcher2 = patch(func2_path, moe_patch_fn)
     patcher2.start()

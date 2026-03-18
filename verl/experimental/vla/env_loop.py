@@ -123,7 +123,7 @@ class EnvLoop:
                 trajectories[stage_id][-1]["done"] = env_result.batch["terminations"]
 
                 next_obs = DataProto(
-                    batch=env_result.batch.select("full_image", "state"),
+                    batch=env_result.batch.select("full_image", "wrist_image", "state"),
                     non_tensor_batch={"task_descriptions": env_result.non_tensor_batch["task_descriptions"]},
                 )
 
@@ -173,27 +173,14 @@ class EnvLoop:
                         elif isinstance(value, torch.Tensor):
                             flat_trajs[step_idx][key] = torch.cat([flat_trajs[step_idx][key], value], dim=0)
 
-        all_pixel_values = [step["action"].batch["pixel_values"] for step in flat_trajs]
-        all_responses = [step["action"].batch["responses"] for step in flat_trajs]
-        all_input_ids = [step["action"].batch["input_ids"] for step in flat_trajs]
-        all_attn_masks = [step["action"].batch["attention_mask"] for step in flat_trajs]
-        all_actions = [step["action"].batch["action"] for step in flat_trajs]
-        all_dones = [step["done"] for step in flat_trajs]
+        # iterate all action batch keys (e.g., action, images, pixel_values, input_ids, ...)
+        batch_dict = {}
+        action_batch_keys = list(flat_trajs[0]["action"].batch.keys())
+        for key in action_batch_keys:
+            per_step_values = [step["action"].batch[key] for step in flat_trajs]
+            batch_dict[key] = torch.stack(per_step_values, dim=1)
 
-        pixel_values = torch.stack(all_pixel_values, dim=1)
-        responses = torch.stack(all_responses, dim=1)
-        input_ids = torch.stack(all_input_ids, dim=1)
-        attention_mask = torch.stack(all_attn_masks, dim=1)
-        actions = torch.stack(all_actions, dim=1)
-        complete = torch.stack(all_dones, dim=1).squeeze(-1)  # Shape [bs, steps]
-        batch_dict = {
-            "pixel_values": pixel_values,
-            "responses": responses,
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "complete": complete,
-            "action": actions,
-            "env_state_id": torch.from_numpy(initial_state_ids.astype(int)),
-        }
+        batch_dict["complete"] = torch.stack([step["done"] for step in flat_trajs], dim=1).squeeze(-1)
+        batch_dict["env_state_id"] = torch.from_numpy(initial_state_ids.astype(int))
 
         return DataProto.from_single_dict(batch_dict, meta_info=meta_info)

@@ -73,7 +73,7 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
     critic.strategy=fsdp2 \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
@@ -117,12 +117,12 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_manager.name=dapo \
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False \
+    +reward.reward_kwargs.max_resp_len=${max_response_length} \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \

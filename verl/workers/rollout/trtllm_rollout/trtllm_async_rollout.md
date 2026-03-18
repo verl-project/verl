@@ -23,9 +23,6 @@ Note that using the TRT-LLM rollout requires setting the following environment v
 for v in $(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print $1}'); do
     unset "$v"
 done
-
-# Required for IPC UUID detection
-export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
 ```
 
 ## 2. Architecture Design

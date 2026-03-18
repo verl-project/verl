@@ -51,16 +51,12 @@ tool_config:
     # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
     _target_: verl.utils.profiler.config.TorchProfilerToolConfig
 
-    # start profile mini-batch in training
-    # NOTICE: different with global steps config which refers to iteration
-    # This field only related with mini-batch
-    step_start: 0
+    # Contents to profile, can be empty
+    # options: cuda, cpu, memory, shapes, stack
+    contents: []
 
-    # stop profile mini-batch in training
-    step_end: null
-
-    # manual save
-    manual_save: True
+    # True for each task has its own database, False for all tasks in one training step share one database.
+    discrete: false
 
     name: torch
 

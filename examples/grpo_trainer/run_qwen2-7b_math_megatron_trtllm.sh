@@ -7,7 +7,6 @@ for v in $(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print $1}'); do
     unset "$v"
 done
 
-export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
 export RAY_DEDUP_LOGS=0
 
 # -----
@@ -72,7 +71,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.rollout.max_num_seqs=${MAX_BATCH_SIZE} \
     actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
-    actor_rollout_ref.rollout.update_weights_bucket_megabytes=4096 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${ACTOR_TP} \
     +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 \

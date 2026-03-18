@@ -21,13 +21,10 @@ from uuid import uuid4
 
 import torch
 from PIL import Image
-from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopBase,
     AgentLoopOutput,
-    AsyncLLMServerManager,
-    DictConfigWrap,
     register,
 )
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
@@ -38,6 +35,7 @@ from verl.tools.schemas import ToolResponse
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -88,43 +86,35 @@ class AgentData:
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
 
+        self.routed_experts = None
+
         # Extra fields for dynamic addition, e.g., tool session data
         self.extra_fields: dict[str, Any] = {}
 
 
 @register("tool_agent")
 class ToolAgentLoop(AgentLoopBase):
-    def __init__(
-        self,
-        trainer_config: DictConfigWrap,
-        server_manager: AsyncLLMServerManager,
-        tokenizer: AutoTokenizer,
-        processor: AutoProcessor,
-        **kwargs,
-    ):
-        super().__init__(trainer_config, server_manager, tokenizer, processor, **kwargs)
-        config = trainer_config.config
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
         # Initialize tools from config file
-        self.max_user_turns = config.actor_rollout_ref.rollout.multi_turn.max_user_turns
-        self.max_assistant_turns = config.actor_rollout_ref.rollout.multi_turn.max_assistant_turns
-        self.max_parallel_calls = config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls
-        self.max_tool_response_length = config.actor_rollout_ref.rollout.multi_turn.max_tool_response_length
-        self.tool_response_truncate_side = config.actor_rollout_ref.rollout.multi_turn.tool_response_truncate_side
-        tool_config_path = config.actor_rollout_ref.rollout.multi_turn.tool_config_path
+        self.max_user_turns = self.rollout_config.multi_turn.max_user_turns
+        self.max_assistant_turns = self.rollout_config.multi_turn.max_assistant_turns
+        self.max_parallel_calls = self.rollout_config.multi_turn.max_parallel_calls
+        self.max_tool_response_length = self.rollout_config.multi_turn.max_tool_response_length
+        self.tool_response_truncate_side = self.rollout_config.multi_turn.tool_response_truncate_side
+        tool_config_path = self.rollout_config.multi_turn.tool_config_path
         tool_list = initialize_tools_from_config(tool_config_path) if tool_config_path else []
         self.tools = {tool.name: tool for tool in tool_list}
         self.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
-        self.tool_parser = ToolParser.get_tool_parser(
-            config.actor_rollout_ref.rollout.multi_turn.format, self.tokenizer
-        )
-        self.tool_parser_name = config.actor_rollout_ref.rollout.multi_turn.format
+        self.tool_parser = ToolParser.get_tool_parser(self.rollout_config.multi_turn.format, self.tokenizer)
+        self.tool_parser_name = self.rollout_config.multi_turn.format
 
-        self.prompt_length = config.actor_rollout_ref.rollout.prompt_length
-        self.response_length = config.actor_rollout_ref.rollout.response_length
+        self.prompt_length = self.rollout_config.prompt_length
+        self.response_length = self.rollout_config.response_length
 
         # Initialize interactions from config file
-        self.interaction_config_file = config.actor_rollout_ref.rollout.multi_turn.interaction_config_path
+        self.interaction_config_file = self.rollout_config.multi_turn.interaction_config_path
         if self.interaction_config_file:
             self.interaction_map: dict[str, BaseInteraction] = self._initialize_interactions(
                 self.interaction_config_file
@@ -193,7 +183,8 @@ class ToolAgentLoop(AgentLoopBase):
             multi_modal_data["images"] = agent_data.image_data
         if agent_data.video_data is not None:
             multi_modal_data["videos"] = agent_data.video_data
-        output = AgentLoopOutput(
+
+        output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
             response_mask=agent_data.response_mask[: self.response_length],
@@ -203,7 +194,8 @@ class ToolAgentLoop(AgentLoopBase):
             else None,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
-            extra_fields={},
+            routed_experts=agent_data.routed_experts,
+            extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
         return output
@@ -226,7 +218,7 @@ class ToolAgentLoop(AgentLoopBase):
         add_messages: list[dict[str, Any]] = []
 
         with simple_timer("generate_sequences", agent_data.metrics):
-            output = await self.server_manager.generate(
+            output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
                 prompt_ids=agent_data.prompt_ids,
                 sampling_params=sampling_params,
@@ -239,6 +231,14 @@ class ToolAgentLoop(AgentLoopBase):
         # then add num_preempted to the metrics
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
+
+        if not agent_data.extra_fields:
+            agent_data.extra_fields.update(output.extra_fields)
+        else:
+            # Multi-round calls, only update the maximum max_global_steps.
+            max_global_steps = output.extra_fields.get("max_global_steps", None)
+            if max_global_steps:
+                agent_data.extra_fields["max_global_steps"] = max_global_steps
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
@@ -259,7 +259,8 @@ class ToolAgentLoop(AgentLoopBase):
             return AgentState.TERMINATED
 
         # Extract tool calls
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
+        tools = [tool.tool_schema for tool in self.tools.values()]
+        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
 
         # Handle interaction if needed
         if self.interaction_config_file:
@@ -350,10 +351,14 @@ class ToolAgentLoop(AgentLoopBase):
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
         else:
+            # Note that we have to pass None to the images and videos if there are no new images / videos
+            # to stay compatible with downstream image processing logic!
+            images = new_images_this_turn if new_images_this_turn else None
+            videos = None
             response_ids = await self.apply_chat_template(
                 add_messages,
-                images=new_images_this_turn,  # Using local variable
-                videos=None,
+                images=images,
+                videos=videos,
                 remove_system_prompt=True,
             )
 

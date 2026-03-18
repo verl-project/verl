@@ -25,6 +25,8 @@ from functools import wraps
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Optional
 
+import numpy as np
+
 from verl.utils.metric import Metric
 
 
@@ -339,3 +341,28 @@ def convert_to_regular_types(obj):
     elif isinstance(obj, dict):
         return {k: convert_to_regular_types(v) for k, v in obj.items()}
     return obj
+
+
+def convert_nested_value_to_list_recursive(data_item):
+    if isinstance(data_item, dict):
+        return {k: convert_nested_value_to_list_recursive(v) for k, v in data_item.items()}
+    elif isinstance(data_item, list):
+        return [convert_nested_value_to_list_recursive(elem) for elem in data_item]
+    elif isinstance(data_item, np.ndarray):
+        # Convert to list, then recursively process the elements of the new list
+        return convert_nested_value_to_list_recursive(data_item.tolist())
+    else:
+        # Base case: item is already a primitive type (int, str, float, bool, etc.)
+        return data_item
+
+
+def list_of_dict_to_dict_of_list(list_of_dict: list[dict]):
+    if len(list_of_dict) == 0:
+        return {}
+    keys = list_of_dict[0].keys()
+    output = {key: [] for key in keys}
+    for data in list_of_dict:
+        for key, item in data.items():
+            assert key in output, f"Key '{key}' is not present in the keys of the first dictionary in the list."
+            output[key].append(item)
+    return output

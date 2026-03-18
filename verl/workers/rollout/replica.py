@@ -18,16 +18,22 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
 
+import ray
 from omegaconf import DictConfig
 from pydantic import BaseModel
 from ray.actor import ActorHandle
 
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-from verl.trainer.ppo.ray_trainer import RayResourcePool, ResourcePoolManager
+from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import is_torch_npu_available
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
+
+
+# Max number of concurrent calls to the methods of Rollout,
+# excluding calls to generate method.
+CONTROL_METHOD_CONCURRENCY = 16
 
 
 class TokenOutput(BaseModel):
@@ -41,6 +47,8 @@ class TokenOutput(BaseModel):
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
     """number of preempted times for metric calculation"""
+    extra_fields: dict[str, Any] = {}
+    """Extra fields for dynamic addition."""
 
 
 class RolloutMode(Enum):
@@ -91,7 +99,7 @@ class RolloutReplica(ABC):
         is_reward_model: bool = False,
     ) -> None:
         self.replica_rank = replica_rank
-        self.config = omega_conf_to_dataclass(config)
+        self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = model_config
 
         self.world_size = (
@@ -164,6 +172,7 @@ class RolloutReplica(ABC):
             if not self.is_reward_model
             else f"rollout_reward_colocate_{self.replica_rank}",
             use_gpu=use_gpu,
+            device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
         await self.launch_servers()
@@ -194,14 +203,23 @@ class RolloutReplica(ABC):
             if not self.is_reward_model
             else f"rollout_reward_standalone_{self.replica_rank}",
             use_gpu=use_gpu,
+            device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
         self.workers = worker_group.workers
         await self.launch_servers()
 
-    @abstractmethod
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""
-        raise NotImplementedError
+        from verl.checkpoint_engine.base import CheckpointEngineWorker
+
+        rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
+
+        return RayClassWithInitArgs(
+            cls=rollout_worker_actor_cls,
+            rollout_config=self.config,
+            model_config=self.model_config,
+            replica_rank=self.replica_rank,
+        )
 
     @abstractmethod
     async def launch_servers(self):
@@ -218,6 +236,12 @@ class RolloutReplica(ABC):
         """Get rollout server handle for Token-in-token-out generation."""
         return self._server_handle
 
+    @property
+    def max_concurrency(self) -> int:
+        # 1000 is Ray's default max_concurrency for async execution.
+        # Add some margin to account for control method call.
+        return max(1000, self.config.max_num_seqs + CONTROL_METHOD_CONCURRENCY)
+
     def rollout_worker_use_gpu(self) -> bool:
         return True
 
@@ -229,9 +253,25 @@ class RolloutReplica(ABC):
         """Sleep each rollout server."""
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
+    async def abort_all_requests(self):
+        """Partial rollout: abort and save all unfinished requests in each rollout server."""
+        await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+
+    async def resume_generation(self):
+        """Resume generation on all servers after abort_all_requests."""
+        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+
     async def clear_kv_cache(self):
         """reset kv cache in each rollout server."""
         await asyncio.gather(*[server.clear_kv_cache.remote() for server in self.servers])
+
+    async def start_profile(self, **kwargs):
+        """Start profiling on the replica."""
+        await asyncio.gather(*[server.start_profile.remote(**kwargs) for server in self.servers])
+
+    async def stop_profile(self):
+        """Stop profiling on the replica."""
+        await asyncio.gather(*[server.stop_profile.remote() for server in self.servers])
 
 
 class RolloutReplicaRegistry:

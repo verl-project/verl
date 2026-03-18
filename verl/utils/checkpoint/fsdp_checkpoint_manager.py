@@ -32,6 +32,7 @@ from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
+from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -70,6 +71,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         checkpoint_contents DictConfig: Configuration for checkpoint contents.
             - 'load': Components to load; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
             - 'save': Components to save; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
+        trust_remote_code: Whether to trust_remote_code when loading the model configuration
     """
 
     def __init__(
@@ -79,6 +81,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         processing_class: PreTrainedTokenizer | ProcessorMixin = None,
         checkpoint_config: DictConfig = None,
+        trust_remote_code: bool = False,
         **kwargs,
     ):
         if processing_class is None and "tokenizer" in kwargs:
@@ -94,6 +97,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             processing_class=processing_class,
             checkpoint_config=checkpoint_config,
         )
+        self.trust_remote_code = trust_remote_code
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
@@ -315,25 +319,15 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                     auto_model_cls = AutoModelForCausalLM
                 elif "ForConditionalGeneration" in model_config.architectures[0]:
-                    # Handle different transformers versions for Vision2Seq models
-                    import transformers
-                    from packaging import version
-
-                    if version.parse(transformers.__version__) >= version.parse("4.54.0"):
-                        # transformers >= 4.54.0 uses AutoModelForImageTextToText
-                        from transformers import AutoModelForImageTextToText
-
-                        auto_model_cls = AutoModelForImageTextToText
-                    else:
-                        # transformers < 4.54.0 uses AutoModelForVision2Seq
-                        from transformers import AutoModelForVision2Seq
-
-                        auto_model_cls = AutoModelForVision2Seq
+                    auto_model_cls = get_auto_model_for_vision2seq()
                 else:
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
 
                 with init_empty_weights():
-                    save_model = auto_model_cls.from_config(model_config, torch_dtype=torch.bfloat16)
+                    save_model = auto_model_cls.from_config(
+                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=self.trust_remote_code
+                    )
+
                 save_model.to_empty(device="cpu")
 
                 if save_model.can_generate():
