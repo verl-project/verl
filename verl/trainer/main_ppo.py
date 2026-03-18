@@ -356,7 +356,14 @@ class TaskRunner:
         trainer.init_workers()
 
         # Start the training process.
-        trainer.fit()
+        try:
+            trainer.fit()
+        finally:
+            # Explicitly shut down DataLoader workers before Ray tears down the process,
+            # to avoid "DataLoader worker killed by signal" errors on exit.
+            trainer.train_dataloader._iterator = None
+            trainer.val_dataloader._iterator = None
+            del trainer
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True, max_samples: int = -1):

@@ -1,0 +1,19 @@
+working_dir: "."
+excludes:
+  - "**/.git"
+  - "**.deb"
+  - "**.nsys-rep*"
+  - "**/tokenizer.json"
+  - "**/data/*.json*"
+  - "**/e2e_tests"
+  - "**/examples"
+  - "**/tests"
+py_executable: "uv -v run --frozen --extra gpu"
+env_vars:
+  # Ray UV
+  # TODO: https://github.com/ray-project/ray/releases/tag/ray-2.48.0
+  # We can delete this once if ray is 2.48+ where uv support is enabled by default
+  RAY_RUNTIME_ENV_HOOK: "ray._private.runtime_env.uv_runtime_env_hook.hook"
+  # veRL
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  VERL_LOGGING_LEVEL: "WARN"

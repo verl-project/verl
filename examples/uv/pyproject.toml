@@ -1,0 +1,48 @@
+[project]
+name = "verl-uv-example"
+version = "0.1.0"
+description = "Minimal verl RL training example"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "verl",
+    "ray[default,data,serve]>=2.40.0",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "transformers",
+    "wandb",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch==2.10.0+cu129",
+    "torchvision",
+    "torchaudio",
+    "vllm==0.17.0",
+    "flash-attn",
+    "flash-attn-3",
+]
+
+[tool.uv.sources]
+verl = { git = "https://github.com/volcengine/verl.git", tag = "v0.7.1" }
+# verl = { path = "./verl", editable = true }  # if you want to clone it and run locally for dev
+
+torch = [
+    { index = "pytorch", extra = "gpu" },
+]
+torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
+
+flash-attn = { url = "https://github.com/Luosuu/flash-attention3-wheels/releases/download/v0.0.2/flash_attn-2.8.4+cu129torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }  # flash attn 2 compatible with cu129th210
+flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.03.16-4d76052/flash_attn_3-3.0.0+20260316.cu129torch2100cxx11abitrue.71bf77-cp39-abi3-linux_x86_64.whl" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[tool.uv]
+# extra-build-variables = { flash-attn = { FLASH_ATTENTION_FORCE_BUILD = "TRUE", MAX_JOBS = "16" } }  # If your flash-attn 2 built from source for special combination of (cuda,torch,python) version.
+no-build-isolation-package = ["flash-attn"]
+environments = ["sys_platform == 'linux'"]
+override-dependencies = [
+    "opencv-python-headless<4.13.0",
+]

@@ -1,7 +1,7 @@
 Multinode Training
 ==================
 
-Last updated: 06/10/2025.
+Last updated: 03/18/2026.
 
 .. _wuxibin89: https://github.com/wuxibin89
 
@@ -65,6 +65,23 @@ Submit job to ray cluster
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/ray/job.png?raw=true
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/ray/job_detail.png?raw=true
+
+Alternative: uv + Ray (Recommended for Large Clusters)
+-------------------------------------------------------
+
+When launching a Ray cluster manually (Option 1), you can use `uv <https://github.com/astral-sh/uv>`_ instead of pip to manage dependencies. uv is 10–100× faster than pip and uses a lockfile to guarantee identical environments across all nodes — no Docker rebuilds needed.
+
+The only change from Option 1 is passing a ``ray_runtime.yaml`` that sets ``py_executable: "uv -v run --frozen --extra gpu"``, so every Ray worker uses the same locked virtualenv as the driver:
+
+.. code-block:: bash
+
+    ray job submit --address="http://127.0.0.1:8265" \
+        --runtime-env=examples/uv/ray_runtime.yaml \
+        -- bash examples/uv/example.sh
+
+.. seealso::
+
+    See `examples/uv/ <https://github.com/volcengine/verl/tree/main/examples/uv>`_ for a self-contained example including ``pyproject.toml``, ``uv.lock``, and ``ray_runtime.yaml``.
 
 Option 2: Launch via SkyPilot on Kubernetes or clouds
 ------------------------------------------------------
