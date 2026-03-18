@@ -37,9 +37,6 @@ dtype: bfloat16
 # Fraction of GPU memory used by vLLM/SGLang/TRTLLM for KV cache.
 gpu_memory_utilization: 0.5
 
-# Whether to ignore EOS and continue generating after EOS is hit.
-ignore_eos: False
-
 # Whether to disable CUDA graph. Default False to best performance.
 enforce_eager: False
 
@@ -118,11 +115,6 @@ n: 1
 # The over_sample_rate parameter controls the early termination threshold for training rollouts,
 # where the system will abort remaining requests when (1 - over_sample_rate) * total_requests completions are reached.
 over_sample_rate: 0
-
-# Whether to wake up inference engine in multi-stage for SGLang
-# to reduce peak memory during training-rollout transition.
-# This is only effective for SGLang rollout.
-multi_stage_wake_up: false
 
 # Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail
 engine_kwargs:
@@ -207,7 +199,7 @@ multi_turn:
   format: hermes
 
   # Number of repeat rollouts for each interaction
-  num_repeat_rollouts: null
+  num_repeat_rollouts: null # TODO: implement repeat rollouts per batch to reduce variance
 
 # support logging rollout prob for debugging purpose
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling

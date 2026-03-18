@@ -183,7 +183,6 @@ Actor/Rollout/Reference Policy
       # for vllm rollout
       dtype: bfloat16 # should align with FSDP
       gpu_memory_utilization: 0.5
-      ignore_eos: False
       enforce_eager: True
       free_cache_engine: True
       load_format: dummy_dtensor
@@ -387,9 +386,6 @@ Reference model will be enabled when ``actor.use_kl_loss`` or/and ``algorithm.us
 - ``actor_rollout_ref.rollout.engine_kwargs.vllm``: extra vllm engine args, please refer vllm official doc for detail
 
 - ``actor_rollout_ref.rollout.engine_kwargs.sglang``: extra sglang engine args, please refer sglang official doc for detail
-
-- ``actor_rollout_ref.rollout.ignore_eos``: Whether to ignore the EOS
-  token and continue generating tokens after the EOS token is generated.
 
 - ``actor_rollout_ref.rollout.free_cache_engine``: Offload the KVCache
   after rollout generation stage. Default is True. When set to True,

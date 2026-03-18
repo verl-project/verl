@@ -58,7 +58,6 @@ def create_rollout_config_dict():
         "response_length": RESPONSE_LENGTH,
         "dtype": "bfloat16",
         "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
-        "ignore_eos": False,
         "enforce_eager": True,
         "free_cache_engine": False,
         "data_parallel_size": 1,

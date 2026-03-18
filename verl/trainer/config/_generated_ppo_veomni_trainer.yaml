@@ -195,7 +195,6 @@ actor_rollout_ref:
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
     gpu_memory_utilization: 0.5
-    ignore_eos: false
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
@@ -219,7 +218,6 @@ actor_rollout_ref:
     do_sample: true
     'n': 1
     over_sample_rate: 0
-    multi_stage_wake_up: false
     engine_kwargs:
       vllm: {}
       sglang: {}

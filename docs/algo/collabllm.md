@@ -69,7 +69,7 @@ The RL script shows an example to train CollabLLM on `math-hard-large`.
 | Step | Name                          | Description                                                                 |
 |------|-------------------------------|-----------------------------------------------------------------------------|
 | 1    | Model response generation     | The model generates multiple responses for each prompt in a batch.          |
-| 2    | Collaborative simulation      | A user simulator (e.g., GPT or Claude) samples `num_repeat_rollouts` conversations for up to `max_user_turns` additional turns. |
+| 2    | Collaborative simulation      | A user simulator (e.g., GPT or Claude) samples `num_repeat_rollouts` (TODO: not currently implemented) conversations for up to `max_user_turns` additional turns. |
 | 3    | Compute Multiturn-aware Reward | Customized conversational reward functions are applied to the sampled conversations. Rewards are aggregated, then averaged across rollouts. |
 | 4    | Update model                  | The model weights are updated using the computed multiturn-aware rewards.  |
 
@@ -83,7 +83,7 @@ The primary configuration is managed through the launch script `train_rl_collabl
 |----------------------|-----------------------------------------------------------------------------------------|
 | `data`               | Paths to training/validation files, batch sizes, sequence lengths.                      |
 | `actor_rollout_ref` (common) | Base model path (used for actor + initial reference), FSDP settings, optimization (LR, scheduler). |
-| `actor_rollout_ref` (CollabLLM-specific) | Hyperparameters under `actor_rollout_ref.rollout.multi_turn`: `max_user_turns`, `max_assistant_turns`, `num_repeat_rollouts`. |
+| `actor_rollout_ref` (CollabLLM-specific) | Hyperparameters under `actor_rollout_ref.rollout.multi_turn`: `max_user_turns`, `max_assistant_turns`, `num_repeat_rollouts` (TODO: not currently implemented) . |
 | `interaction`        | Defined in `collabllm_interaction_config.yaml`. Specifies user simulator and hyperparameters. Requires exported API keys. |
 | `reward_model`       | Manager set to `collabllm` by default. Modify `reward_model.reward_kwargs.metric_weights` for conversational rewards and weights. LLM Judge hyperparameters (e.g., `model`, `temperature`) go under `reward_model.reward_kwargs.llm_judge_kwargs`. |
 | `algorithm`          | GRPO-specific hyperparameters such as `actor_rollout_ref.rollout.n`.                    |
