@@ -586,7 +586,35 @@ def load_megatron_copy_params(optimizers):
         if hasattr(_opt, "shard_fp32_from_float16_groups"):
             load_group_to_gpu(_opt.shard_fp32_from_float16_groups)
 
-
+@torch.no_grad()
+def offload_optimizer_fp32_params(optimizer: torch.optim.Optimizer):
+    for param_group in optimizer.param_groups:
+        for param in param_group['params']:
+            if param is not None and isinstance(param, (torch.Tensor, torch.nn.Parameter)):
+                if param.storage().size() > 0:
+                    if not hasattr(param, 'cpu_data'):
+                        setattr(param, 'cpu_data', None)
+                    if not hasattr(param, 'param_data_size'):
+                        setattr(param, 'param_data_size', 0)
+                    param.cpu_data = param.to('cpu')
+                    param.param_data_size = param.storage().size()
+                    param.storage().resize_(0) # free gpu memory
+    torch.cuda.synchronize()
+    gc.collect()
+    get_torch_device().empty_cache()
+                
+@torch.no_grad()
+def load_optimizer_fp32_params_to_gpu(optimizer: torch.optim.Optimizer):
+    for param_group in optimizer.param_groups:
+        for load_param in param_group['params']:
+            if load_param is not None and isinstance(load_param, (torch.Tensor, torch.nn.Parameter)):
+                if load_param.storage().size() == 0 and hasattr(load_param, 'param_data_size'):
+                    load_param.storage().resize_(load_param.param_data_size)
+                    load_param.copy_(load_param.cpu_data)
+                    load_param.cpu_data = None # free cpu memory
+    torch.cuda.synchronize()
+    gc.collect()
+    get_torch_device().empty_cache()
 @torch.no_grad()
 def offload_megatron_optimizer(optimizers):
     def _iter_opts(opt):
@@ -616,7 +644,8 @@ def offload_megatron_optimizer(optimizers):
                         v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
                     if "exp_avg_sq" in v:
                         v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
-
+            if hasattr(hdo, 'gpu_optimizer'):
+                offload_optimizer_fp32_params(hdo.gpu_optimizer)# offload fp32 params to cpu 
         try:
             # Free TransformerEngine's dummy weight gradients cache
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.10/transformer_engine/pytorch/module/base.py#L64
@@ -642,6 +671,9 @@ def load_megatron_optimizer(optimizers):
 
     for _opt in _iter_opts(optimizers):
         load_megatron_copy_params(_opt)
+        hdo = _opt.optimizer
+        if hasattr(hdo, 'gpu_optimizer'):
+            load_optimizer_fp32_params_to_gpu(hdo.gpu_optimizer) # reload fp32 params to gpu
         ## worker may hold zero parameter when enabling custom pipeline layout
         if _opt.optimizer is not None:
             # if we are using HybridDeviceOptimizer, we need to only move gpu optimizer state to gpu
