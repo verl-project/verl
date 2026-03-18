@@ -14,6 +14,6 @@ env_vars:
   # TODO: https://github.com/ray-project/ray/releases/tag/ray-2.48.0
   # We can delete this once if ray is 2.48+ where uv support is enabled by default
   RAY_RUNTIME_ENV_HOOK: "ray._private.runtime_env.uv_runtime_env_hook.hook"
-  # veRL
+  # verl
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
   VERL_LOGGING_LEVEL: "WARN"

@@ -1,8 +1,8 @@
-# veRL uv example
+# verl uv example
 
 🍳 A minimal example for running [verl](https://github.com/volcengine/verl) RL training using [uv](https://github.com/astral-sh/uv) for dependency management on Ray cluster.
 
-> ⚡ **Why uv + Ray to use veRL?**
+> ⚡ **Why uv + Ray to use verl?**
 >
 > - 🚀 **Blazing-fast sync at any scale** — uv is 10–100× faster than pip, propagating the exact same environment to every Ray worker instantly, with no per-node installs required
 > - 🔒 **Fully locked environment** — lockfile-based installs eliminate version mismatches across nodes
