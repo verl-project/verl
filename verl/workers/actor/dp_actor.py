@@ -585,7 +585,17 @@ class DataParallelPPOActor(BasePPOActor):
 
                     calculate_entropy = self.config.calculate_entropy or (entropy_coeff != 0)
 
-                    if self.config.use_dynamic_bsz:
+                    if loss_agg_mode == "token-mean":
+                        # Use token-count ratio for token-mean mode to ensure
+                        # accumulated loss matches full-batch computation.
+                        # See: https://github.com/verl-project/verl/issues/5625
+                        batch_num_tokens = response_mask.sum().item()
+                        total_tokens = self.config.global_batch_info.get("total_tokens", None)
+                        if total_tokens is not None and total_tokens > 0:
+                            loss_scale_factor = batch_num_tokens / total_tokens
+                        else:
+                            loss_scale_factor = 1 / self.gradient_accumulation
+                    elif self.config.use_dynamic_bsz:
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
