@@ -23,7 +23,7 @@ from omegaconf import OmegaConf
 
 import verl
 from verl.protocol import DataProto
-from verl.utils.rollout_skip import RolloutSkip, dataproto_compress
+from verl.utils.rollout_skip import RolloutSkip
 
 
 def build_generate_fn(cfg):
@@ -123,7 +123,6 @@ class TestRolloutSkip:
         assert skip.gbs == config.data.gen_batch_size
         assert skip.prompt_length == config.data.max_prompt_length
         assert skip.response_length == config.data.max_response_length
-        assert skip.do_compress == config.actor_rollout_ref.rollout.skip.compress
 
         assert skip.is_enable
         assert str(skip.specify_dumped_dir).startswith(config.actor_rollout_ref.rollout.skip.dump_dir)
@@ -302,34 +301,3 @@ class TestActionWithResume:
         # * Final
         skip.record(new_batch, step + resume_more_step + 1, None)  # train_step start from 1
         rollout_wg.generate_sequences(MagicMock())
-
-
-class TestCompress:
-    @pytest.mark.parametrize("len_input, len_output", [(1 * 1024, 2 * 1024), (4 * 1024, 48 * 1024)])
-    @pytest.mark.parametrize("gbs, n", [(4, 1), (512, 16)])
-    def test_compress_decompress(self, mock_rollout_wg, gbs, n, len_input, len_output):
-        config, _, _ = mock_rollout_wg
-        config.data.gen_batch_size = gbs
-
-        config.actor_rollout_ref.rollout.n = n
-        config.data.max_prompt_length = len_input
-        config.data.max_response_length = len_output
-
-        generate_sequences, new_batch_generator = build_generate_fn(config)
-
-        new_batch = new_batch_generator()
-
-        gen_batch = generate_sequences(MagicMock())
-
-        data_dump = {
-            "new_batch": gen_batch,
-            "gen_batch": new_batch,
-            "compressed": ["gen_batch", "new_batch"],
-        }
-        _info = dataproto_compress(data_dump)
-
-        print(f"{gbs=}, {n=}, {len_input=}, {len_output=}")
-        print(f"ratio={_info['ratio']: 5.2%}")
-        print(f"avg_pickle_time={_info['time_pickle']:5.2f}s")
-        print(f"avg_compress_time={_info['time_compress']:5.2f}s")
-        print(f"{_info['size_data'] / 1024**2: 5.2f}MB -> {_info['size_compressed_data'] / 1024**2: 5.2f}MB")

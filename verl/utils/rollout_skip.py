@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import pickle
 import time
 from enum import Enum
@@ -78,7 +79,6 @@ class RolloutSkip:
         self.record_gen_steps = None  # Given from xxx_ray_tainer.py, start from 1
         self.__gen_offset_step = 0
 
-        self.do_compress = _get_skip_attr(self.skip_config, "compress", True)
         self.max_dump_step = max(0, _get_skip_attr(self.skip_config, "max_dump_step", 1))  # at least dump once
         self.action = _get_skip_attr(self.skip_config, "action", SkipAction.REPEAT)
         self.action = SkipAction(self.action)
@@ -110,9 +110,10 @@ class RolloutSkip:
         return len(self.list_dumped_steps)
 
     def get_path_dump(self, gen_step: int = None) -> Path:
+        """Return the directory path for a given gen_step (one dir per step, no .pkl)."""
         if gen_step is None:
             gen_step = self.curr_gen_step
-        return self.specify_dumped_dir.joinpath(f"genstep_{gen_step:06d}.pkl").absolute()
+        return self.specify_dumped_dir.joinpath(f"genstep_{gen_step:06d}").absolute()
 
     def get_step_describe(self):
         return self.specify_dumped_dir.joinpath("train_step__gen_step.txt").absolute()
@@ -132,9 +133,11 @@ class RolloutSkip:
         """
         Create the directory for dumping rollout data if it doesn't exist.
         Warn if the directory is within Ray's temporary session directory.
+        Relative dump_dir is resolved against cwd; use an absolute path under Ray/multi-process.
         """
 
-        dumped_dir = Path(_get_skip_attr(self.skip_config, "dump_dir", "/tmp/verl/rollout_dump"))
+        raw = _get_skip_attr(self.skip_config, "dump_dir", "~/.verl/rollout_dump")
+        dumped_dir = Path(raw).expanduser().resolve()
         sub_dir = (
             f"{self.exp_name}_{self.project_name}"
             + f"/GBS{self.gbs}_N{self.n}_in{self.prompt_length}_out{self.response_length}"
@@ -234,41 +237,43 @@ class RolloutSkip:
         if step is None:
             step = self.curr_gen_step
 
-        path_dump = self.get_path_dump(step)
-        if path_dump.exists():
-            try:
-                # * Load
-                data_dict = pickle.loads(path_dump.read_bytes())
-                dataproto_decompress(data_dict)
-
-                dumped_gen_batch = data_dict["gen_batch"]
-                dumped_new_batch = data_dict["new_batch"]
-
-                print(
-                    f"{self.print_mark}\033[32mSuccessfully load pre-generated data from {path_dump}.\033[0m",
-                    flush=True,
-                )
-
-                if step not in self.list_dumped_steps:
-                    self.list_dumped_steps.append(step)
-
-            except Exception:
-                print(
-                    f"{self.print_mark}\033[31mFailed to load pre-generated data from {path_dump}.\033[0m",
-                    flush=True,
-                )
-
-        else:
+        step_dir = self.get_path_dump(step)
+        if not step_dir.exists() or not step_dir.is_dir():
             print(
-                f"{self.print_mark}\033[33mNo dumped data found at gen_step {step}",
-                f"from {path_dump}. The trainer will generate and dump the data for this gen_step.\033[0m",
+                f"{self.print_mark}\033[33mNo dumped data found at gen_step {step} "
+                f"from {step_dir}. The trainer will generate and dump the data for this gen_step.\033[0m",
+                flush=True,
+            )
+            return dumped_new_batch, dumped_gen_batch
+
+        new_batch_path = step_dir / "new_batch.dp"
+        gen_batch_path = step_dir / "gen_batch.dp"
+        if not (new_batch_path.is_file() and gen_batch_path.is_file()):
+            print(
+                f"{self.print_mark}\033[33mNo dumped data found at gen_step {step} "
+                f"(missing new_batch.dp or gen_batch.dp in {step_dir}).\033[0m",
+                flush=True,
+            )
+            return dumped_new_batch, dumped_gen_batch
+
+        try:
+            dumped_new_batch = DataProto.load_from_disk(new_batch_path)
+            dumped_gen_batch = DataProto.load_from_disk(gen_batch_path)
+            print(
+                f"{self.print_mark}\033[32mSuccessfully load pre-generated data from {step_dir}.\033[0m",
+                flush=True,
+            )
+            if step not in self.list_dumped_steps:
+                self.list_dumped_steps.append(step)
+        except Exception as e:
+            print(
+                f"{self.print_mark}\033[31mFailed to load pre-generated data from {step_dir}: {e}\033[0m",
                 flush=True,
             )
 
         return dumped_new_batch, dumped_gen_batch
 
     def dump(self, outputs: DataProto):
-        # todo raise error in dump is too late, fix it later.
         if self._flag_record is False or self._new_batch is None:
             raise AssertionError(
                 f"{self.print_mark}\033[33mError: \n"
@@ -279,35 +284,20 @@ class RolloutSkip:
 
         train_step = self.record_global_steps if self.record_global_steps is not None else self.curr_train_step
         gen_step = self.record_gen_steps if self.record_gen_steps is not None else self.curr_gen_step
-        data_dump = {
-            "new_batch": self._new_batch,
-            "gen_batch": outputs,
-            "compressed": [],
-            "global_steps": train_step,
-            "gen_steps": gen_step,
-        }
+        step_dir = self.get_path_dump(gen_step)
+        step_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            info_compress = ""
-            if self.do_compress:
-                data_dump["compressed"] = ["gen_batch", "new_batch"]
-                dict_info = dataproto_compress(data_dump)
-                size_zip = dict_info["size_compressed_data"]
-                size_data = dict_info["size_data"]
-                ratio = dict_info["ratio"]
+            self._new_batch.save_to_disk(step_dir / "new_batch.dp")
+            outputs.save_to_disk(step_dir / "gen_batch.dp")
+            meta_path = step_dir / "meta.json"
+            meta_path.write_text(json.dumps({"global_steps": train_step, "gen_steps": gen_step}))
 
-                if size_data != 0:
-                    info_compress = f"{size_data / 1024**2:.3f}MB -> {size_zip / 1024**2:.3f}MB ({ratio:.1%} )"
-            # Dump rollout result
-            with open(str(self.get_path_dump()), "wb") as f:
-                pickle.dump(data_dump, f)
-            # Dump info of train_step and gen_step for resume
             with open(str(self.get_step_describe()), "a") as f:
                 f.write(f"{train_step} {gen_step}\n")
 
             print(
-                f"{self.print_mark}\033[32mSuccessfully dump data in {self.get_path_dump()}\033[0m",
-                info_compress,
+                f"{self.print_mark}\033[32mSuccessfully dump data in {step_dir}\033[0m",
                 flush=True,
             )
             if self.curr_gen_step not in self.list_dumped_steps:
@@ -315,7 +305,7 @@ class RolloutSkip:
 
         except Exception as e:
             print(
-                f"{self.print_mark}\033[31mFailed to dump data in {self.get_path_dump()}: {e}\033[0m",
+                f"{self.print_mark}\033[31mFailed to dump data in {step_dir}: {e}\033[0m",
                 flush=True,
             )
 
@@ -391,94 +381,33 @@ def wrap_generate_sequences(rolloutskip: RolloutSkip, rollout_wg):
     return rollout_skip_wrap_fn
 
 
-def dataproto_compress(dict_data: dict) -> dict[str, DataProto]:
-    try:
-        import pyzstd
-
-        compresser = pyzstd
-    except ImportError:
-        import zlib
-
-        compresser = zlib
-
-    dict_data["compresser_name"] = compresser.__name__
-
-    key_compress = dict_data.get("compressed", [])
-
-    size_data = 0
-    size_compressed_data = 0
-
-    print("Compress dumped data...", flush=True)
-    time_pickle = 0
-    time_compress = 0
-    for key in key_compress:
-        time_start = time.time()
-        _data = pickle.dumps(dict_data[key])
-        time_pickle += time.time() - time_start
-        size_data += len(_data)
-
-        time_start = time.time()
-        compressed_data = compresser.compress(_data)
-        time_compress += time.time() - time_start
-
-        size_compressed_data += len(compressed_data)
-
-        dict_data[key] = compressed_data
-
-    dict_info = {
-        "size_compressed_data": size_compressed_data,
-        "size_data": size_data,
-        "time_pickle": time_pickle,
-        "time_compress": time_compress,
-        "ratio": size_compressed_data / size_data if size_data != 0 else None,
-    }
-
-    return dict_info
-
-
-def dataproto_decompress(dict_data: dict[str, DataProto]) -> dict[str, DataProto]:
-    key_compresser_name = dict_data.get("compresser_name", "zlib")
-    if key_compresser_name == "zlib":
-        import zlib
-
-        compresser = zlib
-    elif key_compresser_name == "pyzstd":
-        import pyzstd
-
-        compresser = pyzstd
-
-    key_compress = dict_data.get("compressed", [])
-
-    for key in key_compress:
-        compressed_data = compresser.decompress(dict_data[key])
-        _data = pickle.loads(compressed_data)
-        dict_data[key] = _data
-
-    dict_data["compressed"] = []
-
-
 def read_dumped_data(path_dump: Path) -> dict[str, DataProto]:
     """
-    Common function to read and decompress dumped data from a specified path.
+    Read dumped rollout data from a step directory (DataProto.save_to_disk format).
+
+    path_dump should point to a step directory containing new_batch.dp and gen_batch.dp,
+    e.g. .../GBS8_N16_in1024_out10240/genstep_000001/
 
     ```
-    import verl
     from verl.utils.rollout_skip import read_dumped_data
 
-    dumped_data = read_dumped_data("tmp/rollout_dump/DAPO-Qwen2.5-0.5B_DAPO/GBS4_N4_in2048_out4096/genstep_000001.pkl")
-
+    dumped_data = read_dumped_data("path/to/rollout_dump/.../genstep_000001")
     print(dumped_data["new_batch"])
     print(dumped_data["gen_batch"])
     ```
-
     """
     path_dump = Path(path_dump)
-    if path_dump.is_file():
-        with open(path_dump, "rb") as f:
-            data_dump = pickle.load(f)
-    else:
-        raise FileNotFoundError(f"File {path_dump} does not exist.")
+    if not path_dump.is_dir():
+        raise FileNotFoundError(f"Directory {path_dump} does not exist.")
 
-    dataproto_decompress(data_dump)
+    new_batch_path = path_dump / "new_batch.dp"
+    gen_batch_path = path_dump / "gen_batch.dp"
+    if not (new_batch_path.is_file() and gen_batch_path.is_file()):
+        raise FileNotFoundError(
+            f"Missing new_batch.dp or gen_batch.dp under {path_dump}."
+        )
 
-    return data_dump
+    return {
+        "new_batch": DataProto.load_from_disk(new_batch_path),
+        "gen_batch": DataProto.load_from_disk(gen_batch_path),
+    }
