@@ -24,7 +24,7 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
-__all__ = ["HFModelConfig", "DiffusionModelConfig", "DiffusersModelConfig", "MtpConfig"]
+__all__ = ["HFModelConfig", "DiffusionModelConfig", "MtpConfig"]
 
 
 @dataclass
@@ -326,7 +326,3 @@ class DiffusionModelConfig(BaseConfig):
 
     def get_processor(self):
         return self.processor if self.processor is not None else self.tokenizer
-
-
-# Backward-compatible alias
-DiffusersModelConfig = DiffusionModelConfig
