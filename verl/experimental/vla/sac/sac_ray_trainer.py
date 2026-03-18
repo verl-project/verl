@@ -443,93 +443,30 @@ class RobRaySACTrainer(RayPPOTrainer):
                         return
 
 
-    def _validate(self):
-        data_source_lst = []
-        reward_extra_infos_dict: dict[str, list] = defaultdict(list)
-
-        sample_scores = []
-        sample_uids = []
-        sample_positive_traj_lens = []
-
-        for test_data in self.val_dataloader:
-            test_batch = DataProto.from_single_dict(test_data)
+    def _validate(self) -> dict:
+        metric_list = []
+        val_iter = iter(self.val_dataloader)
+        test_batch = self._next_rollout_batch(val_iter)
+        while test_batch is not None:
             if len(test_batch) < self.config.data.val_batch_size:
                 print(f"drop last batch in val_dataloader, len {len(test_batch)}")
                 break
 
-            if "uid" not in test_batch.non_tensor_batch:
-                test_batch.non_tensor_batch["uid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(len(test_batch))], dtype=object
-                )
-
-            test_gen_batch = self._get_gen_batch(test_batch)
-            test_gen_batch.meta_info = {
-                "eos_token_id": self.tokenizer.eos_token_id,
-                "pad_token_id": self.tokenizer.pad_token_id,
-                "prompt_length": self.config.actor_rollout_ref.rollout.prompt_length,
-                "recompute_log_prob": False,
-                "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
-                "temperature": self.config.actor_rollout_ref.rollout.temperature,
-                "n_samples": self.config.actor_rollout_ref.rollout.n,
-                "validate": True,
-                "global_steps": self.global_steps,
-            }
-
-            test_gen_batch = test_gen_batch.repeat(
-                repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-            )
-
-            sample_uids.extend(test_gen_batch.non_tensor_batch["uid"])
-
-            reset_future = self._reset_envs(test_gen_batch)
-            test_output_gen_batch = self.async_rollout_manager.generate_sequences(test_gen_batch, reset_future)
-
-            test_batch = test_output_gen_batch
             test_batch.meta_info["validate"] = True
+            reset_future = self._reset_envs(test_batch)
+            rollout_output = self.async_rollout_manager.generate_sequences(test_batch, reset_future)
+            self._prepare_actor_input(rollout_output)
+            test_batch = self._next_rollout_batch(val_iter)
+            actor_input = self._prepare_actor_input(rollout_output)
 
-            complete_any = test_batch.batch["complete"].any(dim=-1)  # (B, T)
-            dones_step = complete_any.clone()
-            dones_step[:, -2] = True
-            sparse_rewards = complete_any.float()
-            traj_rewards = sparse_rewards.any(dim=-1).float()  # (B,)
+            metric_list.append({
+                "val/avg_reward": actor_input.meta_info["data/trajectory_avg_reward"],
+                "val/avg_positive_trajectory_length": actor_input.meta_info["data/avg_positive_trajectory_length"],
+            })
 
-            scores = traj_rewards.cpu().tolist()
-            sample_scores.extend(scores)
+        metrics = {}
+        if metric_list:
+            metrics["val/avg_reward"] = np.mean([m["val/avg_reward"] for m in metric_list])
+            metrics["val/avg_positive_trajectory_length"] = np.mean([m["val/avg_positive_trajectory_length"] for m in metric_list])
 
-            reward_extra_infos_dict["reward"].extend(scores)
-
-            traj_lens = (torch.argmax(dones_step.int(), dim=1) + 1).float()
-            reward_extra_infos_dict["trajectory_length"].extend(traj_lens.cpu().tolist())
-            sample_positive_traj_lens.extend(traj_lens[traj_rewards > 0].cpu().tolist())
-
-            data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * traj_rewards.shape[0]))
-
-        for key_info, lst in reward_extra_infos_dict.items():
-            assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
-
-        data_sources = np.concatenate(data_source_lst, axis=0).tolist()
-
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
-        metric_dict = {}
-        for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
-            for var_name, metric2val in var2metric2val.items():
-                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
-                for metric_name, metric_val in metric2val.items():
-                    if (
-                        (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
-                        and (f"@{n_max}" in metric_name)
-                    ):
-                        metric_sec = "val-core"
-                    else:
-                        metric_sec = "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
-
-        if len(sample_positive_traj_lens) > 0:
-            metric_dict["val-aux/avg_positive_trajectory_length"] = float(np.mean(sample_positive_traj_lens))
-        else:
-            metric_dict["val-aux/avg_positive_trajectory_length"] = 0.0
-
-        return metric_dict
+        return metrics
