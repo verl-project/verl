@@ -593,6 +593,8 @@ class DataParallelPPOActor(BasePPOActor):
                         total_tokens = self.config.global_batch_info.get("total_tokens", None)
                         if total_tokens is not None and total_tokens > 0:
                             loss_scale_factor = batch_num_tokens / total_tokens
+                        elif self.config.use_dynamic_bsz:
+                            loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
                         else:
                             loss_scale_factor = 1 / self.gradient_accumulation
                     elif self.config.use_dynamic_bsz:
