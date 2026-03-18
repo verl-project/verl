@@ -157,9 +157,12 @@ class MegatronEngine(BaseEngine):
             bridge = AutoBridge.from_config(self.model_config.hf_config, dtype=self.param_dtype)
             if self.engine_config.dynamic_context_parallel:
                 override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
-                override_transformer_config["dynamic_context_parallel"] = self.engine_config.dynamic_context_parallel
-                override_transformer_config["sequence_packing"] = True
-                override_transformer_config["sequence_packing_scheduler"] = "external"
+                # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
+                # because of the bad coupling design in Megatron-LM
+                # https://github.com/xiaoyao0115/Megatron-LM/blob/88733ab6614e3e91b9d095172f41e7d8b5d8e9d4/megatron/core/pipeline_parallel/dynamic_cp_schedule.py#L552-L553
+                # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
+                override_transformer_config["dynamic_context_parallel"] = False
+                override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
             bridge.set_extra_args(**override_transformer_config)
             tf_config = bridge.config
             tf_config.fp16 = self.param_dtype == torch.float16
@@ -775,6 +778,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
+        print(f"local_cp_size: {local_cp_size}")
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
