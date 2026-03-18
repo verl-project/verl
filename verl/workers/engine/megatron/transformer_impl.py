@@ -113,15 +113,15 @@ class MegatronEngine(BaseEngine):
 
         extra_args = dict()
 
-        if self.engine_config.hybrid_context_parallel:
-            assert "hybrid_context_parallel" in inspect.signature(mpu.initialize_model_parallel).parameters, (
-                "hybrid_context_parallel is not supported in your megatron version, "
+        if self.engine_config.dynamic_context_parallel:
+            assert "dynamic_context_parallel" in inspect.signature(mpu.initialize_model_parallel).parameters, (
+                "dynamic_context_parallel is not supported in your megatron version, "
                 + "please update your megatron version to the latest version"
             )
             assert self.engine_config.max_seqlen_per_dp_cp_rank is not None, (
-                "max_seqlen_per_dp_cp_rank is required when hybrid_context_parallel is enabled"
+                "max_seqlen_per_dp_cp_rank is required when dynamic_context_parallel is enabled"
             )
-            extra_args["hybrid_context_parallel"] = self.engine_config.hybrid_context_parallel
+            extra_args["dynamic_context_parallel"] = self.engine_config.dynamic_context_parallel
 
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=self.engine_config.tensor_model_parallel_size,
@@ -155,9 +155,9 @@ class MegatronEngine(BaseEngine):
             from verl.models.mcore.mbridge import AutoBridge
 
             bridge = AutoBridge.from_config(self.model_config.hf_config, dtype=self.param_dtype)
-            if self.engine_config.hybrid_context_parallel:
+            if self.engine_config.dynamic_context_parallel:
                 override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
-                override_transformer_config["hybrid_context_parallel"] = self.engine_config.hybrid_context_parallel
+                override_transformer_config["dynamic_context_parallel"] = self.engine_config.dynamic_context_parallel
                 override_transformer_config["sequence_packing"] = True
                 override_transformer_config["sequence_packing_scheduler"] = "external"
             bridge.set_extra_args(**override_transformer_config)
@@ -485,13 +485,13 @@ class MegatronEngine(BaseEngine):
             raise ValueError(f"Invalid device type: {device}")
 
     def get_data_parallel_rank(self):
-        if self.engine_config.hybrid_context_parallel:
+        if self.engine_config.dynamic_context_parallel:
             # in order to let every dp-cp group has full data to split, we set dp=1
             return 0
         return mpu.get_data_parallel_rank()
 
     def get_data_parallel_size(self):
-        if self.engine_config.hybrid_context_parallel:
+        if self.engine_config.dynamic_context_parallel:
             # in order to let every dp-cp group has full data to split, we set dp=1
             return 1
         return mpu.get_data_parallel_world_size()
@@ -755,7 +755,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def forward_step(self, batch_iter: Iterator[TensorDict], model, postprocess_micro_batch_func):
         batch: TensorDict = next(batch_iter)
 
-        if self.engine_config.hybrid_context_parallel:
+        if self.engine_config.dynamic_context_parallel:
             # split the batch and give the sub-batches to each dp-cp group
             from verl.utils.megatron_utils import dynamic_cp_split_batch
 

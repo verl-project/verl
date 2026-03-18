@@ -41,7 +41,7 @@ use_dist_checkpointing: False
 dist_checkpointing_path: null
 
 # Whether to use hybrid context parallelism
-hybrid_context_parallel: False
+dynamic_context_parallel: False
 
 # Maximum sequence length per DPxCP rank
 max_seqlen_per_dp_cp_rank: null

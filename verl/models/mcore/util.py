@@ -310,7 +310,7 @@ def preprocess_thd_engine(
     if local_cp_size is not None:
         # dynamic CP
         cp_size = local_cp_size
-        cp_group = mpu.get_hybrid_data_context_parallel_groups(group_size=local_cp_size)
+        cp_group = mpu.get_dynamic_data_context_parallel_groups(group_size=local_cp_size)
         cp_rank = torch.distributed.get_rank(group=cp_group)
         extra_packed_args["local_cp_size"] = local_cp_size
         extra_packed_args["cp_group"] = cp_group
