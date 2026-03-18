@@ -237,19 +237,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
-        self._is_lazy_offload_param = False
-        self._is_lazy_offload_optimizer = False
+        self._is_optimizer_lazy_offload = False
         if self._is_actor:
             self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
             self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
-            self._is_lazy_offload_param = self.config.actor.fsdp_config.get("param_lazy_offload", False)
-            self._is_lazy_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_lazy_offload", False)
+            self._is_optimizer_lazy_offload = self.config.actor.fsdp_config.get("optimizer_lazy_offload", False)
 
-            if self._is_offload_param and self._is_lazy_offload_param:
-                raise ValueError("param_offload and param_lazy_offload cannot be both True")
+            if self._is_offload_optimizer and self._is_optimizer_lazy_offload:
+                raise ValueError("optimizer_lazy_offload is not supported when optimizer_offload is True")
 
-            if self._is_offload_optimizer and self._is_lazy_offload_optimizer:
-                raise ValueError("optimizer_offload and optimizer_lazy_offload cannot be both True")
 
         elif self._is_ref:
             # TODO: it seems that manual offload is slowly than FSDP offload
@@ -763,7 +759,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         aggressive_empty_cache(force_sync=True)
 
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
-        if self._is_offload_param or self._is_lazy_offload_param:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
@@ -806,7 +802,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
-        if self._is_offload_param or self._is_lazy_offload_param:
+        if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
@@ -921,11 +917,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if fsdp_version(self.actor_module_fsdp) == 1:
                 self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
 
-            if self._is_offload_param or self._is_lazy_offload_param:
+            if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
                 log_gpu_memory_usage("After offload actor model during init", logger=logger)
 
-            if self._is_offload_optimizer or self._is_lazy_offload_optimizer:
+            if self._is_offload_optimizer or self._is_optimizer_lazy_offload:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
                 log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
 
@@ -1009,9 +1005,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):
         assert self._is_actor
-        if self._is_offload_param and not self._is_lazy_offload_param:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        if self._is_offload_optimizer and not self._is_lazy_offload_optimizer:
+        if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
 
         with self.ulysses_sharding_manager:
@@ -1042,10 +1038,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             output = output.to("cpu")
 
-        if self._is_offload_param and not self._is_lazy_offload_param:
+        if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             log_gpu_memory_usage("After offload actor model during update_actor", logger=logger)
-        if self._is_offload_optimizer and not self._is_lazy_offload_optimizer:
+        if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
@@ -1107,7 +1103,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
-        if self._is_offload_param or self._is_lazy_offload_param:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         # Support all hardwares
@@ -1147,7 +1143,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
             self.actor.actor_module._handle.reshard(True)
 
-        if self._is_offload_param or self._is_lazy_offload_param:
+        if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
 
@@ -1194,7 +1190,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # only support save and load ckpt for actor
         assert self._is_actor
 
-        if self._is_offload_param or self._is_lazy_offload_param:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         self.checkpoint_manager.save_checkpoint(
@@ -1233,7 +1229,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 log_only_rank_0=True,
             )
 
-        if self._is_offload_param or self._is_lazy_offload_param:
+        if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -1245,23 +1241,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # No checkpoint to load, just offload the model and optimizer to CPU
         if local_path is None:
-            if self._is_offload_param or self._is_lazy_offload_param:
+            if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            if self._is_offload_optimizer or self._is_lazy_offload_optimizer:
+            if self._is_offload_optimizer or self._is_optimizer_lazy_offload:
                 offload_fsdp_optimizer(self.actor_optimizer)
             return
 
-        if self._is_offload_param or self._is_lazy_offload_param:
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         self.checkpoint_manager.load_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
         )
 
-        if self._is_offload_param or self._is_lazy_offload_param:
+        if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
-        if self._is_offload_optimizer or self._is_lazy_offload_optimizer:
+        if self._is_offload_optimizer or self._is_optimizer_lazy_offload:
             offload_fsdp_optimizer(self.actor_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

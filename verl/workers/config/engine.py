@@ -243,6 +243,7 @@ class FSDPEngineConfig(EngineConfig):
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "fsdp"
+    optimizer_lazy_offload: bool = False
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self):
