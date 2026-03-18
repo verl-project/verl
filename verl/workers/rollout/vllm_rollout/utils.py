@@ -229,7 +229,7 @@ class vLLMColocateWorkerExtension:
                 logger.info("Loading standard weights (non-FP8, async)")
                 # TODO: Since the gmm operator of vllm_ascend requires calling wakeup() to correctly transpose the weights for the qwen3-moe model, 
                 # we are temporarily bypassing this by explicitly calling the wakeup() function, and a more elegant solution will be implemented later.
-                if is_npu_available and self.model_runner.model_config.hf_config.model_type == "qwen3_moe":
+                if os.getenv("ENABLE_FULLY_ASYNC") is not None and is_npu_available and self.model_runner.model_config.hf_config.model_type == "qwen3_moe":
                     self.sleep()
                     self.wake_up(tags=["kv_cache", "weights"])
                     patch_vllm_moe_model_weight_loader(self.model_runner.model)
