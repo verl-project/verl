@@ -39,7 +39,10 @@ def register_with_atropos(atropos_url: str, config, vllm_endpoints: List[str]) -
         "wandb_group": cfg.get("trainer", {}).get("project_name", "verl_atropos"),
         "wandb_project": cfg.get("trainer", {}).get("project_name", "verl_atropos"),
         "batch_size": cfg.get("data", {}).get("train_batch_size", 32),
-        "max_token_len": cfg.get("data", {}).get("max_prompt_length", 512) + cfg.get("data", {}).get("max_response_length", 1024),
+        "max_token_len": (
+            cfg.get("data", {}).get("max_prompt_length", 512)
+            + cfg.get("data", {}).get("max_response_length", 1024)
+        ),
         "checkpoint_dir": cfg.get("trainer", {}).get("default_hdfs_dir", "/tmp/verl_atropos"),
         "save_checkpoint_interval": cfg.get("trainer", {}).get("save_freq", 20),
         "starting_step": 0,
@@ -91,7 +94,12 @@ def scored_data_to_dataproto(batch: dict):
                 "token_level_scores": scores,
                 "token_level_advantages": advantages,
             })
-        return {"input_ids": tokens, "attention_mask": masks, "token_level_scores": scores, "token_level_advantages": advantages}
+        return {
+            "input_ids": tokens,
+            "attention_mask": masks,
+            "token_level_scores": scores,
+            "token_level_advantages": advantages,
+        }
     else:
         tokens = np.array(batch["tokens"], dtype=np.int64)
         masks = np.array(batch["masks"], dtype=np.int64)
@@ -101,4 +109,9 @@ def scored_data_to_dataproto(batch: dict):
         advantages = (scores - mean) / std
         if batch.get("advantages") is not None:
             advantages = np.array(batch["advantages"], dtype=np.float32)
-        return {"input_ids": tokens, "attention_mask": masks, "token_level_scores": scores, "token_level_advantages": advantages}
+        return {
+            "input_ids": tokens,
+            "attention_mask": masks,
+            "token_level_scores": scores,
+            "token_level_advantages": advantages,
+        }
