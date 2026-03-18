@@ -709,7 +709,15 @@ class AgentLoopWorker:
             response_ids=output.response_ids,
             validate=validate,
         )
-        teacher_logprobs, teacher_ids = teacher_result.get("response_logprobs"), teacher_result.get("response_ids")
+        if teacher_result:
+            teacher_ids, teacher_logprobs = teacher_result["response_ids"], teacher_result["response_logprobs"]
+            pad_size = self.config.actor_rollout_ref.rollout.response_length - teacher_ids.shape[1]
+            padding = (0, 0, 0, pad_size)  # pad the sequence dimension
+            teacher_ids = F.pad(teacher_ids, padding, value=self.tokenizer.pad_token_id)
+            teacher_logprobs = F.pad(teacher_logprobs, padding, value=0.0)
+        else:
+            teacher_ids, teacher_logprobs = None, None
+
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
             response_ids=response_output["input_ids"],
@@ -861,11 +869,7 @@ class AgentLoopWorker:
             response_ids = torch.tensor(response_ids_ls).unsqueeze(0)
             response_logprobs = torch.tensor(response_logprobs_ls).unsqueeze(0)
 
-            pad_size = self.config.actor_rollout_ref.rollout.response_length - response_ids.shape[1]
-            padding = (0, 0, 0, pad_size)  # pad the sequence dimension
-            response_ids_padded = F.pad(response_ids, padding, value=self.tokenizer.pad_token_id)
-            response_logprobs_padded = F.pad(response_logprobs, padding, value=0.0)
-            return {"response_ids": response_ids_padded, "response_logprobs": response_logprobs_padded}
+            return {"response_ids": response_ids, "response_logprobs": response_logprobs}
         else:
             return {}
 
