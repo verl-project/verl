@@ -310,6 +310,10 @@ class TRTLLMHttpServer:
         """Unblock new generation requests after abort_all_requests()."""
         await self.llm.resume_generation()
 
+    async def clear_kv_cache(self):
+        """Invalidate prefix cache entries after weight update."""
+        await self.llm.collective_rpc("reset_prefix_cache")
+
     async def wake_up(self):
         from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
 
