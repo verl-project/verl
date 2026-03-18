@@ -99,7 +99,7 @@ class MLP(nn.Module):
 
         # Identify the output layer by matching out_features to the requested output_dim
         # (works because only the last Linear has out_features == self.output_dim in this MLP)
-        is_output_layer = (m.out_features == self.output_dim)
+        is_output_layer = m.out_features == self.output_dim
 
         if is_output_layer:
             init.uniform_(m.weight, -self.output_init_scale, self.output_init_scale)

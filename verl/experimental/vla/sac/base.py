@@ -38,7 +38,7 @@ class SupportSACTraining:
 
     def sac_init(self):
         raise NotImplementedError("Subclasses must implement sac_init method.")
-    
+
     def sac_get_critic_parameters(self) -> list[torch.nn.Parameter]:
         """Get the parameters of the critic head for optimization.
 

@@ -69,9 +69,7 @@ class SACReplayPool:
             return
 
         if len(task_ids) != batch.batch_size[0]:
-            raise ValueError(
-                f"task_ids length ({len(task_ids)}) must match batch size ({batch.batch_size[0]})."
-            )
+            raise ValueError(f"task_ids length ({len(task_ids)}) must match batch size ({batch.batch_size[0]}).")
 
         valid_mask = batch["valids"].to(torch.bool)
         valid_indices = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
@@ -160,10 +158,7 @@ class SACReplayPool:
             sampled_batch = sampled_parts[0]
         else:
             sampled_batch = TensorDict(
-                {
-                    key: torch.cat([part[key] for part in sampled_parts], dim=0)
-                    for key in sampled_parts[0].keys()
-                },
+                {key: torch.cat([part[key] for part in sampled_parts], dim=0) for key in sampled_parts[0].keys()},
                 batch_size=[sampled_count],
                 device=self.sample_device,
             )
@@ -240,7 +235,8 @@ class SACReplayPool:
 
         torch.save(payload, filepath)
         logger.info(
-            f"[Rank {self.rank}] Task replay pool saved to {filepath} with size={self.size}, tasks={len(self.task_pools)}"
+            f"[Rank {self.rank}] Task replay pool saved to {filepath} with \
+               size={self.size}, tasks={len(self.task_pools)}"
         )
 
     def load(self, directory: str):
@@ -270,7 +266,8 @@ class SACReplayPool:
 
         self._refresh_global_stats()
         logger.info(
-            f"[Rank {self.rank}] Task replay pool loaded from {filepath} with size={self.size}, tasks={len(self.task_pools)}"
+            f"[Rank {self.rank}] Task replay pool loaded from {filepath} with \
+              size={self.size}, tasks={len(self.task_pools)}"
         )
         return True
 
@@ -375,10 +372,7 @@ class SACReplayPool:
         pad_size = target_batch_size - current_size
         pad_idx = torch.zeros(pad_size, dtype=torch.long, device=self.sample_device)
         padded_batch = TensorDict(
-            {
-                key: torch.cat([value, value.index_select(0, pad_idx)], dim=0)
-                for key, value in sampled_batch.items()
-            },
+            {key: torch.cat([value, value.index_select(0, pad_idx)], dim=0) for key, value in sampled_batch.items()},
             batch_size=[target_batch_size],
             device=self.sample_device,
         )
@@ -419,10 +413,7 @@ class SACReplayPool:
             return sampled_parts[0]
 
         return TensorDict(
-            {
-                key: torch.cat([part[key] for part in sampled_parts], dim=0)
-                for key in sampled_parts[0].keys()
-            },
+            {key: torch.cat([part[key] for part in sampled_parts], dim=0) for key in sampled_parts[0].keys()},
             batch_size=[batch_size],
             device=self.sample_device,
         )
@@ -447,9 +438,7 @@ class SACReplayPool:
     def _allocate_counts_across_tasks(self, task_sizes: dict[str, int], total_count: int) -> dict[str, int]:
         total_available = sum(task_sizes.values())
         if total_count > total_available:
-            raise ValueError(
-                f"Requested {total_count} samples but only {total_available} available across task pools."
-            )
+            raise ValueError(f"Requested {total_count} samples but only {total_available} available across task pools.")
 
         allocation: dict[str, int] = {task_id: 0 for task_id in task_sizes}
         task_order = list(task_sizes.keys())

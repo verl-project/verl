@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import uuid
-from collections import defaultdict
 from pprint import pprint
 from typing import Optional
 
@@ -24,26 +22,25 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo.metric_utils import process_validation_metrics
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import Role
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
 
+
 def compute_avg_positive_trajectory_length(batch: DataProto) -> float:
-    dones = batch.batch["dones"].bool()                    # (B, T)
-    positive_mask = batch.batch["positive_sample_mask"]    # (B, T)
-    positive_traj = positive_mask.any(dim=1)               # (B,)
+    dones = batch.batch["dones"].bool()  # (B, T)
+    positive_mask = batch.batch["positive_sample_mask"]  # (B, T)
+    positive_traj = positive_mask.any(dim=1)  # (B,)
 
     if positive_traj.sum() == 0:
         return 0.0
 
     B, T = dones.shape
-    done_idx = torch.argmax(dones.int(), dim=1)            # (B,)
+    done_idx = torch.argmax(dones.int(), dim=1)  # (B,)
     traj_lens = done_idx + 1
 
     return traj_lens[positive_traj].float().mean().item()
@@ -203,21 +200,21 @@ class RobRaySACTrainer(RayPPOTrainer):
         reset_prompts = DataProto.from_dict(non_tensors={"state_ids": initial_state_ids, "task_ids": task_ids})
         reset_future = self.env_wg.reset_envs_to_state_ids(reset_prompts)
         return reset_future
-    
-    def _next_rollout_batch(self, train_iter) -> Optional[DataProto]: 
+
+    def _next_rollout_batch(self, train_iter) -> Optional[DataProto]:
         try:
             batch_dict = next(train_iter)
         except StopIteration:
             return None
 
         rollout_batch = DataProto.from_single_dict(batch_dict)
-        rollout_batch = self._get_gen_batch(rollout_batch)        
+        rollout_batch = self._get_gen_batch(rollout_batch)
         rollout_batch = rollout_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
         rollout_batch.meta_info["task_ids"] = np.asarray(rollout_batch.non_tensor_batch["task_ids"], dtype=np.int64)
         rollout_batch.meta_info["global_steps"] = self.global_steps
 
         return rollout_batch
-    
+
     def _prepare_actor_input(self, rollout_output: Optional[DataProto]) -> DataProto:
         # dones
         complete_any = rollout_output.batch["complete"].any(dim=-1)  # (B, T)
@@ -233,10 +230,10 @@ class RobRaySACTrainer(RayPPOTrainer):
         rollout_output.batch["rewards"][:, -2] = -1.0
 
         # mark samples in successful trajectories as positive samples
-        rollout_output.batch["positive_sample_mask"] = sparse_rewards.any(dim=-1).unsqueeze(-1).repeat_interleave(
-            rollout_output.batch["action"].shape[1], dim=-1
+        rollout_output.batch["positive_sample_mask"] = (
+            sparse_rewards.any(dim=-1).unsqueeze(-1).repeat_interleave(rollout_output.batch["action"].shape[1], dim=-1)
         )
-        
+
         # task id
         rollout_output.batch["task_ids"] = torch.as_tensor(
             rollout_output.meta_info["task_ids"],
@@ -245,14 +242,17 @@ class RobRaySACTrainer(RayPPOTrainer):
         )
 
         rollout_output.meta_info["global_token_num"] = [0]
-        rollout_output.meta_info["data/trajectory_avg_reward"] = sparse_rewards.any(dim=-1).mean(dtype=torch.float32).item()
-        rollout_output.meta_info["data/avg_positive_trajectory_length"] = compute_avg_positive_trajectory_length(rollout_output)
+        rollout_output.meta_info["data/trajectory_avg_reward"] = (
+            sparse_rewards.any(dim=-1).mean(dtype=torch.float32).item()
+        )
+        rollout_output.meta_info["data/avg_positive_trajectory_length"] = compute_avg_positive_trajectory_length(
+            rollout_output
+        )
 
         rollout_output = add_transition_prefixes(rollout_output)
         rollout_output = flatten_trajectories(rollout_output)
 
         return rollout_output
-
 
     def fit(self):
         from omegaconf import OmegaConf
@@ -282,7 +282,9 @@ class RobRaySACTrainer(RayPPOTrainer):
                 return
 
         # add tqdm
-        self.total_training_steps = self.config.trainer.total_epochs * len(self.train_dataloader) * self.config.trainer.rollout_interval
+        self.total_training_steps = (
+            self.config.trainer.total_epochs * len(self.train_dataloader) * self.config.trainer.rollout_interval
+        )
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         self.global_steps += 1
@@ -303,14 +305,14 @@ class RobRaySACTrainer(RayPPOTrainer):
             next_rollout_batch = self._next_rollout_batch(train_iter)
             if next_rollout_batch is None:
                 continue
-            
+
             print(f"Starting epoch {epoch}, dataloader length: {len(self.train_dataloader)}")
-            while next_rollout_batch is not None: 
+            while next_rollout_batch is not None:
                 for training_step in range(self.config.trainer.rollout_interval):
                     metrics = {}
                     timing_raw = {}
 
-                    # === start profiling === 
+                    # === start profiling ===
                     with marked_timer("start_profile", timing_raw):
                         self._start_profiling(
                             not prev_step_profile and curr_step_profile
@@ -324,7 +326,11 @@ class RobRaySACTrainer(RayPPOTrainer):
                         # enable at start and early warmup, disable during critic warmup phase
                         warm_rollout_steps = int(getattr(self.config.actor_rollout_ref.actor, "warm_rollout_steps", 0))
                         need_rollout = (training_step == 0) or self.global_steps < warm_rollout_steps
-                        if warm_rollout_steps <= self.global_steps < self.config.actor_rollout_ref.actor.critic_warmup_steps:
+                        if (
+                            warm_rollout_steps
+                            <= self.global_steps
+                            < self.config.actor_rollout_ref.actor.critic_warmup_steps
+                        ):
                             need_rollout = False
                         if need_rollout and next_rollout_batch is None:
                             break
@@ -338,7 +344,9 @@ class RobRaySACTrainer(RayPPOTrainer):
                                 if reset_future is None:
                                     reset_future = self._reset_envs(rollout_batch)
                                 with marked_timer("generate", timing_raw, color="red"):
-                                    rollout_output = self.async_rollout_manager.generate_sequences(rollout_batch, reset_future)
+                                    rollout_output = self.async_rollout_manager.generate_sequences(
+                                        rollout_batch, reset_future
+                                    )
 
                                 # prepare for next batch's env reset
                                 next_rollout_batch = self._next_rollout_batch(train_iter)
@@ -347,17 +355,21 @@ class RobRaySACTrainer(RayPPOTrainer):
 
                                 # compute rewards and other metrics, and prepare for actor update
                                 actor_input = self._prepare_actor_input(rollout_output)
-                        
+
                         # === update policy ===
                         with marked_timer("update_actor", timing_raw, color="red"):
                             if actor_input is not None:
                                 actor_output = self.actor_rollout_wg.update_actor(actor_input)
                             else:
-                                actor_output = self.actor_rollout_wg.update_actor(DataProto(meta_info={
-                                    "empty_batch": True, 
-                                    "global_steps": self.global_steps, 
-                                    "global_token_num": [0]
-                                }))
+                                actor_output = self.actor_rollout_wg.update_actor(
+                                    DataProto(
+                                        meta_info={
+                                            "empty_batch": True,
+                                            "global_steps": self.global_steps,
+                                            "global_token_num": [0],
+                                        }
+                                    )
+                                )
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
@@ -375,7 +387,7 @@ class RobRaySACTrainer(RayPPOTrainer):
                         metrics.update(val_metrics)
                         reset_future = None
 
-                    # === save checkpoint ===          
+                    # === save checkpoint ===
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                     esi_close_to_expiration = should_save_ckpt_esi(
                         max_steps_duration=self.max_steps_duration,
@@ -389,14 +401,16 @@ class RobRaySACTrainer(RayPPOTrainer):
                     # 3. The current step number is a multiple of the save frequency.
                     # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
                     if self.config.trainer.save_freq > 0 and (
-                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
+                        is_last_step
+                        or self.global_steps % self.config.trainer.save_freq == 0
+                        or esi_close_to_expiration
                     ):
                         if esi_close_to_expiration:
                             print("Force saving checkpoint: ESI instance expiration approaching.")
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
 
-                    # === stop profiling === 
+                    # === stop profiling ===
                     with marked_timer("stop_profile", timing_raw):
                         next_step_profile = (
                             self.global_steps + 1 in self.config.global_profiler.steps
@@ -423,8 +437,10 @@ class RobRaySACTrainer(RayPPOTrainer):
                     )
                     metrics.update({f"timing_s/{name}": value for name, value in timing_raw.items()})
                     if actor_input is not None:
-                        metrics["data/trajectory_avg_reward"] = actor_input.meta_info["data/trajectory_avg_reward"] 
-                        metrics["data/avg_positive_trajectory_length"] = actor_input.meta_info["data/avg_positive_trajectory_length"] 
+                        metrics["data/trajectory_avg_reward"] = actor_input.meta_info["data/trajectory_avg_reward"]
+                        metrics["data/avg_positive_trajectory_length"] = actor_input.meta_info[
+                            "data/avg_positive_trajectory_length"
+                        ]
                     logger.log(data=metrics, step=self.global_steps)
 
                     progress_bar.update(1)
@@ -443,7 +459,6 @@ class RobRaySACTrainer(RayPPOTrainer):
                         progress_bar.close()
                         return
 
-
     def _validate(self) -> dict:
         metric_list = []
         val_iter = iter(self.val_dataloader)
@@ -460,14 +475,18 @@ class RobRaySACTrainer(RayPPOTrainer):
             test_batch = self._next_rollout_batch(val_iter)
             actor_input = self._prepare_actor_input(rollout_output)
 
-            metric_list.append({
-                "val/avg_reward": actor_input.meta_info["data/trajectory_avg_reward"],
-                "val/avg_positive_trajectory_length": actor_input.meta_info["data/avg_positive_trajectory_length"],
-            })
+            metric_list.append(
+                {
+                    "val/avg_reward": actor_input.meta_info["data/trajectory_avg_reward"],
+                    "val/avg_positive_trajectory_length": actor_input.meta_info["data/avg_positive_trajectory_length"],
+                }
+            )
 
         metrics = {}
         if metric_list:
             metrics["val/avg_reward"] = np.mean([m["val/avg_reward"] for m in metric_list])
-            metrics["val/avg_positive_trajectory_length"] = np.mean([m["val/avg_positive_trajectory_length"] for m in metric_list])
+            metrics["val/avg_positive_trajectory_length"] = np.mean(
+                [m["val/avg_positive_trajectory_length"] for m in metric_list]
+            )
 
         return metrics

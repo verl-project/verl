@@ -21,7 +21,6 @@ import torch
 from onnx_ir import Tensor
 from torch import nn
 from torch.distributed.fsdp import register_fsdp_forward_method
-from torch.distributions import Normal
 from transformers import PreTrainedModel
 from typing_extensions import override
 
@@ -236,9 +235,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         # Output transforms
         from .policy.libero_policy import LiberoPi0Output
 
-        pi0_output = LiberoPi0Output.from_model_output({
-            "full_action": self.action_unnormalize_transform(pred_action)
-        })
+        pi0_output = LiberoPi0Output.from_model_output({"full_action": self.action_unnormalize_transform(pred_action)})
         s = {
             "states": state,
             "images": torch.stack(images, dim=1),
@@ -280,7 +277,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         vision_tower = self.model.paligemma_with_expert.vision_tower
         vision_tower.requires_grad_(False)
         vision_tower.eval()
-    
+
     def bc_loss(
         self,
         state_features: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
@@ -551,7 +548,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         q_values = self._multi_heads_value(critic_head, critic_input, method=method)
 
         return q_values
-    
+
     @override
     def sac_get_critic_parameters(self) -> list[torch.nn.Parameter]:
         critic_head_params = [p for head in self.critic_heads for p in head.parameters()]
@@ -560,11 +557,7 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
 
     @override
     def sac_get_named_actor_parameters(self) -> list[tuple[str, torch.nn.Parameter]]:
-        named_parameters = [
-            (name, param)
-            for name, param in self.model.named_parameters()
-            if param.requires_grad
-        ]
+        named_parameters = [(name, param) for name, param in self.model.named_parameters() if param.requires_grad]
         return named_parameters
 
     @override
