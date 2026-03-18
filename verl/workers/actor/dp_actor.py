@@ -30,7 +30,14 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
-from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
+from verl.utils.fsdp_utils import (
+    FSDPModule,
+    fsdp2_clip_grad_norm_,
+    load_fsdp_model_to_gpu,
+    load_fsdp_optimizer,
+    offload_fsdp_model_to_cpu,
+    offload_fsdp_optimizer,
+)
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -109,6 +116,9 @@ class DataParallelPPOActor(BasePPOActor):
                 "calculate_sum_pi_squared is not supported with "
                 f"{self.use_fused_kernels=} or {self.use_prefix_grouper=} for now."
             )
+
+        self._is_lazy_offload_param = self.config.fsdp_config.get("param_lazy_offload", False)
+        self._is_lazy_offload_optimizer = self.config.fsdp_config.get("optimizer_lazy_offload", False)
 
     def _forward_micro_batch(
         self, micro_batch: dict[str, torch.Tensor], temperature: float, calculate_entropy: bool = False
@@ -389,6 +399,10 @@ class DataParallelPPOActor(BasePPOActor):
             return outputs
 
     def _optimizer_step(self):
+        # load optim
+        if self._is_lazy_offload_optimizer and self.actor_optimizer is not None:
+            load_fsdp_optimizer(self.actor_optimizer)
+
         assert self.config.grad_clip is not None
         if self.scaler is not None:
             self.scaler.unscale_(self.actor_optimizer)
@@ -419,6 +433,9 @@ class DataParallelPPOActor(BasePPOActor):
 
             invalidate_all_scales(self.actor_module)
 
+        # offload optim
+        if self._is_lazy_offload_optimizer:
+            offload_fsdp_optimizer(self.actor_optimizer)
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -555,6 +572,10 @@ class DataParallelPPOActor(BasePPOActor):
         }
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
+                # load param
+                if self._is_lazy_offload_param:
+                    load_fsdp_model_to_gpu(self.actor_module)
+
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
@@ -668,6 +689,10 @@ class DataParallelPPOActor(BasePPOActor):
 
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
+
+                # offload param
+                if self._is_lazy_offload_param:
+                    offload_fsdp_model_to_cpu(self.actor_module)
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
