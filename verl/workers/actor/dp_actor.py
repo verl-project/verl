@@ -377,6 +377,8 @@ class DataParallelPPOActor(BasePPOActor):
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
             select_keys.append("rollout_is_weights")
+        if "observation_mask" in data.batch.keys():
+            select_keys.append("observation_mask")
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -482,6 +484,18 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    # World model SFT loss on observation tokens
+                    wm_coeff = getattr(self.config, "world_model_coeff", 0.0)
+                    obs_mask = model_inputs.get("observation_mask", None)
+                    if wm_coeff > 0 and obs_mask is not None:
+                        obs_mask = obs_mask.to(bool)
+                        if obs_mask.sum() > 0:
+                            from verl.utils.torch_functional import masked_mean
+                            wm_loss = -masked_mean(log_prob, obs_mask)
+                            policy_loss = policy_loss + wm_coeff * wm_loss
+                            micro_batch_metrics["actor/wm_sft_loss"] = wm_loss.detach().item()
+                            micro_batch_metrics["actor/wm_num_obs_tokens"] = obs_mask.sum().item()
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
