@@ -163,19 +163,12 @@ def vllm_ascend_v013_matmul_and_reduce_wrapper(fn):
 if is_torch_npu_available(check_device=False):
     VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2 = bool(int(os.getenv("VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2", "1")))
     if VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2:
+        from packaging import version
         import vllm
 
-        if vllm.__version__ == "0.11.0":
-            from vllm_ascend.ops.linear_op import SequenceRowParallelOp
-            from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-            NPUModelRunner._select_moe_comm_method = vllm_ascend_v011_select_moe_comm_method_wrapper(
-                NPUModelRunner._select_moe_comm_method
-            )
-            SequenceRowParallelOp.matmul_and_reduce = vllm_ascend_v011_matmul_and_reduce_wrapper(
-                SequenceRowParallelOp.matmul_and_reduce
-            )
-        elif vllm.__version__ == "0.13.0":
+        _VLLM_VERSION = version.parse(vllm.__version__)
+        # only support vllm 0.13 and 0.11 now.
+        if _VLLM_VERSION >= version.parse("0.13.0"):
             from vllm_ascend import ascend_forward_context
             from vllm_ascend.ops.linear_op import SequenceRowParallelOp
 
@@ -183,5 +176,15 @@ if is_torch_npu_available(check_device=False):
                 ascend_forward_context.select_moe_comm_method
             )
             SequenceRowParallelOp.matmul_and_reduce = vllm_ascend_v013_matmul_and_reduce_wrapper(
+                SequenceRowParallelOp.matmul_and_reduce
+            )
+        elif _VLLM_VERSION >= version.parse("0.11.0"):
+            from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+            from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+            NPUModelRunner._select_moe_comm_method = vllm_ascend_v011_select_moe_comm_method_wrapper(
+                NPUModelRunner._select_moe_comm_method
+            )
+            SequenceRowParallelOp.matmul_and_reduce = vllm_ascend_v011_matmul_and_reduce_wrapper(
                 SequenceRowParallelOp.matmul_and_reduce
             )
