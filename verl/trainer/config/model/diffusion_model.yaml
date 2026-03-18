@@ -9,9 +9,6 @@ _target_: verl.workers.config.DiffusersModelConfig
 # path to the huggingface model
 path: ~/models/Qwen/Qwen-Image
 
-# config to the huggingface config. In case it is not the same as path
-# hf_config_path: null
-
 # path to the huggingface tokenizer. In case it is not the same as path
 tokenizer_path: null
 
@@ -27,20 +24,23 @@ custom_chat_template: null
 # whether to use external libs for the model
 external_lib: null
 
-# override hf config
-# override_config: {}
-
-# whether to enable gradient checkpointing. Only valid when we use hf model definition
+# whether to enable gradient checkpointing.
 enable_gradient_checkpointing: True
 
 # Set to positive value to enable LoRA (e.g., 32)
-lora_rank: 0
+lora_rank: 32
 
 # LoRA scaling factor
-lora_alpha: 16
+lora_alpha: 64
+
+# Lora initialization method.
+lora_init_weights: gaussian
 
 # Target modules for LoRA adaptation
 target_modules: all-linear
+
+# Target parameters for LoRA adaptation
+target_parameters: null
 
 # Exclude modules from LoRA adaptation
 exclude_modules: null
@@ -48,25 +48,17 @@ exclude_modules: null
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 
-# height (image/video)
+# image/video height
 height: ${oc.select:actor_rollout_ref.rollout.height,512}
 
-# width (image/video)
+# image/video width
 width: ${oc.select:actor_rollout_ref.rollout.width,512}
 
 # inference steps
 num_inference_steps: ${oc.select:actor_rollout_ref.rollout.num_inference_steps,10}
 
 # guidance scale for classifier-free guidance
-guidance_scale:  ${oc.select:actor_rollout_ref.rollout.guidance_scale,1.0}
+guidance_scale:  ${oc.select:actor_rollout_ref.rollout.guidance_scale,4.5}
 
-# Model-specific SDE params (algorithm-specific features)
-extra_configs:
-
-  noise_level: 0.7
-
-  sde_type: sde
-
-  sde_window_size: null
-
-  sde_window_range: [0, 5]
+# extra configs for algorithm specific features.
+extra_configs: {}
