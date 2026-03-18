@@ -135,9 +135,9 @@ class WorkerGroup:
 
         if resource_pool is not None:
             # handle the case when WorkGroup is attached to an existing one
-            self._procecss_dispatch_config = resource_pool()
+            self._process_dispatch_config = resource_pool()
         else:
-            self._procecss_dispatch_config = None
+            self._process_dispatch_config = None
 
         self._workers = []
         self._worker_names = []
