@@ -27,9 +27,21 @@ def patch_provider_for_qat(provider):
     AutoMapping.register_module_type("QuantRowParallelLinear", "row")
 
 
-def apply_qat_to_modules(modules, qat_mode, ignore_patterns=None):
+def _get_qat_field(qat_config, key, default=None):
+    """Extract a field from qat_config, supporting both dict and object-style access."""
+    if isinstance(qat_config, dict):
+        return qat_config.get(key, default)
+    return getattr(qat_config, key, default)
+
+
+def apply_qat_to_modules(modules, qat_config):
     """Apply ModelOpt fake quantization to a list of Megatron module chunks."""
     from verl.utils.modelopt.quantize import apply_qat
+
+    qat_mode = _get_qat_field(qat_config, "mode", "w4a16")
+    ignore_patterns = _get_qat_field(qat_config, "ignore_patterns", None)
+    if ignore_patterns is not None:
+        ignore_patterns = list(ignore_patterns)
 
     for i in range(len(modules)):
         modules[i] = apply_qat(modules[i], qat_mode, ignore_patterns=ignore_patterns)

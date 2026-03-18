@@ -243,6 +243,16 @@ class MegatronWorker(Worker):
         self.hf_config = hf_config
         self.tf_config = tf_config
 
+        actor_config = getattr(self.config, "actor", None)
+        qat_enabled = actor_config.get("qat", {}).get("enable", False) if actor_config is not None else False
+        if qat_enabled:
+            if not self.bridge or self.vanilla_bridge:
+                raise ValueError(
+                    "QAT (Quantization-Aware Training) requires Megatron bridge. "
+                    "Please ensure 'actor.megatron.use_mbridge' is set to True and "
+                    "'actor.megatron.vanilla_mbridge' is set to False in your configuration."
+                )
+
         # Get PEFT config from model.lora if specified
         from verl.workers.config.megatron_peft import get_peft_cls
 
@@ -453,9 +463,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if qat_config.get("enable", False):
                 from verl.utils.modelopt import apply_qat_to_modules
 
-                qat_mode = qat_config.get("mode", "w4a16")
-                ignore_patterns = qat_config.get("ignore_patterns", None)
-                actor_module = apply_qat_to_modules(actor_module, qat_mode, ignore_patterns=ignore_patterns)
+                actor_module = apply_qat_to_modules(actor_module, qat_config)
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model
@@ -731,12 +739,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             )
         qat_config = self.config.actor.get("qat", {})
         if qat_config.get("enable", False):
-            if not self.bridge or self.vanilla_bridge:
-                raise ValueError(
-                    "QAT (Quantization-Aware Training) requires Megatron bridge. "
-                    "Please ensure 'actor.megatron.use_mbridge' is set to True and "
-                    "'actor.megatron.vanilla_mbridge' is set to False in your configuration."
-                )
             from verl.utils.modelopt import export_qat_weights
 
             qat_mode = qat_config.get("mode", "w4a16")

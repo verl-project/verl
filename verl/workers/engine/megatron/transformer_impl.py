@@ -101,6 +101,11 @@ class MegatronEngine(BaseEngine):
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
         if self._qat_enabled:
+            if self.engine_config.vanilla_mbridge:
+                raise ValueError(
+                    "QAT requires non-vanilla Megatron bridge. "
+                    "Please set 'use_mbridge=True' and 'vanilla_mbridge=False'."
+                )
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
 
         # Router replay configuration for MoE models
@@ -330,9 +335,7 @@ class MegatronEngine(BaseEngine):
         if self._qat_enabled and not self.engine_config.forward_only:
             from verl.utils.modelopt import apply_qat_to_modules
 
-            qat_mode = self._qat_config.mode
-            ignore_patterns = list(self._qat_config.ignore_patterns) if self._qat_config.ignore_patterns else None
-            self.module = apply_qat_to_modules(self.module, qat_mode, ignore_patterns=ignore_patterns)
+            self.module = apply_qat_to_modules(self.module, self._qat_config)
 
         self._maybe_enable_fused_kernels()
 
@@ -676,12 +679,6 @@ class MegatronEngine(BaseEngine):
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled:
-            if self.vanilla_bridge:
-                raise ValueError(
-                    "QAT requires non-vanilla Megatron bridge. "
-                    "Please set 'use_mbridge=True' and 'vanilla_mbridge=False'."
-                )
-
             from verl.utils.modelopt import export_qat_weights
 
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
