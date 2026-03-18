@@ -19,6 +19,11 @@ from verl.utils.modelopt.megatron_qat_patch import (
     apply_qat_patch,
     revert_qat_patch,
 )
+from verl.utils.modelopt.qat_utils import (
+    apply_qat_to_modules,
+    export_qat_weights,
+    patch_provider_for_qat,
+)
 from verl.utils.modelopt.qat_weight_exporter import QATWeightExporter
 from verl.utils.modelopt.quantize import (
     apply_qat,
@@ -39,4 +44,7 @@ __all__ = [
     "modelopt_process_weights_after_loading",
     "apply_qat_patch",
     "revert_qat_patch",
+    "patch_provider_for_qat",
+    "apply_qat_to_modules",
+    "export_qat_weights",
 ]

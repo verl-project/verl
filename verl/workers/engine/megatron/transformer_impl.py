@@ -186,19 +186,9 @@ class MegatronEngine(BaseEngine):
 
             # Apply QAT: set quantization layer spec and patch Megatron-Bridge
             if self._qat_enabled:
-                from megatron.bridge.models.gpt_provider import quantization_layer_spec
+                from verl.utils.modelopt import patch_provider_for_qat
 
-                provider.transformer_layer_spec = quantization_layer_spec
-
-                from verl.utils.modelopt.megatron_qat_patch import apply_qat_patch
-
-                apply_qat_patch()
-
-                from megatron.bridge.models.conversion.param_mapping import AutoMapping
-
-                AutoMapping.register_module_type("QuantColumnParallelLinear", "column")
-                AutoMapping.register_module_type("QuantRowParallelLinear", "row")
-                logger.info("QAT patches applied for Megatron-Bridge")
+                patch_provider_for_qat(provider)
 
             # Apply transformer config overrides
             for key, value in override_transformer_config.items():
@@ -337,15 +327,12 @@ class MegatronEngine(BaseEngine):
 
         self.module = self._build_megatron_module()
 
-        # Apply QAT (ModelOpt fake quantization) after model construction, before optimizer
         if self._qat_enabled and not self.engine_config.forward_only:
-            from verl.utils.modelopt import apply_qat as modelopt_apply_qat
+            from verl.utils.modelopt import apply_qat_to_modules
 
             qat_mode = self._qat_config.mode
             ignore_patterns = list(self._qat_config.ignore_patterns) if self._qat_config.ignore_patterns else None
-            for i in range(len(self.module)):
-                self.module[i] = modelopt_apply_qat(self.module[i], qat_mode, ignore_patterns=ignore_patterns)
-            logger.info(f"QAT applied to {len(self.module)} module chunk(s): mode={qat_mode}")
+            self.module = apply_qat_to_modules(self.module, qat_mode, ignore_patterns=ignore_patterns)
 
         self._maybe_enable_fused_kernels()
 
@@ -695,11 +682,9 @@ class MegatronEngine(BaseEngine):
                     "Please set 'use_mbridge=True' and 'vanilla_mbridge=False'."
                 )
 
-            from verl.utils.modelopt import QATWeightExporter
+            from verl.utils.modelopt import export_qat_weights
 
-            qat_mode = self._qat_config.mode
-            qat_weight_exporter = QATWeightExporter(self.module, qat_mode, bridge=self.bridge)
-            per_tensor_param = qat_weight_exporter.process_weights_iterator(per_tensor_param)
+            per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
 
         return per_tensor_param, peft_config
 
