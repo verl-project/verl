@@ -379,6 +379,11 @@ class PI0ForActionPrediction(PreTrainedModel, SupportSACTraining):
         requires_grad: bool,
         return_log_prob: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """
+        add noise to the action sampling process using Flow-SDE method.
+        see https://arxiv.org/abs/2510.25889
+        """
+
         prefix_features, states = state_features
         prefix_embs, prefix_pad_masks, _ = prefix_features
         batch_size = prefix_embs.shape[0]
