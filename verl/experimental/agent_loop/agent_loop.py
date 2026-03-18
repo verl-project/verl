@@ -853,8 +853,8 @@ class AgentLoopWorker:
                 video_data=videos,
             )
             response_ids_ls, response_logprobs_ls = (
-                teacher_output.extra_fields["response_ids"],
-                teacher_output.extra_fields["response_logprobs"],
+                teacher_output.extra_fields["prompt_ids"],
+                teacher_output.extra_fields["prompt_logprobs"],
             )
             # Shapes: # 1, S, (1 or K), where S is the response length, K is either 1 or topk depending on
             # the distillation loss settings.

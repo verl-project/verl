@@ -19,9 +19,10 @@ import platform
 import signal
 import threading
 from types import MethodType
-from typing import Any, Literal, get_args
+from typing import Any, Literal, Optional, get_args
 
 import torch
+from vllm.outputs import RequestOutput
 
 from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
@@ -292,3 +293,37 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
             # Use json.dumps for dict to ensure valid JSON format
             cli_args.append(json.dumps(v) if isinstance(v, dict) else str(v))
     return cli_args
+
+
+def extract_prompt_logprobs(
+    output: RequestOutput, num_prompt_logprobs: Optional[int], logprobs_to_extract: int, result_dict: dict[str, list]
+):
+    """Extract prompt log probabilities from generation output."""
+    # For prefill-only requests, logprobs_to_extract may be passed as a
+    # way to extract onto the part of the prompt corresponding to the response
+    if num_prompt_logprobs is None:
+        return
+    prompt_logprob_dicts = output.prompt_logprobs[-logprobs_to_extract:]
+    prompt_logprobs_ls, prompt_ids_ls = [], []
+    for logprobs_dict in prompt_logprob_dicts:
+        if num_prompt_logprobs == 0:
+            token_id_str = list(logprobs_dict.keys())[0]
+            logprob = logprobs_dict[token_id_str].logprob
+            prompt_logprobs_ls.append([logprob])
+            prompt_ids_ls.append([int(token_id_str)])
+        else:
+            prompt_ids = [None] * num_prompt_logprobs
+            prompt_logprobs = [None] * num_prompt_logprobs
+            # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
+            assert len(logprobs_dict) in [num_prompt_logprobs, num_prompt_logprobs + 1], len(logprobs_dict)
+            for token_id_str, token_logprob in logprobs_dict.items():
+                rank = token_logprob.rank
+                if rank > num_prompt_logprobs:
+                    continue  # the sampled token is not in the top-k
+                logprob = token_logprob.logprob
+                prompt_ids[rank - 1] = int(token_id_str)
+                prompt_logprobs[rank - 1] = logprob
+            prompt_logprobs_ls.append(prompt_logprobs)
+            prompt_ids_ls.append(prompt_ids)
+    result_dict["prompt_ids"] = prompt_ids_ls
+    result_dict["prompt_logprobs"] = prompt_logprobs_ls

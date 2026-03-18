@@ -49,6 +49,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_PATH,
     SuppressSignalInThread,
     build_cli_args_from_config,
+    extract_prompt_logprobs,
     get_vllm_max_lora_rank,
 )
 
@@ -583,37 +584,13 @@ class vLLMHttpServer:
             final_res = output
         assert final_res is not None
 
-        # Extract prompt logprobs
         extra_fields = {"global_steps": self.global_steps}
-        prompt_logprobs = sampling_params.prompt_logprobs
-        if prompt_logprobs is not None:
-            # For prefill-only requests, response_length_for_prompt_logprobs may be passed as a
-            # way to extract onto the part of the prompt corresponding to the response
-            response_logprob_dicts = final_res.prompt_logprobs[-response_length_for_prompt_logprobs:]
-            response_logprobs_ls, response_ids_ls = [], []
-            for logprobs_dict in response_logprob_dicts:
-                if prompt_logprobs == 0:
-                    token_id_str = list(logprobs_dict.keys())[0]
-                    logprob = logprobs_dict[token_id_str].logprob
-                    response_logprobs_ls.append([logprob])
-                    response_ids_ls.append([int(token_id_str)])
-                else:
-                    response_ids = [None] * prompt_logprobs
-                    response_logprobs = [None] * prompt_logprobs
-                    # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
-                    assert len(logprobs_dict) in [prompt_logprobs, prompt_logprobs + 1], len(logprobs_dict)
-                    for token_id_str, token_logprob in logprobs_dict.items():
-                        rank = token_logprob.rank
-                        if rank > prompt_logprobs:
-                            continue  # the sampled token is not in the top-k
-                        logprob = token_logprob.logprob
-                        response_ids[rank - 1] = int(token_id_str)
-                        response_logprobs[rank - 1] = logprob
-                    response_logprobs_ls.append(response_logprobs)
-                    response_ids_ls.append(response_ids)
-            extra_fields["response_ids"] = response_ids_ls
-            extra_fields["response_logprobs"] = response_logprobs_ls
-
+        extract_prompt_logprobs(
+            output=final_res,
+            num_prompt_logprobs=sampling_params.prompt_logprobs,
+            logprobs_to_extract=response_length_for_prompt_logprobs,
+            result_dict=extra_fields,
+        )
         token_ids = final_res.outputs[0].token_ids
         log_probs = None
         if sampling_params.logprobs is not None:
