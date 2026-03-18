@@ -72,7 +72,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm017.dev2"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -148,6 +148,7 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip3 install --upgrade "transformers<5.0"
+          pip3 install cupy-cuda12x==13.6.0
       - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
         run: |
           ROLLOUT_NAME=vllm pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py

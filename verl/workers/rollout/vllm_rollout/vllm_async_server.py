@@ -20,7 +20,6 @@ import os
 from pprint import pprint
 from typing import Any, Callable, Optional
 
-import numpy as np
 import ray
 import vllm.entrypoints.cli.serve
 from packaging import version
@@ -36,14 +35,14 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword
+from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -361,26 +360,25 @@ class vLLMHttpServer:
             }
             args["speculative_config"] = speculative_config
 
-        if self.config.expert_parallel_size > 1:
+        if self.config.data_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
                 "gpus_per_node should be divisible by tensor_model_parallel_size"
             )
             data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
             assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
-                f"num workers ({len(self.workers)}) should be equal to dp_size_local "
+                f"num workers ({len(self.workers)}) should be equal to "
+                f"dp_size_local ({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
             )
-            f"({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
+            dp_args = {
+                "data_parallel_size": self.config.data_parallel_size,
+                "data_parallel_size_local": data_parallel_size_local,
+                "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
+                "data_parallel_address": self._master_address,
+                "data_parallel_rpc_port": self._dp_rpc_port,
+            }
+            args.update(dp_args)
 
-            args.update(
-                {
-                    "enable_expert_parallel": self.config.expert_parallel_size > 1,
-                    "data_parallel_size": self.config.data_parallel_size,
-                    "data_parallel_size_local": data_parallel_size_local,
-                    "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
-                    "data_parallel_address": self._master_address,
-                    "data_parallel_rpc_port": self._dp_rpc_port,
-                }
-            )
+        args.update({"enable_expert_parallel": self.config.expert_parallel_size > 1})
 
         # used for torch.distributed.init_process_group
         if self.nnodes > 1:
@@ -492,6 +490,7 @@ class vLLMHttpServer:
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
+        args.api_server_count = 0
 
         def run_headless_wrapper():
             with SuppressSignalInThread():
@@ -541,7 +540,11 @@ class vLLMHttpServer:
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
             # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            # Cap max_tokens by response_length to ensure tensor alignment,
+            # and by remaining budget to prevent OOM in multi-turn rollouts.
+            max_tokens = min(
+                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
+            )
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
@@ -552,7 +555,7 @@ class vLLMHttpServer:
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
@@ -614,7 +617,7 @@ class vLLMHttpServer:
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
-            extra_info={"global_steps": self.global_steps},
+            extra_fields={"global_steps": self.global_steps},
         )
 
     async def wake_up(self):
@@ -638,7 +641,7 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here
             # lora only update adapter weights, so set sleep level to 1
-            if self.lora_as_adapter:
+            if self.lora_as_adapter or is_npu_available:
                 sleep_level = 1
             else:
                 sleep_level = 2
@@ -846,6 +849,7 @@ class vLLMReplica(RolloutReplica):
                 if not self.is_reward_model
                 else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
             )
+
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
@@ -855,6 +859,11 @@ class vLLMReplica(RolloutReplica):
                     "env_vars": {
                         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                         "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                        # To prevent hanging or crash during synchronization of weights between actor and rollout
+                        # in disaggregated mode. See:
+                        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+                        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+                        "NCCL_CUMEM_ENABLE": "0",
                     }
                 },
                 name=name,
@@ -938,31 +947,3 @@ class vLLMReplica(RolloutReplica):
                 return r
 
         return {"aborted": False, "request_id": request_id, "error": "Request not found on any server"}
-
-
-def _qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
-    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
-    <|image_pad|> and <|video_pad|> token by image_data.
-
-    For example,
-    ```
-    <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
-    =>
-    <|vision_start|><|image_pad|><|vision_end|>
-    ```
-    """
-    if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
-        prompt_ids = np.array(prompt_ids)
-
-        # Create a mask where True indicates elements to keep
-        mask = np.ones(len(prompt_ids), dtype=bool)
-
-        # Find where the array equals the value
-        is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-
-        # Find consecutive duplicates by checking if previous element is also the value
-        mask[1:] &= ~(is_value[1:] & is_value[:-1])
-
-        return prompt_ids[mask].tolist()
-    else:
-        return prompt_ids

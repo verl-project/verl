@@ -309,6 +309,12 @@ class VeOmniEngine(FSDPEngine):
         else:
             return torch.distributed.group.WORLD
 
+    def get_model_parallel_group(self):
+        raise NotImplementedError
+
+    def get_context_parallel_group(self):
+        raise NotImplementedError
+
     def is_mp_src_rank_with_outputs(self):
         """
         Whether the current rank is the first rank in model parallel group that contains model outputs

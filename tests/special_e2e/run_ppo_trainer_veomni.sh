@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+
+SAVE_PATH=tests/utils/ci/profiler_data
+rm -rf "$SAVE_PATH"
+
+CONTENTS=['cuda']
+PROFILE_STEPS=[1]
+PROFILE_RANKS_ALL=False
+PROFILE_RANKS=[0]
+DISCRETE=True
+
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
@@ -49,7 +59,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.name=vllm \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.enforce_eager=True \
@@ -68,4 +77,20 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=1 $@
+    trainer.total_training_steps=1 \
+    actor_rollout_ref.actor.profiler.enable=True \
+    actor_rollout_ref.actor.profiler.all_ranks=$PROFILE_RANKS_ALL \
+    actor_rollout_ref.actor.profiler.ranks=$PROFILE_RANKS \
+    actor_rollout_ref.actor.profiler.tool_config.torch.discrete=$DISCRETE \
+    actor_rollout_ref.actor.profiler.tool_config.torch.contents=$CONTENTS \
+    actor_rollout_ref.ref.profiler.enable=True \
+    actor_rollout_ref.ref.profiler.all_ranks=$PROFILE_RANKS_ALL \
+    actor_rollout_ref.ref.profiler.ranks=$PROFILE_RANKS \
+    actor_rollout_ref.ref.profiler.tool_config.torch.discrete=$DISCRETE \
+    actor_rollout_ref.ref.profiler.tool_config.torch.contents=$CONTENTS \
+    global_profiler.tool=torch \
+    global_profiler.steps=$PROFILE_STEPS \
+    global_profiler.save_path="$SAVE_PATH" $@
+
+python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu"
+rm -rf "$SAVE_PATH"

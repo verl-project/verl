@@ -23,7 +23,7 @@ from transformers.utils import get_json_schema
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop.agent_loop import get_trajectory_info
+from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer, get_trajectory_info
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
@@ -453,3 +453,70 @@ async def test_get_trajectory_info():
     trajectory_info = await get_trajectory_info(step, index, validate=False)
 
     assert trajectory_info == expected_info
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GlobalRequestLoadBalancer unit tests (lightweight, no GPU required)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def ray_for_lb():
+    ray.init(ignore_reinit_error=True)
+    yield
+    ray.shutdown()
+
+
+class TestLoadBalancerRouting:
+    """Least-loaded selection."""
+
+    def test_distributes_across_servers(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2"])
+        servers = [ray.get(lb.acquire_server.remote(request_id=f"r{i}")) for i in range(3)]
+        assert sorted(servers) == ["s0", "s1", "s2"]
+
+    def test_new_requests_route_to_least_loaded(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2"])
+        # Load s0 with 3 inflight requests
+        ray.get(lb.acquire_server.remote(request_id="a"))  # -> s0
+        ray.get(lb.acquire_server.remote(request_id="a"))  # sticky -> s0
+        ray.get(lb.acquire_server.remote(request_id="a"))  # sticky -> s0
+        # Load s1 with 1 inflight request
+        ray.get(lb.acquire_server.remote(request_id="b"))  # -> s1
+        # s2 has 0 inflight, so next new request must go to s2
+        s_new = ray.get(lb.acquire_server.remote(request_id="d"))
+        assert s_new == "s2"
+
+    def test_release_rebalances(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        s0 = ray.get(lb.acquire_server.remote(request_id="r0"))
+        s1 = ray.get(lb.acquire_server.remote(request_id="r1"))
+        assert s0 != s1
+        ray.get(lb.release_server.remote(server_id=s0))
+        ray.get(lb.release_server.remote(server_id=s1))
+        s2 = ray.get(lb.acquire_server.remote(request_id="r2"))
+        s3 = ray.get(lb.acquire_server.remote(request_id="r3"))
+        assert s2 != s3
+
+    def test_release_invalid_server_raises(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        with pytest.raises(ray.exceptions.RayTaskError, match="Invalid server_id") as excinfo:
+            ray.get(lb.release_server.remote(server_id="nonexistent"))
+        assert "Invalid server_id" in str(excinfo.value)
+
+    def test_release_without_inflight_raises(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        with pytest.raises(ray.exceptions.RayTaskError, match="no inflight") as excinfo:
+            ray.get(lb.release_server.remote(server_id="s1"))
+        assert "no inflight" in str(excinfo.value)
+
+
+class TestLoadBalancerStickySession:
+    """Request-level sticky session."""
+
+    def test_same_request_id_same_server(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2", "s3"])
+        s0 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))
+        ray.get(lb.release_server.remote(server_id=s0))
+        s1 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))
+        assert s0 == s1

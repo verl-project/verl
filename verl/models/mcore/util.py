@@ -16,6 +16,7 @@
 import logging
 import math
 import os
+from typing import Optional
 
 import torch
 from megatron.core import parallel_state as mpu
@@ -289,11 +290,9 @@ def postprocess_packed_seqs_for_dict_output(
 
 ### No padding versions for model engine
 ### inputs are nested tensors
-
-
 def preprocess_thd_no_padding(
     input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
-) -> tuple[torch.Tensor, PackedSeqParams]:
+) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
     """
     Preprocess packed sequences
     CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0 gets first and last chunks, GPU1
@@ -341,14 +340,20 @@ def preprocess_thd_no_padding(
     shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
+        position_ids_rmpad = torch.zeros(shape, dtype=torch.long, device=input_ids.device)
         if need_roll:
             saved_roll_dict = {}
+            saved_position_roll_dict = {}
         for i in range(batch_size):
             # Use Python int, so no GPU→CPU sync in the loop
             if cp_size <= 1:
                 seqlen = seqlens_in_batch_cpu[i]
                 start_idx = cu_seqlens_padded_cpu[i]
                 input_ids_rmpad[start_idx : start_idx + seqlen] = input_ids[i]
+                # Build position_ids: 0, 1, 2, ..., seqlen-1 for this sequence
+                position_ids_rmpad[start_idx : start_idx + seqlen] = torch.arange(
+                    seqlen, dtype=torch.long, device=input_ids.device
+                )
                 continue
 
             seqlen_padded_i = seqlens_in_batch_padded_cpu[i]
@@ -374,6 +379,11 @@ def preprocess_thd_no_padding(
                 half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)
             ]
 
+            # Build position_ids for the first chunk
+            position_ids_rmpad[start_idx : start_idx + half_seqlen] = torch.arange(
+                half_seqlen * cp_rank, half_seqlen * (cp_rank + 1), dtype=torch.long, device=input_ids.device
+            )
+
             remain_start = seqlen_padded_i - half_seqlen * (cp_rank + 1)
             remain_end = seqlen_padded_i - half_seqlen * cp_rank
             remain_end = min(remain_end, d.shape[0])
@@ -382,21 +392,33 @@ def preprocess_thd_no_padding(
                 input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[
                     remain_start:remain_end
                 ]
+                # Build position_ids for the remaining chunk
+                position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = torch.arange(
+                    seqlen_padded_i - remain_len, seqlen_padded_i, dtype=torch.long, device=input_ids.device
+                )
 
             if need_roll:
                 # Handle roll for cp_size > 1 case
                 saved_roll_dict[start_idx + half_seqlen - 1] = d[(cp_rank + 1) * half_seqlen]
+                saved_position_roll_dict[start_idx + half_seqlen - 1] = position_ids_rmpad[start_idx + half_seqlen - 1]
                 if remain_len > 0:
                     if remain_end == d.shape[0]:
                         saved_roll_dict[start_idx + half_seqlen + remain_len - 1] = d[0]
+                        saved_position_roll_dict[start_idx + half_seqlen + remain_len - 1] = 0
                     else:
                         saved_roll_dict[start_idx + half_seqlen + remain_len - 1] = d[remain_end]
+                        saved_position_roll_dict[start_idx + half_seqlen + remain_len - 1] = position_ids_rmpad[
+                            start_idx + half_seqlen + remain_len - 1
+                        ]
 
         if need_roll:
             input_ids_rmpad = torch.roll(input_ids_rmpad, shifts=-1, dims=0)
+            position_ids_rmpad = torch.roll(position_ids_rmpad, shifts=-1, dims=0)
             if len(saved_roll_dict) > 0:
                 for k, v in saved_roll_dict.items():
                     input_ids_rmpad[k] = v
+                for k, v in saved_position_roll_dict.items():
+                    position_ids_rmpad[k] = v
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
@@ -408,9 +430,9 @@ def preprocess_thd_no_padding(
         cu_seqlens_kv_padded=cu_seqlens_padded,
     )
     if pre_process:
-        return input_ids_rmpad.unsqueeze(0), packed_seq_params
+        return input_ids_rmpad.unsqueeze(0), packed_seq_params, position_ids_rmpad.unsqueeze(0)
     else:
-        return input_ids, packed_seq_params
+        return input_ids, packed_seq_params, None
 
 
 def postprocess_thd_no_padding(
