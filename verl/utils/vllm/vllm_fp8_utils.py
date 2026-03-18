@@ -537,14 +537,25 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
     if self.moe_quant_config:
         assert self.experts_cls is not None
 
-        self.moe_kernel = make_fp8_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            fp8_backend=self.fp8_backend,
-            experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
-            shared_experts=layer.shared_experts,
-        )
+        vllm_ver = version.parse(vllm.__version__)
+        if vllm_ver >= version.parse("0.16.0"):
+            # vLLM 0.16+: routing_tables/shared_experts added, returns kernel directly
+            self.moe_kernel = make_fp8_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
+        else:
+            # vLLM 0.14/0.15: routing_tables/shared_experts not supported, returns (kernel, use_inplace)
+            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
+            )
 
 
 def apply_vllm_fp8_patches():
