@@ -1869,7 +1869,8 @@ def normalize_gift_kl(
     if debug:
         num_groups = len(id2kl)
         group_sizes = [len(v) for v in id2kl.values()]
-        print(f"[GIFT KL Norm] num_groups={num_groups}, group_sizes={group_sizes[:5]}{'...' if len(group_sizes) > 5 else ''}")
+        print(f"[GIFT KL Norm] num_groups={num_groups}, "
+              f"group_sizes={group_sizes[:5]}{'...' if len(group_sizes) > 5 else ''}")
         if num_groups > 0:
             first_uid = list(id2kl.keys())[0]
             print(f"[GIFT KL Norm] first_group: uid={first_uid}, size={len(id2kl[first_uid])}, "
@@ -1924,7 +1925,8 @@ def compute_policy_loss_gift(
     # Debug: print loss statistics (periodically)
     if should_debug:
         print(f"[GIFT Loss] call={_GIFT_DEBUG_COUNTER}, pg_loss={pg_loss.item():.4f}, "
-              f"kl_mean={kl_div_sum.mean().item():.4f}, kl_norm_mean={kl_div_sum_normalized.mean().item():.4f}, "
+              f"kl_mean={kl_div_sum.mean().item():.4f}, "
+              f"kl_norm_mean={kl_div_sum_normalized.mean().item():.4f}, "
               f"adv_mean={advantage_scalar.mean().item():.4f}")
 
     pg_metrics = {
