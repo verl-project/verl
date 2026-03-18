@@ -38,7 +38,7 @@ Atlas 800T A3
 
 从 Docker 镜像进行安装
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-我们提供了DockerFile进行构建,详见 `dockerfile_build_guidance <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/dockerfile_build_guidance.rst>`_ ，请根据设备自行选择对应构建文件
+我们提供了DockerFile进行构建,详见 `dockerfile_build_guidance <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/dockerfile_build_guidance.rst>`_ ，请根据设备自行选择对应构建文件
 
 从自定义环境安装
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
