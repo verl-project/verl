@@ -114,7 +114,7 @@ torchrun \
     model.enable_gradient_checkpointing=True \
     ${MEGATRON_ENGINE_CONFIG} \
     trainer.test_freq=-1 \
-    trainer.save_freq=500 \
+    trainer.save_freq=-1 \
     trainer.max_ckpt_to_keep=3 \
     trainer.logger="['console']" \
     trainer.project_name="${PROJECT_NAME}" \
