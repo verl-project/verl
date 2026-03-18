@@ -778,7 +778,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
-        print(f"local_cp_size: {local_cp_size}")
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
