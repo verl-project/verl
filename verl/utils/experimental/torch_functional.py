@@ -15,7 +15,13 @@
 from typing import Optional
 
 import torch
-from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
+
+try:
+    from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
+
+    _FLASH_ATTN_CROSS_ENTROPY_AVAILABLE = True
+except ImportError:
+    _FLASH_ATTN_CROSS_ENTROPY_AVAILABLE = False
 
 
 def _fused_linear_for_ppo_fwd(
@@ -31,12 +37,14 @@ def _fused_linear_for_ppo_fwd(
     probs = logits.softmax(dim=-1)
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
 
-    # Reference:
-    # log_probs = logits.log_softmax(dim=-1) # [N, V]
-    # token_log_probs = log_probs.gather(-1, input_ids.unsqueeze(-1)).squeeze(-1) # [N]
-    # log_probs are fp32 here because of fp32 logits
-    per_token_entropy_loss = cross_entropy_loss(logits, input_ids)[0]
-    token_log_probs = -per_token_entropy_loss
+    if _FLASH_ATTN_CROSS_ENTROPY_AVAILABLE:
+        per_token_entropy_loss = cross_entropy_loss(logits, input_ids)[0]
+        token_log_probs = -per_token_entropy_loss
+    else:
+        # Fallback to original PyTorch implementation
+        log_probs = logits.log_softmax(dim=-1)
+        token_log_probs = log_probs.gather(-1, input_ids.unsqueeze(-1)).squeeze(-1)
+
     assert token_log_probs.dtype == torch.float32
     return token_log_probs, entropy.to(orig_dtype)
 
