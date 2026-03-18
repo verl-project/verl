@@ -165,3 +165,7 @@ class WorkerExtension(TrtllmWorkerExtension):
         except Exception as e:
             logger.error("Encountered an error in update_weights")
             raise e
+
+    def reset_prefix_cache(self) -> None:
+        """Invalidate the KV cache prefix reuse state after weight updates."""
+        self.engine.reset_prefix_cache()

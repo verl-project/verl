@@ -19,8 +19,8 @@ Usage:
 
 Environment variables:
     TRTLLM_TEST_MODEL_PATH: full path to model weights
-    TRTLLM_TEST_TP_SIZE: tensor parallel size (default: 1)
-    TRTLLM_TEST_GPUS_PER_NODE: number of GPUs (default: 1)
+    TRTLLM_TEST_TP_SIZE: tensor parallel size (default: 2)
+    TRTLLM_TEST_GPUS_PER_NODE: number of GPUs (default: 2)
 """
 
 import os
@@ -36,8 +36,8 @@ def test_trtllm_abort():
         "/lustre/fsw/coreai_comparch_trtllm/erinh/llm-models/Qwen/Qwen2.5-1.5B-Instruct",
     )
     # MODEL_PATH = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
-    GPUS_PER_NODE = int(os.getenv("TRTLLM_TEST_GPUS_PER_NODE", "1"))
-    TP_SIZE = int(os.getenv("TRTLLM_TEST_TP_SIZE", "1"))
+    GPUS_PER_NODE = int(os.getenv("TRTLLM_TEST_GPUS_PER_NODE", "2"))
+    TP_SIZE = int(os.getenv("TRTLLM_TEST_TP_SIZE", "2"))
     ABORT_DELAY = 0.5  # seconds to wait before aborting
     NUM_PROMPTS = 8
 
@@ -95,7 +95,7 @@ def test_trtllm_abort():
             name_prefix="test_abort",
         )
         pgs = resource_pool.get_placement_groups()
-        bundle_indices = [[0]]
+        bundle_indices = [list(range(TP_SIZE))]
 
         pg_data = placement_group_table(pgs[0])
         node_id = pg_data["bundles_to_node_id"][bundle_indices[0][0]]
@@ -218,6 +218,12 @@ def test_trtllm_abort():
         assert timeout_count == 0, f"No requests should timeout, got {timeout_count}"
         assert aborted_count + completed_count == NUM_PROMPTS, "All requests should finish (aborted or completed)"
         assert abort_time < 1.0, f"Abort should be fast (< 1s), took {abort_time:.2f}s"
+        # At least some requests should have been aborted with partial tokens
+        if aborted_count > 0:
+            partial_token_counts = [len(out.token_ids) for _, _, out in outputs if out and out.stop_reason == "aborted"]
+            assert any(n > 0 for n in partial_token_counts), (
+                f"At least one aborted request should have partial tokens, got counts: {partial_token_counts}"
+            )
         print("Phase 1 assertions PASSED")
 
         # ==================== Phase 2: Resume Test ====================
@@ -258,6 +264,86 @@ def test_trtllm_abort():
                 f"Post-resume request {request_id} was aborted (resume_generation() not working)"
             )
             assert len(output.token_ids) > 0, f"Post-resume request {request_id} returned no tokens"
+
+        # ==================== Phase 3: Partial Rollout Test ====================
+        print("\n" + "=" * 60)
+        print("PHASE 3: Partial Rollout Test")
+        print("=" * 60)
+        print("Re-submitting aborted requests with prompt_ids + partial_token_ids")
+
+        # Collect aborted outputs that have partial tokens to continue from
+        aborted_with_tokens = [
+            (i, request_id, out)
+            for i, request_id, out in outputs
+            if out is not None and out.stop_reason == "aborted" and len(out.token_ids) > 0
+        ]
+        print(f"\n   Found {len(aborted_with_tokens)} aborted requests with partial tokens to continue")
+
+        if aborted_with_tokens:
+            partial_refs = []
+            for i, orig_request_id, partial_output in aborted_with_tokens[:2]:  # test up to 2
+                # Re-submit: prompt_ids + accumulated partial tokens (the partial rollout pattern)
+                continued_prompt_ids = list(all_prompt_ids[i]) + list(partial_output.token_ids)
+                request_id = f"partial_rollout_{i}_{uuid4().hex[:8]}"
+                ref = server.generate.remote(
+                    prompt_ids=continued_prompt_ids,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    image_data=None,
+                )
+                partial_refs.append((i, orig_request_id, partial_output.token_ids, request_id, ref))
+                print(f"      Re-submitted request {i}: {len(partial_output.token_ids)} partial tokens + prompt")
+
+            print("\n   Waiting for partial rollout continuations...")
+            for i, orig_request_id, partial_token_ids, request_id, ref in partial_refs:
+                try:
+                    output = ray.get(ref, timeout=60.0)
+                    total_tokens = len(partial_token_ids) + len(output.token_ids)
+                    print(
+                        f"[{i}] {request_id}: {output.stop_reason} "
+                        f"(+{len(output.token_ids)} new tokens, {total_tokens} total)"
+                    )
+                    assert output is not None, f"Partial rollout continuation {request_id} timed out"
+                    assert output.stop_reason != "aborted", (
+                        f"Partial rollout continuation {request_id} was aborted again"
+                    )
+                    assert len(output.token_ids) > 0, (
+                        f"Partial rollout continuation {request_id} returned no new tokens"
+                    )
+                except ray.exceptions.GetTimeoutError as err:
+                    raise AssertionError(f"Partial rollout continuation {request_id} timed out") from err
+
+            print("Phase 3 assertions PASSED")
+        else:
+            print("   No aborted requests with partial tokens (all completed before abort) — skipping Phase 3")
+            print("   (Try reducing ABORT_DELAY or increasing response_length to force mid-flight aborts)")
+
+        # ==================== Phase 4: clear_kv_cache Test ====================
+        print("\n" + "=" * 60)
+        print("PHASE 4: clear_kv_cache Test")
+        print("=" * 60)
+
+        print("\n   Calling clear_kv_cache...")
+        ray.get(server.clear_kv_cache.remote())
+        print("   clear_kv_cache() returned.")
+
+        print("\n   Submitting 1 request after clear_kv_cache to verify generation still works...")
+        request_id = f"post_clear_{uuid4().hex[:8]}"
+        ref = server.generate.remote(
+            prompt_ids=all_prompt_ids[0],
+            sampling_params=sampling_params,
+            request_id=request_id,
+            image_data=None,
+        )
+        try:
+            output = ray.get(ref, timeout=60.0)
+            print(f"   {request_id}: {output.stop_reason} ({len(output.token_ids)} tokens)")
+            assert output is not None, "Post-clear_kv_cache request timed out"
+            assert output.stop_reason != "aborted", "Post-clear_kv_cache request was unexpectedly aborted"
+            assert len(output.token_ids) > 0, "Post-clear_kv_cache request returned no tokens"
+        except ray.exceptions.GetTimeoutError as err:
+            raise AssertionError("Post-clear_kv_cache request timed out") from err
+        print("Phase 4 assertions PASSED")
 
     finally:
         ray.shutdown()
