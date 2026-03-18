@@ -12,6 +12,9 @@ defaults:
   # load the reference default config, then apply the fields in the current yaml
   - _self_
 
+  # Use diffusion-specific val_kwargs (no top_k/top_p/temperature)
+  - override val_kwargs: diffusion
+
 # Target class for this configuration
 _target_: verl.workers.config.DiffusionRolloutConfig
 
@@ -36,23 +39,4 @@ engine_kwargs:
   # vllm-omni engine config
   vllm_omni: {}
 
-# Sampling parameters used during validation.
-val_kwargs:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.DiffusionSamplingConfig
-
-  # whether to repeat n times for validation
-  n: 1
-
-  # Whether to sample during training rollout. False uses greedy sampling.
-  do_sample: False
-
-  # number of inference steps for diffusion model rollout
-  num_inference_steps: 40
-
-  # noise level for diffusion model rollout
-  noise_level: 0.0
-
-  # random seed for validation
-  seed: 42
+# Sampling parameters used during validation (from val_kwargs/diffusion config group).

@@ -1,6 +1,13 @@
 # Target class for this configuration
 _target_: verl.workers.config.RolloutConfig
 
+# Config group defaults for loading nested configs
+defaults:
+
+  - val_kwargs: sampling
+
+  - _self_
+
 # actor_rollout_ref.rollout.name: hf/vllm/sglang/trtllm. The default value will be removed in the future
 name: ???
 
@@ -136,28 +143,7 @@ engine_kwargs:
   # trtllm engine config
   trtllm: {}
 
-# Sampling parameters used during validation.
-val_kwargs:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.SamplingConfig
-
-  # sampling parameters for validation
-  # Top-k sampling parameter. -1 for vLLM rollout, 0 for HF rollout.
-  top_k: -1
-
-  # Top-p sampling parameter. Default 1.0.
-  top_p: 1.0
-
-  # Sampling temperature for rollout.
-  temperature: 0
-
-  # whether to repeat n times for validation
-  n: 1
-
-  # Whether to sample during training rollout. False uses greedy sampling.
-  do_sample: False
-
+# Sampling parameters used during validation (loaded from val_kwargs config group).
 # Multi-turn interaction config for tools or chat.
 multi_turn:
 

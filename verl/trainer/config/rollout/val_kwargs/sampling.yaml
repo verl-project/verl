@@ -1,0 +1,23 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.SamplingConfig
+
+# Top-k sampling parameter. -1 for vLLM rollout, 0 for HF rollout.
+top_k: -1
+
+# Top-p sampling parameter. Default 1.0.
+top_p: 1.0
+
+# Sampling temperature for rollout.
+temperature: 0
+
+# whether to repeat n times for validation
+n: 1
+
+# Whether to sample during training rollout. False uses greedy sampling.
+do_sample: False
