@@ -679,7 +679,7 @@ class DataParallelPPOActor(BasePPOActor):
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
-                if self._is_optimizer_lazy_offload:
+                if self._is_optimizer_lazy_offload and micro_batches:
                     del log_prob, old_log_prob, advantages, response_mask
                     del pg_loss, policy_loss, loss
                     if entropy is not None:
