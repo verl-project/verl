@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 from dataclasses import dataclass, field
 from unittest.mock import patch
@@ -537,9 +538,11 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
     if self.moe_quant_config:
         assert self.experts_cls is not None
 
-        vllm_ver = version.parse(vllm.__version__)
-        if vllm_ver >= version.parse("0.16.0"):
-            # vLLM 0.16+: routing_tables/shared_experts added, returns kernel directly
+        # Check for the new API by inspecting the function signature, which is more
+        # robust than version string comparison, especially for dev/pre-release versions.
+        sig = inspect.signature(make_fp8_moe_kernel)
+        if "routing_tables" in sig.parameters:
+            # vLLM >= 0.16+: routing_tables/shared_experts added, returns kernel directly
             self.moe_kernel = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
