@@ -16,7 +16,6 @@ the class of WorkerGroup
 """
 
 import logging
-import signal
 import threading
 import time
 from typing import Any, Callable
@@ -110,7 +109,7 @@ def check_workers_alive(workers: list, is_alive: Callable, gap_time: float = 1) 
         gap_time (float):
             Time interval between checks
     """
-    import time
+    import signal
 
     while True:
         for worker in workers:
