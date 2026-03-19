@@ -125,7 +125,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps --force-reinstall .
-          pip3 install mbridge
+          pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
           pip3 install math-verify
       - name: Prepare GSM8K dataset
         run: |

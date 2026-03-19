@@ -35,12 +35,11 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_npu_available
+from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_npu_available, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
-from verl.utils.vllm.patch import patch_vllm013_rotary_emb
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
@@ -63,9 +62,6 @@ if _VLLM_VERSION > version.parse("0.11.0"):
 
     elif _VLLM_VERSION >= version.parse("0.13.0"):
         from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
-        if is_npu_available:
-            # patch VLLM013 NPU: Disable flash_attn in RotaryEmbedding
-            patch_vllm013_rotary_emb()
 
     else:
         get_encoding = None
@@ -242,7 +238,10 @@ class vLLMHttpServer:
 
         quantization = self.config.quantization
         hf_overrides = {}
+        if is_torch_npu_available(check_device=False):
+            from verl.utils.vllm.npu_vllm_patch import check_vllm_ascend_before_server_launch
 
+            check_vllm_ascend_before_server_launch()
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
         if qat_config_dict.get("enable", False):

@@ -133,18 +133,3 @@ def patch_vllm_moe_model_weight_loader(model):
         for name, param in mlp.named_parameters():
             if "w13_weight" in name or "w2_weight" in name:
                 param.weight_loader = experts.weight_loader
-
-def patch_vllm013_rotary_emb():       
-    from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-    def vllm013_npu_rotary_embedding_init_impl(
-            self,
-            enforce_enable: bool = False,
-            is_neox_style: bool = True,
-            enable_fp32_compute: bool = False,
-        ) -> None:
-        super(ApplyRotaryEmb, self).__init__(enforce_enable)
-        self.is_neox_style = is_neox_style
-        self.enable_fp32_compute = enable_fp32_compute
-        self.apply_rotary_emb_flash_attn = None
-        
-    ApplyRotaryEmb.__init__ = vllm013_npu_rotary_embedding_init_impl
