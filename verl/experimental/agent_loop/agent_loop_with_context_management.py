@@ -12,16 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
-import os
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
+from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, AgentLoopMetrics
 from verl.experimental.agent_loop.context_manager import ContextManager, ContextState
-
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class AgentLoopWithContextManagement(AgentLoopBase, ABC):
@@ -29,7 +24,6 @@ class AgentLoopWithContextManagement(AgentLoopBase, ABC):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
         self.context_manager: Optional[ContextManager] = None
 
@@ -39,36 +33,42 @@ class AgentLoopWithContextManagement(AgentLoopBase, ABC):
     async def create_initial_context(self, **kwargs) -> ContextState:
         messages = list(kwargs["raw_prompt"])
         multi_modal_data = await self.process_vision_info(messages)
-        return ContextState(messages=messages, multi_modal_data=multi_modal_data)
+        return ContextState(
+            messages=messages,
+            multi_modal_data=multi_modal_data,
+            metrics=AgentLoopMetrics(),
+        )
 
-    async def check_and_compress_context(self, state: ContextState) -> ContextState:
+    async def check_and_compress_context(self, state: ContextState) -> tuple[ContextState, bool]:
         if self.context_manager is None:
-            return state
+            return state, False
         return await self.context_manager.check_and_compress(state)
 
     def build_output(
         self,
         *,
         state: ContextState,
-        prompt_ids: list[int],
-        response_ids: list[int],
-        response_mask: list[int],
-        metrics: dict[str, Any],
-        response_logprobs: Optional[list[float]] = None,
-        routed_experts: Optional[Any] = None,
-        num_turns: int = 0,
         extra_fields: Optional[dict[str, Any]] = None,
     ) -> AgentLoopOutput:
+        response_length = len(state.response_mask)
+        if response_length == 0:
+            prompt_ids = list(state.trajectory_ids)
+            response_ids = []
+        else:
+            prompt_ids = state.trajectory_ids[:-response_length]
+            response_ids = state.trajectory_ids[-response_length:]
+
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
-            response_mask=response_mask[: self.response_length],
-            response_logprobs=response_logprobs[: self.response_length] if response_logprobs else None,
-            routed_experts=routed_experts,
+            response_mask=state.response_mask[: self.response_length],
+            response_logprobs=state.response_logprobs[: self.response_length] if state.response_logprobs else None,
+            routed_experts=state.routed_experts,
             multi_modal_data=state.multi_modal_data or None,
-            num_turns=num_turns,
-            metrics=metrics,
-            extra_fields=dict(state.metadata),
+            reward_score=state.reward_score,
+            num_turns=state.num_turns,
+            metrics=state.metrics,
+            extra_fields=dict(state.extra_fields),
         )
         if extra_fields:
             output.extra_fields.update(extra_fields)
