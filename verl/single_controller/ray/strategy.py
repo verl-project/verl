@@ -72,7 +72,9 @@ class BlockStrategy(StrategyInterface):
     def preorder(self, num):
         if self.node.is_leaf():
             return num
-        child_array = sorted(self.node.children, key=lambda x: x.strategy.total_nodes, reverse=False)
+        child_array = sorted(
+            self.node.children, key=lambda x: x.strategy.total_nodes // self.block_size * self.block_size, reverse=False
+        )
         total = num
         for child in child_array:
             size = child.strategy.total_nodes // self.block_size * self.block_size
