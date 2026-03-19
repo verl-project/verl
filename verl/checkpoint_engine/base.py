@@ -24,7 +24,8 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
-from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout import BaseRollout, RolloutReplica
+from verl.workers.rollout.base import get_rollout_class_from_config
 
 
 class TensorMeta(TypedDict):
@@ -272,7 +273,7 @@ class CheckpointEngineWorker(Worker):
         self.extra_rollout_args = args
         self.extra_rollout_kwargs = kwargs
         if self.server_adapter is None:
-            self.server_adapter = get_rollout_class(self.rollout_config.name, self.rollout_config.mode)(
+            self.server_adapter = get_rollout_class_from_config(self.rollout_config)(
                 *self.extra_rollout_args,
                 config=self.rollout_config,
                 model_config=self.model_config,

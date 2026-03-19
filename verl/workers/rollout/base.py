@@ -102,3 +102,20 @@ def get_rollout_class(rollout_name: str, mode: str = "async") -> type[BaseRollou
     module_name, class_name = fqdn.rsplit(".", 1)
     rollout_module = importlib.import_module(module_name)
     return getattr(rollout_module, class_name)
+
+
+def get_rollout_class_from_config(rollout_config: RolloutConfig | dict) -> type[BaseRollout]:
+    """Resolve rollout class from full rollout config.
+
+    This helper keeps the original registry behavior for normal paths while allowing
+    decoupled-spec SGLang to use a dedicated ServerAdapter without changing `rollout.name`.
+    """
+
+    config = omega_conf_to_dataclass(rollout_config, dataclass_type=RolloutConfig)
+    if config.name == "sglang" and config.enable_decoupled_spec:
+        module_name, class_name = (
+            "verl.workers.rollout.decoupled_spec_rollout.server_adapter.DecoupledSGLangServerAdapter"
+        ).rsplit(".", 1)
+        rollout_module = importlib.import_module(module_name)
+        return getattr(rollout_module, class_name)
+    return get_rollout_class(config.name, config.mode)

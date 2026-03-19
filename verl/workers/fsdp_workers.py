@@ -89,7 +89,7 @@ from verl.utils.ray_utils import get_event_loop
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.config.optimizer import build_optimizer
-from verl.workers.rollout import get_rollout_class
+from verl.workers.rollout.base import get_rollout_class_from_config
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 logger = logging.getLogger(__file__)
@@ -719,7 +719,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 4. build rollout model
         log_gpu_memory_usage(f"Before building {self.config.rollout.name} rollout", logger=logger)
-        self.rollout = get_rollout_class(rollout_config.name, rollout_config.mode)(
+        self.rollout = get_rollout_class_from_config(rollout_config)(
             config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
         )
         log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=logger)

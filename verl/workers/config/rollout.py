@@ -29,6 +29,7 @@ __all__ = [
     "TraceConfig",
     "ServerConfig",
     "PrometheusConfig",
+    "DraftConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
 ]
@@ -118,6 +119,13 @@ class PrometheusConfig(BaseConfig):
     file: str = "/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"
     # Specify served_model_name to avoid displaying overly long model paths in Grafana
     served_model_name: Optional[str] = None
+
+
+@dataclass
+class DraftConfig(BaseConfig):
+    tensor_model_parallel_size: int = 1
+    ngpus: int = 0
+    model_path: Optional[str] = None
 
 
 @dataclass
@@ -221,6 +229,10 @@ class RolloutConfig(BaseConfig):
 
     enable_prefix_caching: bool = True
 
+    enable_decoupled_spec: bool = False
+    num_speculative_steps: int = 0
+    draft: DraftConfig = field(default_factory=DraftConfig)
+
     load_format: str = "dummy"
 
     layered_summon: bool = False
@@ -290,4 +302,22 @@ class RolloutConfig(BaseConfig):
             if self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
+                )
+
+        if self.enable_decoupled_spec:
+            if self.name != "sglang":
+                raise ValueError("decoupled speculation currently only supports rollout.name='sglang'")
+            if self.num_speculative_steps <= 0:
+                raise ValueError("num_speculative_steps must be > 0 when enable_decoupled_spec=True")
+            if self.draft.ngpus <= 0:
+                raise ValueError("draft.ngpus must be > 0 when enable_decoupled_spec=True")
+            if self.draft.tensor_model_parallel_size <= 0:
+                raise ValueError(
+                    "draft.tensor_model_parallel_size must be > 0 when enable_decoupled_spec=True"
+                )
+            if not self.draft.model_path:
+                raise ValueError("draft.model_path must be set when enable_decoupled_spec=True")
+            if self.draft.ngpus % self.draft.tensor_model_parallel_size != 0:
+                raise ValueError(
+                    "draft.ngpus must be divisible by draft.tensor_model_parallel_size when enable_decoupled_spec=True"
                 )

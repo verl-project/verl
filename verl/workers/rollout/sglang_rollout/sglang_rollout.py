@@ -128,6 +128,8 @@ class ServerAdapter(BaseRollout):
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
         self.local_rank = self.rollout_rank % local_world_size
+        self.server_actor_name = f"sglang_server_{self.replica_rank}_{self.node_rank}"
+        self.is_leader_rank = self.local_rank == 0
 
     async def _init_server_adapter(self):
         if self._engine is not None:
@@ -149,7 +151,7 @@ class ServerAdapter(BaseRollout):
             return
 
         # Lazy init http server adapter because http server is launched after hybrid engine.
-        self.server_actor = ray.get_actor(f"sglang_server_{self.replica_rank}_{self.node_rank}")
+        self.server_actor = ray.get_actor(self.server_actor_name)
         server_address, server_port = await self.server_actor.get_server_address.remote()
         logger.debug(
             f"replica_rank={self.replica_rank} node_rank={self.node_rank}, "

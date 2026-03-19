@@ -40,7 +40,7 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.workers.config import ActorConfig, HFModelConfig, MtpConfig, RolloutConfig, TrainingWorkerConfig
-from verl.workers.rollout.base import BaseRollout, get_rollout_class
+from verl.workers.rollout.base import BaseRollout, get_rollout_class_from_config
 from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
@@ -559,7 +559,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # 3.2 initialize rollout engine
-            rollout_cls: type[BaseRollout] = get_rollout_class(rollout_config.name, rollout_config.mode)
+            rollout_cls: type[BaseRollout] = get_rollout_class_from_config(rollout_config)
             self.rollout = rollout_cls(
                 config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
             )

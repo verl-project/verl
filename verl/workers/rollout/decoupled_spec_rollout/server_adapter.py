@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+import logging
+import os
+from typing import Generator
+
+import ray
+import torch
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+
+from verl.utils.net_utils import is_valid_ipv6_address
+from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.rollout.base import BaseRollout
+from verl.workers.rollout.decoupled_spec_rollout.layout import DecoupledSpecRole, resolve_server_adapter_layout
+from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
+from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+class DecoupledSGLangServerAdapter(BaseRollout):
+    """Dedicated server adapter for decoupled-spec SGLang rollout.
+
+    It resolves verify/draft ownership from the decoupled-spec layout instead of assuming
+    all hybrid workers belong to the verifier rollout mesh.
+    """
+
+    def __init__(
+        self,
+        config: RolloutConfig,
+        model_config: HFModelConfig,
+        device_mesh: DeviceMesh,
+        replica_rank: int = -1,
+    ):
+        if config.get("quantization", None) == "fp8":
+            import sglang
+            from packaging import version
+
+            assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
+                "sglang>=0.5.5 is required for FP8 quantization"
+            )
+            fp8_block_quant_kwargs = {
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "quant_method": "fp8",
+                "weight_block_size": [128, 128],
+            }
+            model_config.hf_config.quantization_config = dict(fp8_block_quant_kwargs)
+
+        super().__init__(config, model_config, device_mesh)
+        self._engine: AsyncHttpServerAdapter = None
+
+        rank = int(os.environ["RANK"])
+        local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+        world_size = int(os.environ["WORLD_SIZE"])
+
+        adapter_layout = resolve_server_adapter_layout(
+            self.config,
+            global_rank=rank,
+            local_world_size=local_world_size,
+            world_size=world_size,
+        )
+        if adapter_layout is None:
+            raise RuntimeError("DecoupledSGLangServerAdapter requires enable_decoupled_spec=True")
+
+        self.decoupled_spec_role = adapter_layout.role
+        self.replica_rank = adapter_layout.replica_rank if replica_rank == -1 else replica_rank
+        self.rollout_rank = adapter_layout.rollout_rank
+        self.node_rank = adapter_layout.node_rank
+        self.local_rank = adapter_layout.local_rank
+        self.server_actor_name = adapter_layout.server_actor_name
+        self.is_leader_rank = self.local_rank == 0 and self.decoupled_spec_role != DecoupledSpecRole.DRAFT
+
+    async def _init_server_adapter(self):
+        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
+            return
+        if self._engine is not None:
+            return
+
+        if self.device_mesh is None:
+            assert torch.distributed.is_initialized(), "torch distributed must be initialized"
+            infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+            infer_pp = self.config.pipeline_model_parallel_size
+            infer_world_size = infer_tp * infer_pp
+            dp = torch.distributed.get_world_size() // infer_world_size
+            self.device_mesh = init_device_mesh(
+                "cpu", mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+            )
+
+        if self.device_mesh["infer_tp"].get_local_rank() != 0:
+            return
+
+        self.server_actor = ray.get_actor(self.server_actor_name)
+        server_address, server_port = await self.server_actor.get_server_address.remote()
+        logger.debug(
+            f"replica_rank={self.replica_rank} node_rank={self.node_rank}, "
+            f"server address: {server_address}, port: {server_port}"
+        )
+        host = f"[{server_address}]" if is_valid_ipv6_address(server_address) else server_address
+        self._engine = AsyncHttpServerAdapter(
+            model_path=self.model_config.local_path,
+            host=host,
+            port=server_port,
+            launch_server=False,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
+    async def resume(self, tags: list[str]):
+        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
+            return
+        await self._init_server_adapter()
+        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+            await self._engine.resume_memory_occupation(tags=tags)
+
+    async def release(self):
+        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
+            return
+        await self._init_server_adapter()
+        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+            await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
+
+    async def update_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+    ):
+        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
+            return
+
+        from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
+
+        await self._init_server_adapter()
+
+        update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+        if self.config.get("quantization", None) == "fp8":
+            from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
+
+            logger.info("Convert bf16 weights to fp8 format before loading")
+            fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+            weights = fp8_quantizer_helper.quant_weights_by_name(
+                weights,
+                dtype=self.model_config.hf_config.dtype,
+            )
+
+        async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+            await sgl_update_weights(
+                engine=self._engine,
+                params_batch=params_batch,
+                device_mesh_key="infer_tp",
+                device_mesh=self.device_mesh,
+            )
+
+        if self.device_mesh["infer_tp"].get_local_rank() == 0:
+            await self._engine.flush_cache()
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)

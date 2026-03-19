@@ -79,6 +79,27 @@ enable_chunked_prefill: True
 # Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
 enable_prefix_caching: True
 
+# Whether to enable decoupled speculation between verifier and drafter.
+enable_decoupled_spec: False
+
+# Number of speculative steps the drafter should run ahead of verifier.
+num_speculative_steps: 0
+
+# Draft model configuration. Draft DP/PP is intentionally unsupported in the first stage.
+draft:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.DraftConfig
+
+  # TP size for the draft model.
+  tensor_model_parallel_size: 1
+
+  # Total number of GPUs reserved for draft replicas.
+  ngpus: 0
+
+  # HuggingFace path of the draft model.
+  model_path: null
+
 # logprobs mode for rollout logprobs
 logprobs_mode: processed_logprobs
 

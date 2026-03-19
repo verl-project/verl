@@ -933,6 +933,66 @@ class AgentLoopManager:
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
+    def _is_decoupled_spec_enabled(self) -> bool:
+        return self.rollout_config.name == "sglang" and bool(self.rollout_config.get("enable_decoupled_spec", False))
+
+    async def _initialize_decoupled_spec_llm_servers(self, world_size: int):
+        from verl.workers.rollout.decoupled_spec_rollout.layout import (
+            build_decoupled_spec_layout,
+            build_draft_model_config,
+            build_draft_rollout_config,
+        )
+        from verl.workers.rollout.decoupled_spec_rollout.replica import DraftSGLangReplica, VerifySGLangReplica
+
+        if self.worker_group is None:
+            raise NotImplementedError("decoupled speculation currently only supports hybrid_engine rollout")
+
+        self.decoupled_spec_layout = build_decoupled_spec_layout(self.rollout_config, world_size=world_size)
+        draft_rollout_config = build_draft_rollout_config(self.rollout_config)
+        draft_model_config = build_draft_model_config(self.model_config, self.rollout_config.draft.model_path)
+
+        self.draft_rollout_replicas = [
+            DraftSGLangReplica(
+                replica_rank=assignment.replica_rank,
+                config=draft_rollout_config,
+                model_config=draft_model_config,
+                gpus_per_node=self.rollout_config.n_gpus_per_node,
+            )
+            for assignment in self.decoupled_spec_layout.draft_assignments
+        ]
+        await asyncio.gather(
+            *[
+                replica.init_hybrid_with_workers(
+                    [self.worker_group.workers[worker_idx] for worker_idx in assignment.worker_indices]
+                )
+                for replica, assignment in zip(
+                    self.draft_rollout_replicas, self.decoupled_spec_layout.draft_assignments, strict=True
+                )
+            ]
+        )
+        draft_server_endpoints = [replica.as_endpoint() for replica in self.draft_rollout_replicas]
+
+        self.rollout_replicas = [
+            VerifySGLangReplica(
+                replica_rank=assignment.replica_rank,
+                config=self.rollout_config,
+                model_config=self.model_config,
+                gpus_per_node=self.rollout_config.n_gpus_per_node,
+                draft_server_endpoints=draft_server_endpoints,
+            )
+            for assignment in self.decoupled_spec_layout.verify_assignments
+        ]
+        await asyncio.gather(
+            *[
+                replica.init_hybrid_with_workers(
+                    [self.worker_group.workers[worker_idx] for worker_idx in assignment.worker_indices]
+                )
+                for replica, assignment in zip(
+                    self.rollout_replicas, self.decoupled_spec_layout.verify_assignments, strict=True
+                )
+            ]
+        )
+
     @classmethod
     @auto_await
     async def create(
@@ -955,11 +1015,24 @@ class AgentLoopManager:
             * self.rollout_config.data_parallel_size
             * self.rollout_config.pipeline_model_parallel_size
         )
+        
         world_size = (
-            self.worker_group.world_size
-            if self.worker_group
-            else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
+            self.worker_group.world_size if self.worker_group else 
+            self.rollout_config.n_gpus_per_node 
+            * self.rollout_config.nnodes
         )
+
+        if self._is_decoupled_spec_enabled():
+            await self._initialize_decoupled_spec_llm_servers(world_size)
+            self.server_handles = [server._server_handle for server in self.rollout_replicas]
+            self.server_addresses = [server._server_address for server in self.rollout_replicas]
+            print(f"AgentLoopManager: {self.server_addresses}")
+            if self.rollout_config.prometheus.enable:
+                if self.rollout_config.disable_log_stats:
+                    raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
+                update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
+            return
+
         num_replicas = world_size // rollout_world_size
 
         self.rollout_replicas = [

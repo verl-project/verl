@@ -82,6 +82,8 @@ class SGLangHttpServer:
         nnodes: int,
         cuda_visible_devices: str,
         base_gpu_id: int,
+        server_role: Optional[str] = None,
+        draft_server_endpoints: Optional[list[Any]] = None,
     ):
         print(f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, {nnodes=}, {cuda_visible_devices=}")
         os.environ[visible_devices_keyword] = cuda_visible_devices
@@ -104,6 +106,9 @@ class SGLangHttpServer:
         self.node_rank = node_rank
         self.nnodes = nnodes
         self.base_gpu_id = base_gpu_id
+        self.server_role = server_role
+        self.draft_server_endpoints = list(draft_server_endpoints or [])
+        self.draft_proxy_runtime = None
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
 
@@ -253,12 +258,25 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
+        launch_components = {}
+        if self.config.enable_decoupled_spec:
+            from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.apply_patch import (
+                get_sglang_launch_components,
+            )
+
+            launch_components = get_sglang_launch_components(self.server_role)
         if version.parse(sglang.__version__) >= version.parse("0.5.7"):
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args,
-                init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
-                run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
-                run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
+                init_tokenizer_manager_func=launch_components.get(
+                    "init_tokenizer_manager_func", sglang.srt.entrypoints.engine.init_tokenizer_manager
+                ),
+                run_scheduler_process_func=launch_components.get(
+                    "run_scheduler_process_func", sglang.srt.entrypoints.engine.run_scheduler_process
+                ),
+                run_detokenizer_process_func=launch_components.get(
+                    "run_detokenizer_process_func", sglang.srt.entrypoints.engine.run_detokenizer_process
+                ),
             )
         else:
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
@@ -282,6 +300,15 @@ class SGLangHttpServer:
         app.server_args = server_args
         app.warmup_thread_kwargs = {"server_args": server_args}
         app.warmup_thread_args = (server_args, None, None)
+
+        if self.config.enable_decoupled_spec and self.server_role == "verify":
+            from verl.workers.rollout.decoupled_spec_rollout.draft_proxy import launch_draftproxy_subprocess
+
+            self.draft_proxy_runtime = launch_draftproxy_subprocess(
+                verify_replica_rank=self.replica_rank,
+                num_speculative_steps=self.config.num_speculative_steps,
+                draft_endpoints=self.draft_server_endpoints,
+            )
 
         # Manually add Prometheus middleware before starting server
         # This ensures /metrics endpoint is available immediately
