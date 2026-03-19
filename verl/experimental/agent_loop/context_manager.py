@@ -55,7 +55,12 @@ class ContextManager(ABC):
 
 
 class SlidingWindowContextManager(ContextManager):
-    """Rule-based compressor to keep the last N tool responses/observations when having M of them."""
+    """Rule-based sliding-window compressor, following the structure of Figure 3 
+    in paper: https://arxiv.org/pdf/2510.08276
+
+    Keeps the last N tool responses/observations when M have accumulated, where
+    tool_window_size = M and slide_size = M - N in paper.
+    """
 
     def __init__(
         self,
@@ -82,16 +87,29 @@ class SlidingWindowContextManager(ContextManager):
         self.tool_response_pattern = re.compile(tool_response_pattern, re.DOTALL)
 
     async def should_compress(self, state: ContextState) -> bool:
-        observation_count = self._count_remaining_observations(state)
+        """Return True only when the number of remaining observations reaches the threshold M."""
+        response_length = len(state.response_mask)
+        if response_length == 0:
+            return False
+        response_ids = state.trajectory_ids[-response_length:]
+        response_text = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+
+        observation_count = 0
+        for _, body, _ in self.tool_response_pattern.findall(response_text):
+            # Only consider the observations that haven't been compressed or replaced
+            if body.strip() != self.replacing_text:
+                observation_count += 1
         return observation_count >= self.compress_when_m_observations
 
     async def compress(self, state: ContextState) -> ContextState:
+        """Remove earlier observations and keep only the last N observations."""
         response_length = len(state.response_mask)
 
         # 'response_length' won't be zero as it has been checked by should_compress()
         prompt_ids = state.trajectory_ids[:-response_length]
         response_ids = state.trajectory_ids[-response_length:]
             
+        # Compress both trajectory_ids and messages, and they should be aligned.
         compressed_response_ids, removed_num_obs_from_ids = self._compress_token_ids(response_ids)
         compressed_messages, removed_num_obs_from_messages = self._compress_messages(state.messages)
         
@@ -100,7 +118,7 @@ class SlidingWindowContextManager(ContextManager):
                 "_compress_token_ids and _compress_messages must remove the same number of observations."
             )
         if removed_num_obs_from_ids == 0:
-            return state
+            raise ValueError("SlidingWindowContextManager.compress removed zero observations unexpectedly.")
 
         # Reconstruct the context state
         compressed_trajectory_ids = prompt_ids + compressed_response_ids
@@ -119,21 +137,6 @@ class SlidingWindowContextManager(ContextManager):
             metrics=state.metrics.model_copy(deep=True),
             extra_fields=dict(state.extra_fields),
         )
-
-    def _count_remaining_observations(self, state: ContextState) -> int:
-        response_length = len(state.response_mask)
-        if response_length == 0:
-            return 0
-        response_ids = state.trajectory_ids[-response_length:]
-        response_text = self.tokenizer.decode(response_ids, skip_special_tokens=False)
-
-        count = 0
-        for _, body, _ in self.tool_response_pattern.findall(response_text):
-            # Skip those tool responses that have been compressed/replaced already.
-            if body.strip() != self.replacing_text:
-                count += 1
-
-        return count
 
     def _compress_messages(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
         """Compress earlier observations in messages through message struct and keep the last N unchanged."""
@@ -182,27 +185,98 @@ class SlidingWindowContextManager(ContextManager):
 
 
 class SummarizerContextManager(ContextManager):
-    """Skeleton for model-based summarization compression."""
+    """Model-based summarization compressor, following the structure of Figure 1 in 
+    paper: https://arxiv.org/pdf/2510.06727
+    
+    Models are doing the summarization by itself and start the next trajectory from 
+    the initial token_ids of prompt_ids + summarization_ids.
+    """
 
     def __init__(
         self,
-        summary_prompt: Optional[str] = None,
-        summary_model: Optional[str] = None,
+        summary_pattern: str = r"(<summary>)(.*?)(</summary>)",
+        *,
+        tokenizer: Any,
     ):
-        self.summary_prompt = summary_prompt
-        self.summary_model = summary_model
+        if tokenizer is None:
+            raise ValueError("tokenizer must be provided for SummarizerContextManager.")
+
+        self.tokenizer = tokenizer
+        self.summary_pattern = re.compile(summary_pattern, re.DOTALL)
 
     async def should_compress(self, state: ContextState) -> bool:
-        raise NotImplementedError("SummarizerContextManager.should_compress is recipe-specific.")
+        """Return True only when a model-generated summary exists in the current generated 
+        response of this trajectory. 
+        
+        NOTE: Previous summarization from the preceding run should not be considered.
+        """
+        response_length = len(state.response_mask)
+        if response_length == 0:
+            return False
+        response_ids = state.trajectory_ids[-response_length:]
+        # IMPORTANT: should only consider if there is a summarization in current generation, otherwise
+        # may get into a infinite loop as previous summarization may continuously trigger the compression.
+        generated_response_ids = [
+            token_id for token_id, token_mask in zip(response_ids, state.response_mask) if token_mask == 1
+        ]
+        response_text = self.tokenizer.decode(generated_response_ids, skip_special_tokens=False)
+        return self.summary_pattern.search(response_text) is not None
 
     async def compress(self, state: ContextState) -> ContextState:
-        raise NotImplementedError("SummarizerContextManager.compress is recipe-specific.")
+        """Keep the last summarization only, prepended with original prompts."""
+        response_length = len(state.response_mask)
+
+        # 'response_length' won't be zero as it has been checked by should_compress()
+        prompt_ids = state.trajectory_ids[:-response_length]
+        response_ids = state.trajectory_ids[-response_length:]
+        generated_response_ids = [
+            token_id for token_id, token_mask in zip(response_ids, state.response_mask) if token_mask == 1
+        ]
+        response_text = self.tokenizer.decode(generated_response_ids, skip_special_tokens=False)
+
+        summary_match = None
+        # Use the last summarization
+        for match in self.summary_pattern.finditer(response_text):
+            summary_match = match
+        if summary_match is None:
+            raise ValueError("SummarizerContextManager.compress expected a <summary> block but found none.")
+
+        summary_text = summary_match.group(0)
+        summary_ids = self.tokenizer.encode(summary_text, add_special_tokens=False)
+
+        compressed_messages = []
+        # Only keep the prompts from user and system, and append it with summarization
+        for message in state.messages:
+            if message.get("role") in {"assistant", "tool"}:
+                break
+            compressed_messages.append(dict(message))
+        compressed_messages.append({"role": "assistant", "content": summary_text})
+
+        # Reconstruct the context state
+        compressed_trajectory_ids = prompt_ids + summary_ids
+        response_mask = [0] * len(summary_ids)
+        response_logprobs = [0.0] * len(summary_ids) if state.response_logprobs else []
+
+        return ContextState(
+            messages=compressed_messages,
+            trajectory_ids=compressed_trajectory_ids,
+            response_mask=response_mask,
+            response_logprobs=response_logprobs,
+            multi_modal_data=dict(state.multi_modal_data),
+            routed_experts=None,
+            reward_score=state.reward_score,
+            num_turns=state.num_turns,
+            metrics=state.metrics.model_copy(deep=True),
+            extra_fields=dict(state.extra_fields),
+        )
 
 
 class HybridContextManager(ContextManager):
     """Compose multiple managers without coupling them to a specific loop."""
 
     def __init__(self, managers: Optional[Sequence[ContextManager]] = None):
+        # Prioritized list for multi-managers. Must be careful with response_mask
+        # under several rounds of compressions, as it could be fragile among those.
         self.managers = list(managers) if managers is not None else []
 
     async def should_compress(self, state: ContextState) -> bool:
