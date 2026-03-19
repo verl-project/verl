@@ -162,7 +162,7 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${infer_ppo_micro_batch_size_per_gpu} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=${USE_DIST_CKPT} \
-    actor_rollout_ref.ref.megatron.param_offload=${offload} \
+    actor_rollout_ref.ref.megatron.param_offload=True \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${REF_TP} \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${REF_PP} \
     actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=${REF_VPP} \
