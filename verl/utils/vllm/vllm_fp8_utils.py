@@ -280,9 +280,8 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         # Yield the scale with appropriate naming based on vLLM version
         if _use_scale_not_scale_inv and "expert" not in k:
             yield (k + "_scale", param_scale)
-        else:
-            if not is_mxfp8_npu:
-                yield (k + "_scale_inv", param_scale)
+        elif not is_mxfp8_npu:
+            yield (k + "_scale_inv", param_scale)
 
         # Explicitly delete original tensor reference to help GC
         del v, param_lp, param_scale
@@ -323,8 +322,6 @@ def load_quanted_weights(weights, model_runner):
         apply_mxfp8_transformation_after_loading(model)
     
     return loaded_params
-
-
 
 
 def process_weights_after_loading_for_vllm10(self, layer) -> None:

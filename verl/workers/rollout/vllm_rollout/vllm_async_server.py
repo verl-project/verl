@@ -241,7 +241,7 @@ class vLLMHttpServer:
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
-        quant_config_kwargs = None 
+        quant_config_kwargs = None
         if qat_config_dict.get("enable", False):
             # QAT uses compressed-tensors quantization, apply patches for dynamic weight loading
             from verl.utils.qat import QATConfig, apply_qat_patches, load_quantization_config
