@@ -124,22 +124,15 @@ def is_mxfp8_vllm_ascend(quant_config):
         # Check if the specific quantization method is MXFP8
         # AscendQuantConfig stores config in quant_description
         quant_method = quant_config.quant_description.get("quant_method")
-        print(f"[+] quant_method: {quant_method}")
         return quant_method in ["ascend"]
     return False
 
 def restore_mxfp8_weights_for_loading(model):
     for name, module in model.named_modules():
-        s = f"[+] {type(module)}: _mxfp8_transformed:{hasattr(module, '_mxfp8_transformed')}, quant_method:{hasattr(module, 'quant_method')}"
-        if hasattr(module, 'quant_method'):
-            s += f"{type(module.quant_method)}, "
-            if hasattr(module.quant_method, 'quant_method'):
-                s += f"{type(module.quant_method.quant_method)}, restore_weights_for_rl_loading:{hasattr(module.quant_method.quant_method, 'restore_weights_for_rl_loading')}"
-
-        if hasattr(module, '_mxfp8_transformed') and hasattr(module, 'quant_method'):
-            if hasattr(module.quant_method, 'quant_method') and hasattr(module.quant_method.quant_method, 'restore_weights_for_rl_loading'):
-                logger.info(f"Restoring MXFP8 weights for module: {name}")
-                module.quant_method.quant_method.restore_weights_for_rl_loading(module)
+        if hasattr(module, '_mxfp8_transformed') and hasattr(module, 'quant_method') \
+            and hasattr(module.quant_method, 'quant_method') and hasattr(module.quant_method.quant_method, 'restore_weights_for_rl_loading'):
+            logger.info(f"Restoring MXFP8 weights for module: {name}")
+            module.quant_method.quant_method.restore_weights_for_rl_loading(module)
 
 def apply_mxfp8_transformation_after_loading(model):
     """Re-apply MXFP8 transformations after weight loading.
