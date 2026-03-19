@@ -21,10 +21,11 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
+from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import QwenImageTransformer2DModel
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
 
-from verl.models.diffusion.schedulers import FlowMatchSDEDiscreteScheduler
-from verl.models.diffusion.vllm_omni.qwen_image.qwen_image_transformer import QwenImageTransformer2DModelFixed
+from .scheduling_flow_match_sde_discrete import FlowMatchSDEDiscreteScheduler
 
 
 def _maybe_to_cpu(v):
@@ -64,7 +65,9 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         self.vae = AutoencoderKLQwenImage.from_pretrained(model, subfolder="vae", local_files_only=local_files_only).to(
             self.device
         )
-        self.transformer = QwenImageTransformer2DModelFixed(od_config=od_config)
+        transformer_kwargs = get_transformer_config_kwargs(od_config.tf_model_config, QwenImageTransformer2DModel)
+
+        self.transformer = QwenImageTransformer2DModel(od_config=od_config, **transformer_kwargs)
 
         self.stage = None
 

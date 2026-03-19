@@ -51,11 +51,11 @@ class TokenOutput(BaseModel):
     """Extra fields for dynamic addition."""
 
 
-class ImageOutput(BaseModel):
-    image: list[list[list[float]]]
-    """generated image tensor (CHW format)"""
+class DiffusionOutput(BaseModel):
+    diffusion_output: list[list[list[float]]] | list[list[list[list[float]]]]
+    """generated image tensor (CHW format) / video tensor (TCHW format)"""
     log_probs: Optional[list[float]] = None
-    """logprobs of generated image"""
+    """logprobs of generated image/video"""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None

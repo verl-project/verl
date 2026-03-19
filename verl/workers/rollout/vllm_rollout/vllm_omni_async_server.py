@@ -30,7 +30,7 @@ from vllm_omni.outputs import OmniRequestOutput
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
-from verl.workers.rollout.replica import ImageOutput
+from verl.workers.rollout.replica import DiffusionOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
@@ -134,7 +134,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         priority: int = 0,
-    ) -> ImageOutput:
+    ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
 
@@ -187,7 +187,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             final_res = output
         assert final_res is not None
 
-        image = (self._to_tensor(final_res.images[0]) / 255.0).tolist()
+        diffusion_output = (self._to_tensor(final_res.images[0]) / 255.0).tolist()
 
         # Extract extra data from custom_output (populated by DiffusionEngine)
         mm_output = final_res.custom_output or {}
@@ -234,8 +234,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if final_res.request_output is not None and hasattr(final_res.request_output, "num_preempted"):
             num_preempted = final_res.request_output.num_preempted
 
-        return ImageOutput(
-            image=image,
+        return DiffusionOutput(
+            diffusion_output=diffusion_output,
             log_probs=log_probs,
             stop_reason=stop_reason,
             num_preempted=num_preempted,

@@ -33,7 +33,7 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.rollout.replica import ImageOutput, RolloutMode
+from verl.workers.rollout.replica import DiffusionOutput, RolloutMode
 from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 # ---------------------------------------------------------------------
@@ -144,7 +144,7 @@ def init_server():
             "guidance_scale": 4.0,
             "engine_kwargs": {
                 "vllm_omni": {
-                    "custom_pipeline": "verl.models.diffusion.vllm_omni.QwenImagePipelineWithLogProb",
+                    "custom_pipeline": "examples.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb",
                 }
             },
         }
@@ -190,7 +190,7 @@ def init_server():
 
 
 def test_generate(init_server):
-    """generate() returns a valid ImageOutput with CHW image in [0, 1]."""
+    """generate() returns a valid DiffusionOutput with CHW image in [0, 1]."""
     server = init_server
     prompt_ids = _tokenize_prompt(
         "a beautiful sunset over the ocean with vibrant orange and purple clouds "
@@ -212,14 +212,14 @@ def test_generate(init_server):
         timeout=300,
     )
 
-    assert isinstance(output, ImageOutput)
-    assert len(output.image) == 3, f"Expected 3 channels (CHW), got {len(output.image)}"
-    h, w = len(output.image[0]), len(output.image[0][0])
+    assert isinstance(output, DiffusionOutput)
+    assert len(output.diffusion_output) == 3, f"Expected 3 channels (CHW), got {len(output.diffusion_output)}"
+    h, w = len(output.diffusion_output[0]), len(output.diffusion_output[0][0])
     assert h > 0 and w > 0
     assert output.stop_reason in ("completed", "aborted", None)
 
     # spot-check pixel range
-    assert 0.0 <= output.image[0][0][0] <= 1.0
+    assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0
 
     print(f"image: C=3 H={h} W={w}  stop_reason={output.stop_reason}")
 
@@ -248,8 +248,8 @@ def test_generate_with_logprobs(init_server):
         timeout=300,
     )
 
-    assert isinstance(output, ImageOutput)
-    assert len(output.image) == 3
+    assert isinstance(output, DiffusionOutput)
+    assert len(output.diffusion_output) == 3
     assert output.log_probs is not None, "log_probs should be present when logprobs=True"
     assert isinstance(output.log_probs, list)
     assert len(output.log_probs) > 0
@@ -258,7 +258,7 @@ def test_generate_with_logprobs(init_server):
 
 
 def test_generate_concurrent(init_server):
-    """Multiple concurrent generate() calls all return valid ImageOutput."""
+    """Multiple concurrent generate() calls all return valid DiffusionOutput."""
     server = init_server
     n_requests = 4
 
@@ -291,8 +291,8 @@ def test_generate_concurrent(init_server):
     results = ray.get(refs, timeout=600)
 
     for i, res in enumerate(results):
-        assert isinstance(res, ImageOutput), f"Request {i}: expected ImageOutput"
-        assert len(res.image) == 3, f"Request {i}: expected 3 channels"
+        assert isinstance(res, DiffusionOutput), f"Request {i}: expected DiffusionOutput"
+        assert len(res.diffusion_output) == 3, f"Request {i}: expected 3 channels"
         assert res.stop_reason in ("completed", "aborted", None)
 
-    print(f"All {n_requests} concurrent requests returned valid ImageOutput")
+    print(f"All {n_requests} concurrent requests returned valid DiffusionOutput")
