@@ -163,8 +163,8 @@ def vllm_ascend_v013_matmul_and_reduce_wrapper(fn):
 if is_torch_npu_available(check_device=False):
     VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2 = bool(int(os.getenv("VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2", "1")))
     if VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2:
-        from packaging import version
         import vllm
+        from packaging import version
 
         _VLLM_VERSION = version.parse(vllm.__version__)
         # only support vllm 0.13 and 0.11 now.
