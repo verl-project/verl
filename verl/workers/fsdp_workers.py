@@ -474,11 +474,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 attn_implementation=attn_implementation,
             )
 
-            # Apply Liger kernel to the model if use_liger is set to True.
-            # fused_linear_cross_entropy must be False: verl patches the model forward
-            # separately for RL log-prob computation, and Liger's forward patch is
-            # incompatible with VL models (drops rope_deltas) and with verl's fused kernels.
-            # swiglu=True enables fused SwiGLU (off by default in Liger) for ~15-50% speedup.
+            # Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with verl's forward patching)
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
