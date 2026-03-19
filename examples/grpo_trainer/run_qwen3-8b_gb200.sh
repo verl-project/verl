@@ -1,17 +1,19 @@
 # Tested on GB200 NVL4 (1 node, 4x B200 192GB, aarch64)
-# Uses SGLang rollout with flashinfer attention backend (required for Blackwell SM=100)
+# Supports both SGLang and vLLM rollout backends.
 # Based on run_qwen3-8b.sh adapted for GB200.
 #
 # Key GB200-specific settings vs the standard script:
-#   - rollout.name=sglang + attention_backend=flashinfer (FA3 unsupported on SM>90)
 #   - enforce_eager=True (required for Blackwell)
 #   - ray_kwargs.ray_init.num_gpus=N (Docker --privileged bypasses GPU auto-detection)
 #   - fsdp_config.model_dtype=bfloat16 (FSDP actor defaults to fp32, breaks FlashAttn)
+#   - SGLang only: attention_backend=flashinfer (FA3 unsupported on SM>90)
 
 set -x
 
 NNODES=${NNODES:-1}
 NGPUS_PER_NODES=${NGPUS_PER_NODES:-4}
+
+rollout_name="sglang" # sglang or vllm
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -36,13 +38,13 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-    actor_rollout_ref.rollout.name=sglang \
+    actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${NGPUS_PER_NODES} \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=flashinfer \
+    $([ "${rollout_name}" = "sglang" ] && echo "+actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend=flashinfer") \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \

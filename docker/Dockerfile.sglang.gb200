@@ -9,7 +9,7 @@
 # Build:
 #   docker build -f docker/Dockerfile.sglang.gb200 -t verl:sglang-gb200 .
 
-FROM lmsysorg/sglang:v0.5.6.post2
+FROM lmsysorg/sglang:v0.5.9
 
 ARG PIP_NO_CACHE_DIR=1
 
