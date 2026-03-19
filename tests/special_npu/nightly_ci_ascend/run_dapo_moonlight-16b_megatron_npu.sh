@@ -187,4 +187,3 @@ python3 -m recipe.dapo.main_dapo \
     trainer.resume_mode=auto \
     trainer.log_val_generations=10 \
     trainer.total_training_steps=15 2>&1 | tee /root/.cache/nightly_log/moonlight/dapo_moonlight16b_megatron_npu-$(date +%Y%m%d_%H%M).log
-
