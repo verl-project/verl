@@ -1,7 +1,21 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import logger
 import ray
-import os
-import json
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
+
 from .tree_topology import TreeTopology
 
 
@@ -16,7 +30,7 @@ def topology_aware_schedule(pgs, strategy, pg_name_prefix, lifetime):
     try:
         schedule_list = tr.schedule(acquire_node_num)
     except Exception as e:
-        print(e)
+        logger.exception("Topology-aware scheduling failed, falling back to default scheduling: %s", e)
         return pgs
 
     pg_scheme = []
@@ -28,11 +42,9 @@ def topology_aware_schedule(pgs, strategy, pg_name_prefix, lifetime):
 
     result = [
         placement_group(
-            bundles,
-            strategy=strategy,
-            lifetime=lifetime,
-            name=pg_name_prefix + "_npu_topology" + str(index)
-        ) for index, bundles in enumerate(pg_scheme)
+            bundles, strategy=strategy, lifetime=lifetime, name=pg_name_prefix + "_npu_topology" + str(index)
+        )
+        for index, bundles in enumerate(pg_scheme)
     ]
 
     return result
@@ -82,7 +94,7 @@ def get_node_info():
                     continue
 
         l_labels.sort(key=lambda x: x[0], reverse=True)
-        l_labels.sort(key=lambda x: x[0], reverse=True)
+        l_blocks.sort(key=lambda x: x[0], reverse=True)
 
         label_dict[node_id] = {
             "Labels": [value for _, value in l_labels],
