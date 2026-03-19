@@ -90,6 +90,9 @@ vanilla_mbridge: True
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
 use_remove_padding: True
 
+# Whether to use Megatron-FSDP (Zero-3 sharding)
+use_megatron_fsdp: False
+
 # whether to use forward only
 forward_only: False
 

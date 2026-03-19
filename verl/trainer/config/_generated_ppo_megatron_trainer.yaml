@@ -57,6 +57,7 @@ actor_rollout_ref:
       use_mbridge: true
       vanilla_mbridge: true
       use_remove_padding: true
+      use_megatron_fsdp: false
       forward_only: false
       dtype: bfloat16
       router_replay:
@@ -203,6 +204,7 @@ actor_rollout_ref:
       use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
       vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
+      use_megatron_fsdp: false
       forward_only: true
       dtype: bfloat16
       router_replay:
@@ -489,6 +491,7 @@ critic:
     use_mbridge: true
     vanilla_mbridge: true
     use_remove_padding: true
+    use_megatron_fsdp: false
     forward_only: false
     dtype: bfloat16
     router_replay:
