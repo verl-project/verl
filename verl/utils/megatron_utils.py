@@ -610,7 +610,7 @@ def load_optimizer_fp32_params_to_gpu(optimizer: torch.optim.Optimizer):
             if load_param is not None and isinstance(load_param, (torch.Tensor, torch.nn.Parameter)):
                 if load_param.storage().size() == 0 and hasattr(load_param, 'param_data_size'):
                     load_param.storage().resize_(load_param.param_data_size)
-                    load_param.copy_(load_param.cpu_data)
+                    load_param.copy_(load_param.cpu_data, non_blocking=True)
                     load_param.cpu_data = None # free cpu memory
     torch.cuda.synchronize()
     gc.collect()
