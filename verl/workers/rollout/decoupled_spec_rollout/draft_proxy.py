@@ -71,11 +71,17 @@ class DraftProxy:
     def notify_verify_result(self, result: VerifyResult) -> None:
         request = self.pending_requests.pop(result.request_id, None)
         if request is None:
+            if result.finished:
+                self.pending_results.pop(result.request_id, None)
+                self.release_session(SessionKey(request_id=result.request_id, session_id=result.session_id))
             return
         if request.draft_replica_rank is not None:
             self.inflight_per_replica[request.draft_replica_rank] = max(
                 0, self.inflight_per_replica.get(request.draft_replica_rank, 0) - 1
             )
+        if result.finished:
+            self.pending_results.pop(result.request_id, None)
+            self.release_session(SessionKey(request_id=result.request_id, session_id=result.session_id))
 
     def release_session(self, session_key: SessionKey) -> None:
         self.session_routes.pop(session_key.routing_key, None)

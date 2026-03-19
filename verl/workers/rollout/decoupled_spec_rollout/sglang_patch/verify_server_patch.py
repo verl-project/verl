@@ -5,7 +5,6 @@ import multiprocessing as mp
 import os
 
 import zmq
-from sglang.srt.managers.io_struct import TokenizedGenerateReqInput
 from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.utils import get_zmq_socket
 
@@ -17,6 +16,7 @@ from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     DraftRequestKind,
     DraftResult,
     DraftStatus,
+    VerifyResult,
     get_draft_endpoints_from_env,
     get_num_speculative_steps_from_env,
     get_verify_replica_rank_from_env,
@@ -69,81 +69,180 @@ def _build_sampling_params_dict(sampling_params) -> dict:
     return params
 
 
-def _build_draft_request(self: Scheduler, recv_req: TokenizedGenerateReqInput) -> DraftRequest | None:
-    if recv_req.input_ids is None:
-        return None
+def _is_draftproxy_enabled(self: Scheduler) -> bool:
+    return getattr(self, "_send_to_draftproxy", None) is not None and getattr(self, "_recv_from_draftproxy", None) is not None
 
-    session_id = recv_req.session_params.id if recv_req.session_params is not None else None
-    request_kind = DraftRequestKind.PREFILL
-    full_prompt_token_ids = list(recv_req.input_ids)
 
-    if (
-        recv_req.session_params is not None
-        and recv_req.session_params.id is not None
-        and recv_req.session_params.id in self.sessions
-        and recv_req.session_params.rid is not None
-    ):
-        session = self.sessions[recv_req.session_params.id]
-        request_kind = DraftRequestKind.DECODE
-        last_req_node = session.req_nodes.get(recv_req.session_params.rid)
-        if last_req_node is not None:
-            last_req = last_req_node.req
-            full_prompt_token_ids = (
-                list(last_req.origin_input_ids)
-                + list(last_req.output_ids[: last_req.sampling_params.max_new_tokens])
-                + list(recv_req.input_ids)
-            )
+def _iter_live_batch_reqs(batch) -> list:
+    return [req for req in batch.reqs if not req.is_retracted and not req.finished()]
 
+
+def _build_draft_request_from_req(
+    self: Scheduler,
+    req,
+    *,
+    request_kind: DraftRequestKind | None = None,
+) -> DraftRequest:
+    request_kind = request_kind or (
+        DraftRequestKind.PREFILL if req.decode_batch_idx == 0 else DraftRequestKind.DECODE
+    )
+    committed_token_ids = list(req.output_ids)
     return DraftRequest(
-        request_id=recv_req.rid,
-        session_id=session_id,
+        request_id=req.rid,
+        session_id=req.session_id,
         verify_replica_rank=get_verify_replica_rank_from_env(),
-        prompt_token_ids=full_prompt_token_ids,
-        committed_token_ids=[],
-        target_position=len(full_prompt_token_ids),
+        prompt_token_ids=list(req.origin_input_ids),
+        committed_token_ids=committed_token_ids,
+        target_position=len(req.origin_input_ids) + len(committed_token_ids),
         num_speculative_steps=get_num_speculative_steps_from_env(),
         request_kind=request_kind,
-        sampling_params=_build_sampling_params_dict(recv_req.sampling_params),
+        sampling_params=_build_sampling_params_dict(req.sampling_params),
         metadata={
-            "priority": recv_req.priority,
-            "routing_key": recv_req.routing_key,
+            "priority": req.priority,
+            "routing_key": req.routing_key,
+            "decode_batch_idx": req.decode_batch_idx,
+            "kv_committed_len": req.kv_committed_len,
         },
     )
 
 
-def _request_draft_result(self: Scheduler, recv_req: TokenizedGenerateReqInput) -> DraftResult | None:
-    if getattr(self, "_send_to_draftproxy", None) is None or getattr(self, "_recv_from_draftproxy", None) is None:
-        return None
-
-    draft_request = _build_draft_request(self, recv_req)
-    if draft_request is None:
-        return None
-
-    self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_draft_request(draft_request))
-    if not self._recv_from_draftproxy.poll(timeout=10000):
-        return DraftResult(
-            request_id=draft_request.request_id,
-            session_id=draft_request.session_id,
-            status=DraftStatus.FAILED,
-            metadata={"error": "Timed out waiting for DraftProxy response"},
-        )
-
-    response = self._recv_from_draftproxy.recv_pyobj()
-    if response.message_type == DraftProxyMessageType.DRAFT_RESULT and response.result is not None:
-        return response.result
-    if response.message_type == DraftProxyMessageType.ERROR:
-        return DraftResult(
-            request_id=draft_request.request_id,
-            session_id=draft_request.session_id,
-            status=DraftStatus.FAILED,
-            metadata={"error": response.error or "Unknown DraftProxy error"},
-        )
+def _build_failed_draft_result(req, error: str) -> DraftResult:
     return DraftResult(
-        request_id=draft_request.request_id,
-        session_id=draft_request.session_id,
+        request_id=req.rid,
+        session_id=req.session_id,
         status=DraftStatus.FAILED,
-        metadata={"error": f"Unexpected DraftProxy response: {response.message_type}"},
+        metadata={"error": error},
     )
+
+
+def _send_draft_requests(self: Scheduler, batch) -> None:
+    if not _is_draftproxy_enabled(self):
+        return
+
+    batch_requests = []
+    for req in _iter_live_batch_reqs(batch):
+        if req.is_chunked > 0:
+            continue
+        draft_request = _build_draft_request_from_req(self, req)
+        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_draft_request(draft_request))
+        self._decoupled_inflight_draft_requests[draft_request.request_id] = draft_request
+        self._decoupled_waiting_draft_rids.add(draft_request.request_id)
+        setattr(req, "decoupled_spec_draft_result", None)
+        batch_requests.append(draft_request)
+
+    if batch_requests:
+        setattr(batch, "decoupled_spec_draft_requests", batch_requests)
+
+
+def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
+    if not _is_draftproxy_enabled(self):
+        return
+
+    live_reqs = [
+        req
+        for req in (target_reqs if target_reqs is not None else batch.reqs)
+        if not req.is_retracted and not req.finished()
+    ]
+    if not live_reqs:
+        return
+
+    req_by_id = {req.rid: req for req in live_reqs}
+    missing_ids = [
+        req.rid
+        for req in live_reqs
+        if req.rid in self._decoupled_waiting_draft_rids and req.rid not in self._decoupled_pending_draft_results
+    ]
+
+    while missing_ids:
+        if not self._recv_from_draftproxy.poll(timeout=10000):
+            for rid in missing_ids:
+                self._decoupled_pending_draft_results[rid] = _build_failed_draft_result(
+                    req_by_id[rid], "Timed out waiting for DraftProxy batch response"
+                )
+            break
+
+        response = self._recv_from_draftproxy.recv_pyobj()
+        if response.message_type == DraftProxyMessageType.DRAFT_RESULT and response.result is not None:
+            self._decoupled_pending_draft_results[response.result.request_id] = response.result
+        elif response.message_type == DraftProxyMessageType.ERROR and response.request is not None:
+            req = req_by_id.get(response.request.request_id)
+            if req is not None:
+                self._decoupled_pending_draft_results[req.rid] = _build_failed_draft_result(
+                    req, response.error or "Unknown DraftProxy error"
+                )
+        else:
+            logger.warning("Unexpected DraftProxy batch response: %s", response.message_type)
+
+        missing_ids = [
+            req.rid
+            for req in live_reqs
+            if req.rid in self._decoupled_waiting_draft_rids
+            and req.rid not in self._decoupled_pending_draft_results
+        ]
+
+    batch_results = {}
+    for req in live_reqs:
+        draft_result = self._decoupled_pending_draft_results.pop(req.rid, None)
+        if draft_result is None:
+            if req.rid in self._decoupled_waiting_draft_rids:
+                draft_result = _build_failed_draft_result(req, "Draft result missing for decode batch")
+            else:
+                draft_result = _build_failed_draft_result(req, "Draft result not prepared for request")
+        self._decoupled_waiting_draft_rids.discard(req.rid)
+        self._decoupled_inflight_draft_requests.pop(req.rid, None)
+        setattr(req, "decoupled_spec_draft_result", draft_result)
+        batch_results[req.rid] = draft_result
+
+    setattr(batch, "decoupled_spec_draft_results", batch_results)
+
+
+def _build_verify_result_from_req(req) -> VerifyResult:
+    draft_result = getattr(req, "decoupled_spec_draft_result", None)
+    accepted_token_ids = list(req.output_ids[-1:]) if req.output_ids else []
+    return VerifyResult(
+        request_id=req.rid,
+        session_id=req.session_id,
+        accepted_token_ids=accepted_token_ids,
+        rollback_to=None,
+        finished=req.finished(),
+        metadata={
+            "draft_status": draft_result.status.value if draft_result is not None else None,
+            "draft_token_ids": list(draft_result.draft_token_ids) if draft_result is not None else [],
+            "accepted_prefix_len": draft_result.accepted_prefix_len if draft_result is not None else 0,
+            "decode_batch_idx": req.decode_batch_idx,
+        },
+    )
+
+
+def _send_verify_results_and_trigger_draft(self: Scheduler, batch) -> None:
+    if not _is_draftproxy_enabled(self):
+        return
+
+    verify_results = []
+    next_round_requests = []
+    for req in [req for req in batch.reqs if not req.is_retracted]:
+        verify_result = _build_verify_result_from_req(req)
+        setattr(req, "decoupled_spec_verify_result", verify_result)
+        verify_results.append(verify_result)
+        if not req.finished():
+            next_round_requests.append(
+                _build_draft_request_from_req(self, req, request_kind=DraftRequestKind.DECODE)
+            )
+        else:
+            self._decoupled_pending_draft_results.pop(req.rid, None)
+            self._decoupled_waiting_draft_rids.discard(req.rid)
+            self._decoupled_inflight_draft_requests.pop(req.rid, None)
+
+    for verify_result in verify_results:
+        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_verify_result(verify_result))
+
+    for draft_request in next_round_requests:
+        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_draft_request(draft_request))
+        self._decoupled_inflight_draft_requests[draft_request.request_id] = draft_request
+        self._decoupled_waiting_draft_rids.add(draft_request.request_id)
+
+    if verify_results:
+        setattr(batch, "decoupled_spec_verify_results", verify_results)
 
 
 def _patch_verify_scheduler():
@@ -151,12 +250,15 @@ def _patch_verify_scheduler():
         return
 
     original_init_ipc_channels = Scheduler.init_ipc_channels
-    original_handle_generate_request = Scheduler.handle_generate_request
-    original_add_request_to_queue = Scheduler._add_request_to_queue
+    original_run_batch = Scheduler.run_batch
+    original_process_batch_result_prefill = Scheduler.process_batch_result_prefill
+    original_process_batch_result_decode = Scheduler.process_batch_result_decode
 
     def patched_init_ipc_channels(self, port_args):
         original_init_ipc_channels(self, port_args)
         self._decoupled_pending_draft_results = {}
+        self._decoupled_inflight_draft_requests = {}
+        self._decoupled_waiting_draft_rids = set()
         self._send_to_draftproxy = None
         self._recv_from_draftproxy = None
         ipc_config = DraftProxyIpcConfig.from_env()
@@ -178,22 +280,28 @@ def _patch_verify_scheduler():
                 False,
             )
 
-    def patched_handle_generate_request(self, recv_req):
-        draft_result = _request_draft_result(self, recv_req)
-        if draft_result is not None:
-            self._decoupled_pending_draft_results[recv_req.rid] = draft_result
-            setattr(recv_req, "decoupled_spec_draft_result", draft_result)
-        return original_handle_generate_request(self, recv_req)
+    def patched_run_batch(self, batch, pp_proxy_tensors=None):
+        if batch is not None:
+            if batch.forward_mode.is_decode():
+                _wait_for_draft_results(self, batch)
+            elif batch.forward_mode.is_extend() and batch.decoding_reqs:
+                _wait_for_draft_results(self, batch, target_reqs=batch.decoding_reqs)
+        return original_run_batch(self, batch, pp_proxy_tensors)
 
-    def patched_add_request_to_queue(self, req):
-        draft_result = self._decoupled_pending_draft_results.pop(req.rid, None)
-        if draft_result is not None:
-            setattr(req, "decoupled_spec_draft_result", draft_result)
-        return original_add_request_to_queue(self, req)
+    def patched_process_batch_result_prefill(self, batch, result):
+        original_process_batch_result_prefill(self, batch, result)
+        if self.is_generation:
+            _send_draft_requests(self, batch)
+
+    def patched_process_batch_result_decode(self, batch, result):
+        original_process_batch_result_decode(self, batch, result)
+        if self.is_generation:
+            _send_verify_results_and_trigger_draft(self, batch)
 
     Scheduler.init_ipc_channels = patched_init_ipc_channels
-    Scheduler.handle_generate_request = patched_handle_generate_request
-    Scheduler._add_request_to_queue = patched_add_request_to_queue
+    Scheduler.run_batch = patched_run_batch
+    Scheduler.process_batch_result_prefill = patched_process_batch_result_prefill
+    Scheduler.process_batch_result_decode = patched_process_batch_result_decode
     Scheduler._verl_decoupled_spec_patched = True
 
 
