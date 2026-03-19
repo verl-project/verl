@@ -173,7 +173,7 @@ jobs:
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen25-vl-3b-instruct_fsdp_npu.sh
 
-  # Test grpo qwen25-vl-3b-Instruct fsdp+vllm
+  # Test dapo moonlight-16b megatron vllm
   nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2-8
@@ -218,11 +218,7 @@ jobs:
           # cuda to npu
           TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py"
           sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
-      - name: Running nightlyCI_grpo-qwen25-vl-3b-Instruct-fsdp-vllm_ascend
+      - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
         run: |
           ray stop --force
-<<<<<<< HEAD
           bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
-=======
-          bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight16b_megatron_npu.sh
->>>>>>> a907d2ba6354be32f256d43f69829518d811c795
