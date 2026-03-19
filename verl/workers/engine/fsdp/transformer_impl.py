@@ -241,11 +241,16 @@ class FSDPEngine(BaseEngine):
             )
 
             use_liger = self.model_config.use_liger
-            # Apply Liger kernel to the model if use_liger is set to True
+            # Apply Liger kernel to the model if use_liger is set to True.
+            # See fsdp_workers.py for rationale on fused_linear_cross_entropy and swiglu.
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
-                _apply_liger_kernel_to_instance(model=module)
+                _apply_liger_kernel_to_instance(
+                    model=module,
+                    fused_linear_cross_entropy=False,
+                    swiglu=True,
+                )
 
             fused_kernel_options = self.model_config.fused_kernel_options
             fused_kernels_backend = (
