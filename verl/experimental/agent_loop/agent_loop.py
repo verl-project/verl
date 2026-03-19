@@ -703,20 +703,22 @@ class AgentLoopWorker:
             position_ids=position_ids,
             kwargs=kwargs,
         )
-        teacher_result = await self._compute_teacher_logprobs(
+        await self._compute_teacher_logprobs(
             output,
             prompt_ids=output.prompt_ids,
             response_ids=output.response_ids,
             validate=validate,
         )
-        if teacher_result:
-            teacher_ids, teacher_logprobs = teacher_result["response_ids"], teacher_result["response_logprobs"]
-            pad_size = self.config.actor_rollout_ref.rollout.response_length - teacher_ids.shape[1]
-            padding = (0, 0, 0, pad_size)  # pad the sequence dimension
-            teacher_ids = F.pad(teacher_ids, padding, value=self.tokenizer.pad_token_id)
-            teacher_logprobs = F.pad(teacher_logprobs, padding, value=0.0)
-        else:
-            teacher_ids, teacher_logprobs = None, None
+        teacher_ids, teacher_logprobs = (
+            output.extra_fields.pop("teacher_ids", None),
+            output.extra_fields.pop("teacher_logprobs", None),
+        )
+        if teacher_ids is not None and teacher_logprobs is not None:
+            left_pad_size = prompt_output["input_ids"].shape[1] - len(output.prompt_ids)
+            right_pad_size = response_output["input_ids"].shape[1] - len(output.response_ids)
+            padding = (0, 0, left_pad_size, right_pad_size)  # pad the sequence dimension
+            teacher_ids = F.pad(teacher_ids, padding, value=self.tokenizer.pad_token_id).unsqueeze(0)
+            teacher_logprobs = F.pad(teacher_logprobs, padding, value=0.0).unsqueeze(0)
 
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
@@ -851,7 +853,6 @@ class AgentLoopWorker:
                 "max_tokens": 1,
                 "temperature": self.distillation_config.teacher_model.inference.temperature,
                 "prompt_logprobs": num_logprobs,
-                "_response_length_for_prompt_logprobs": len(response_ids),
             }
             teacher_output = await self.teacher_server_manager.generate(
                 request_id=uuid4().hex,
@@ -864,14 +865,14 @@ class AgentLoopWorker:
                 teacher_output.extra_fields["prompt_ids"],
                 teacher_output.extra_fields["prompt_logprobs"],
             )
-            # Shapes: # 1, S, (1 or K), where S is the response length, K is either 1 or topk depending on
+            # Shapes: # S, (1 or K), where S is the response length, K is either 1 or topk depending on
             # the distillation loss settings.
-            response_ids = torch.tensor(response_ids_ls).unsqueeze(0)
-            response_logprobs = torch.tensor(response_logprobs_ls).unsqueeze(0)
+            teacher_ids = torch.tensor(response_ids_ls, dtype=torch.int32)
+            teacher_logprobs = torch.tensor(response_logprobs_ls)
+            assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(prompt_ids + response_ids)
 
-            return {"response_ids": response_ids, "response_logprobs": response_logprobs}
-        else:
-            return {}
+            output.extra_fields["teacher_ids"] = teacher_ids
+            output.extra_fields["teacher_logprobs"] = teacher_logprobs
 
     def _postprocess(
         self,

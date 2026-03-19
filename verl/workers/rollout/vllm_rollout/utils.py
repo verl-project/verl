@@ -295,17 +295,15 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     return cli_args
 
 
-def extract_prompt_logprobs(
-    output: RequestOutput, num_prompt_logprobs: Optional[int], logprobs_to_extract: int, result_dict: dict[str, list]
-):
+def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):
     """Extract prompt log probabilities from generation output."""
     # For prefill-only requests, logprobs_to_extract may be passed as a
     # way to extract onto the part of the prompt corresponding to the response
     if num_prompt_logprobs is None:
         return
-    prompt_logprob_dicts = output.prompt_logprobs[-logprobs_to_extract:]
-    prompt_logprobs_ls, prompt_ids_ls = [], []
-    for logprobs_dict in prompt_logprob_dicts:
+    prompt_logprobs_ls, prompt_ids_ls = [[0.0] * max(num_prompt_logprobs, 1)], [[0] * max(num_prompt_logprobs, 1)]
+    # NOTE: logprob of first prompt token is None.
+    for logprobs_dict in output.prompt_logprobs[1:]:
         if num_prompt_logprobs == 0:
             token_id_str = list(logprobs_dict.keys())[0]
             logprob = logprobs_dict[token_id_str].logprob

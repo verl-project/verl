@@ -545,9 +545,6 @@ class vLLMHttpServer:
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
-        response_length_for_prompt_logprobs = sampling_params.pop(
-            "_response_length_for_prompt_logprobs", len(prompt_ids)
-        )
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
@@ -587,7 +584,6 @@ class vLLMHttpServer:
         extract_prompt_logprobs(
             output=final_res,
             num_prompt_logprobs=sampling_params.prompt_logprobs,
-            logprobs_to_extract=response_length_for_prompt_logprobs,
             result_dict=extra_fields,
         )
         token_ids = final_res.outputs[0].token_ids
