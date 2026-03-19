@@ -30,6 +30,14 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
+
+# Atropos integration — imported lazily when atropos config is present
+_ATROPOS_AVAILABLE = False
+try:
+    import requests
+    _ATROPOS_AVAILABLE = True
+except ImportError:
+    pass
 from verl.utils.import_utils import load_extern_object
 
 
@@ -78,7 +86,11 @@ def run_ppo(config, task_runner_class=None) -> None:
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     if task_runner_class is None:
-        task_runner_class = ray.remote(num_cpus=1)(TaskRunner)  # please make sure main_task is not scheduled on head
+        # Use AtroposTaskRunner if atropos config block is present
+        if hasattr(config, 'atropos') and config.atropos.get('host', None):
+            task_runner_class = ray.remote(num_cpus=1)(AtroposTaskRunner)
+        else:
+            task_runner_class = ray.remote(num_cpus=1)(TaskRunner)  # please make sure main_task is not scheduled on head
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
@@ -105,6 +117,161 @@ def run_ppo(config, task_runner_class=None) -> None:
     if timeline_json_file:
         ray.timeline(filename=timeline_json_file)
 
+
+
+
+class AtroposDataset:
+    """
+    Drop-in replacement for rl_dataset when Atropos is the data source.
+    Polls Atropos /batch endpoint instead of reading parquet files.
+    Implements the minimal interface verl expects from a dataset.
+    """
+    def __init__(self, atropos_url: str, batch_size: int = 32, max_token_len: int = 1536):
+        self.atropos_url = atropos_url
+        self.batch_size = batch_size
+        self.max_token_len = max_token_len
+        self._batch_cache = None
+
+    def __len__(self):
+        # Return large number — Atropos streams data, no fixed size
+        return 10_000_000
+
+    def __getitem__(self, idx):
+        # Batch-level fetch — cache one batch, serve items from it
+        if self._batch_cache is None or idx % self.batch_size == 0:
+            self._fetch_batch()
+        if self._batch_cache is None:
+            return {}
+        pos = idx % self.batch_size
+        if pos >= len(self._batch_cache.get('tokens', [])):
+            return {}
+        return {
+            'input_ids': self._batch_cache['tokens'][pos],
+            'attention_mask': self._batch_cache['masks'][pos],
+            'token_level_scores': self._batch_cache['scores'][pos],
+            'advantages': (
+                self._batch_cache['advantages'][pos]
+                if 'advantages' in self._batch_cache
+                else None
+            ),
+        }
+
+    def _fetch_batch(self):
+        from verl.trainer.atropos.verl_atropos_reflex import poll_batch
+        batch = poll_batch(self.atropos_url)
+        if batch:
+            self._batch_cache = batch
+
+
+class AtroposTaskRunner(TaskRunner):
+    """
+    Minimal subclass of TaskRunner that wires Atropos as the data source.
+    Overrides only run() — everything else (workers, resource pools) unchanged.
+    """
+
+    def run(self, config):
+        from pprint import pprint
+        import os, socket
+        from omegaconf import OmegaConf
+        from verl.utils.fs import copy_to_local
+        from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+        from verl.utils.dataset.rl_dataset import collate_fn
+        from verl.trainer.atropos.verl_atropos_reflex import (
+            register_with_atropos,
+            poll_batch,
+            scored_data_to_dataproto,
+        )
+
+        print(f"AtroposTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        pprint(OmegaConf.to_container(config, resolve=True))
+        OmegaConf.resolve(config)
+
+        actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
+        self.add_critic_worker(config)
+        self.add_reward_model_resource_pool(config)
+        self.add_ref_policy_worker(config, actor_rollout_cls)
+
+        from verl.utils.config import validate_config
+        from verl.trainer.ppo.utils import need_critic, need_reference_policy
+        validate_config(
+            config=config,
+            use_reference_policy=need_reference_policy(config),
+            use_critic=need_critic(config),
+        )
+
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get('use_shm', False),
+        )
+        from verl.utils import hf_processor, hf_tokenizer
+        trust_remote_code = config.data.get('trust_remote_code', False)
+        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+
+        resource_pool_manager = self.init_resource_pool_mgr(config)
+
+        # Build Atropos URL from config
+        atropos_host = config.atropos.get('host', 'localhost')
+        atropos_port = config.atropos.get('port', 8000)
+        atropos_url = f"http://{atropos_host}:{atropos_port}"
+
+        # Use Atropos as train dataset — val dataset still reads files if provided
+        max_token_len = (
+            config.data.get('max_prompt_length', 512)
+            + config.data.get('max_response_length', 1024)
+        )
+        train_dataset = AtroposDataset(
+            atropos_url=atropos_url,
+            batch_size=config.data.get('train_batch_size', 32),
+            max_token_len=max_token_len,
+        )
+
+        # Val dataset — fall back to file-based if val_files provided
+        val_files = config.data.get('val_files', None)
+        if val_files:
+            val_dataset = create_rl_dataset(
+                val_files, config.data, tokenizer, processor,
+                is_train=False,
+                max_samples=config.data.get('val_max_samples', -1),
+            )
+        else:
+            val_dataset = None
+
+        train_sampler = create_rl_sampler(config.data, train_dataset)
+
+        trainer = RayPPOTrainer(
+            config=config,
+            tokenizer=tokenizer,
+            processor=processor,
+            role_worker_mapping=self.role_worker_mapping,
+            resource_pool_manager=resource_pool_manager,
+            ray_worker_group_cls=ray_worker_group_cls,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            collate_fn=collate_fn,
+            train_sampler=train_sampler,
+        )
+
+        # Init workers first — then register vLLM endpoints with Atropos
+        trainer.init_workers()
+
+        # Collect vLLM server endpoints after workers are up
+        vllm_endpoints = []
+        try:
+            if hasattr(trainer, 'actor_rollout_wg'):
+                # Extract endpoint info from worker group if available
+                wg = trainer.actor_rollout_wg
+                if hasattr(wg, 'get_vllm_urls'):
+                    vllm_endpoints = wg.get_vllm_urls()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"[Atropos] Could not collect vLLM endpoints: {e}")
+
+        uuid = register_with_atropos(atropos_url, config, vllm_endpoints)
+        import logging
+        logging.getLogger(__name__).info(f"[Atropos] Training UUID: {uuid}")
+
+        trainer.fit()
 
 class TaskRunner:
     """Ray remote class for executing distributed PPO training tasks.
