@@ -9,6 +9,7 @@ from .draft_server_patch import (
 )
 from .verify_server_patch import (
     init_tokenizer_manager as verify_init_tokenizer_manager,
+    launch_subprocesses as verify_launch_subprocesses,
     run_detokenizer_process as verify_run_detokenizer_process,
     run_scheduler_process as verify_run_scheduler_process,
 )
@@ -18,6 +19,7 @@ def get_sglang_launch_components(server_role: str | None) -> dict[str, Callable]
     if server_role == "verify":
         return {
             "init_tokenizer_manager_func": verify_init_tokenizer_manager,
+            "launch_subprocesses_func": verify_launch_subprocesses,
             "run_scheduler_process_func": verify_run_scheduler_process,
             "run_detokenizer_process_func": verify_run_detokenizer_process,
         }

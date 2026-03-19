@@ -131,6 +131,7 @@ class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
             server_address=self._server_address,
             actor_handle=self._server_handle,
             node_rank=0,
+            actor_name=self._build_server_name(0),
         )
 
 

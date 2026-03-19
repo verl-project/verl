@@ -18,6 +18,7 @@ import json
 import logging
 import os
 from typing import Any, Optional
+from uuid import uuid4
 
 import ray
 import sglang
@@ -108,7 +109,7 @@ class SGLangHttpServer:
         self.base_gpu_id = base_gpu_id
         self.server_role = server_role
         self.draft_server_endpoints = list(draft_server_endpoints or [])
-        self.draft_proxy_runtime = None
+        self.draft_proxy_ipc_config = None
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
 
@@ -257,6 +258,21 @@ class SGLangHttpServer:
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+        if self.config.enable_decoupled_spec and self.server_role == "verify" and self.node_rank == 0:
+            from verl.workers.rollout.decoupled_spec_rollout.protocol import (
+                DraftProxyIpcConfig,
+                get_draft_proxy_runtime_env,
+            )
+
+            self.draft_proxy_ipc_config = DraftProxyIpcConfig.init_new()
+            os.environ.update(
+                get_draft_proxy_runtime_env(
+                    ipc_config=self.draft_proxy_ipc_config,
+                    verify_replica_rank=self.replica_rank,
+                    num_speculative_steps=self.config.num_speculative_steps,
+                    draft_endpoints=self.draft_server_endpoints,
+                )
+            )
         server_args = ServerArgs(**args)
         launch_components = {}
         if self.config.enable_decoupled_spec:
@@ -265,8 +281,9 @@ class SGLangHttpServer:
             )
 
             launch_components = get_sglang_launch_components(self.server_role)
+        launch_subprocesses_func = launch_components.get("launch_subprocesses_func", _launch_subprocesses)
         if version.parse(sglang.__version__) >= version.parse("0.5.7"):
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
+            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = launch_subprocesses_func(
                 server_args=server_args,
                 init_tokenizer_manager_func=launch_components.get(
                     "init_tokenizer_manager_func", sglang.srt.entrypoints.engine.init_tokenizer_manager
@@ -300,15 +317,6 @@ class SGLangHttpServer:
         app.server_args = server_args
         app.warmup_thread_kwargs = {"server_args": server_args}
         app.warmup_thread_args = (server_args, None, None)
-
-        if self.config.enable_decoupled_spec and self.server_role == "verify":
-            from verl.workers.rollout.decoupled_spec_rollout.draft_proxy import launch_draftproxy_subprocess
-
-            self.draft_proxy_runtime = launch_draftproxy_subprocess(
-                verify_replica_rank=self.replica_rank,
-                num_speculative_steps=self.config.num_speculative_steps,
-                draft_endpoints=self.draft_server_endpoints,
-            )
 
         # Manually add Prometheus middleware before starting server
         # This ensures /metrics endpoint is available immediately
@@ -447,6 +455,53 @@ class SGLangHttpServer:
             routed_experts=routed_experts,
             stop_reason=finish_reason,
             extra_fields={"global_steps": self.global_steps},
+        )
+
+    async def handle_draft_request(self, draft_request):
+        from verl.workers.rollout.decoupled_spec_rollout.protocol import DraftResult, DraftStatus
+        from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.draft_server_patch import (
+            build_generate_req_from_draft_request,
+        )
+
+        if self.server_role != "draft":
+            raise ValueError("handle_draft_request is only supported on draft servers")
+
+        prompt_ids = draft_request.full_token_ids
+        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+        if max_possible_tokens < 0:
+            return DraftResult(
+                request_id=draft_request.request_id,
+                session_id=draft_request.session_id,
+                status=DraftStatus.FAILED,
+                metadata={"error": "Draft prompt exceeds max_model_len"},
+            )
+
+        max_new_tokens = max(0, min(draft_request.num_speculative_steps, max_possible_tokens))
+        generate_request = build_generate_req_from_draft_request(
+            draft_request,
+            request_id=f"draft-{draft_request.request_id}-{uuid4().hex[:8]}",
+            max_new_tokens=max_new_tokens,
+        )
+        try:
+            output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
+        except Exception as exc:
+            return DraftResult(
+                request_id=draft_request.request_id,
+                session_id=draft_request.session_id,
+                status=DraftStatus.FAILED,
+                metadata={"error": str(exc)},
+            )
+
+        finish_reason = output["meta_info"]["finish_reason"]
+        finish_reason = finish_reason["type"] if finish_reason else None
+        return DraftResult(
+            request_id=draft_request.request_id,
+            session_id=draft_request.session_id,
+            draft_token_ids=output.get("output_ids", []),
+            accepted_prefix_len=len(prompt_ids),
+            finished=finish_reason is not None,
+            status=DraftStatus.READY,
+            metadata={"finish_reason": finish_reason},
         )
 
     async def set_global_steps(self, global_steps: int):

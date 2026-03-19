@@ -4,15 +4,18 @@ import multiprocessing as mp
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .protocol import DraftRequest, DraftResult, DraftRoute, DraftServerEndpoint, SessionKey, VerifyResult
-
-
-@dataclass
-class DraftProxyRuntime:
-    proxy: "DraftProxy"
-    process: mp.Process
-    stop_event: mp.synchronize.Event
-    ready_event: mp.synchronize.Event
+from .protocol import (
+    DraftProxyIpcConfig,
+    DraftProxyMessage,
+    DraftProxyMessageType,
+    DraftRequest,
+    DraftRequestKind,
+    DraftResult,
+    DraftRoute,
+    DraftServerEndpoint,
+    SessionKey,
+    VerifyResult,
+)
 
 
 @dataclass
@@ -24,12 +27,14 @@ class DraftProxy:
     inflight_per_replica: dict[int, int] = field(default_factory=dict)
     pending_requests: dict[str, DraftRequest] = field(default_factory=dict)
     pending_results: dict[str, DraftResult] = field(default_factory=dict)
+    endpoint_by_replica: dict[int, DraftServerEndpoint] = field(default_factory=dict)
 
     def __post_init__(self):
         self.register_drafters(self.draft_endpoints)
 
     def register_drafters(self, draft_endpoints: list[DraftServerEndpoint]) -> None:
         self.draft_endpoints = list(draft_endpoints)
+        self.endpoint_by_replica = {endpoint.replica_rank: endpoint for endpoint in self.draft_endpoints}
         self.inflight_per_replica = {endpoint.replica_rank: 0 for endpoint in self.draft_endpoints}
 
     def acquire_route(self, session_key: SessionKey) -> DraftRoute:
@@ -77,24 +82,45 @@ class DraftProxy:
     def release_session(self, session_key: SessionKey) -> None:
         self.session_routes.pop(session_key.routing_key, None)
 
+    def submit_request(self, request: DraftRequest) -> DraftRoute:
+        if request.request_kind == DraftRequestKind.PREFILL:
+            return self.submit_prefill(request)
+        return self.submit_decode(request)
+
+    def complete_request(self, request_id: str, result: DraftResult) -> DraftResult:
+        request = self.pending_requests.pop(request_id, None)
+        self.pending_results[request_id] = result
+        draft_replica_rank = result.metadata.get("draft_replica_rank")
+        if draft_replica_rank is None and request is not None:
+            draft_replica_rank = request.draft_replica_rank
+        if draft_replica_rank is not None:
+            self.inflight_per_replica[draft_replica_rank] = max(
+                0, self.inflight_per_replica.get(draft_replica_rank, 0) - 1
+            )
+        return result
+
+    def handle_message(self, message: DraftProxyMessage) -> Optional[DraftProxyMessage]:
+        if message.message_type == DraftProxyMessageType.VERIFY_RESULT and message.verify_result is not None:
+            self.notify_verify_result(message.verify_result)
+            return None
+        if message.message_type == DraftProxyMessageType.SHUTDOWN:
+            return DraftProxyMessage.shutdown()
+        return None
+
 
 def launch_draftproxy_subprocess(
     *,
     verify_replica_rank: int,
     num_speculative_steps: int,
     draft_endpoints: list[DraftServerEndpoint],
-) -> DraftProxyRuntime:
+    ipc_config: DraftProxyIpcConfig | None = None,
+) -> mp.Process:
     from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.draftproxy_subprocess import (
         run_draftproxy_subprocess,
     )
 
-    proxy = DraftProxy(
-        verify_replica_rank=verify_replica_rank,
-        num_speculative_steps=num_speculative_steps,
-        draft_endpoints=draft_endpoints,
-    )
+    ipc_config = ipc_config or DraftProxyIpcConfig.init_new()
     ctx = mp.get_context("spawn")
-    stop_event = ctx.Event()
     ready_event = ctx.Event()
     process = ctx.Process(
         target=run_draftproxy_subprocess,
@@ -102,11 +128,11 @@ def launch_draftproxy_subprocess(
             "verify_replica_rank": verify_replica_rank,
             "num_speculative_steps": num_speculative_steps,
             "draft_endpoints": [endpoint.to_metadata() for endpoint in draft_endpoints],
-            "stop_event": stop_event,
+            "ipc_config": ipc_config,
             "ready_event": ready_event,
         },
         daemon=True,
     )
     process.start()
     ready_event.wait(timeout=5)
-    return DraftProxyRuntime(proxy=proxy, process=process, stop_event=stop_event, ready_event=ready_event)
+    return process
