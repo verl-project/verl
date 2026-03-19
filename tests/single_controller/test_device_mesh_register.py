@@ -33,11 +33,12 @@ class TestActor(Worker):
         import torch.distributed
 
         torch.distributed.init_process_group(backend=get_nccl_backend())
+        ngpus = torch.distributed.get_world_size()
         self.infer_device_mesh = torch.distributed.device_mesh.init_device_mesh(
-            device_type=get_device_name(), mesh_shape=[2, 4], mesh_dim_names=["dp", "tp"]
+            device_type=get_device_name(), mesh_shape=[2, ngpus // 2], mesh_dim_names=["dp", "tp"]
         )
         self.train_device_mesh = torch.distributed.device_mesh.init_device_mesh(
-            device_type=get_device_name(), mesh_shape=[2, 2, 2], mesh_dim_names=["pp", "dp", "tp"]
+            device_type=get_device_name(), mesh_shape=[2, 2, ngpus // 4], mesh_dim_names=["pp", "dp", "tp"]
         )
 
         self._register_dispatch_collect_info(
@@ -105,15 +106,19 @@ def test_dist_global_info_wg():
     from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 
     ray.init()
+    ngpus = torch.cuda.device_count()
+    infer_tp = ngpus // 2
+    train_tp = ngpus // 4
 
     ray_cls = RayClassWithInitArgs(TestActor)
-    resource_pool = RayResourcePool(process_on_nodes=[8])
+    resource_pool = RayResourcePool(process_on_nodes=[ngpus])
     wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls, device_name=get_device_name())
 
     infer_input_data_proto = DataProto.from_single_dict(data={"a": torch.tensor([1, 2])})
     infer_output_data_proto = wg.generate_data_proto(infer_input_data_proto)
 
-    assert wg._dispatch_info["infer"] == [0, 0, 0, 0, 1, 1, 1, 1]
+    expected_infer_dispatch = [d for d in range(2) for _ in range(infer_tp)]
+    assert wg._dispatch_info["infer"] == expected_infer_dispatch
 
     assert torch.all(torch.eq(infer_output_data_proto.batch["a"], torch.tensor([1, 3])))
 
@@ -124,7 +129,8 @@ def test_dist_global_info_wg():
     train_input_data_proto = DataProto.from_single_dict(data={"a": torch.tensor([3, 4])})
     train_output_data_proto = wg.train_data_proto(train_input_data_proto)
 
-    assert wg._dispatch_info["train"] == [0, 0, 1, 1, 0, 0, 1, 1]
+    expected_train_dispatch = [d for _ in range(2) for d in range(2) for _ in range(train_tp)]
+    assert wg._dispatch_info["train"] == expected_train_dispatch
 
     assert torch.all(torch.eq(train_output_data_proto.batch["a"], torch.tensor([11, 16])))
 
