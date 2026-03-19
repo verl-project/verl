@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import multiprocessing as mp
 from dataclasses import dataclass, field
 from typing import Optional
 
 from .protocol import (
-    DraftProxyIpcConfig,
     DraftProxyMessage,
     DraftProxyMessageType,
     DraftRequest,
@@ -106,33 +104,3 @@ class DraftProxy:
         if message.message_type == DraftProxyMessageType.SHUTDOWN:
             return DraftProxyMessage.shutdown()
         return None
-
-
-def launch_draftproxy_subprocess(
-    *,
-    verify_replica_rank: int,
-    num_speculative_steps: int,
-    draft_endpoints: list[DraftServerEndpoint],
-    ipc_config: DraftProxyIpcConfig | None = None,
-) -> mp.Process:
-    from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.draftproxy_subprocess import (
-        run_draftproxy_subprocess,
-    )
-
-    ipc_config = ipc_config or DraftProxyIpcConfig.init_new()
-    ctx = mp.get_context("spawn")
-    ready_event = ctx.Event()
-    process = ctx.Process(
-        target=run_draftproxy_subprocess,
-        kwargs={
-            "verify_replica_rank": verify_replica_rank,
-            "num_speculative_steps": num_speculative_steps,
-            "draft_endpoints": [endpoint.to_metadata() for endpoint in draft_endpoints],
-            "ipc_config": ipc_config,
-            "ready_event": ready_event,
-        },
-        daemon=True,
-    )
-    process.start()
-    ready_event.wait(timeout=5)
-    return process

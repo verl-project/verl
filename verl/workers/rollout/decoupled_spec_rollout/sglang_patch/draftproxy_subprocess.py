@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+import signal
 
+import psutil
 import ray
+import setproctitle
 
-from sglang.srt.utils import get_zmq_socket, kill_itself_when_parent_died
+from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.utils import configure_logger, get_zmq_socket, kill_itself_when_parent_died
+from sglang.utils import get_exception_traceback
 
 from verl.workers.rollout.decoupled_spec_rollout.draft_proxy import DraftProxy
 from verl.workers.rollout.decoupled_spec_rollout.protocol import (
@@ -15,6 +19,9 @@ from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     DraftResult,
     DraftServerEndpoint,
     DraftStatus,
+    get_draft_endpoints_from_env,
+    get_num_speculative_steps_from_env,
+    get_verify_replica_rank_from_env,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,45 +114,69 @@ class DraftProxyManager:
     def init_ipc_channels(self):
         import zmq
 
-        context = zmq.Context(2)
+        self.context = zmq.Context(2)
         self.recv_from_scheduler = get_zmq_socket(
-            context,
+            self.context,
             zmq.PULL,
             self.ipc_config.scheduler_to_proxy_ipc_name,
             True,
         )
         self.send_to_scheduler = get_zmq_socket(
-            context,
+            self.context,
             zmq.PUSH,
             self.ipc_config.proxy_to_scheduler_ipc_name,
             True,
         )
 
+    def close(self):
+        if getattr(self, "recv_from_scheduler", None) is not None:
+            self.recv_from_scheduler.close(linger=0)
+        if getattr(self, "send_to_scheduler", None) is not None:
+            self.send_to_scheduler.close(linger=0)
+        if getattr(self, "context", None) is not None:
+            self.context.term()
+
     def event_loop(self):
-        while True:
-            message = self.recv_from_scheduler.recv_pyobj()
-            response = _handle_proxy_message(self.proxy, message)
-            if response is not None:
-                self.send_to_scheduler.send_pyobj(response)
-            if response is not None and response.message_type == DraftProxyMessageType.SHUTDOWN:
-                break
+        try:
+            while True:
+                message = self.recv_from_scheduler.recv_pyobj()
+                response = _handle_proxy_message(self.proxy, message)
+                if response is not None and response.message_type != DraftProxyMessageType.SHUTDOWN:
+                    self.send_to_scheduler.send_pyobj(response)
+                if response is not None and response.message_type == DraftProxyMessageType.SHUTDOWN:
+                    break
+        finally:
+            self.close()
 
 
-def run_draftproxy_subprocess(
-    *,
-    verify_replica_rank: int,
-    num_speculative_steps: int,
-    draft_endpoints: list[dict[str, Any]],
-    ipc_config: DraftProxyIpcConfig,
-    ready_event,
+def run_draftproxy_process(
+    server_args: ServerArgs,
+    port_args: PortArgs,
+    draftproxy_manager_class=DraftProxyManager,
 ):
+    _ = port_args
     kill_itself_when_parent_died()
-    _maybe_init_ray()
-    manager = DraftProxyManager(
-        verify_replica_rank=verify_replica_rank,
-        num_speculative_steps=num_speculative_steps,
-        draft_endpoints=[DraftServerEndpoint.from_metadata(item) for item in draft_endpoints],
-        ipc_config=ipc_config,
-    )
-    ready_event.set()
-    manager.event_loop()
+    setproctitle.setproctitle("sglang::draftproxy")
+    configure_logger(server_args)
+    parent_process = psutil.Process().parent()
+
+    try:
+        _maybe_init_ray()
+        ipc_config = DraftProxyIpcConfig.from_env()
+        draft_endpoints = get_draft_endpoints_from_env()
+        if ipc_config is None:
+            raise ValueError("DraftProxy IPC config is not configured")
+        if not draft_endpoints:
+            raise ValueError("DraftProxy endpoints are not configured")
+        manager = draftproxy_manager_class(
+            verify_replica_rank=get_verify_replica_rank_from_env(),
+            num_speculative_steps=get_num_speculative_steps_from_env(),
+            draft_endpoints=draft_endpoints,
+            ipc_config=ipc_config,
+        )
+        manager.event_loop()
+    except Exception:
+        traceback = get_exception_traceback()
+        logger.error(f"DraftProxyManager hit an exception: {traceback}")
+        if parent_process is not None:
+            parent_process.send_signal(signal.SIGQUIT)

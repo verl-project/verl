@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import os
 
 import zmq
 from sglang.srt.managers.io_struct import TokenizedGenerateReqInput
@@ -22,7 +23,6 @@ from verl.workers.rollout.decoupled_spec_rollout.protocol import (
 )
 
 logger = logging.getLogger(__name__)
-_DRAFTPROXY_PROCESSES: list[mp.Process] = []
 
 
 def init_tokenizer_manager(*args, **kwargs):
@@ -204,25 +204,77 @@ def run_scheduler_process(*args, **kwargs):
     return upstream(*args, **kwargs)
 
 
-def launch_subprocesses(*args, **kwargs):
-    from sglang.srt.entrypoints.engine import _launch_subprocesses as upstream
+def launch_subprocesses(
+    server_args,
+    init_tokenizer_manager_func,
+    run_scheduler_process_func,
+    run_detokenizer_process_func,
+    port_args=None,
+):
+    from sglang.srt.entrypoints.engine import (
+        _launch_scheduler_processes,
+        _set_envs_and_config,
+        _wait_for_scheduler_ready,
+    )
+    from sglang.srt.managers.multi_tokenizer_mixin import MultiTokenizerRouter
+    from sglang.srt.server_args import PortArgs
+    from sglang.srt.utils import configure_logger, launch_dummy_health_check_server
+    from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.draftproxy_subprocess import (
+        run_draftproxy_process,
+    )
 
-    tokenizer_manager, template_manager, scheduler_info, port_args = upstream(*args, **kwargs)
+    configure_logger(server_args)
+    _set_envs_and_config(server_args)
+    server_args.check_server_args()
+    if port_args is None:
+        port_args = PortArgs.init_new(server_args)
+    logger.info(f"{server_args=}")
+
+    scheduler_procs, scheduler_pipe_readers = _launch_scheduler_processes(
+        server_args=server_args,
+        port_args=port_args,
+        run_scheduler_process_func=run_scheduler_process_func,
+    )
+
+    if server_args.node_rank >= 1:
+        scheduler_infos = _wait_for_scheduler_ready(scheduler_pipe_readers, scheduler_procs)
+        if os.getenv("SGLANG_BLOCK_NONZERO_RANK_CHILDREN") == "0":
+            return None, None, scheduler_infos, port_args
+        launch_dummy_health_check_server(server_args.host, server_args.port, server_args.enable_metrics)
+        for proc in scheduler_procs:
+            proc.join()
+            logger.error(f"Scheduler or DataParallelController {proc.pid} terminated with {proc.exitcode}")
+        return None, None, scheduler_infos, port_args
+
+    detoken_proc = mp.Process(
+        target=run_detokenizer_process_func,
+        args=(
+            server_args,
+            port_args,
+        ),
+    )
+    detoken_proc.start()
+
     ipc_config = DraftProxyIpcConfig.from_env()
     draft_endpoints = get_draft_endpoints_from_env()
-    server_args = kwargs.get("server_args") if "server_args" in kwargs else (args[0] if args else None)
-    if ipc_config is not None and draft_endpoints and server_args is not None and server_args.node_rank == 0:
-        from verl.workers.rollout.decoupled_spec_rollout.draft_proxy import launch_draftproxy_subprocess
+    if ipc_config is not None and draft_endpoints:
+        mp.Process(
+            target=run_draftproxy_process,
+            args=(
+                server_args,
+                port_args,
+            ),
+        ).start()
 
-        process = launch_draftproxy_subprocess(
-            verify_replica_rank=get_verify_replica_rank_from_env(),
-            num_speculative_steps=get_num_speculative_steps_from_env(),
-            draft_endpoints=draft_endpoints,
-            ipc_config=ipc_config,
-        )
-        _DRAFTPROXY_PROCESSES.append(process)
-        setattr(tokenizer_manager, "_draftproxy_process", process)
-    return tokenizer_manager, template_manager, scheduler_info, port_args
+    if server_args.tokenizer_worker_num == 1:
+        tokenizer_manager, template_manager = init_tokenizer_manager_func(server_args, port_args)
+    else:
+        tokenizer_manager = MultiTokenizerRouter(server_args, port_args)
+        template_manager = None
+
+    scheduler_infos = _wait_for_scheduler_ready(scheduler_pipe_readers, scheduler_procs)
+    tokenizer_manager.max_req_input_len = scheduler_infos[0]["max_req_input_len"]
+    return tokenizer_manager, template_manager, scheduler_infos, port_args
 
 
 def run_detokenizer_process(*args, **kwargs):
