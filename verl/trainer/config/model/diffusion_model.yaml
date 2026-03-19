@@ -4,7 +4,7 @@
 # 3. Inline comments (after a field on the same line) are not allowed.
 # 4. Indentation level is respected for nested fields.
 
-_target_: verl.workers.config.DiffusersModelConfig
+_target_: verl.workers.config.DiffusionModelConfig
 
 # path to the huggingface model
 path: ~/models/Qwen/Qwen-Image
