@@ -177,14 +177,15 @@ def patch_vllm013_rotary_emb():
 
 
 if is_torch_npu_available(check_device=False):
+    import vllm
+    from packaging import version
     _VLLM_VERSION = version.parse(vllm.__version__)
     if _VLLM_VERSION >= version.parse("0.13.0"):
         # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.13
         patch_vllm013_rotary_emb()
+
     VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2 = bool(int(os.getenv("VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2", "1")))
     if VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2:
-        import vllm
-        from packaging import version
         # only support vllm 0.13 and 0.11 now.
         if _VLLM_VERSION >= version.parse("0.13.0"):
             from vllm_ascend import ascend_forward_context
