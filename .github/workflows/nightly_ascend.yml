@@ -221,4 +221,8 @@ jobs:
       - name: Running nightlyCI_grpo-qwen25-vl-3b-Instruct-fsdp-vllm_ascend
         run: |
           ray stop --force
+<<<<<<< HEAD
           bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
+=======
+          bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight16b_megatron_npu.sh
+>>>>>>> a907d2ba6354be32f256d43f69829518d811c795
