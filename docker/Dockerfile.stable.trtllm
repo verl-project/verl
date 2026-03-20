@@ -50,3 +50,5 @@ RUN pip uninstall -y verl
 # ==============================================================================
 # Note: The NGC image already includes a pre-installed TensorRT-LLM, but you can install a specific version if needed.
 # Refer to https://nvidia.github.io/TensorRT-LLM/installation/index.html for more details.
+
+RUN pip install -e ".[trtllm]"
