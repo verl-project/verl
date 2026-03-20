@@ -468,16 +468,17 @@ class DiffusersFSDPEngine(BaseEngine):
             micro_batch = micro_batch.to(get_device_id())
             meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
             # Forward and backward for each timestep
-            for step in range(micro_batch["all_timesteps"].shape[1]):
-                with ctx:
+            with ctx:
+                for step in range(micro_batch["all_timesteps"].shape[1]):
                     loss, meta_info = self.forward_step(
                         micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
                     )
 
                     if not forward_only:
                         loss.backward()
-                for key, val in meta_info.items():
-                    meta_info_lst[key].append(val)
+
+                    for key, val in meta_info.items():
+                        meta_info_lst[key].append(val)
 
             output_lst.append(meta_info_lst)
 
