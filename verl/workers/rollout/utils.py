@@ -14,6 +14,7 @@
 import asyncio
 import logging
 
+import numpy as np
 import uvicorn
 from fastapi import FastAPI
 
@@ -80,3 +81,23 @@ async def ensure_async_iterator(iterable):
     else:
         for item in iterable:
             yield item
+
+
+def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
+    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
+    <|image_pad|> and <|video_pad|> token by image_data.
+    For example,
+    ```
+    <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
+    =>
+    <|vision_start|><|image_pad|><|vision_end|>
+    ```
+    """
+    if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
+        prompt_ids = np.array(prompt_ids)
+        mask = np.ones(len(prompt_ids), dtype=bool)
+        is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
+        mask[1:] &= ~(is_value[1:] & is_value[:-1])
+        return prompt_ids[mask].tolist()
+    else:
+        return prompt_ids

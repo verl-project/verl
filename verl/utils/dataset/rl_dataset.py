@@ -226,11 +226,22 @@ class RLHFDataset(Dataset):
                             videos = None
                             videos_kwargs = {}
 
-                        return len(
-                            processor(text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs)[
-                                "input_ids"
-                            ][0]
-                        )
+                        if images is None and videos is None:
+                            # only text prompt
+                            return len(
+                                processor.tokenizer(
+                                    text=raw_prompt,
+                                    add_special_tokens=False,  # avoid adding special tokens
+                                    return_attention_mask=False,
+                                )["input_ids"]
+                            )
+                        else:
+                            # multi-modal prompt
+                            return len(
+                                processor(text=[raw_prompt], images=images, videos=videos, videos_kwargs=videos_kwargs)[
+                                    "input_ids"
+                                ][0]
+                            )
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()
@@ -362,7 +373,7 @@ class RLHFDataset(Dataset):
         interaction_kwargs = row_dict.get("extra_info", {}).get("interaction_kwargs", {})
         need_tools_kwargs = row_dict.get("extra_info", {}).get("need_tools_kwargs", self.need_tools_kwargs)
         if need_tools_kwargs and not tools_kwargs:
-            logger.warning("tools_kwargs is empty for index {}, data source: {}", index, row_dict["data_source"])
+            logger.warning("tools_kwargs is empty for index %s, data source: %s", index, row_dict["data_source"])
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
@@ -427,8 +438,12 @@ class RLHFDataset(Dataset):
         print(f"total_samples: {total_samples}")
         if total_samples == 0:
             raise ValueError("Cannot split an empty dataset")
+
+        # Calculate effective sample count after dropping remainders if needed
         if total_samples % num_splits != 0:
-            raise ValueError(f"Cannot split dataset size {total_samples} into {num_splits} splits")
+            total_samples = total_samples - (total_samples % num_splits)
+            logging.warning(f"Dropping {len(self.dataframe) % num_splits} samples, effective samples: {total_samples}")
+
         split_size = total_samples // num_splits
         splits = []
 

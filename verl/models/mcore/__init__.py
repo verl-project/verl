@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from verl.models.mcore.patch import apply_patch_megatron_v012_with_torch_v28
+
 from .registry import (
     get_mcore_forward_fn,
     get_mcore_forward_fused_fn,
@@ -32,3 +34,5 @@ __all__ = [
     "get_mcore_forward_fused_no_padding_fn",
     "get_mcore_forward_no_padding_fn",
 ]
+
+apply_patch_megatron_v012_with_torch_v28()

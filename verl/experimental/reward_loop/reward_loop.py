@@ -294,6 +294,7 @@ class RewardLoopManager:
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
+
             self.reward_loop_workers.append(
                 self.reward_loop_workers_class.options(
                     name=f"reward_loop_worker_{i}",

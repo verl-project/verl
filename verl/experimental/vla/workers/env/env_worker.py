@@ -106,26 +106,28 @@ class EnvWorker(Worker, DistProfilerExtension):
         if self.cfg.train.simulator_type == "libero":
             from verl.experimental.vla.envs.libero_env.libero_env import LiberoEnv
 
-            for _ in range(self.stage_num):
+            for stage_id in range(self.stage_num):
                 self.simulator_list.append(
                     EnvManager(
                         self.cfg.train,
                         rank=self._rank,
                         world_size=self._world_size,
                         env_cls=LiberoEnv,
+                        stage_id=stage_id,
                     )
                 )
 
         elif self.cfg.train.simulator_type == "isaac":
             from verl.experimental.vla.envs.isaac_env.isaac_env import IsaacEnv
 
-            for _ in range(self.stage_num):
+            for stage_id in range(self.stage_num):
                 self.simulator_list.append(
                     EnvManager(
                         self.cfg.train,
                         rank=self._rank,
                         world_size=self._world_size,
                         env_cls=IsaacEnv,
+                        stage_id=stage_id,
                     )
                 )
         else:
@@ -145,6 +147,7 @@ class EnvWorker(Worker, DistProfilerExtension):
         This function is used to interact with the environment.
         """
         chunk_actions: torch.Tensor = data.non_tensor_batch["actions"]
+        chunk_values = data.non_tensor_batch["critic_values"]
         stage_id: int = data.meta_info["stage_id"]
 
         # Pi0.5 Libero is not required
@@ -160,7 +163,7 @@ class EnvWorker(Worker, DistProfilerExtension):
 
         extracted_obs, chunk_rewards, chunk_terminations, chunk_truncations, infos = self.simulator_list[
             stage_id
-        ].chunk_step(chunk_actions)
+        ].chunk_step(chunk_actions, chunk_values=chunk_values)
         chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
 
         if chunk_dones.any():

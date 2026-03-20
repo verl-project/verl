@@ -54,7 +54,7 @@ async def test_hccl_checkpoint_engine(
 
     # initialize config
     checkpoint_engine_config = CheckpointEngineConfig(
-        backend="hccl", engine_kwargs={"hccl": {"rebuild_group": rebuild_group}}
+        backend="nccl", engine_kwargs={"nccl": {"rebuild_group": rebuild_group}}
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
@@ -115,7 +115,7 @@ async def test_kimi_checkpoint_engine(
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(backend="kimi_ckpt_engine", trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
@@ -163,7 +163,7 @@ async def test_mooncake_checkpoint_engine(
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(backend="mooncake", trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
