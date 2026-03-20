@@ -172,8 +172,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if multi_modal_data:
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
-        # Translate generic diffusion request fields into Omni-specific names here,
-        # so model/backend details do not leak into the generic agent loop.
+        # Translate generic diffusion request fields into Omni-specific names
         sampling_kwargs = build_diffusion_backend_sampling_params(
             sampling_params,
             model_extra_configs=self.model_config.extra_configs,
