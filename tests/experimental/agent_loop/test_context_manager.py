@@ -82,7 +82,10 @@ async def test_sliding_window_should_compress_ignores_already_compressed_observa
         ],
     )
 
-    assert not await manager.should_compress(state)
+    next_state, compressed = await manager.check_and_compress(state)
+
+    assert next_state == state
+    assert not compressed
 
 
 @pytest.mark.asyncio
@@ -109,10 +112,11 @@ async def test_sliding_window_compress_rewrites_messages_and_response_segment():
         routed_experts="stale-routes",
     )
 
-    compressed_state = await manager.compress(state)
+    compressed_state, compressed = await manager.check_and_compress(state)
     compressed_response_ids = compressed_state.trajectory_ids[-len(compressed_state.response_mask) :]
     compressed_response_text = tokenizer.decode(compressed_response_ids)
 
+    assert compressed
     assert compressed_response_text == (
         "<tool_response>[Compressed]</tool_response>"
         "<tool_response>[Compressed]</tool_response>"
@@ -167,7 +171,7 @@ async def test_sliding_window_compress_raises_when_no_new_observation_is_removed
     )
 
     with pytest.raises(ValueError, match="removed zero observations unexpectedly"):
-        await manager.compress(state)
+        await manager._compress(state)
 
 
 @pytest.mark.asyncio
@@ -187,7 +191,10 @@ async def test_summarizer_should_compress_only_checks_current_generated_tokens()
         response_mask=[0] * len(old_summary) + [1] * len(current_generation),
     )
 
-    assert not await manager.should_compress(state)
+    next_state, compressed = await manager.check_and_compress(state)
+
+    assert next_state == state
+    assert not compressed
 
 
 @pytest.mark.asyncio
@@ -204,7 +211,8 @@ async def test_summarizer_compress_keeps_last_summary_when_multiple_exist():
         ],
     )
 
-    compressed_state = await manager.compress(state)
+    compressed_state, compressed = await manager.check_and_compress(state)
+    assert compressed
     assert compressed_state.messages[-1]["content"] == "<summary>new summary</summary>"
 
 
@@ -226,10 +234,11 @@ async def test_summarizer_compress_keeps_original_prompt_and_last_summary():
         routed_experts="stale-routes",
     )
 
-    compressed_state = await manager.compress(state)
+    compressed_state, compressed = await manager.check_and_compress(state)
     summary_text = "<summary>new summary</summary>"
     summary_ids = tokenizer.encode(summary_text)
 
+    assert compressed
     assert compressed_state.messages == [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "prompt"},
@@ -254,4 +263,4 @@ async def test_summarizer_compress_raises_when_summary_is_missing():
     )
 
     with pytest.raises(ValueError, match="expected a <summary> block"):
-        await manager.compress(state)
+        await manager._compress(state)

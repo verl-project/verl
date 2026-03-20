@@ -40,17 +40,17 @@ class ContextManager(ABC):
     """Plugin interface for context management."""
 
     async def check_and_compress(self, state: ContextState) -> tuple[ContextState, bool]:
-        if not await self.should_compress(state):
+        if not await self._should_compress(state):
             return state, False
-        compressed_state = await self.compress(state)
+        compressed_state = await self._compress(state)
         return compressed_state, compressed_state != state
 
     @abstractmethod
-    async def should_compress(self, state: ContextState) -> bool:
+    async def _should_compress(self, state: ContextState) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    async def compress(self, state: ContextState) -> ContextState:
+    async def _compress(self, state: ContextState) -> ContextState:
         raise NotImplementedError
 
 
@@ -86,7 +86,7 @@ class SlidingWindowContextManager(ContextManager):
         self.tokenizer = tokenizer
         self.tool_response_pattern = re.compile(tool_response_pattern, re.DOTALL)
 
-    async def should_compress(self, state: ContextState) -> bool:
+    async def _should_compress(self, state: ContextState) -> bool:
         """Return True only when the number of remaining observations reaches the threshold M."""
         response_length = len(state.response_mask)
         if response_length == 0:
@@ -101,11 +101,11 @@ class SlidingWindowContextManager(ContextManager):
                 observation_count += 1
         return observation_count >= self.compress_when_m_observations
 
-    async def compress(self, state: ContextState) -> ContextState:
+    async def _compress(self, state: ContextState) -> ContextState:
         """Remove earlier observations and keep only the last N observations."""
         response_length = len(state.response_mask)
 
-        # 'response_length' won't be zero as it has been checked by should_compress()
+        # 'response_length' won't be zero as it has been checked by _should_compress()
         prompt_ids = state.trajectory_ids[:-response_length]
         response_ids = state.trajectory_ids[-response_length:]
 
@@ -202,7 +202,7 @@ class SummarizerContextManager(ContextManager):
         self.tokenizer = tokenizer
         self.summary_pattern = re.compile(summary_pattern, re.DOTALL)
 
-    async def should_compress(self, state: ContextState) -> bool:
+    async def _should_compress(self, state: ContextState) -> bool:
         """Return True only when a model-generated summary exists in the current generated
         response of this trajectory.
 
@@ -221,13 +221,15 @@ class SummarizerContextManager(ContextManager):
         response_text = self.tokenizer.decode(generated_response_ids, skip_special_tokens=False)
         return self.summary_pattern.search(response_text) is not None
 
-    async def compress(self, state: ContextState) -> ContextState:
+    async def _compress(self, state: ContextState) -> ContextState:
         """Keep the last summarization only, prepended with original prompts."""
         response_length = len(state.response_mask)
 
-        # 'response_length' won't be zero as it has been checked by should_compress()
+        # 'response_length' won't be zero as it has been checked by _should_compress()
         prompt_ids = state.trajectory_ids[:-response_length]
         response_ids = state.trajectory_ids[-response_length:]
+
+        # Take the llm-generated tokens of current trajectory and search for summarization
         generated_response_ids = [
             token_id for token_id, token_mask in zip(response_ids, state.response_mask, strict=False) if token_mask == 1
         ]
