@@ -17,61 +17,16 @@ class DecoupledSpecRole(str, Enum):
 
 
 @dataclass(frozen=True)
-class ReplicaAssignment:
-    role: DecoupledSpecRole
-    replica_rank: int
-    world_size: int
-    worker_indices: tuple[int, ...]
+class DecoupledSpecTopology:
+    """GPU / replica counts for decoupled speculative rollout (verify first, then draft in global rank space)."""
 
-    @property
-    def start_idx(self) -> int:
-        return self.worker_indices[0]
-
-    @property
-    def end_idx(self) -> int:
-        return self.worker_indices[-1] + 1
-
-    def contains_rank(self, global_rank: int) -> bool:
-        return self.start_idx <= global_rank < self.end_idx
-
-    def offset_for_rank(self, global_rank: int) -> int:
-        if not self.contains_rank(global_rank):
-            raise ValueError(f"Rank {global_rank} does not belong to assignment {self}")
-        return global_rank - self.start_idx
-
-
-@dataclass(frozen=True)
-class DecoupledSpecLayout:
     world_size: int
     verify_world_size: int
     draft_world_size: int
-    verify_assignments: tuple[ReplicaAssignment, ...]
-    draft_assignments: tuple[ReplicaAssignment, ...]
-
-    @property
-    def verify_gpu_count(self) -> int:
-        return len(self.verify_assignments) * self.verify_world_size
-
-    @property
-    def draft_gpu_count(self) -> int:
-        return len(self.draft_assignments) * self.draft_world_size
-
-    @property
-    def num_verify_replicas(self) -> int:
-        return len(self.verify_assignments)
-
-    @property
-    def num_draft_replicas(self) -> int:
-        return len(self.draft_assignments)
-
-    def all_assignments(self) -> tuple[ReplicaAssignment, ...]:
-        return self.verify_assignments + self.draft_assignments
-
-    def assignment_for_rank(self, global_rank: int) -> ReplicaAssignment:
-        for assignment in self.all_assignments():
-            if assignment.contains_rank(global_rank):
-                return assignment
-        raise ValueError(f"Global rank {global_rank} is outside of decoupled spec layout")
+    verify_gpu_count: int
+    draft_gpu_count: int
+    num_verify_replicas: int
+    num_draft_replicas: int
 
 
 @dataclass(frozen=True)
@@ -128,10 +83,16 @@ def build_draft_model_config(model_config: DictConfig | dict, draft_model_path: 
     return draft_model_config
 
 
-def build_decoupled_spec_layout(
+def compute_decoupled_spec_topology(
     config: RolloutConfig | DictConfig | dict,
     world_size: int,
-) -> DecoupledSpecLayout:
+) -> DecoupledSpecTopology:
+    """Compute verify/draft GPU counts and replica counts for decoupled speculative rollout.
+
+    Global worker layout (indices in ``worker_group.workers``):
+    - ranks ``[0, verify_gpu_count)``: verify replicas (each replica is ``verify_world_size`` workers)
+    - ranks ``[verify_gpu_count, world_size)``: draft replicas (each replica is ``draft_world_size`` workers)
+    """
     rollout_config = omega_conf_to_dataclass(config, dataclass_type=RolloutConfig)
     verify_world_size = (
         rollout_config.tensor_model_parallel_size
@@ -161,37 +122,14 @@ def build_decoupled_spec_layout(
     num_verify_replicas = verify_gpu_count // verify_world_size
     num_draft_replicas = draft_gpu_count // draft_world_size
 
-    verify_assignments = []
-    for replica_rank in range(num_verify_replicas):
-        start_idx = replica_rank * verify_world_size
-        verify_assignments.append(
-            ReplicaAssignment(
-                role=DecoupledSpecRole.VERIFY,
-                replica_rank=replica_rank,
-                world_size=verify_world_size,
-                worker_indices=tuple(range(start_idx, start_idx + verify_world_size)),
-            )
-        )
-
-    draft_assignments = []
-    draft_offset = verify_gpu_count
-    for replica_rank in range(num_draft_replicas):
-        start_idx = draft_offset + replica_rank * draft_world_size
-        draft_assignments.append(
-            ReplicaAssignment(
-                role=DecoupledSpecRole.DRAFT,
-                replica_rank=replica_rank,
-                world_size=draft_world_size,
-                worker_indices=tuple(range(start_idx, start_idx + draft_world_size)),
-            )
-        )
-
-    return DecoupledSpecLayout(
+    return DecoupledSpecTopology(
         world_size=world_size,
         verify_world_size=verify_world_size,
         draft_world_size=draft_world_size,
-        verify_assignments=tuple(verify_assignments),
-        draft_assignments=tuple(draft_assignments),
+        verify_gpu_count=verify_gpu_count,
+        draft_gpu_count=draft_gpu_count,
+        num_verify_replicas=num_verify_replicas,
+        num_draft_replicas=num_draft_replicas,
     )
 
 
@@ -205,17 +143,27 @@ def resolve_server_adapter_layout(
     if not rollout_config.enable_decoupled_spec:
         return None
 
-    layout = build_decoupled_spec_layout(rollout_config, world_size=world_size)
-    assignment = layout.assignment_for_rank(global_rank)
-    rollout_rank = assignment.offset_for_rank(global_rank)
+    topo = compute_decoupled_spec_topology(rollout_config, world_size=world_size)
+
+    if global_rank < topo.verify_gpu_count:
+        replica_rank = global_rank // topo.verify_world_size
+        rollout_rank = global_rank - replica_rank * topo.verify_world_size
+        role = DecoupledSpecRole.VERIFY
+        server_prefix = "sglang_server"
+    else:
+        offset = global_rank - topo.verify_gpu_count
+        replica_rank = offset // topo.draft_world_size
+        rollout_rank = offset - replica_rank * topo.draft_world_size
+        role = DecoupledSpecRole.DRAFT
+        server_prefix = "sglang_draft_server"
+
     node_rank = rollout_rank // local_world_size
     local_rank = rollout_rank % local_world_size
-    server_prefix = "sglang_server" if assignment.role == DecoupledSpecRole.VERIFY else "sglang_draft_server"
     return ServerAdapterLayout(
-        role=assignment.role,
-        replica_rank=assignment.replica_rank,
+        role=role,
+        replica_rank=replica_rank,
         rollout_rank=rollout_rank,
         node_rank=node_rank,
         local_rank=local_rank,
-        server_actor_name=f"{server_prefix}_{assignment.replica_rank}_{node_rank}",
+        server_actor_name=f"{server_prefix}_{replica_rank}_{node_rank}",
     )

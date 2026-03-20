@@ -938,60 +938,52 @@ class AgentLoopManager:
 
     async def _initialize_decoupled_spec_llm_servers(self, world_size: int):
         from verl.workers.rollout.decoupled_spec_rollout.layout import (
-            build_decoupled_spec_layout,
             build_draft_model_config,
             build_draft_rollout_config,
+            compute_decoupled_spec_topology,
         )
         from verl.workers.rollout.decoupled_spec_rollout.replica import DraftSGLangReplica, VerifySGLangReplica
 
         if self.worker_group is None:
             raise NotImplementedError("decoupled speculation currently only supports hybrid_engine rollout")
 
-        self.decoupled_spec_layout = build_decoupled_spec_layout(self.rollout_config, world_size=world_size)
+        topo = compute_decoupled_spec_topology(self.rollout_config, world_size=world_size)
         draft_rollout_config = build_draft_rollout_config(self.rollout_config)
         draft_model_config = build_draft_model_config(self.model_config, self.rollout_config.draft.model_path)
 
-        self.draft_rollout_replicas = [
-            DraftSGLangReplica(
-                replica_rank=assignment.replica_rank,
-                config=draft_rollout_config,
-                model_config=draft_model_config,
-                gpus_per_node=self.rollout_config.n_gpus_per_node,
-            )
-            for assignment in self.decoupled_spec_layout.draft_assignments
-        ]
-        await asyncio.gather(
-            *[
-                replica.init_hybrid_with_workers(
-                    [self.worker_group.workers[worker_idx] for worker_idx in assignment.worker_indices]
-                )
-                for replica, assignment in zip(
-                    self.draft_rollout_replicas, self.decoupled_spec_layout.draft_assignments, strict=True
-                )
-            ]
-        )
-        draft_server_endpoints = [replica.as_endpoint() for replica in self.draft_rollout_replicas]
+        self.rollout_replicas = []
 
-        self.rollout_replicas = [
-            VerifySGLangReplica(
-                replica_rank=assignment.replica_rank,
-                config=self.rollout_config,
-                model_config=self.model_config,
-                gpus_per_node=self.rollout_config.n_gpus_per_node,
-                draft_server_endpoints=draft_server_endpoints,
+        for replica_rank in range(topo.num_draft_replicas):
+            self.rollout_replicas.append(
+                DraftSGLangReplica(
+                    replica_rank=replica_rank,
+                    config=draft_rollout_config,
+                    model_config=draft_model_config,
+                    gpus_per_node=self.rollout_config.n_gpus_per_node,
+                    topology_rollout_config=self.rollout_config,
+                )
             )
-            for assignment in self.decoupled_spec_layout.verify_assignments
-        ]
-        await asyncio.gather(
-            *[
-                replica.init_hybrid_with_workers(
-                    [self.worker_group.workers[worker_idx] for worker_idx in assignment.worker_indices]
+
+        draft_replicas = self.rollout_replicas[: topo.num_draft_replicas]
+        await asyncio.gather(*[r.init_hybrid_decoupled(self.worker_group) for r in draft_replicas])
+        draft_server_endpoints = [r.as_endpoint() for r in draft_replicas]
+
+        for replica_rank in range(topo.num_verify_replicas):
+            self.rollout_replicas.append(
+                VerifySGLangReplica(
+                    replica_rank=replica_rank,
+                    config=self.rollout_config,
+                    model_config=self.model_config,
+                    gpus_per_node=self.rollout_config.n_gpus_per_node,
+                    draft_server_endpoints=draft_server_endpoints,
                 )
-                for replica, assignment in zip(
-                    self.rollout_replicas, self.decoupled_spec_layout.verify_assignments, strict=True
-                )
-            ]
-        )
+            )
+
+        verify_replicas = self.rollout_replicas[topo.num_draft_replicas :]
+        await asyncio.gather(*[r.init_hybrid_decoupled(self.worker_group) for r in verify_replicas])
+
+        self.server_handles = [r._server_handle for r in verify_replicas]
+        self.server_addresses = [r._server_address for r in verify_replicas]
 
     @classmethod
     @auto_await
@@ -1024,8 +1016,6 @@ class AgentLoopManager:
 
         if self._is_decoupled_spec_enabled():
             await self._initialize_decoupled_spec_llm_servers(world_size)
-            self.server_handles = [server._server_handle for server in self.rollout_replicas]
-            self.server_addresses = [server._server_address for server in self.rollout_replicas]
             print(f"AgentLoopManager: {self.server_addresses}")
             if self.rollout_config.prometheus.enable:
                 if self.rollout_config.disable_log_stats:

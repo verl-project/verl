@@ -28,6 +28,24 @@ from verl.workers.rollout import BaseRollout, RolloutReplica
 from verl.workers.rollout.base import get_rollout_class_from_config
 
 
+def _checkpoint_rollout_workers_ordered(replicas: list[RolloutReplica]) -> list:
+    """Flatten hybrid rollout replica workers in **global rank** order.
+
+    Decoupled-spec stores replicas as draft-first then verify in ``AgentLoopManager.rollout_replicas``,
+    but checkpoint / NCCL topology must follow global worker order: verify segment then draft segment.
+    """
+    if not replicas:
+        return []
+    has_decoupled = any(getattr(r, "server_role", None) in ("verify", "draft") for r in replicas)
+    if not has_decoupled:
+        return [w for r in replicas for w in r.workers]
+    verify_replicas = [r for r in replicas if getattr(r, "server_role", None) == "verify"]
+    draft_replicas = [r for r in replicas if getattr(r, "server_role", None) == "draft"]
+    verify_replicas.sort(key=lambda r: r.replica_rank)
+    draft_replicas.sort(key=lambda r: r.replica_rank)
+    return [w for r in verify_replicas + draft_replicas for w in r.workers]
+
+
 class TensorMeta(TypedDict):
     name: str
     shape: torch.Size
@@ -418,9 +436,7 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
 
         # 2. create a temporay worker group for all replicas
-        workers = []
-        for replica in self.replicas:
-            workers.extend(replica.workers)
+        workers = _checkpoint_rollout_workers_ordered(self.replicas)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
         trainer = self.trainer
 

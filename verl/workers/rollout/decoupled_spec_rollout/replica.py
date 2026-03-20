@@ -6,8 +6,10 @@ from typing import Optional
 
 import ray
 
+from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.rollout.decoupled_spec_rollout.layout import compute_decoupled_spec_topology
 from verl.workers.rollout.decoupled_spec_rollout.protocol import DraftServerEndpoint
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica
 from verl.workers.rollout.sglang_rollout.async_sglang_server import SGLangHttpServer, visible_devices_keyword
@@ -28,10 +30,9 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(SGLangHttpServer)
 
-    async def init_hybrid_with_workers(self, workers: list):
-        self.rollout_mode = RolloutMode.HYBRID
-        self.workers = list(workers)
-        await self.launch_servers()
+    async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
+        """Bind this replica to the correct worker slice using decoupled-spec topology (subclass implements slice)."""
+        raise NotImplementedError
 
     def _build_server_name(self, node_rank: int) -> str:
         return f"{self.server_name_prefix}_{self.replica_rank}_{node_rank}"
@@ -125,6 +126,30 @@ class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
     server_role = "draft"
     server_name_prefix = "sglang_draft_server"
 
+    def __init__(
+        self,
+        replica_rank: int,
+        config: RolloutConfig,
+        model_config: HFModelConfig,
+        gpus_per_node: int = 8,
+        is_reward_model: bool = False,
+        topology_rollout_config: RolloutConfig | None = None,
+    ):
+        """Args:
+        topology_rollout_config: Full rollout config (verify mesh + draft.ngpus) for GPU layout.
+            Required for ``init_hybrid_decoupled``; defaults to ``config`` if unset.
+        """
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        self._topology_rollout_config = topology_rollout_config
+
+    async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
+        rollout_cfg = self._topology_rollout_config if self._topology_rollout_config is not None else self.config
+        topo = compute_decoupled_spec_topology(rollout_cfg, world_size=worker_group.world_size)
+        start = topo.verify_gpu_count + self.replica_rank * topo.draft_world_size
+        self.rollout_mode = RolloutMode.HYBRID
+        self.workers = worker_group.workers[start : start + topo.draft_world_size]
+        await self.launch_servers()
+
     def as_endpoint(self) -> DraftServerEndpoint:
         return DraftServerEndpoint(
             replica_rank=self.replica_rank,
@@ -150,6 +175,13 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.draft_server_endpoints = list(draft_server_endpoints or [])
+
+    async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
+        topo = compute_decoupled_spec_topology(self.config, world_size=worker_group.world_size)
+        start = self.replica_rank * topo.verify_world_size
+        self.rollout_mode = RolloutMode.HYBRID
+        self.workers = worker_group.workers[start : start + topo.verify_world_size]
+        await self.launch_servers()
 
     def _build_extra_server_kwargs(self) -> dict:
         extra_kwargs = super()._build_extra_server_kwargs()

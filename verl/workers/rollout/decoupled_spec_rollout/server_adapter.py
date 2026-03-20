@@ -22,8 +22,9 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 class DecoupledSGLangServerAdapter(BaseRollout):
     """Dedicated server adapter for decoupled-spec SGLang rollout.
 
-    It resolves verify/draft ownership from the decoupled-spec layout instead of assuming
-    all hybrid workers belong to the verifier rollout mesh.
+    It resolves verify/draft ownership from global rank and the decoupled-spec topology
+    (``compute_decoupled_spec_topology`` / ``resolve_server_adapter_layout``) instead of
+    assuming all hybrid workers belong to the verifier rollout mesh.
     """
 
     def __init__(
