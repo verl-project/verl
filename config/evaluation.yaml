@@ -1,0 +1,14 @@
+data:
+  path: /tmp/math_Qwen2-7B-Instruct.parquet
+  prompt_key: prompt
+  response_key: responses
+  data_source_key: data_source
+  reward_model_key: reward_model
+
+custom_reward_function:
+  path: /home/hjw/CoT-Data-verl/CoT-DataSynth/verl/utils/reward_score/gsm8k.py
+  name: compute_score
+
+ray_init:
+  num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
+  timeline_json_file: null
