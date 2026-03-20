@@ -39,3 +39,33 @@ Due to potential issues with CUDA graph capture in ROCm, we've found that vLLM's
 Our investigation shows that ROCm may trigger an unexpected crash when attempting to capture large batches with CUDA graph. One workaround is to set ``actor_rollout_ref.rollout.cudagraph_capture_sizes`` to values such as ``[1, 2, 4, 8, 16, 32, 64]`` (change depending on your GPU memory size).
 
 Then, you can choose to enable CUDA graph by setting ``actor_rollout_ref.rollout.enforce_eager`` to ``False`` in your verl configuration file.
+
+
+Optimize Tool Execution Latency (Sandbox Fusion)
+--------------------------------------------------------------
+
+When using tool-calling features (e.g., Sandbox Fusion code interpreter) on AMD GPUs, you may
+observe significantly higher per-step latency compared to NVIDIA GPUs. This is because the
+default execution path uses a Ray actor-based execution pool, where Ray's pickle serialization
+and IPC communication may have different performance characteristics on ROCm.
+
+**Workaround**: Set ``use_ray_execution_pool: false`` in your tool configuration to bypass Ray
+actor overhead and use a local thread pool instead:
+
+.. code-block:: yaml
+
+    tools:
+      - class_name: "recipe.retool.retool.CustomSandboxFusionTool"
+        config:
+          sandbox_fusion_url: "http://localhost:8080/run_code"
+          num_workers: 128
+          use_ray_execution_pool: false  # Bypass Ray actor IPC, recommended for AMD
+          # ... other config ...
+
+This switches to ``asyncio.run_in_executor`` with a local semaphore for concurrency control,
+eliminating the Ray actor serialization overhead while maintaining the same functionality.
+
+.. note::
+
+   The local thread pool mode is recommended for single-node training. For multi-node setups
+   where distributed rate limiting is required, keep ``use_ray_execution_pool: true``.

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import os
 import threading
@@ -75,8 +76,9 @@ class ExecutionWorker:
 
     def execute(self, fn: Callable[..., T], *fn_args, **fn_kwargs) -> T:
         with ExitStack() as stack:
-            stack.callback(self.rate_limit_worker.release.remote)
-            ray.get(self.rate_limit_worker.acquire.remote())
+            if self.rate_limit_worker is not None:
+                stack.callback(self.rate_limit_worker.release.remote)
+                ray.get(self.rate_limit_worker.acquire.remote())
             try:
                 return fn(*fn_args, **fn_kwargs)
             except Exception as e:
@@ -136,12 +138,14 @@ class SandboxFusionTool(BaseTool):
         self.default_timeout = config.get("default_timeout", 30)
         self.default_language = config.get("default_language", "python")
         self.enable_global_rate_limit = config.get("enable_global_rate_limit", True)
+        self.use_ray_execution_pool = config.get("use_ray_execution_pool", False)
         self.execution_pool = init_execution_pool(
             num_workers=self.num_workers,
             enable_global_rate_limit=self.enable_global_rate_limit,
             rate_limit=self.rate_limit,
             mode=PoolMode.ThreadMode,
         )
+        self._thread_semaphore = threading.Semaphore(self.num_workers)
         self.sandbox_fusion_url = config.get("sandbox_fusion_url", "")
         self.memory_limit_mb = config.get("memory_limit_mb", 1024)
         if self.sandbox_fusion_url == "":
@@ -172,7 +176,18 @@ class SandboxFusionTool(BaseTool):
         if not isinstance(code, str):
             code = str(code)
 
-        result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
+        if self.use_ray_execution_pool:
+            result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
+        else:
+            # Bypass Ray IPC: run blocking HTTP call directly in a thread pool,
+            # using a semaphore to limit concurrency (same as num_workers).
+            self._thread_semaphore.acquire()
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None, self.execute_code, instance_id, code, timeout, language
+                )
+            finally:
+                self._thread_semaphore.release()
         # sandbox has no score or metrics, use Nones
         if isinstance(result, ToolResponse):
             return result, None, None
