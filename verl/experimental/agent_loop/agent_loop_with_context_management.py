@@ -15,7 +15,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, AgentLoopMetrics
+from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopMetrics, AgentLoopOutput
 from verl.experimental.agent_loop.context_manager import ContextManager, ContextState
 
 
