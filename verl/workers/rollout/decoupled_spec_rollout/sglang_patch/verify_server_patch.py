@@ -17,10 +17,18 @@ from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     DraftResult,
     DraftStatus,
     VerifyResult,
-    get_draft_endpoints_from_env,
     get_num_speculative_steps_from_env,
     get_verify_replica_rank_from_env,
 )
+
+# Set by SGLangHttpServer.launch_server immediately before verify launch_subprocesses runs.
+_pending_draft_actor_handles: list | None = None
+
+
+def set_pending_draft_actor_handles(handles: list | None) -> None:
+    """Pass drafter Ray actor handles from the verify server process into launch_subprocesses (cannot use env JSON)."""
+    global _pending_draft_actor_handles
+    _pending_draft_actor_handles = list(handles) if handles else None
 
 logger = logging.getLogger(__name__)
 
@@ -363,14 +371,18 @@ def launch_subprocesses(
     )
     detoken_proc.start()
 
+    global _pending_draft_actor_handles
+    draft_actor_handles = _pending_draft_actor_handles
+    _pending_draft_actor_handles = None
+
     ipc_config = DraftProxyIpcConfig.from_env()
-    draft_endpoints = get_draft_endpoints_from_env()
-    if ipc_config is not None and draft_endpoints:
+    if ipc_config is not None and draft_actor_handles:
         mp.Process(
             target=run_draftproxy_process,
             args=(
                 server_args,
                 port_args,
+                draft_actor_handles,
             ),
         ).start()
 

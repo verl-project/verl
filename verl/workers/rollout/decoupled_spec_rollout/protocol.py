@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -31,7 +30,6 @@ _SCHEDULER_TO_PROXY_IPC_ENV = "VERL_DRAFT_PROXY_SCHEDULER_TO_PROXY_IPC"
 _PROXY_TO_SCHEDULER_IPC_ENV = "VERL_DRAFT_PROXY_PROXY_TO_SCHEDULER_IPC"
 _VERIFY_REPLICA_RANK_ENV = "VERL_DRAFT_PROXY_VERIFY_REPLICA_RANK"
 _NUM_SPECULATIVE_STEPS_ENV = "VERL_DRAFT_PROXY_NUM_SPECULATIVE_STEPS"
-_DRAFT_ENDPOINTS_ENV = "VERL_DRAFT_PROXY_DRAFT_ENDPOINTS"
 
 
 @dataclass(frozen=True)
@@ -53,36 +51,9 @@ class DraftMetrics:
 
 
 @dataclass
-class DraftServerEndpoint:
-    replica_rank: int
-    server_address: str
-    actor_handle: Any = None
-    node_rank: int = 0
-    actor_name: Optional[str] = None
-
-    def to_metadata(self) -> dict[str, Any]:
-        return {
-            "replica_rank": self.replica_rank,
-            "server_address": self.server_address,
-            "node_rank": self.node_rank,
-            "actor_name": self.actor_name,
-        }
-
-    @staticmethod
-    def from_metadata(metadata: dict[str, Any]) -> "DraftServerEndpoint":
-        return DraftServerEndpoint(
-            replica_rank=metadata["replica_rank"],
-            server_address=metadata["server_address"],
-            node_rank=metadata.get("node_rank", 0),
-            actor_name=metadata.get("actor_name"),
-        )
-
-
-@dataclass
 class DraftRoute:
     session_key: SessionKey
-    draft_replica_rank: int
-    draft_server_address: str
+    draft_index: int
 
 
 @dataclass
@@ -90,7 +61,7 @@ class DraftRequest:
     request_id: str
     session_id: Optional[str]
     verify_replica_rank: int
-    draft_replica_rank: Optional[int] = None
+    draft_index: Optional[int] = None
     prompt_token_ids: list[int] = field(default_factory=list)
     committed_token_ids: list[int] = field(default_factory=list)
     target_position: int = 0
@@ -195,13 +166,10 @@ def get_draft_proxy_runtime_env(
     ipc_config: DraftProxyIpcConfig,
     verify_replica_rank: int,
     num_speculative_steps: int,
-    draft_endpoints: Optional[list[DraftServerEndpoint]] = None,
 ) -> dict[str, str]:
     runtime_env = ipc_config.export_env()
     runtime_env[_VERIFY_REPLICA_RANK_ENV] = str(verify_replica_rank)
     runtime_env[_NUM_SPECULATIVE_STEPS_ENV] = str(num_speculative_steps)
-    if draft_endpoints is not None:
-        runtime_env[_DRAFT_ENDPOINTS_ENV] = json.dumps([endpoint.to_metadata() for endpoint in draft_endpoints])
     return runtime_env
 
 
@@ -211,10 +179,3 @@ def get_verify_replica_rank_from_env(default: int = -1) -> int:
 
 def get_num_speculative_steps_from_env(default: int = 0) -> int:
     return int(os.getenv(_NUM_SPECULATIVE_STEPS_ENV, str(default)))
-
-
-def get_draft_endpoints_from_env() -> list[DraftServerEndpoint]:
-    raw_value = os.getenv(_DRAFT_ENDPOINTS_ENV)
-    if not raw_value:
-        return []
-    return [DraftServerEndpoint.from_metadata(item) for item in json.loads(raw_value)]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import ray
 
@@ -10,7 +10,6 @@ from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.decoupled_spec_rollout.layout import compute_decoupled_spec_topology
-from verl.workers.rollout.decoupled_spec_rollout.protocol import DraftServerEndpoint
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica
 from verl.workers.rollout.sglang_rollout.async_sglang_server import SGLangHttpServer, visible_devices_keyword
 
@@ -150,14 +149,10 @@ class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
         self.workers = worker_group.workers[start : start + topo.draft_world_size]
         await self.launch_servers()
 
-    def as_endpoint(self) -> DraftServerEndpoint:
-        return DraftServerEndpoint(
-            replica_rank=self.replica_rank,
-            server_address=self._server_address,
-            actor_handle=self._server_handle,
-            node_rank=0,
-            actor_name=self._build_server_name(0),
-        )
+    @property
+    def draft_actor_handle(self):
+        """Ray actor handle for this draft replica's HTTP server (node 0)."""
+        return self._server_handle
 
 
 class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
@@ -171,10 +166,10 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
         model_config: HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
-        draft_server_endpoints: Optional[list[DraftServerEndpoint]] = None,
+        draft_actor_handles: Optional[list[Any]] = None,
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
-        self.draft_server_endpoints = list(draft_server_endpoints or [])
+        self.draft_actor_handles = list(draft_actor_handles or [])
 
     async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
         topo = compute_decoupled_spec_topology(self.config, world_size=worker_group.world_size)
@@ -185,5 +180,5 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
 
     def _build_extra_server_kwargs(self) -> dict:
         extra_kwargs = super()._build_extra_server_kwargs()
-        extra_kwargs["draft_server_endpoints"] = self.draft_server_endpoints
+        extra_kwargs["draft_actor_handles"] = self.draft_actor_handles
         return extra_kwargs

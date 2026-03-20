@@ -966,7 +966,7 @@ class AgentLoopManager:
 
         draft_replicas = self.rollout_replicas[: topo.num_draft_replicas]
         await asyncio.gather(*[r.init_hybrid_decoupled(self.worker_group) for r in draft_replicas])
-        draft_server_endpoints = [r.as_endpoint() for r in draft_replicas]
+        draft_actor_handles = [r.draft_actor_handle for r in draft_replicas]
 
         for replica_rank in range(topo.num_verify_replicas):
             self.rollout_replicas.append(
@@ -975,7 +975,7 @@ class AgentLoopManager:
                     config=self.rollout_config,
                     model_config=self.model_config,
                     gpus_per_node=self.rollout_config.n_gpus_per_node,
-                    draft_server_endpoints=draft_server_endpoints,
+                    draft_actor_handles=draft_actor_handles,
                 )
             )
 
