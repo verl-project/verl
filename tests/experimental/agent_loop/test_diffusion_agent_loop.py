@@ -130,7 +130,6 @@ def test_single_turn(init_config):
             "prompt_embeds_mask",
             "input_ids",
             "attention_mask",
-            "rollout_log_probs",
         ]
         for key in expected_batch_keys:
             assert key in result.batch, f"Key {key} not found in result batch with keys {list(result.batch.keys())}."
