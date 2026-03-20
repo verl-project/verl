@@ -174,11 +174,19 @@ class ServerAdapter(BaseRollout):
         if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
             await self._engine.resume_memory_occupation(tags=tags)
 
-    async def release(self):
-        """Release weights and kv cache in GPU memory."""
+    async def release(self, tags: list[str] | None = None):
+        """Release weights and/or kv cache in GPU memory.
+
+        Args:
+            tags: List of tags to release, e.g. ["weights"], ["kv_cache"], or
+                  ["kv_cache", "weights"]. If None (default), releases both.
+        """
+        from verl.workers.rollout._tag_utils import validate_release_tags
+
+        tag_set = validate_release_tags(tags)
         await self._init_server_adapter()
         if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
-            await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
+            await self._engine.release_memory_occupation(tags=sorted(tag_set))
 
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs

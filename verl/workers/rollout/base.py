@@ -64,8 +64,13 @@ class BaseRollout(ABC):
         pass
 
     @abstractmethod
-    async def release(self):
-        """Release weights and kv cache in GPU memory."""
+    async def release(self, tags: list[str] | None = None):
+        """Release weights and/or kv cache in GPU memory.
+
+        Args:
+            tags: List of tags to release, e.g. ["weights"], ["kv_cache"], or
+                  ["kv_cache", "weights"]. If None (default), releases both.
+        """
         pass
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
