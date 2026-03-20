@@ -13,16 +13,19 @@
 # limitations under the License.
 
 
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
+from verl.trainer.distillation import distillation_loss, is_distillation_enabled, prepare_distillation_inputs
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
-from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.config import ActorConfig, CriticConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
 
@@ -94,8 +97,19 @@ def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) ->
     return output
 
 
-def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+def ppo_loss(
+    config: ActorConfig,
+    distillation_config: Optional[DistillationConfig],
+    model_output,
+    data: TensorDict,
+    dp_group=None,
+):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+    distillation_enabled = is_distillation_enabled(distillation_config)
+    if distillation_enabled:
+        distillation_loss_config: DistillationLossConfig = distillation_config.distillation_loss
+    else:
+        distillation_loss_config = None
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
@@ -123,33 +137,36 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     metrics = {}
 
     response_mask = data["response_mask"].to(bool)
-    # compute policy loss
+    loss_agg_mode = config.loss_agg_mode
     old_log_prob = data["old_log_probs"]
-    advantages = data["advantages"]
     rollout_is_weights = data.get("rollout_is_weights", None)
 
-    loss_agg_mode = config.loss_agg_mode
+    # compute policy loss
+    if not distillation_enabled or distillation_loss_config.use_task_rewards:
+        advantages = data["advantages"]
 
-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+        loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
-    policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_metrics = policy_loss_fn(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        response_mask=response_mask,
-        loss_agg_mode=loss_agg_mode,
-        config=config,
-        rollout_is_weights=rollout_is_weights,
-    )
+        policy_loss_fn = get_policy_loss_fn(loss_mode)
+        pg_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=config,
+            rollout_is_weights=rollout_is_weights,
+        )
 
-    # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
-    # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
-    pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+        # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
+        # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
+        pg_metrics = {key: Metric(AggregationType.MEAN, value) for key, value in pg_metrics.items()}
 
-    metrics.update(pg_metrics)
-    metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
-    policy_loss = pg_loss
+        metrics.update(pg_metrics)
+        metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
+        policy_loss = pg_loss
+    else:
+        policy_loss = 0
 
     # add entropy loss
     if entropy is not None:
@@ -158,7 +175,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
-        metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
+        metrics["actor/entropy_loss"] = Metric(value=entropy[response_mask], aggregation=AggregationType.MEAN)
 
     # add kl loss
     if config.use_kl_loss:
@@ -170,8 +187,30 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         )
 
         policy_loss += kl_loss * config.kl_loss_coef
-        metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
+        metrics["kl_loss"] = Metric(value=kld[response_mask], aggregation=AggregationType.MEAN)
         metrics["kl_coef"] = config.kl_loss_coef
+
+    # distillation loss
+    if distillation_enabled:
+        distillation_inputs = prepare_distillation_inputs(
+            log_prob=log_prob, data=data, model_output=model_output, config=distillation_config
+        )
+        dist_loss, distillation_metrics = distillation_loss(
+            inputs=distillation_inputs,
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=config,
+            distillation_config=distillation_config,
+            rollout_is_weights=rollout_is_weights,
+        )
+        metrics.update(distillation_metrics)
+        distillation_loss_coef = (
+            distillation_loss_config.distillation_loss_coef if distillation_loss_config.use_task_rewards else 1.0
+        )
+        policy_loss += dist_loss * distillation_loss_coef
+        metrics["distillation/loss"] = Metric(value=dist_loss, aggregation=metric_aggregation)
 
     return policy_loss, metrics
 
