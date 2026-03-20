@@ -139,6 +139,36 @@ MindSpeed 对应 Megatron-LM 后端使用场景，使用方式如下：
     3. 更多特性信息可参考 `MindSpeed & verl 文档 <https://gitcode.com/Ascend/MindSpeed/blob/master/docs/user-guide/verl.md>`_ 。
 
 
+新增 MindSpeed-LLM 训练后端支持
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+如需使能 MindSpeed-LLM 训练后端，需要额外下载 MindSpeed-LLM 。
+需要注意的是，MindSpeed-LLM 训练后端依赖 MindSpeed-LLM master 分支、 MindSpeed master 分支以及 Megatron-LM core_v0.12.1 分支。
+MindSpeed-LLM 及相关依赖的源码安装指令：
+
+    .. code-block:: bash
+
+        # 下载 MindSpeed-LLM、 MindSpeed 和 Megatron-LM
+        git clone https://gitcode.com/Ascend/MindSpeed-LLM.git
+        git clone https://gitcode.com/Ascend/MindSpeed.git
+        git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
+
+        # 配置环境变量
+        export PYTHONPATH=$PYTHONPATH:your path/Megatron-LM
+        export PYTHONPATH=$PYTHONPATH:your path/MindSpeed
+        export PYTHONPATH=$PYTHONPATH:your path/MindSpeed-LLM
+
+        # 安装 mbridge
+        pip install mbridge
+
+MindSpeed-LLM 对应 Megatron-LM 后端使用场景，使用方式如下：
+
+    1. 使能 verl worker 模型 ``strategy`` 配置为 ``mindspeed`` ，例如 ``actor_rollout_ref.actor.strategy=mindspeed``。
+
+    2. MindSpeed-LLM 自定义入参可通过 ``llm_kwargs`` 参数传入，例如对 MOE 模型开启 GMM 特性可使用 ``+actor_rollout_ref.actor.mindspeed.llm_kwargs.moe_grouped_gemm=True``。
+
+    3. 更多特性信息可参考 `MindSpeed-LLM 内的特性文档 <https://gitcode.com/Ascend/MindSpeed-LLM/tree/master/docs/zh/pytorch/features/mcore>`_ 。
+
+
 安装verl
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

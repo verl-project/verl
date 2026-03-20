@@ -163,12 +163,12 @@ def vllm_ascend_v013_matmul_and_reduce_wrapper(fn):
 def patch_vllm013_rotary_emb():
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
     def vllm013_npu_rotary_embedding_init_impl(
-            self,
-            enforce_enable: bool = False,
-            is_neox_style: bool = True,
-            enable_fp32_compute: bool = False,
-        ) -> None:
-        super(ApplyRotaryEmb, self).__init__(enforce_enable)
+        self,
+        enforce_enable: bool = False,
+        is_neox_style: bool = True,
+        enable_fp32_compute: bool = False,
+    ) -> None:
+        super(ApplyRotaryEmb, self).__init__()
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
         self.apply_rotary_emb_flash_attn = None
@@ -179,6 +179,7 @@ def patch_vllm013_rotary_emb():
 if is_torch_npu_available(check_device=False):
     import vllm
     from packaging import version
+
     _VLLM_VERSION = version.parse(vllm.__version__)
     if _VLLM_VERSION >= version.parse("0.13.0"):
         # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.13
