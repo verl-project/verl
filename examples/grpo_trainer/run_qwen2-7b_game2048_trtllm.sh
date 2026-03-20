@@ -28,6 +28,11 @@ DATADIR=${DATADIR:-"$HOME/data/game2048"}
 TRAIN_PATH="$DATADIR/train.parquet"
 TEST_PATH="$DATADIR/test.parquet"
 
+if [ ! -f "$TRAIN_PATH" ] || [ ! -f "$TEST_PATH" ]; then
+    echo "Data not found at $DATADIR — generating dataset..."
+    python3 "$VERL_ROOT/examples/data_preprocess/game2048.py" --local_save_dir "$DATADIR"
+fi
+
 PROJECT_NAME=${PROJECT_NAME:-"verl_grpo_game2048"}
 EXP_NAME="trtllm-qwen2.5-coder-7b-game2048-tp${TP}-8gpus${EXP_NAME_SUFFIX:+"-"}${EXP_NAME_SUFFIX}"
 
