@@ -21,7 +21,7 @@ export RAY_DEDUP_LOGS=0
 # -----------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------
-TP=${1:-8}
+TP=${1:-4}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-Coder-7B-Instruct"}
 DATADIR=${DATADIR:-"$HOME/data/game2048"}
 
