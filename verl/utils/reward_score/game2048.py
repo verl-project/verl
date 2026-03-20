@@ -387,13 +387,15 @@ def compute_score(solution_str: str, ground_truth: str, extra_info: Optional[dic
 
     ok, info = check_python_modules(function)
     if "error" in info:
-        print(f"[2048] syntax error | score=-2.0\n{function}\n")
+        print(f"[2048] syntax error | score=-2.0")
+        # print(f"[2048] syntax error | score=-2.0\n{function}\n")
         return -2.0
 
     try:
         strategy_fn = create_locked_down_function(function)
     except Exception as e:
-        print(f"[2048] exec failed | score=-0.5 | {type(e).__name__}: {e}\n{function}\n")
+        print(f"[2048] exec failed | score=-0.5 | {type(e).__name__}: {e}")
+        # print(f"[2048] exec failed | score=-0.5 | {type(e).__name__}: {e}\n{function}\n")
         return -0.5
 
     score = 1.0  # function_works reward
@@ -401,7 +403,8 @@ def compute_score(solution_str: str, ground_truth: str, extra_info: Optional[dic
     # ---- no_cheating ----
     if not ok:
         score += -20.0
-        print(f"[2048] cheating detected | score={score}\n{function}\n")
+        print(f"[2048] cheating detected | score={score}")
+        # print(f"[2048] cheating detected | score={score}\n{function}\n")
         return score
     else:
         score += 1.0
@@ -444,6 +447,7 @@ def compute_score(solution_str: str, ground_truth: str, extra_info: Optional[dic
     ]
     if exc_msg:
         fields.append(exc_msg.lstrip(" - "))
-    print(f"[2048] {' - '.join(fields)}\n{function}\n")
+    print(f"[2048] {' - '.join(fields)}")
+    # print(f"[2048] {' - '.join(fields)}\n{function}\n")
 
     return score

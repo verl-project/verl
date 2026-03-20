@@ -54,7 +54,7 @@ python3 -m verl.trainer.main_ppo \
     \
     data.train_files="['$TRAIN_PATH']" \
     data.val_files="['$TEST_PATH']" \
-    data.train_batch_size=8 \
+    data.train_batch_size=4 \
     data.max_prompt_length=256 \
     data.max_response_length=1024 \
     data.return_raw_chat=True \
@@ -67,7 +67,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
@@ -101,7 +101,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
-    trainer.test_freq=5 \
+    trainer.test_freq=-1 \
     trainer.resume_mode=disable \
     trainer.total_epochs=1 \
     "${@:2}"
