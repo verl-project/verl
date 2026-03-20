@@ -1,0 +1,10 @@
+interaction:
+  - name: "equation_fitting"
+    class_name: "examples.llm_sr.interactions.equation_fitting.EquationFittingInteraction"
+    config:
+      bfgs_maxiter: 100
+      n_restarts: 3
+      alpha: 0.1
+      complexity_penalty_coef: 0.005
+      timeout_seconds: 30
+      early_stop_nmse: 1.0e-5
