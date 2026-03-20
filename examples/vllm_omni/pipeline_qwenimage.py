@@ -35,7 +35,7 @@ def _maybe_to_cpu(v):
 
 
 # Custom pipeline class for QwenImage that returns log probabilities during the diffusion process.
-# This is compatible with API of vllm-omni
+# This is compatible with API of vllm-omni custom pipeline
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super(QwenImagePipeline, self).__init__()
