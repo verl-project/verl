@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""High-level QAT workflow helpers for Megatron backend."""
+
 
 def patch_provider_for_qat(provider):
     """Patch the Megatron-Bridge provider to support QAT quantized layers."""
@@ -52,5 +54,5 @@ def export_qat_weights(per_tensor_param, modules, qat_mode, bridge):
     """Process exported weights through QATWeightExporter for quantized weight sync."""
     from verl.utils.modelopt.qat_weight_exporter import QATWeightExporter
 
-    qat_weight_exporter = QATWeightExporter(modules, qat_mode, bridge=bridge)
+    qat_weight_exporter = QATWeightExporter(modules, bridge, qat_mode)
     return qat_weight_exporter.process_weights_iterator(per_tensor_param)

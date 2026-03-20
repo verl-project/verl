@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
+"""QAT weight exporter for Megatron-to-vLLM NVFP4 quantized weight sync."""
+
 import re
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
@@ -28,7 +29,7 @@ from modelopt.torch.export.quant_utils import (
 )
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
-logger = logging.getLogger(__name__)
+from verl.utils.megatron_utils import unwrap_model
 
 # NVFP4 two-level scaling denominator: FP4_MAX (6.0) * FP8_MAX (448.0).
 _NVFP4_AMAX_DENOMINATOR = 6.0 * 448.0
@@ -51,21 +52,23 @@ class QATWeightExporter:
     def __init__(
         self,
         actor_module: list,
+        bridge: Any,
         qat_mode: str = "w4a16",
-        bridge: Any = None,
     ):
         self.qat_mode = qat_mode
         self._actor_module = actor_module
 
         self._registry = self._get_mapping_registry(bridge)
-        if self._registry is None:
-            raise ValueError(
-                "QATWeightExporter requires a bridge with a valid MappingRegistry. "
-                "Ensure use_mbridge=True and vanilla_mbridge=False."
-            )
 
-        self._pp_size, self._pp_rank, self._pp_group = _get_parallel_info("pp")
-        self._ep_size, self._ep_rank, self._ep_group = _get_parallel_info("ep")
+        from megatron.core import parallel_state as mpu
+
+        self._pp_size = mpu.get_pipeline_model_parallel_world_size()
+        self._pp_rank = mpu.get_pipeline_model_parallel_rank()
+        self._pp_group = mpu.get_pipeline_model_parallel_group() if self._pp_size > 1 else None
+
+        self._ep_size = mpu.get_expert_model_parallel_world_size()
+        self._ep_rank = mpu.get_expert_model_parallel_rank() if self._ep_size > 1 else 0
+        self._ep_group = mpu.get_expert_model_parallel_group() if self._ep_size > 1 else None
 
         self._config = self._get_model_config(actor_module)
         self._num_local_experts = self._count_local_experts(actor_module)
@@ -77,8 +80,6 @@ class QATWeightExporter:
             self._sync_metadata(self._pp_group)
         if self._ep_size > 1 and self._ep_group is not None:
             self._sync_metadata(self._ep_group)
-
-        self._log_init_summary()
 
     def process_weights_iterator(
         self,
@@ -95,35 +96,20 @@ class QATWeightExporter:
             if meta is None:
                 yield (hf_name, weight)
             else:
-                yield from self._quantize_weight(hf_name, weight, meta)
+                assert meta.qformat == QUANTIZATION_NVFP4, f"Unsupported qformat: {meta.qformat}"
+                yield from self._quantize_nvfp4(hf_name, weight, meta)
 
     @staticmethod
-    def _get_mapping_registry(bridge) -> Any:
-        """Extract the ``MappingRegistry`` from *bridge*, or return ``None``."""
-        if bridge is None:
-            return None
-        try:
-            return bridge._model_bridge.mapping_registry()
-        except Exception as exc:
-            logger.warning("Failed to get mapping registry from bridge: %s", exc)
-            return None
+    def _get_mapping_registry(bridge):
+        return bridge._model_bridge.mapping_registry()
 
     @staticmethod
     def _get_model_config(actor_module):
-        """Return the ``TransformerConfig`` from the first model chunk."""
-        try:
-            from verl.utils.megatron_utils import unwrap_model
-
-            model = unwrap_model(actor_module[0])
-            return getattr(model, "config", None)
-        except Exception:
-            return None
+        model = unwrap_model(actor_module[0])
+        return getattr(model, "config", None)
 
     @staticmethod
     def _count_local_experts(actor_module) -> int:
-        """Count distinct ``local_experts.<N>`` indices across all model chunks."""
-        from verl.utils.megatron_utils import unwrap_model
-
         indices: set[int] = set()
         for module in actor_module:
             model = unwrap_model(module)
@@ -134,9 +120,6 @@ class QATWeightExporter:
         return max(indices) + 1 if indices else 0
 
     def _collect_metadata(self, actor_module: list) -> None:
-        """Walk all QAT modules and populate ``self._metadata``."""
-        from verl.utils.megatron_utils import unwrap_model
-
         for vpp_idx, module in enumerate(actor_module):
             model = unwrap_model(module)
             for name, submodule in model.named_modules():
@@ -166,7 +149,6 @@ class QATWeightExporter:
                     self._metadata[global_name] = meta
 
     def _local_to_global_param_name(self, name: str, vpp_idx: int) -> str:
-        """Convert a local parameter name to global (PP layers + EP experts)."""
         if self._pp_size > 1 and "layers." in name and self._config is not None:
             from megatron.bridge.models.conversion.model_bridge import (
                 _megatron_local_name_to_global,
@@ -190,7 +172,6 @@ class QATWeightExporter:
         return name
 
     def _sync_metadata(self, group) -> None:
-        """Gather and merge metadata across the given process group."""
         world_size = torch.distributed.get_world_size(group=group)
 
         local_info = {
@@ -221,11 +202,6 @@ class QATWeightExporter:
                 )
 
     def _resolve_quant_metadata(self, hf_name: str) -> Optional[_QuantMeta]:
-        """Resolve *hf_name* -> Megatron param name -> quantisation metadata.
-
-        Returns ``None`` for parameters that are not quantised (norms,
-        embeddings, MoE routers, etc.).
-        """
         if not hf_name.endswith(".weight") or "norm" in hf_name:
             return None
 
@@ -235,19 +211,6 @@ class QATWeightExporter:
                 return meta
 
         return None
-
-    def _quantize_weight(
-        self,
-        name: str,
-        weight: torch.Tensor,
-        meta: _QuantMeta,
-    ) -> Iterator[tuple[str, torch.Tensor]]:
-        """Dispatch to the format-specific quantiser."""
-        if meta.qformat == QUANTIZATION_NVFP4:
-            yield from self._quantize_nvfp4(name, weight, meta)
-        else:
-            logger.warning("Unsupported qformat %s for %s; passing through", meta.qformat, name)
-            yield (name, weight)
 
     def _quantize_nvfp4(
         self,
@@ -282,20 +245,6 @@ class QATWeightExporter:
         if input_scale is not None:
             yield (_derive_scale_name(name, "input_scale"), input_scale)
 
-    def _log_init_summary(self) -> None:
-        """Log a one-line initialisation summary."""
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        logger.info(
-            "[QAT Exporter][Rank %d] mode=%s, metadata_count=%d, pp=%d/%d, ep=%d/%d",
-            rank,
-            self.qat_mode,
-            len(self._metadata),
-            self._pp_rank,
-            self._pp_size,
-            self._ep_rank,
-            self._ep_size,
-        )
-
 
 def _iter_hf_to_megatron_matches(registry, hf_name: str):
     """Yield all resolved mappings whose HF pattern matches *hf_name*."""
@@ -321,38 +270,12 @@ def _iter_hf_to_megatron_matches(registry, hf_name: str):
                         yield mapping.resolve(match.groups())
 
 
-def _get_parallel_info(kind: str) -> tuple[int, int, Any]:
-    """Return ``(world_size, rank, process_group)`` for *kind* in {pp, ep}."""
-    try:
-        from megatron.core import parallel_state as mpu
-
-        if kind == "pp":
-            size = mpu.get_pipeline_model_parallel_world_size()
-            rank = mpu.get_pipeline_model_parallel_rank()
-            group = mpu.get_pipeline_model_parallel_group() if size > 1 else None
-        elif kind == "ep":
-            size = mpu.get_expert_model_parallel_world_size()
-            rank = mpu.get_expert_model_parallel_rank() if size > 1 else 0
-            group = mpu.get_expert_model_parallel_group() if size > 1 else None
-        else:
-            return 1, 0, None
-        return size, rank, group
-    except Exception:
-        return 1, 0, None
-
-
 def _derive_scale_name(weight_name: str, suffix: str) -> str:
-    """Derive a scale parameter name from a weight parameter name.
-
-    ``"model.layers.0.self_attn.q_proj.weight"``
-    -> ``"model.layers.0.self_attn.q_proj.weight_scale"``
-    """
     result = weight_name.replace(".weight", f".{suffix}")
     return result if result != weight_name else f"{weight_name}_{suffix}"
 
 
 def _compute_input_scale(meta: _QuantMeta) -> Optional[torch.Tensor]:
-    """Derive the activation scale from the quantizer or synced amax."""
     if meta.input_quantizer is not None:
         if hasattr(NVFP4QTensor, "get_activation_scaling_factor"):
             return NVFP4QTensor.get_activation_scaling_factor(meta.input_quantizer)

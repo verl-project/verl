@@ -15,14 +15,9 @@
 
 """ModelOpt NVFP4 quantization config and application for Megatron QAT."""
 
-import logging
-
 import modelopt.torch.quantization as mtq
 import torch.nn as nn
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
-
-logger = logging.getLogger(__name__)
-
 
 _NVFP4_W4A16_QUANTIZER_CFG = {
     "*weight_quantizer": {
@@ -36,7 +31,6 @@ _NVFP4_W4A16_QUANTIZER_CFG = {
 
 
 def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> dict:
-    """Convert user-provided ignore patterns to ModelOpt ``quant_cfg`` entries."""
     cfg = {}
     mapping = {
         "lm_head": "*output_layer*",
@@ -69,8 +63,6 @@ def build_quantize_config(
         **_default_disabled_quantizer_cfg,
         **ignore_cfg,
     }
-    logger.info("Built NVFP4 %s quantize config, ignore_patterns=%s", qat_mode, ignore_patterns)
-
     return {"quant_cfg": quant_cfg, "algorithm": "max"}
 
 

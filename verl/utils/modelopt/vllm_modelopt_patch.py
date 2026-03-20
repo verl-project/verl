@@ -13,35 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-vLLM ModelOpt NVFP4 Patches for Dynamic Weight Updates (Marlin Backend).
+"""vLLM ModelOpt NVFP4 patches for dynamic weight updates (Marlin backend)."""
 
-Enables dynamic weight reloading for NVFP4 quantized models in vLLM
-using the ModelOpt quantization path with the Marlin kernel backend.
-
-Saves parameter metadata on first load and deletes HF parameters. Before
-reload, HF parameters are rebuilt from metadata, loaded, then re-converted
-to Marlin format in-place via copy_ (preserving CUDA Graph tensor addresses).
-
-Supported schemes:
-- Dense: ModelOptNvFp4LinearMethod (Marlin backend)
-- MoE:  ModelOptNvFp4FusedMoE     (Marlin backend)
-- KV:   BaseKVCacheMethod          (preserves scales for reload)
-"""
-
-import logging
-import os
 from typing import Optional
 
 import torch
 from torch.nn import Parameter
 
-logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-
-def save_param_meta(layer: torch.nn.Module, param_name: str):
-    """Save parameter metadata (shape, dtype, param_class, dims) for later rebuild."""
+def _save_param_meta(layer: torch.nn.Module, param_name: str):
     if not hasattr(layer, "_hf_param_meta"):
         layer._hf_param_meta = {}
 
@@ -70,7 +50,6 @@ def _create_param_from_meta(
     meta: dict,
     device: Optional[torch.device] = None,
 ) -> Parameter:
-    """Create a Parameter from saved metadata. Used by rebuild and tensor swap."""
     shape = meta["shape"]
     dtype = meta["dtype"]
     dev = device or meta.get("device", "cuda")
@@ -81,20 +60,14 @@ def _create_param_from_meta(
 
     data = torch.empty(shape, dtype=dtype, device=dev)
 
-    try:
-        if param_class is not Parameter and weight_loader is not None:
-            kwargs = {"data": data, "weight_loader": weight_loader}
-            if "input_dim" in meta:
-                kwargs["input_dim"] = meta["input_dim"]
-            if "output_dim" in meta:
-                kwargs["output_dim"] = meta["output_dim"]
-            new_param = param_class(**kwargs)
-        else:
-            new_param = Parameter(data, requires_grad=False)
-            if weight_loader is not None:
-                new_param.weight_loader = weight_loader
-    except Exception as e:
-        logger.warning(f"Failed to create param {param_name} with class {param_class}: {e}, using Parameter")
+    if param_class is not Parameter and weight_loader is not None:
+        kwargs = {"data": data, "weight_loader": weight_loader}
+        if "input_dim" in meta:
+            kwargs["input_dim"] = meta["input_dim"]
+        if "output_dim" in meta:
+            kwargs["output_dim"] = meta["output_dim"]
+        new_param = param_class(**kwargs)
+    else:
         new_param = Parameter(data, requires_grad=False)
         if weight_loader is not None:
             new_param.weight_loader = weight_loader
@@ -103,14 +76,12 @@ def _create_param_from_meta(
 
 
 def _check_first_call(layer: torch.nn.Module) -> bool:
-    """Check if this is the first process_weights call, and increment counter."""
     count = getattr(layer, "_process_weights_call_count", 0)
     layer._process_weights_call_count = count + 1
     return count == 0
 
 
 def _save_weight_loaders(layer: torch.nn.Module, param_names: list[str]):
-    """Save weight_loader references from parameters before they are overwritten."""
     if not hasattr(layer, "_weight_loaders"):
         layer._weight_loaders = {}
     for pname in param_names:
@@ -120,25 +91,18 @@ def _save_weight_loaders(layer: torch.nn.Module, param_names: list[str]):
 
 
 def _update_ref_or_create(layer, ref_name, new_data):
-    """Copy new_data into existing tensor ref (CUDA Graph safe), or create new Parameter."""
     refs = getattr(layer, "_marlin_tensor_refs", {})
     ref = refs.get(ref_name)
     if ref is not None:
         ref.copy_(new_data)
         setattr(layer, ref_name, Parameter(ref, requires_grad=False))
     else:
-        logger.warning(f"_marlin_tensor_refs['{ref_name}'] not found, creating new Parameter")
         t = new_data.clone() if isinstance(new_data, torch.Tensor) else torch.tensor(new_data)
         setattr(layer, ref_name, Parameter(t, requires_grad=False))
 
 
 class ModelOptParamMetaDict(dict):
-    """
-    Dict-like class for parameter management with metadata-based rebuild
-    and tensor swap. Supports:
-    - Rebuild of deleted parameters from saved metadata
-    - Tensor swap for parameters with shape changes (address stability for CUDA Graph)
-    """
+    """Dict-like parameter store with metadata-based rebuild and tensor swap."""
 
     def __init__(self, model: torch.nn.Module, device: Optional[torch.device] = None):
         super().__init__()
@@ -158,7 +122,6 @@ class ModelOptParamMetaDict(dict):
             self[name] = param
 
     def _build_mappings(self):
-        """Build layer metadata cache for rebuild and tensor swap."""
         for layer_name, module in self._model.named_modules():
             if not hasattr(module, "_hf_param_meta"):
                 continue
@@ -261,7 +224,7 @@ def _modelopt_dense_process_weights(self, layer: torch.nn.Module) -> None:
 
     if is_first_call:
         for pname in _DENSE_HF_PARAMS:
-            save_param_meta(layer, pname)
+            _save_param_meta(layer, pname)
         _save_weight_loaders(layer, _DENSE_HF_PARAMS)
 
     weight_data = layer.weight.data
@@ -320,7 +283,6 @@ def _modelopt_dense_process_weights(self, layer: torch.nn.Module) -> None:
 
 
 def _marlin_repack_experts(packed, perm, size_k, size_n, num_experts):
-    """Repack weight for each expert into Marlin format and stack."""
     import vllm._custom_ops as ops
 
     result = []
@@ -339,7 +301,6 @@ def _marlin_repack_experts(packed, perm, size_k, size_n, num_experts):
 
 
 def _marlin_process_scales_experts(scale_hf, param_dtype, size_k, size_n, group_size, num_experts):
-    """Process scales for each expert into Marlin format and stack."""
     from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_permute_scales
     from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import nvfp4_marlin_process_scales
 
@@ -364,7 +325,6 @@ _MOE_HF_PARAMS = [
 
 
 def _modelopt_moe_marlin_convert(self, layer: torch.nn.Module, is_first_call: bool) -> None:
-    """Convert MoE layer weights between HF and Marlin format."""
     from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_make_workspace_new
     from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import nvfp4_marlin_process_global_scale
 
@@ -454,7 +414,7 @@ def _modelopt_moe_process_weights(self, layer: torch.nn.Module) -> None:
 
     if is_first_call:
         for pname in _MOE_HF_PARAMS:
-            save_param_meta(layer, pname)
+            _save_param_meta(layer, pname)
         _save_weight_loaders(layer, _MOE_HF_PARAMS)
 
     w13_weight_scale_2 = layer.w13_weight_scale_2.data
@@ -465,11 +425,6 @@ def _modelopt_moe_process_weights(self, layer: torch.nn.Module) -> None:
     _modelopt_moe_marlin_convert(self, layer, is_first_call)
 
     self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-
-
-# ============================================================================
-# KV Cache Patch
-# ============================================================================
 
 
 def _modelopt_kv_process_weights(self, layer) -> None:
@@ -536,25 +491,11 @@ def _modelopt_kv_process_weights(self, layer) -> None:
     layer._prob_scale.copy_(prob_scale)
 
 
-# ============================================================================
-# Patch Application & Entry Points
-# ============================================================================
-
 _patched = False
 
 
 def prepare_modelopt_for_weight_reload(model, device=None):
-    """
-    Prepare ModelOpt model for weight reloading. Call ONCE before each reload cycle.
-
-    1. Builds ModelOptParamMetaDict from saved metadata
-    2. Swaps kernel-format tensors back to HF-shape for weight_loader compatibility
-    3. Rebuilds any deleted parameters from metadata
-
-    Args:
-        model: vLLM model
-        device: Device for created parameters
-    """
+    """Prepare ModelOpt model for weight reloading. Call ONCE before each reload cycle."""
     inner_model = model
     if hasattr(model, "model"):
         inner_model = model.model
@@ -562,9 +503,7 @@ def prepare_modelopt_for_weight_reload(model, device=None):
     param_meta = ModelOptParamMetaDict(inner_model, device=device)
 
     param_meta.prepare_for_reload()
-    logger.info(f"[prepare_modelopt] Tensor swap prepared for {len(param_meta._tensor_swap_layers)} layers")
 
-    rebuilt_count = 0
     for layer_name, cache_entry in param_meta._layer_meta_cache.items():
         module = cache_entry["module"]
         for param_name, pm in cache_entry["meta"].items():
@@ -580,9 +519,7 @@ def prepare_modelopt_for_weight_reload(model, device=None):
                     continue
             new_param = _create_param_from_meta(module, param_name, pm, device)
             module.register_parameter(param_name, new_param)
-            rebuilt_count += 1
 
-    logger.info(f"[prepare_modelopt] Rebuilt {rebuilt_count} parameters")
     inner_model._param_meta_for_restore = param_meta
     return param_meta
 
@@ -609,7 +546,6 @@ def modelopt_process_weights_after_loading(model):
                 quant_method.process_weights_after_loading(module)
                 moe_count += 1
 
-    logger.debug(f"Processed {dense_count} dense layers, {moe_count} MoE layers")
     return dense_count + moe_count
 
 
@@ -618,10 +554,7 @@ def apply_modelopt_nvfp4_patches():
     global _patched
 
     if _patched:
-        logger.warning("ModelOpt NVFP4 patches already applied, skipping")
         return
-
-    logger.info("Applying ModelOpt NVFP4 patches for dynamic weight loading...")
 
     from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -634,4 +567,3 @@ def apply_modelopt_nvfp4_patches():
     BaseKVCacheMethod.process_weights_after_loading = _modelopt_kv_process_weights
 
     _patched = True
-    logger.info("Applied 3 ModelOpt NVFP4 patches (Dense, MoE, KV)")

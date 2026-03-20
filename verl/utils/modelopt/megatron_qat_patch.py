@@ -13,21 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Megatron-Core / megatron-bridge monkey patches for QAT workflows.
-
-Patches SwiGLU sharded state-dict, EP gather, extract_sort_key, local-to-global
-name mapping, build_conversion_tasks, and parallelism type detection to support
-SequentialMLP and quantised wrappers.
-"""
+"""Megatron-Core / megatron-bridge monkey patches for QAT workflows."""
 
 import gc
-import logging
 import re
+import warnings
 from typing import Optional
 
 import torch
-
-logger = logging.getLogger(__name__)
 
 
 def apply_swiglu_sharded_factory_patch():
@@ -44,7 +37,7 @@ def apply_swiglu_sharded_factory_patch():
     mlp_module._swiglu_patched = True
     mlp_module._original_apply_swiglu_sharded_factory = mlp_module.apply_swiglu_sharded_factory
 
-    def patched_apply_swiglu_sharded_factory(original_sh_ten, sharded_offsets, singleton_local_shards: bool = False):
+    def _patched_apply_swiglu_sharded_factory(original_sh_ten, sharded_offsets, singleton_local_shards: bool = False):
         swiglu_shard_axis = 0
         prepend_axis_num = len(sharded_offsets)
         original_shape = original_sh_ten.local_shape
@@ -100,9 +93,9 @@ def apply_swiglu_sharded_factory_patch():
                 try:
                     return torch.cat(sub_state_dict)
                 except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
-                    logger.warning(
-                        "CUDA OOM during tensor merge – falling back to CPU. (Error: %s)",
-                        e,
+                    warnings.warn(
+                        f"CUDA OOM during tensor merge – falling back to CPU. (Error: {e})",
+                        stacklevel=2,
                     )
                     merged = torch.cat([t.cpu() for t in sub_state_dict])
                     gc.collect()
@@ -118,19 +111,17 @@ def apply_swiglu_sharded_factory_patch():
             flattened_range=original_sh_ten.flattened_range,
         )
 
-    mlp_module.apply_swiglu_sharded_factory = patched_apply_swiglu_sharded_factory
-    logger.info("Applied QAT patch: apply_swiglu_sharded_factory now supports singleton_local_shards.")
+    mlp_module.apply_swiglu_sharded_factory = _patched_apply_swiglu_sharded_factory
 
 
 def revert_swiglu_sharded_factory_patch():
-    """Revert :func:`apply_swiglu_sharded_factory_patch`."""
+    """Revert the SwiGLU sharded factory patch."""
     import megatron.core.transformer.mlp as mlp_module
 
     if not getattr(mlp_module, "_swiglu_patched", False):
         return
     mlp_module.apply_swiglu_sharded_factory = mlp_module._original_apply_swiglu_sharded_factory
     mlp_module._swiglu_patched = False
-    logger.info("Reverted QAT patch: apply_swiglu_sharded_factory.")
 
 
 def apply_ep_gather_patch():
@@ -208,18 +199,16 @@ def apply_ep_gather_patch():
         return weights_dict
 
     MegatronParamMapping.gather_from_ep_ranks = _patched_gather_from_ep_ranks
-    logger.info("Applied QAT patch: MegatronParamMapping.gather_from_ep_ranks now supports SequentialMLP pattern.")
 
 
 def revert_ep_gather_patch():
-    """Revert :func:`apply_ep_gather_patch`."""
+    """Revert the EP gather patch."""
     from megatron.bridge.models.conversion.param_mapping import MegatronParamMapping
 
     if not getattr(MegatronParamMapping, "_ep_gather_patched", False):
         return
     MegatronParamMapping.gather_from_ep_ranks = MegatronParamMapping._original_gather_from_ep_ranks
     MegatronParamMapping._ep_gather_patched = False
-    logger.info("Reverted QAT patch: MegatronParamMapping.gather_from_ep_ranks.")
 
 
 def apply_extract_sort_key_patch():
@@ -263,11 +252,10 @@ def apply_extract_sort_key_patch():
 
     utils_module.extract_sort_key = _patched_extract_sort_key
     bridge_module.extract_sort_key = _patched_extract_sort_key
-    logger.info("Applied QAT patch: extract_sort_key now supports SequentialMLP pattern.")
 
 
 def revert_extract_sort_key_patch():
-    """Revert :func:`apply_extract_sort_key_patch`."""
+    """Revert the extract_sort_key patch."""
     import megatron.bridge.models.conversion.model_bridge as bridge_module
     import megatron.bridge.models.conversion.utils as utils_module
 
@@ -277,7 +265,6 @@ def revert_extract_sort_key_patch():
     bridge_module.extract_sort_key = bridge_module._original_extract_sort_key
     utils_module._sort_key_patched = False
     bridge_module._sort_key_patched = False
-    logger.info("Reverted QAT patch: extract_sort_key.")
 
 
 def apply_local_name_to_global_patch():
@@ -313,28 +300,20 @@ def apply_local_name_to_global_patch():
         return param_name
 
     bridge_module._megatron_local_name_to_global = _patched_megatron_local_name_to_global
-    logger.info("Applied QAT patch: _megatron_local_name_to_global now supports SequentialMLP pattern.")
 
 
 def revert_local_name_to_global_patch():
-    """Revert :func:`apply_local_name_to_global_patch`."""
+    """Revert the local-to-global name mapping patch."""
     import megatron.bridge.models.conversion.model_bridge as bridge_module
 
     if not getattr(bridge_module, "_local_name_to_global_patched", False):
         return
     bridge_module._megatron_local_name_to_global = bridge_module._original_megatron_local_name_to_global
     bridge_module._local_name_to_global_patched = False
-    logger.info("Reverted QAT patch: _megatron_local_name_to_global.")
 
 
 def apply_skip_quantizer_params_patch():
-    """Extend ``_is_adapter_param_name`` to also skip ModelOpt quantizer parameters.
-
-    After ``mtq.quantize()``, quantizer sub-modules (``weight_quantizer``,
-    ``input_quantizer``) are registered in the model tree.  Their internal
-    parameters (e.g. ``_amax``) have no HF counterpart and must not enter
-    the Bridge's conversion pipeline.
-    """
+    """Extend ``_is_adapter_param_name`` to also skip ModelOpt quantizer parameters."""
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 
     if getattr(MegatronModelBridge, "_quantizer_filter_patched", False):
@@ -350,20 +329,16 @@ def apply_skip_quantizer_params_patch():
         return "_quantizer" in param_name
 
     MegatronModelBridge._is_adapter_param_name = _patched_is_adapter_param_name
-    logger.info(
-        "Applied QAT patch: _is_adapter_param_name now also skips ModelOpt quantizer parameters (*_quantizer*)."
-    )
 
 
 def revert_skip_quantizer_params_patch():
-    """Revert :func:`apply_skip_quantizer_params_patch`."""
+    """Revert the quantizer parameter skip patch."""
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 
     if not getattr(MegatronModelBridge, "_quantizer_filter_patched", False):
         return
     MegatronModelBridge._is_adapter_param_name = MegatronModelBridge._original_is_adapter_param_name
     MegatronModelBridge._quantizer_filter_patched = False
-    logger.info("Reverted QAT patch: _is_adapter_param_name (quantizer filter).")
 
 
 def apply_detect_parallelism_type_patch():
@@ -387,21 +362,16 @@ def apply_detect_parallelism_type_patch():
         return AutoMapping._original_detect_parallelism_type(self, module)
 
     AutoMapping._detect_parallelism_type = _patched_detect_parallelism_type
-    logger.info(
-        "Applied QAT patch: AutoMapping._detect_parallelism_type "
-        "now supports quantised LayerNormColumnParallelLinear variants."
-    )
 
 
 def revert_detect_parallelism_type_patch():
-    """Revert :func:`apply_detect_parallelism_type_patch`."""
+    """Revert the parallelism type detection patch."""
     from megatron.bridge.models.conversion.param_mapping import AutoMapping
 
     if not getattr(AutoMapping, "_detect_parallelism_patched", False):
         return
     AutoMapping._detect_parallelism_type = AutoMapping._original_detect_parallelism_type
     AutoMapping._detect_parallelism_patched = False
-    logger.info("Reverted QAT patch: AutoMapping._detect_parallelism_type.")
 
 
 def apply_qat_patch():
