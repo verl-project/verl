@@ -20,6 +20,8 @@ from typing import Optional
 import torch
 from torch.nn import Parameter
 
+from verl.utils.device import get_device_name
+
 
 def _save_param_meta(layer: torch.nn.Module, param_name: str):
     if not hasattr(layer, "_hf_param_meta"):
@@ -52,7 +54,7 @@ def _create_param_from_meta(
 ) -> Parameter:
     shape = meta["shape"]
     dtype = meta["dtype"]
-    dev = device or meta.get("device", "cuda")
+    dev = device or meta.get("device", get_device_name())
     param_class = meta.get("param_class", Parameter)
 
     weight_loaders = getattr(module, "_weight_loaders", {})
