@@ -950,8 +950,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_actor:
             actor_cfg = omega_conf_to_dataclass(self.config.actor)
+            if self.ulysses_device_mesh is not None:
+                actor_dp_size = self.ulysses_device_mesh["dp"].size()
+                actor_dp_group = self.ulysses_device_mesh["dp"].get_group()
+            else:
+                actor_dp_size = torch.distributed.get_world_size()
+                actor_dp_group = torch.distributed.group.WORLD
             self.actor = DataParallelPPOActor(
-                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
+                config=actor_cfg,
+                actor_module=self.actor_module_fsdp,
+                actor_optimizer=self.actor_optimizer,
+                dp_size=actor_dp_size,
+                dp_group=actor_dp_group,
             )
 
         if self._is_rollout:
