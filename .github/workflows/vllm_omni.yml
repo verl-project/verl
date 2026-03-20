@@ -110,12 +110,7 @@ jobs:
           pip3 install --no-deps -e .
       - name: Install vllm-omni
         run: |
-          pip3 install vllm==0.16.0
-          pip3 install git+https://github.com/vllm-project/vllm-omni.git@92e1a54419b6acf3f776e04793548aa3cdf8373f
-          pip3 install "numpy<2"
-          pip3 install transformers==4.57.6
-          pip3 uninstall xformers -y
-          pip3 uninstall flash_attn -y
+          pip3 install git+https://github.com/vllm-project/vllm-omni.git@3158e9d28f1286119756604e9c40292cee4808d3
       - name: Test vLLM Omni generate
         run: |
           ray stop --force

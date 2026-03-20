@@ -20,7 +20,7 @@ import ray
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs
+from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
@@ -96,7 +96,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     async def run_server(self, args: argparse.Namespace):
-        engine_args = AsyncOmniEngineArgs.from_cli_args(args)
+        engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
         # TODO (mike): read custom_pipeline from CLI

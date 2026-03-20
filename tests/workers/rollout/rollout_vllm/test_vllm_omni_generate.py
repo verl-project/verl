@@ -20,15 +20,12 @@ Usage:
     python tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
 """
 
-import atexit
 import os
-import shutil
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import ray
-from huggingface_hub import snapshot_download
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
@@ -36,49 +33,7 @@ from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import DiffusionOutput, RolloutMode
 from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
-# ---------------------------------------------------------------------
-#                👇 Model Caching & Auto‑Download Logic 👇
-# ---------------------------------------------------------------------
-
-LOCAL_MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/Qwen-Image"))
-CACHE_DIR = Path(os.path.expanduser("~/.cache/tiny-random/Qwen-Image"))
-
-# Use your specified HF repo name/path directly here
-MODEL_REPO = "tiny-random/Qwen-Image"
-MODEL_PATH = LOCAL_MODEL_PATH
-
-
-def ensure_model_available() -> str:
-    """Ensure the model weights and tokenizer are available for testing.
-
-    If missing locally, download from HF Hub, cache temporarily, and
-    mark for deletion on process exit.
-    """
-    if LOCAL_MODEL_PATH.exists():
-        print(f"✅ Using local model at {LOCAL_MODEL_PATH}")
-        return str(LOCAL_MODEL_PATH)
-
-    print(f"⚠️ Local model not found at {LOCAL_MODEL_PATH}. Pulling from Hugging Face Hub...")
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    hf_model_path = snapshot_download(
-        repo_id=MODEL_REPO,
-        cache_dir=str(CACHE_DIR),
-        local_files_only=False,
-        resume_download=True,
-    )
-
-    print(f"✅ Downloaded model to cache: {hf_model_path}")
-
-    def _cleanup():
-        print(f"🧹 Cleaning up downloaded model cache: {hf_model_path}")
-        shutil.rmtree(hf_model_path, ignore_errors=True)
-
-    atexit.register(_cleanup)
-    return hf_model_path
-
-
-MODEL_PATH = ensure_model_available()
+MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/Qwen-Image"))
 
 
 # ---------------------------------------------------------------------
