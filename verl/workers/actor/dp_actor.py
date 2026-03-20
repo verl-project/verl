@@ -624,22 +624,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     calculate_entropy = self.config.calculate_entropy or (entropy_coeff != 0)
 
-                    if loss_agg_mode == "token-mean":
-                        # Use token-count ratio for token-mean mode to ensure
-                        # accumulated loss matches full-batch computation.
-                        # See: https://github.com/verl-project/verl/issues/5625
-                        batch_num_tokens = response_mask.sum().item()
-                        total_tokens = self.config.global_batch_info.get("total_tokens", None)
-                        if total_tokens is not None and total_tokens > 0:
-                            loss_scale_factor = batch_num_tokens / total_tokens
-                        elif self.config.use_dynamic_bsz:
-                            loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
-                        else:
-                            loss_scale_factor = 1 / self.gradient_accumulation
-                    elif self.config.use_dynamic_bsz:
-                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
-                    else:
-                        loss_scale_factor = 1 / self.gradient_accumulation
+
 
                     # all return: (bsz, response_length)
                     outputs = self._forward_micro_batch(
@@ -696,7 +681,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     policy_loss = pg_loss
                     if calculate_entropy and entropy is not None:
-                        entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **self.config.global_batch_info)
                         micro_batch_metrics["actor/entropy"] = entropy_agg.detach().item()
                         if entropy_coeff != 0:
                             policy_loss -= entropy_agg * entropy_coeff
@@ -707,23 +692,19 @@ class DataParallelPPOActor(BasePPOActor):
                         kld = kl_penalty(
                             logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
                         )
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **self.config.global_batch_info)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
+                        metrics["actor/kl_loss"] += kl_loss.detach().item()
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = policy_loss * loss_scale_factor
-                    else:
-                        loss = policy_loss * loss_scale_factor
+                    loss = policy_loss
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
 
-                    metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
+                    metrics["actor/pg_loss"] += pg_loss.detach().item()
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()

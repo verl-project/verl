@@ -236,21 +236,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
                     )
-                    if self.config.loss_agg_mode == "token-mean":
-                        # Use token-count ratio for token-mean mode
-                        batch_num_tokens = response_mask.sum().item()
-                        total_tokens = self.config.global_batch_info.get("total_tokens", None)
-                        if total_tokens is not None and total_tokens > 0:
-                            loss_scale_factor = batch_num_tokens / total_tokens
-                        elif self.config.use_dynamic_bsz:
-                            loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
-                        else:
-                            loss_scale_factor = 1 / self.gradient_accumulation
-                    elif self.config.use_dynamic_bsz:
-                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
-                    else:
-                        loss_scale_factor = 1 / self.gradient_accumulation
-                    loss = vf_loss * loss_scale_factor
+                    loss = vf_loss
 
                     loss.backward()
 
@@ -261,7 +247,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         }
                     )
 
-                    metrics["critic/vf_loss"] += vf_loss.detach().item() * loss_scale_factor
+                    metrics["critic/vf_loss"] += vf_loss.detach().item()
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
