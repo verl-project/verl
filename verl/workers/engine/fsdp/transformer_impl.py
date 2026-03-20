@@ -884,7 +884,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids_rmpad = input_ids.values().unsqueeze(0)  # (1, total_nnz)
                 if position_ids.dim() == 3:
-                    position_ids_rmpad = position_ids.values().unsqueeze(1)  # (4, 1, total_nnz)
+                    # NOTE: When all samples in a micro-batch have the same seq_len,
+                    # torch.nested.as_nested_tensor treats dim=0 (=4) as the jagged dim
+                    # instead of dim=1 (=seq_len), causing .values() to return (B*4, seq_len)
+                    # instead of (4, total_nnz). We use unbind+cat to avoid this ambiguity.
+                    position_ids_rmpad = torch.cat([t for t in position_ids.unbind()], dim=-1)  # (4, total_nnz)
+                    position_ids_rmpad = position_ids_rmpad.unsqueeze(1)  # (4, 1, total_nnz)
                 else:
                     position_ids_rmpad = position_ids.values().unsqueeze(0)  # (1, total_nnz)
             else:
