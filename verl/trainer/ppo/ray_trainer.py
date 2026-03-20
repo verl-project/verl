@@ -66,6 +66,18 @@ from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
+def build_critic_cfg_for_worker(config, use_legacy_worker_impl):
+    """Build critic worker config with safe serialization behavior.
+
+    In legacy worker mode (auto/enable), keep critic config as DictConfig and let the
+    worker instantiate dataclass/HF objects locally. This avoids serializing remote-code
+    objects (e.g. modules under `transformers_modules.*`) from driver to workers.
+    """
+    if use_legacy_worker_impl in ["auto", "enable"]:
+        return config.critic
+    return omega_conf_to_dataclass(config.critic)
+
+
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -703,9 +715,7 @@ class RayPPOTrainer:
         if self.use_critic:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
 
-            from verl.workers.config import CriticConfig
-
-            critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
+            critic_cfg = build_critic_cfg_for_worker(self.config, self.use_legacy_worker_impl)
 
             if self.use_legacy_worker_impl == "disable":
                 # convert critic_cfg into TrainingWorkerConfig
