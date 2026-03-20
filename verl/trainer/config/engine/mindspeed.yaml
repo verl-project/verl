@@ -1,0 +1,45 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.MindSpeedEngineConfig
+
+# mindspeed_llm or mindspeed_mm
+strategy: mindspeed_llm
+
+llm_kwargs:
+  # mindspeed_llm model config
+  use_mcore_models: true
+  spec: []
+  qk_layernorm: true
+  position_embedding_type: rope
+  normalization: RMSNorm
+  disable_bias_linear: true
+  swiglu: true
+  attention_softmax_in_fp32: true  
+  no_gradient_accumulation_fusion: true
+  group_query_attention: true
+
+  # only support transformer_engine for now
+  transformer_impl: transformer_engine
+
+  no_pad_to_seq_lengths: true
+  reset_attention_mask: true
+  context_parallel_algo: ulysses_cp_algo
+  attention_mask_type: general
+
+  # mindspeed_llm optimizer config
+  use_flash_attn: true
+  use_fused_rotary_pos_emb: true
+  sequence_parallel: true
+  use_rotary_position_embeddings: true
+  use_fused_swiglu: true
+  use_fused_rmsnorm: true
+  no_masked_softmax_fusion: true
+  use_distributed_optimizer: true
+
+  # mindspeed_llm train config
+  seq_length: 10240
+  micro_batch_size: 1
+  initial_loss_scale: 4096
+  init_method_std: 0.01
+  hidden_dropout: 0.0
+
+mm_kwargs: {}
