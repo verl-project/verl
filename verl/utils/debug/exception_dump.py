@@ -82,22 +82,29 @@ class ExceptionDumpManager:
         if not self.enabled or data is None:
             return None
 
-        run_dir = self._build_run_dir()
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        stage_name = self._sanitize_stage(stage)
-        stem = (
-            f"step_{step:08d}"
-            f"__epoch_{0 if epoch is None else epoch:04d}"
-            f"__stage_{stage_name}"
-            f"__host_{socket.gethostname()}"
-            f"__pid_{os.getpid()}"
-            f"__{timestamp}"
-            f"__{uuid.uuid4().hex[:8]}"
-        )
-        data_path = run_dir / f"{stem}.pkl"
-        meta_path = run_dir / f"{stem}.json"
-
+        data_path = None
         try:
+            run_dir = self._build_run_dir()
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            stage_name = self._sanitize_stage(stage)
+            try:
+                hostname = socket.gethostname()
+            except Exception:
+                hostname = "unknown"
+            pid = os.getpid()
+
+            stem = (
+                f"step_{step:08d}"
+                f"__epoch_{0 if epoch is None else epoch:04d}"
+                f"__stage_{stage_name}"
+                f"__host_{hostname}"
+                f"__pid_{pid}"
+                f"__{timestamp}"
+                f"__{uuid.uuid4().hex[:8]}"
+            )
+            data_path = run_dir / f"{stem}.pkl"
+            meta_path = run_dir / f"{stem}.json"
+
             data.save_to_disk(data_path)
             metadata = {
                 "project_name": self.project_name,
@@ -106,8 +113,8 @@ class ExceptionDumpManager:
                 "global_step": step,
                 "epoch": epoch,
                 "timestamp_utc": timestamp,
-                "hostname": socket.gethostname(),
-                "pid": os.getpid(),
+                "hostname": hostname,
+                "pid": pid,
                 "exception_type": type(exc).__name__,
                 "exception_message": str(exc),
                 "traceback": "".join(traceback.format_exception(exc)).splitlines(),
@@ -117,5 +124,6 @@ class ExceptionDumpManager:
             logger.info("Dumped exception payload to %s with metadata %s", data_path, meta_path)
             return data_path
         except Exception as dump_exc:
-            logger.warning("Failed to dump exception payload to %s: %s", data_path, dump_exc)
+            path_for_log = data_path if data_path is not None else self.dump_dir
+            logger.warning("Failed to dump exception payload to %s: %s", path_for_log, dump_exc)
             return None
