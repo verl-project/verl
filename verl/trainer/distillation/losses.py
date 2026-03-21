@@ -110,7 +110,7 @@ def compute_distillation_loss_range(
     distillation_losses: torch.Tensor, response_mask: torch.Tensor
 ) -> dict[str, Metric]:
     """Compute min and max distillation loss over valid response tokens."""
-    distillation_losses_response = distillation_losses * response_mask
+    distillation_losses_response = distillation_losses[response_mask.bool()]
     return {
         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
@@ -202,18 +202,18 @@ def distillation_ppo_loss(
 
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
-    distil_loss, distil_metrics = distillation_loss(config, distillation_config, model_output, data)
+    distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
     policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
     if not distillation_loss_config.use_task_rewards:
         policy_loss = 0.0
 
     # Combine distillation with policy loss
-    policy_metrics.update(distil_metrics)
+    policy_metrics.update(distill_metrics)
     distillation_loss_coef = (
         distillation_loss_config.distillation_loss_coef if distillation_loss_config.use_task_rewards else 1.0
     )
-    policy_loss += distil_loss * distillation_loss_coef
-    policy_metrics["distillation/loss"] = Metric(value=distil_loss, aggregation=AggregationType.SUM)
+    policy_loss += distill_loss * distillation_loss_coef
+    policy_metrics["distillation/loss"] = Metric(value=distill_loss, aggregation=AggregationType.SUM)
 
     return policy_loss, policy_metrics
 
@@ -240,7 +240,7 @@ def distillation_loss(
         model_output=model_output,
         data=data,
     )
-    response_mask = data["response_mask"].bool()
+    response_mask = data["response_mask"]
     loss_agg_mode = config.loss_agg_mode
 
     distillation_metrics.update(
@@ -298,12 +298,12 @@ def compute_forward_kl_topk(
     distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
     student_mass = no_padding_2_padding(model_output["student_mass"], data)
     teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
-    response_mask = data["response_mask"].bool()
-    assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask.shape
+    response_mask_bool = data["response_mask"].bool()
+    assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
-    student_mass = student_mass * response_mask
-    teacher_mass = teacher_mass * response_mask
+    student_mass = student_mass[response_mask_bool]
+    teacher_mass = teacher_mass[response_mask_bool]
     distillation_metrics = {
         "distillation/student_mass": student_mass.mean().item(),
         "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
@@ -340,8 +340,8 @@ def compute_distillation_loss_reverse_kl_estimator(
     """
     student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
     teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
-    response_mask = data["response_mask"].bool()
-    assert teacher_log_probs.shape == student_log_probs.shape == response_mask.shape
+    response_mask_bool = data["response_mask"].bool()
+    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
 
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_losses = kl_penalty(
@@ -349,6 +349,6 @@ def compute_distillation_loss_reverse_kl_estimator(
     )
     # Since k1 can be negative, log the mean absolute loss.
     metrics = {
-        "distillation/abs_loss": Metric(AggregationType.MEAN, (distillation_losses * response_mask).abs().mean()),
+        "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask_bool].abs().mean()),
     }
     return distillation_losses, metrics
