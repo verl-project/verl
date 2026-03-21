@@ -13,7 +13,10 @@
 # limitations under the License.
 
 from .agent_loop import AgentLoopBase, AgentLoopManager, AgentLoopWorker, AsyncLLMServerManager
-from .agent_loop_with_context_management import AgentLoopWithContextManagement
+from .agent_loop_with_context_management import (
+    AgentLoopWithContextManagement,
+    SummarizerAgentLoop,
+)
 from .context_manager import (
     ContextManager,
     ContextState,
@@ -23,7 +26,7 @@ from .context_manager import (
 from .single_turn_agent_loop import SingleTurnAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
-_ = [SingleTurnAgentLoop, ToolAgentLoop]
+_ = [SingleTurnAgentLoop, ToolAgentLoop, SummarizerAgentLoop]
 
 __all__ = [
     "AgentLoopBase",
