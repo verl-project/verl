@@ -465,7 +465,7 @@ class SGLangHttpServer:
         )
 
     async def handle_draft_request(self, draft_request):
-        from verl.workers.rollout.decoupled_spec_rollout.protocol import DraftResult, DraftStatus
+        from verl.workers.rollout.decoupled_spec_rollout.protocol import DraftResult
         from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.draft_server_patch import (
             build_generate_req_from_draft_request,
         )
@@ -478,9 +478,7 @@ class SGLangHttpServer:
         if max_possible_tokens < 0:
             return DraftResult(
                 request_id=draft_request.request_id,
-                session_id=draft_request.session_id,
-                status=DraftStatus.FAILED,
-                metadata={"error": "Draft prompt exceeds max_model_len"},
+                draft_token_ids=[],
             )
 
         max_new_tokens = max(0, min(draft_request.num_speculative_steps, max_possible_tokens))
@@ -491,24 +489,15 @@ class SGLangHttpServer:
         )
         try:
             output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
-        except Exception as exc:
+        except Exception:
             return DraftResult(
                 request_id=draft_request.request_id,
-                session_id=draft_request.session_id,
-                status=DraftStatus.FAILED,
-                metadata={"error": str(exc)},
+                draft_token_ids=[],
             )
 
-        finish_reason = output["meta_info"]["finish_reason"]
-        finish_reason = finish_reason["type"] if finish_reason else None
         return DraftResult(
             request_id=draft_request.request_id,
-            session_id=draft_request.session_id,
             draft_token_ids=output.get("output_ids", []),
-            accepted_prefix_len=len(prompt_ids),
-            finished=finish_reason is not None,
-            status=DraftStatus.READY,
-            metadata={"finish_reason": finish_reason},
         )
 
     async def set_global_steps(self, global_steps: int):

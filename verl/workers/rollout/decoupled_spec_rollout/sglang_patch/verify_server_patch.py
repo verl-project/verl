@@ -13,8 +13,8 @@ from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     DraftProxyMessage,
     DraftProxyMessageType,
     DraftRequest,
-    DraftRequestKind,
-    VerifyResult,
+    RequestTerminateMessage,
+    RequestTerminateReason,
     get_num_speculative_steps_from_env,
     get_verify_replica_rank_from_env,
 )
@@ -91,30 +91,15 @@ def _get_scheduler_dp_rank(self: Scheduler) -> int:
 def _build_draft_request_from_req(
     self: Scheduler,
     req,
-    *,
-    request_kind: DraftRequestKind | None = None,
 ) -> DraftRequest:
-    request_kind = request_kind or (
-        DraftRequestKind.PREFILL if req.decode_batch_idx == 0 else DraftRequestKind.DECODE
-    )
-    committed_token_ids = list(req.output_ids)
     return DraftRequest(
         request_id=req.rid,
-        session_id=req.session_id,
         verify_replica_rank=get_verify_replica_rank_from_env(),
         scheduler_dp_rank=_get_scheduler_dp_rank(self),
         prompt_token_ids=list(req.origin_input_ids),
-        committed_token_ids=committed_token_ids,
-        target_position=len(req.origin_input_ids) + len(committed_token_ids),
+        committed_token_ids=list(req.output_ids),
         num_speculative_steps=get_num_speculative_steps_from_env(),
-        request_kind=request_kind,
         sampling_params=_build_sampling_params_dict(req.sampling_params),
-        metadata={
-            "priority": req.priority,
-            "routing_key": req.routing_key,
-            "decode_batch_idx": req.decode_batch_idx,
-            "kv_committed_len": req.kv_committed_len,
-        },
     )
 
 
@@ -185,48 +170,54 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
         setattr(req, "decoupled_spec_draft_result", draft_result)
 
 
-def _build_verify_result_from_req(self: Scheduler, req) -> VerifyResult:
-    draft_result = getattr(req, "decoupled_spec_draft_result", None)
-    accepted_token_ids = list(req.output_ids[-1:]) if req.output_ids else []
-    return VerifyResult(
+def _build_verify_request_from_req(self: Scheduler, req) -> DraftRequest:
+    return DraftRequest(
         request_id=req.rid,
-        session_id=req.session_id,
+        verify_replica_rank=get_verify_replica_rank_from_env(),
         scheduler_dp_rank=_get_scheduler_dp_rank(self),
-        accepted_token_ids=accepted_token_ids,
-        rollback_to=None,
-        finished=req.finished(),
-        metadata={
-            "draft_status": draft_result.status.value if draft_result is not None else None,
-            "draft_token_ids": list(draft_result.draft_token_ids) if draft_result is not None else [],
-            "accepted_prefix_len": draft_result.accepted_prefix_len if draft_result is not None else 0,
-            "decode_batch_idx": req.decode_batch_idx,
-        },
     )
+
+
+def _build_request_terminate_message(req, reason: RequestTerminateReason) -> RequestTerminateMessage:
+    return RequestTerminateMessage(request_id=req.rid, reason=reason)
 
 
 def _send_verify_results_and_trigger_draft(self: Scheduler, batch) -> None:
     if not _is_draftproxy_enabled(self):
         return
 
-    verify_results = []
+    verify_requests = []
     next_round_requests = []
-    for req in [req for req in batch.reqs if not req.is_retracted]:
-        verify_result = _build_verify_result_from_req(self, req)
-        verify_results.append(verify_result)
-        if not req.finished():
-            next_round_requests.append(
-                _build_draft_request_from_req(self, req, request_kind=DraftRequestKind.DECODE)
+    terminate_messages = []
+    for req in batch.reqs:
+        if req.is_retracted:
+            terminate_messages.append(
+                _build_request_terminate_message(req, RequestTerminateReason.ABORT)
             )
-        else:
             self._decoupled_pending_draft_results.pop(req.rid, None)
             self._decoupled_waiting_draft_rids.discard(req.rid)
+            continue
 
-    for verify_result in verify_results:
-        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_verify_result(verify_result))
+        verify_requests.append(_build_verify_request_from_req(self, req))
+        if req.finished():
+            terminate_messages.append(
+                _build_request_terminate_message(req, RequestTerminateReason.FINISHED)
+            )
+            self._decoupled_pending_draft_results.pop(req.rid, None)
+            self._decoupled_waiting_draft_rids.discard(req.rid)
+            continue
+
+        next_round_requests.append(_build_draft_request_from_req(self, req))
+
+    for verify_request in verify_requests:
+        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_verify_request(verify_request))
 
     for draft_request in next_round_requests:
         self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_draft_request(draft_request))
         self._decoupled_waiting_draft_rids.add(draft_request.request_id)
+
+    for terminate_message in terminate_messages:
+        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_request_terminate(terminate_message))
 
 
 def _patch_verify_scheduler():

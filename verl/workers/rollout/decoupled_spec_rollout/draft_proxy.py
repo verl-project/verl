@@ -7,10 +7,9 @@ from .protocol import (
     DraftProxyMessage,
     DraftProxyMessageType,
     DraftRequest,
-    DraftRequestKind,
     DraftResult,
     DraftRoute,
-    VerifyResult,
+    RequestTerminateMessage,
 )
 
 
@@ -20,8 +19,8 @@ class DraftProxy:
     num_speculative_steps: int
     draft_actor_handles: list[Any] = field(default_factory=list)
     request_routes: dict[str, DraftRoute] = field(default_factory=dict)
+    inflight_requests: dict[str, int] = field(default_factory=dict)
     inflight_per_index: list[int] = field(default_factory=list)
-    pending_requests: dict[str, DraftRequest] = field(default_factory=dict)
     pending_results: dict[str, DraftResult] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -46,48 +45,31 @@ class DraftProxy:
         self.request_routes[request_id] = route
         return route
 
-    def submit_prefill(self, request: DraftRequest) -> DraftRoute:
+    def submit_request(self, request: DraftRequest) -> DraftRoute:
         route = self.acquire_route(request.request_id)
-        request.draft_index = route.draft_index
-        self.pending_requests[request.request_id] = request
+        self.inflight_requests[request.request_id] = route.draft_index
         self.inflight_per_index[route.draft_index] += 1
         return route
-
-    def submit_decode(self, request: DraftRequest) -> DraftRoute:
-        return self.submit_prefill(request)
 
     def await_result(self, request_id: str) -> Optional[DraftResult]:
         return self.pending_results.get(request_id)
 
-    def notify_verify_result(self, result: VerifyResult) -> None:
-        request = self.pending_requests.pop(result.request_id, None)
-        if request is None:
-            if result.finished:
-                self.pending_results.pop(result.request_id, None)
-                self.release_request(result.request_id)
-            return
-        if request.draft_index is not None:
-            self.inflight_per_index[request.draft_index] = max(
-                0, self.inflight_per_index[request.draft_index] - 1
-            )
-        if result.finished:
-            self.pending_results.pop(result.request_id, None)
-            self.release_request(result.request_id)
+    def notify_verify_request(self, request: DraftRequest) -> None:
+        self.pending_results.pop(request.request_id, None)
 
     def release_request(self, request_id: str) -> None:
         self.request_routes.pop(request_id, None)
+        self.pending_results.pop(request_id, None)
 
-    def submit_request(self, request: DraftRequest) -> DraftRoute:
-        if request.request_kind == DraftRequestKind.PREFILL:
-            return self.submit_prefill(request)
-        return self.submit_decode(request)
+    def terminate_request(self, message: RequestTerminateMessage) -> None:
+        draft_index = self.inflight_requests.pop(message.request_id, None)
+        if draft_index is not None and 0 <= draft_index < len(self.inflight_per_index):
+            self.inflight_per_index[draft_index] = max(0, self.inflight_per_index[draft_index] - 1)
+        self.release_request(message.request_id)
 
     def complete_request(self, request_id: str, result: DraftResult) -> DraftResult:
-        request = self.pending_requests.pop(request_id, None)
         self.pending_results[request_id] = result
-        draft_index = result.metadata.get("draft_index")
-        if draft_index is None and request is not None:
-            draft_index = request.draft_index
+        draft_index = self.inflight_requests.pop(request_id, None)
         if draft_index is not None:
             idx = int(draft_index)
             if 0 <= idx < len(self.inflight_per_index):
@@ -95,8 +77,11 @@ class DraftProxy:
         return result
 
     def handle_message(self, message: DraftProxyMessage) -> Optional[DraftProxyMessage]:
-        if message.message_type == DraftProxyMessageType.VERIFY_RESULT and message.verify_result is not None:
-            self.notify_verify_result(message.verify_result)
+        if message.message_type == DraftProxyMessageType.VERIFY_RESULT and message.request is not None:
+            self.notify_verify_request(message.request)
+            return None
+        if message.message_type == DraftProxyMessageType.REQUEST_TERMINATE and message.terminate is not None:
+            self.terminate_request(message.terminate)
             return None
         if message.message_type == DraftProxyMessageType.SHUTDOWN:
             return DraftProxyMessage.shutdown()

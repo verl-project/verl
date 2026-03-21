@@ -19,7 +19,6 @@ from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     DraftProxyMessage,
     DraftProxyMessageType,
     DraftResult,
-    DraftStatus,
     get_num_speculative_steps_from_env,
     get_verify_replica_rank_from_env,
 )
@@ -48,17 +47,11 @@ def _handle_proxy_message(
         try:
             actor_handle = proxy.draft_actor_handles[route.draft_index]
             result = ray.get(actor_handle.handle_draft_request.remote(message.request))
-            result.metadata.setdefault("draft_index", route.draft_index)
         except Exception as exc:
             logger.exception("DraftProxy failed to get draft result")
             result = DraftResult(
                 request_id=message.request.request_id,
-                session_id=message.request.session_id,
-                status=DraftStatus.FAILED,
-                metadata={
-                    "error": str(exc),
-                    "draft_index": route.draft_index,
-                },
+                draft_token_ids=[],
             )
         proxy.complete_request(message.request.request_id, result)
         return (
@@ -66,8 +59,12 @@ def _handle_proxy_message(
             _resolve_target_dp_rank(source_dp_rank, message.request.scheduler_dp_rank),
         )
 
-    if message.message_type == DraftProxyMessageType.VERIFY_RESULT and message.verify_result is not None:
-        proxy.notify_verify_result(message.verify_result)
+    if message.message_type == DraftProxyMessageType.VERIFY_RESULT and message.request is not None:
+        proxy.notify_verify_request(message.request)
+        return None, None
+
+    if message.message_type == DraftProxyMessageType.REQUEST_TERMINATE and message.terminate is not None:
+        proxy.terminate_request(message.terminate)
         return None, None
 
     if message.message_type == DraftProxyMessageType.SHUTDOWN:
