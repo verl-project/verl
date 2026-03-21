@@ -33,11 +33,6 @@ from torch.distributed.tensor import DTensor
 import verl.utils.torch_functional as verl_F
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
-from verl.trainer.distillation import (
-    fused_kernel_distillation_exception,
-    is_distillation_enabled,
-    prepare_student_distillation_inputs,
-)
 from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -74,7 +69,7 @@ from verl.utils.ulysses import (
     ulysses_pad,
     ulysses_pad_and_slice_inputs,
 )
-from verl.workers.config import DistillationConfig, FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
+from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -99,7 +94,6 @@ class FSDPEngine(BaseEngine):
         engine_config: FSDPEngineConfig,
         optimizer_config: FSDPOptimizerConfig,
         checkpoint_config: CheckpointConfig,
-        distillation_config: Optional[DistillationConfig],
     ):
         """
         Initialize the FSDPEngine.
@@ -115,13 +109,8 @@ class FSDPEngine(BaseEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
-        self.distillation_config = distillation_config
 
         self.mode = None
-        self.distillation_enabled = is_distillation_enabled(distillation_config)
-        self.need_logits_for_distillation = (
-            self.distillation_enabled and self.distillation_config.distillation_loss.loss_settings.use_topk
-        )
 
         self.rank = torch.distributed.get_rank()
 
@@ -1000,23 +989,23 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         return model_inputs, output_args
 
-    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict):
+    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
+        distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
 
         model_output = {}
 
         input_ids = micro_batch["input_ids"]
-        logits_rmpad = None
+
         if use_remove_padding:
             input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
             temperature_rmpad = output_args["temperature_rmpad"]
 
             if use_fused_kernels:
                 # temperature is singleton
-                fused_kernel_distillation_exception(self.need_logits_for_distillation)
                 log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
             else:
@@ -1042,6 +1031,18 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             self.compute_entropy_from_logits, logits_rmpad
                         )
 
+                # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
+                if distillation_use_topk:
+                    outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
+                    cu_seqlens = input_ids.offsets()
+                    for k, v in outputs.items():
+                        v = v.squeeze(0)
+                        assert v.shape == log_probs.shape, f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
+                        if self.use_ulysses_sp:
+                            pad_size = output_args["pad_size"]
+                            v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                        model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+
             # gather log_prob if sp > 1
             if self.use_ulysses_sp:
                 pad_size = output_args["pad_size"]
@@ -1053,13 +1054,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     unpad_dim=0,
                     padding_size=pad_size,
                 )
-                if self.need_logits_for_distillation:
-                    logits_rmpad = gather_outputs_and_unpad(
-                        logits_rmpad,
-                        gather_dim=0,
-                        unpad_dim=0,
-                        padding_size=pad_size,
-                    )
                 if calculate_entropy:
                     entropy_rmpad = gather_outputs_and_unpad(
                         entropy_rmpad,
@@ -1080,9 +1074,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
         else:  # not using rmpad and no ulysses sp
             response_length = tu.get_non_tensor_data(data=micro_batch, key="max_response_length", default=1024)
             if use_fused_kernels:
-                fused_kernel_distillation_exception(self.need_logits_for_distillation)
                 log_probs = output.log_probs[:, -response_length - 1 : -1]
                 entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+
             else:
                 logits = output.logits  # (bsz, response_length, vocab_size)
                 temperature = output_args["temperature"]  # (bsz,)
@@ -1111,11 +1105,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
-        model_output.update(
-            prepare_student_distillation_inputs(
-                logits=logits_rmpad, batch=micro_batch, cu_seqlens=cu_seqlens, config=self.distillation_config
-            )
-        )
 
         model_output["log_probs"] = log_probs
         if calculate_entropy:
@@ -1136,7 +1125,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
             )  # prevent model thinks we are generating
 
             model_output = self.prepare_model_outputs(
-                output=raw_output, output_args=output_args, micro_batch=micro_batch
+                output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
             )
 
             if loss_function is not None:
@@ -1163,7 +1152,7 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
     The only difference between critic and actor is how the raw model output is processed
     """
 
-    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict):
+    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
 

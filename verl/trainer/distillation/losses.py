@@ -13,27 +13,34 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import torch
+from tensordict import TensorDict
 
-import verl.trainer.distillation.fsdp.losses as fsdp_losses
 from verl.base_config import BaseConfig
-from verl.trainer.distillation.megatron import losses as megatron_losses
-from verl.trainer.distillation.types import DistillationLossInputs
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
+from verl.workers.utils.losses import ppo_loss
+from verl.workers.utils.padding import no_padding_2_padding
 
 DistillationLossFn = Callable[
     [
-        DistillationLossInputs,  # inputs
-        torch.Tensor,  # response_mask
         ActorConfig,  # actor_config
         DistillationConfig,  # distillation_config
+        dict,  # model_output
+        TensorDict,  # micro batch input
     ],
     tuple[torch.Tensor, dict[str, Any]],
 ]
+
+
+def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
+    """Check if distillation is enabled based on the provided configuration."""
+    if config is None:
+        return False
+    return config.enabled
 
 
 @dataclass
@@ -103,58 +110,138 @@ def compute_distillation_loss_range(
     distillation_losses: torch.Tensor, response_mask: torch.Tensor
 ) -> dict[str, Metric]:
     """Compute min and max distillation loss over valid response tokens."""
-    distillation_losses_response = distillation_losses[response_mask]
+    distillation_losses_response = distillation_losses * response_mask
     return {
         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
     }
 
 
-def distillation_loss(
-    inputs: DistillationLossInputs,
-    old_log_prob: torch.Tensor,
-    log_prob: torch.Tensor,
-    response_mask: torch.Tensor,
-    loss_agg_mode: str,
+def compute_topk_loss(
     config: ActorConfig,
     distillation_config: DistillationConfig,
-    rollout_is_weights: torch.Tensor | None = None,
+    data: TensorDict,
+    student_logits: torch.Tensor,
+    data_format: str,
+) -> torch.Tensor:
+    """Compute the topk loss in logit processor.
+
+    Returns:
+    - distillation_losses: (bsz, seqlen/cp_size)
+    - student_mass: (bsz, seqlen/cp_size)
+    - teacher_mass: (bsz, seqlen/cp_size)
+    """
+    match config.strategy:
+        case "fsdp":
+            import verl.trainer.distillation.fsdp.losses as fsdp_losses
+
+            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+        case "megatron":
+            import verl.trainer.distillation.megatron.losses as megatron_losses
+
+            distillation_loss_fn = megatron_losses.compute_forward_kl_topk
+        case _:
+            raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
+
+    outputs = distillation_loss_fn(
+        student_logits=student_logits,
+        teacher_topk_log_probs=data["teacher_logprobs"],
+        teacher_topk_ids=data["teacher_ids"],
+        config=distillation_config,
+        data_format=data_format,
+    )
+
+    expected_shape = student_logits.shape[:2]
+    for k, v in outputs.items():
+        assert v.shape == expected_shape, f"Expected shape {expected_shape}, but got {v.shape} for {k=}."
+
+    return outputs
+
+
+def distillation_ppo_loss(
+    config: ActorConfig,
+    distillation_config: Optional[DistillationConfig],
+    model_output: dict = None,
+    data: TensorDict = None,
+    dp_group=None,
+    student_logits: torch.Tensor = None,
+    data_format: str = "thd",
+):
+    """Loss function used both for logit processor and final policy loss.
+    - student_logits is not None, compute the topk loss in logit processor.
+    - student_logits is None, compute final policy loss.
+
+    [split sequence across sp/cp groups]
+                   |
+    [model forward and output logits: (bsz, seqlen/cp_size, vocab_size/tp_size)]
+                   |
+    [logits processor compute topk loss: (bsz, seqlen/cp_size)]
+                   |
+    [all gather topk loss across sp/cp groups: (bsz, seqlen)]
+                   |
+    [combine topk loss with policy loss]
+
+    Args:
+        config: Actor configuration.
+        distillation_config: Distillation configuration.
+        model_output: Model output, including log_probs, entropy.
+        data: Micro input batch, contains
+          - teacher_logprobs: (bsz, seqlen, topk)
+          - teacher_ids: (bsz, seqlen, topk)
+        student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
+        data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
+
+    Returns:
+    - student_logits is not None, return the topk loss tensor (bsz, seqlen/cp_size).
+    - student_logits is None, return the final policy loss scalar and metrics.
+    """
+
+    # Called as logits processor
+    if student_logits is not None:
+        return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
+
+    # Called as final policy loss
+    distillation_loss_config = distillation_config.distillation_loss
+    distil_loss, distil_metrics = distillation_loss(config, distillation_config, model_output, data)
+    policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
+    if not distillation_loss_config.use_task_rewards:
+        policy_loss = 0.0
+
+    # Combine distillation with policy loss
+    policy_metrics.update(distil_metrics)
+    distillation_loss_coef = (
+        distillation_loss_config.distillation_loss_coef if distillation_loss_config.use_task_rewards else 1.0
+    )
+    policy_loss += distil_loss * distillation_loss_coef
+    policy_metrics["distillation/loss"] = Metric(value=distil_loss, aggregation=AggregationType.SUM)
+
+    return policy_loss, policy_metrics
+
+
+def distillation_loss(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics.
 
-    Args:
-        inputs (DistillationLossInputs):
-            Inputs containing probabilities from teacher and student policies.
-        old_log_prob (torch.Tensor):
-            Log-probabilities of actions under the old policy, shape (batch_size, response_length).
-        log_prob (torch.Tensor):
-            Log-probabilities of actions under the current policy, shape (batch_size, response_length).
-        response_mask (torch.Tensor):
-            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
-        loss_agg_mode (str, optional):
-            Aggregation mode for `agg_loss`. Defaults to "token-mean".
-        config (ActorConfig):
-            Actor configuration.
-        distillation_config (DistillationConfig):
-            Distillation configuration.
-        rollout_is_weights: `(torch.Tensor)`:
-            Importance-sampling weights of actions under the rollout policy, shape (batch_size, response_length).
-
     Returns:
-        tuple[torch.Tensor, dict[str, Any]]: A tuple containing:
-            - distillation_loss: Aggregated distillation loss scalar.
-            - distillation_metrics: Dictionary of metrics.
+    - distillation_loss: Aggregated distillation loss scalar.
+    - distillation_metrics: Dictionary of metrics.
     """
     assert distillation_config is not None
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_loss_fn = get_distillation_loss_fn(loss_config.loss_mode)
     distillation_losses, distillation_metrics = distillation_loss_fn(
-        inputs=inputs,
-        response_mask=response_mask,
         config=config,
         distillation_config=distillation_config,
+        model_output=model_output,
+        data=data,
     )
+    response_mask = data["response_mask"].bool()
+    loss_agg_mode = config.loss_agg_mode
 
     distillation_metrics.update(
         compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
@@ -168,6 +255,9 @@ def distillation_loss(
         policy_loss_fn = get_policy_loss_fn(loss_config.policy_loss_mode)
         for k, v in config.global_batch_info.items():
             loss_config.global_batch_info[k] = v
+        log_prob = no_padding_2_padding(model_output["log_probs"], data)
+        old_log_prob = data["old_log_probs"]
+        rollout_is_weights = data.get("rollout_is_weights", None)
         distillation_loss, pg_metrics = policy_loss_fn(
             old_log_prob=old_log_prob,
             log_prob=log_prob,
@@ -193,61 +283,27 @@ def distillation_loss(
 
 @register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
 def compute_forward_kl_topk(
-    inputs: DistillationLossInputs,
-    response_mask: torch.Tensor,
     config: ActorConfig,
     distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """
-    Compute forward KL distillation loss and related metrics using top-k log probabilities.
-
-    Args:
-        inputs (DistillationLossInputs):
-            Inputs containing top-k log probabilities and indices of the tokens corresponding to the
-            top-k log probabilities for teacher policy and logits for the student policy.
-        response_mask (torch.Tensor):
-            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
-        config (ActorConfig):
-            Actor configuration.
-        distillation_config (DistillationConfig):
-            Distillation configuration.
+    """Compute forward KL distillation loss and related metrics using top-k log probabilities.
 
     Returns:
-        tuple[torch.Tensor, dict[str, Any]]: A tuple containing:
-            - distillation_loss: Aggregated distillation loss scalar.
-            - distillation_metrics: Dictionary of metrics.
+    - distillation_losses: (bsz, resp_len)
+    - distillation_metrics: Dictionary of metrics.
     """
-    teacher_topk_log_probs = inputs.teacher_topk_log_probs
-    teacher_topk_ids = inputs.teacher_topk_ids
-    student_logits = inputs.student_logits
-    if teacher_topk_log_probs is None or teacher_topk_ids is None or student_logits is None:
-        raise ValueError(
-            f"Expected teacher_topk_log_probs ({teacher_topk_log_probs is None}), "
-            f"teacher_topk_ids ({teacher_topk_ids is None}), "
-            f"and student_logits ({student_logits is None}) to be provided in inputs."
-        )
-    match config.strategy:
-        case "fsdp":
-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
-        case "megatron":
-            distillation_loss_fn = megatron_losses.compute_forward_kl_topk
-        case _:
-            raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
-    outputs = distillation_loss_fn(
-        student_logits=student_logits,
-        teacher_topk_log_probs=teacher_topk_log_probs,
-        teacher_topk_ids=teacher_topk_ids,
-        config=distillation_config,
-    )
-    distillation_losses, student_mass, teacher_mass = (
-        outputs["distillation_losses"],
-        outputs["student_mass"],
-        outputs["teacher_mass"],
-    )
+    # topk loss has been computed in logits processor
+    distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
+    student_mass = no_padding_2_padding(model_output["student_mass"], data)
+    teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
+    response_mask = data["response_mask"].bool()
+    assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask.shape
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
-    student_mass = student_mass[response_mask]
-    teacher_mass = teacher_mass[response_mask]
+    student_mass = student_mass * response_mask
+    teacher_mass = teacher_mass * response_mask
     distillation_metrics = {
         "distillation/student_mass": student_mass.mean().item(),
         "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
@@ -267,10 +323,10 @@ def compute_forward_kl_topk(
     DistillationLossSettings(names=["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"], use_estimator=True)
 )  # type: ignore[arg-type]
 def compute_distillation_loss_reverse_kl_estimator(
-    inputs: DistillationLossInputs,
-    response_mask: torch.Tensor,
     config: ActorConfig,
     distillation_config: DistillationConfig,
+    model_output,
+    data: TensorDict,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the distillation loss and related metrics using single-sample KL estimators.
@@ -278,32 +334,21 @@ def compute_distillation_loss_reverse_kl_estimator(
     Uses the kl_penalty function from core_algos which supports various KL divergence
     estimators: "kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3".
 
-    Args:
-        inputs (DistillationLossInputs):
-            Inputs containing log-probabilities of the sampled tokens under the teacher and
-            student policies, shape (batch_size, response_length).
-        response_mask (torch.Tensor):
-            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
-        config (ActorConfig):
-            Actor configuration.
-        distillation_config (DistillationConfig):
-            Distillation configuration containing loss_mode and loss_clamp.
-
     Returns:
-        tuple[torch.Tensor, dict[str, Any]]: A tuple containing:
-            - distillation_loss: Aggregated distillation loss scalar.
-            - distillation_metrics: Dictionary of metrics.
+    - distillation_losses: (bsz, resp_len)
+    - distillation_metrics: Dictionary of metrics.
     """
-    student_log_probs = inputs.student_log_probs
-    teacher_log_probs = inputs.teacher_log_probs
-    if student_log_probs is None or teacher_log_probs is None:
-        raise ValueError("Expected student_log_probs and teacher_log_probs to be provided in inputs.")
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
+    response_mask = data["response_mask"].bool()
+    assert teacher_log_probs.shape == student_log_probs.shape == response_mask.shape
+
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_losses = kl_penalty(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=loss_config.loss_mode
     )
     # Since k1 can be negative, log the mean absolute loss.
     metrics = {
-        "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask].abs().mean()),
+        "distillation/abs_loss": Metric(AggregationType.MEAN, (distillation_losses * response_mask).abs().mean()),
     }
     return distillation_losses, metrics
