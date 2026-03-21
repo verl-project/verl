@@ -29,7 +29,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
-from verl.trainer.distillation import distillation_ppo_loss
+from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, set_expandable_segments
@@ -427,6 +427,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         Worker.__init__(self)
         self.config = config
         self.distillation_config = distillation_config
+        self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
@@ -516,7 +517,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
-            distillation_config: DistillationConfig = omega_conf_to_dataclass(self.distillation_config)
+            distillation_config: Optional[DistillationConfig] = (
+                omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
+            )
 
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",
@@ -548,7 +551,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-            if distillation_config.enabled:
+            if self.distillation_enabled:
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
