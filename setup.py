@@ -58,6 +58,7 @@ SGLANG_REQUIRES = [
 ]
 TRL_REQUIRES = ["trl<=0.9.6"]
 MCORE_REQUIRES = ["mbridge"]
+ATROPOS_REQUIRES = ["httpx"]
 
 extras_require = {
     "test": TEST_REQUIRES,
@@ -70,6 +71,7 @@ extras_require = {
     "trl": TRL_REQUIRES,
     "mcore": MCORE_REQUIRES,
     "trtllm": TRTLLM_REQUIRES,
+    "atropos": ATROPOS_REQUIRES,
 }
 
 
