@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-eval "$(conda shell.bash hook)"
-conda activate verl
-export PATH=$CONDA_PREFIX/bin:$PATH
-export NCCL_P2P_DISABLE=1
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0,2,8,9
-export DATA_PATH=$PWD/../verlData
-export HF_HOME=$DATA_PATH
-export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
-
 set -xeuo pipefail
 
 ############################ Quick Config ############################
@@ -17,7 +7,7 @@ ROLLOUT_NAME="vllm" # sglang or vllm
 
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
-TEACHER_MODEL=Qwen2.5-3B-Instruct
+TEACHER_MODEL=Qwen2.5-0.5B
 
 # USE_POLICY_GRADIENT=False
 # DISTILLATION_LOSS_MODE="k3"
@@ -26,13 +16,12 @@ TEACHER_MODEL=Qwen2.5-3B-Instruct
 
 USE_POLICY_GRADIENT=True
 DISTILLATION_LOSS_MODE="k1"
-USE_FUSED_KERNELS=True
+USE_FUSED_KERNELS=False
 
 DISTILLATION_LOSS_MAX_CLAMP=10.0
 DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
 
 PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
-EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-pg-${USE_POLICY_GRADIENT}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}-fused_kernels-${USE_FUSED_KERNELS}"
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
@@ -40,14 +29,18 @@ MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH + 1 ))
 TRAIN_PROMPT_BSZ=128
 STUDENT_MICRO_BATCH_SIZE_PER_GPU=2
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
-USE_DYNAMIC_BSZ=False
+USE_DYNAMIC_BSZ=True
 
-STUDENT_WORLD_SIZE=4
+STUDENT_WORLD_SIZE=2
 
 TEACHER_RESOURCE_POOL=False
-TEACHER_WORLD_SIZE=2
+TEACHER_WORLD_SIZE=4
 
-ENFORCE_EAGER=False # true for faster debugging
+SP=1
+
+EXP_NAME="fsdp/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
+
+ENFORCE_EAGER=True # true for faster debugging
 
 ############################ Paths ############################
 
@@ -72,9 +65,9 @@ DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path="${FAMILY}/${STUDENT_MODEL}"
-    actor_rollout_ref.model.use_fused_kernels=$USE_FUSED_KERNELS
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.use_fused_kernels=$USE_FUSED_KERNELS
     actor_rollout_ref.actor.use_torch_compile=True
     actor_rollout_ref.rollout.enforce_eager=$ENFORCE_EAGER
 )
@@ -109,7 +102,7 @@ STUDENT=(
     actor_rollout_ref.actor.use_dynamic_bsz=$USE_DYNAMIC_BSZ
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=1
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP
 )
 
 ROLLOUT=(
@@ -140,7 +133,7 @@ TRAINER=(
     trainer.save_freq=200
     trainer.test_freq=5
     trainer.total_epochs=15
-    trainer.val_before_train=True
+    trainer.val_before_train=False
     trainer.use_legacy_worker_impl=disable
     trainer.resume_mode=disable
     trainer.log_val_generations=5

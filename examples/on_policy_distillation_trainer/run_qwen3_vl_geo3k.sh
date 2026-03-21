@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-eval "$(conda shell.bash hook)"
-conda activate verl
-export PATH=$CONDA_PREFIX/bin:$PATH
-export NCCL_P2P_DISABLE=1
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7,8
-export DATA_PATH=$PWD/../verlData
-export HF_HOME=$DATA_PATH
-export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
-
 set -xeuo pipefail
 
 ############################ Quick Config ############################
@@ -32,7 +22,6 @@ DISTILLATION_LOSS_MAX_CLAMP=10.0
 DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
 
 PROJECT_NAME='verl_on_policy_distillation_example_geo3k'
-EXP_NAME="${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-pg-${USE_POLICY_GRADIENT}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}-fused_kernels-${USE_FUSED_KERNELS}"
 
 MAX_PROMPT=1024
 MAX_RESPONSE_LENGTH=2048
@@ -46,6 +35,10 @@ STUDENT_WORLD_SIZE=4
 
 TEACHER_RESOURCE_POOL=True
 TEACHER_WORLD_SIZE=4
+
+SP=1
+
+EXP_NAME="fsdp/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
 
 ENFORCE_EAGER=False # true for faster debugging
 
@@ -73,9 +66,9 @@ DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path="${FAMILY}/${STUDENT_MODEL}"
-    actor_rollout_ref.model.use_fused_kernels=$USE_FUSED_KERNELS
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.use_fused_kernels=$USE_FUSED_KERNELS
     actor_rollout_ref.actor.use_torch_compile=True
     actor_rollout_ref.rollout.enforce_eager=$ENFORCE_EAGER
 )

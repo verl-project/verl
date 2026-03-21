@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-eval "$(conda shell.bash hook)"
-conda activate verlMega
-export PATH=$CONDA_PREFIX/bin:$PATH
-export NCCL_P2P_DISABLE=1
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0,2,8,9
-export DATA_PATH=$PWD/../verlData
-export HF_HOME=$DATA_PATH
-export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
-
 set -xeuo pipefail
 
 ############################ Quick Config ############################
@@ -35,7 +25,7 @@ PROJECT_NAME='verl_on_policy_distillation_example_gsm8k'
 
 MAX_PROMPT=256
 MAX_RESPONSE_LENGTH=512
-MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH ))
+MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH + 1 ))
 TRAIN_PROMPT_BSZ=128
 STUDENT_MICRO_BATCH_SIZE_PER_GPU=1
 STUDENT_MAX_TOKEN_LEN_PER_GPU=$(( STUDENT_MICRO_BATCH_SIZE_PER_GPU * (MAX_PROMPT + MAX_RESPONSE_LENGTH) ))
@@ -52,7 +42,7 @@ CP=1
 EP=1
 ETP=1
 
-EXP_NAME="megatron-tp${TP}-fused_kernels-${USE_FUSED_KERNELS}/${FAMILY}/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}-pg-${USE_POLICY_GRADIENT}-maxclamp-${DISTILLATION_LOSS_MAX_CLAMP}-logprobminclamp-${DISTILLATION_LOG_PROB_MIN_CLAMP}"
+EXP_NAME="megatron/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
 
 PARAM_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                         
 OPTIMIZER_OFFLOAD=True                                                                                                                                                                                                                                                                                                                                                          
@@ -155,7 +145,7 @@ ALGORITHM=(
 )
 
 TRAINER=(
-    trainer.logger='["console"]'
+    trainer.logger='["console","wandb"]'
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXP_NAME
     trainer.n_gpus_per_node=$STUDENT_WORLD_SIZE
