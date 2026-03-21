@@ -18,6 +18,9 @@ from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     get_num_speculative_steps_from_env,
     get_verify_replica_rank_from_env,
 )
+from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.decoupled_spec_verify_patch import (
+    patch_speculative_worker_factory,
+)
 
 # Set by SGLangHttpServer.launch_server immediately before verify launch_subprocesses runs.
 _pending_draft_actor_handles: list | None = None
@@ -265,6 +268,7 @@ def _patch_verify_scheduler():
 def run_scheduler_process(*args, **kwargs):
     from sglang.srt.entrypoints.engine import run_scheduler_process as upstream
 
+    patch_speculative_worker_factory()
     _patch_verify_scheduler()
     return upstream(*args, **kwargs)
 

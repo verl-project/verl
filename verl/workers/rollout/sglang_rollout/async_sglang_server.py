@@ -254,6 +254,21 @@ class SGLangHttpServer:
             args["enable_weights_cpu_backup"] = True
             args["enable_draft_weights_cpu_backup"] = True
 
+        if self.config.enable_decoupled_spec and self.server_role == "verify":
+            from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.decoupled_spec_verify_patch import (
+                set_external_draft_verify_env,
+            )
+
+            # Route verify-side decoding through the monkey-patched external
+            # draft worker while staying on SGLang's spec-v1 non-overlap path.
+            args["speculative_algorithm"] = "EAGLE"
+            args["speculative_num_steps"] = self.config.num_speculative_steps
+            args["speculative_eagle_topk"] = 1
+            args["speculative_num_draft_tokens"] = self.config.num_speculative_steps + 1
+            args["speculative_draft_model_path"] = args["model_path"]
+            args["disable_overlap_schedule"] = True
+            set_external_draft_verify_env()
+
         # NOTE: We can't directly call SGLang's launch_server since it's not an async function.
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
