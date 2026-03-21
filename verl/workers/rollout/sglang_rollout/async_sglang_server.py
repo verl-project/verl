@@ -264,7 +264,7 @@ class SGLangHttpServer:
                 get_draft_proxy_runtime_env,
             )
 
-            self.draft_proxy_ipc_config = DraftProxyIpcConfig.init_new()
+            self.draft_proxy_ipc_config = DraftProxyIpcConfig.init_new(dp_size=self.config.data_parallel_size)
             os.environ.update(
                 get_draft_proxy_runtime_env(
                     ipc_config=self.draft_proxy_ipc_config,

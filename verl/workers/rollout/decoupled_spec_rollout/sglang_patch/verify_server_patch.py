@@ -85,6 +85,11 @@ def _iter_live_batch_reqs(batch) -> list:
     return [req for req in batch.reqs if not req.is_retracted and not req.finished()]
 
 
+def _get_scheduler_dp_rank(self: Scheduler) -> int:
+    dp_rank = getattr(self, "dp_rank", None)
+    return 0 if dp_rank is None else int(dp_rank)
+
+
 def _build_draft_request_from_req(
     self: Scheduler,
     req,
@@ -99,6 +104,7 @@ def _build_draft_request_from_req(
         request_id=req.rid,
         session_id=req.session_id,
         verify_replica_rank=get_verify_replica_rank_from_env(),
+        scheduler_dp_rank=_get_scheduler_dp_rank(self),
         prompt_token_ids=list(req.origin_input_ids),
         committed_token_ids=committed_token_ids,
         target_position=len(req.origin_input_ids) + len(committed_token_ids),
@@ -204,12 +210,13 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
     setattr(batch, "decoupled_spec_draft_results", batch_results)
 
 
-def _build_verify_result_from_req(req) -> VerifyResult:
+def _build_verify_result_from_req(self: Scheduler, req) -> VerifyResult:
     draft_result = getattr(req, "decoupled_spec_draft_result", None)
     accepted_token_ids = list(req.output_ids[-1:]) if req.output_ids else []
     return VerifyResult(
         request_id=req.rid,
         session_id=req.session_id,
+        scheduler_dp_rank=_get_scheduler_dp_rank(self),
         accepted_token_ids=accepted_token_ids,
         rollback_to=None,
         finished=req.finished(),
@@ -229,7 +236,7 @@ def _send_verify_results_and_trigger_draft(self: Scheduler, batch) -> None:
     verify_results = []
     next_round_requests = []
     for req in [req for req in batch.reqs if not req.is_retracted]:
-        verify_result = _build_verify_result_from_req(req)
+        verify_result = _build_verify_result_from_req(self, req)
         setattr(req, "decoupled_spec_verify_result", verify_result)
         verify_results.append(verify_result)
         if not req.finished():
@@ -273,18 +280,19 @@ def _patch_verify_scheduler():
         if ipc_config is None:
             return
         if self.pp_rank == 0 and self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
+            endpoints = ipc_config.get_endpoints(_get_scheduler_dp_rank(self))
             draftproxy_context = zmq.Context(2)
             self._draftproxy_context = draftproxy_context
             self._send_to_draftproxy = get_zmq_socket(
                 draftproxy_context,
                 zmq.PUSH,
-                ipc_config.scheduler_to_proxy_ipc_name,
+                endpoints.scheduler_to_proxy_ipc_name,
                 False,
             )
             self._recv_from_draftproxy = get_zmq_socket(
                 draftproxy_context,
                 zmq.PULL,
-                ipc_config.proxy_to_scheduler_ipc_name,
+                endpoints.proxy_to_scheduler_ipc_name,
                 False,
             )
 

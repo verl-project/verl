@@ -7,6 +7,7 @@ from typing import Any
 import psutil
 import ray
 import setproctitle
+import zmq
 
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import configure_logger, get_zmq_socket, kill_itself_when_parent_died
@@ -35,7 +36,13 @@ def _maybe_init_ray():
         logger.exception("Failed to initialize Ray in DraftProxy subprocess")
 
 
-def _handle_proxy_message(proxy: DraftProxy, message: DraftProxyMessage) -> DraftProxyMessage | None:
+def _resolve_target_dp_rank(source_dp_rank: int, requested_dp_rank: int | None) -> int:
+    return source_dp_rank if requested_dp_rank is None else int(requested_dp_rank)
+
+
+def _handle_proxy_message(
+    proxy: DraftProxy, message: DraftProxyMessage, source_dp_rank: int
+) -> tuple[DraftProxyMessage | None, int | None]:
     if message.message_type == DraftProxyMessageType.DRAFT_REQUEST and message.request is not None:
         route = proxy.submit_request(message.request)
         try:
@@ -54,19 +61,25 @@ def _handle_proxy_message(proxy: DraftProxy, message: DraftProxyMessage) -> Draf
                 },
             )
         proxy.complete_request(message.request.request_id, result)
-        return DraftProxyMessage.from_draft_result(result)
+        return (
+            DraftProxyMessage.from_draft_result(result),
+            _resolve_target_dp_rank(source_dp_rank, message.request.scheduler_dp_rank),
+        )
 
     if message.message_type == DraftProxyMessageType.VERIFY_RESULT and message.verify_result is not None:
         proxy.notify_verify_result(message.verify_result)
-        return None
+        return None, None
 
     if message.message_type == DraftProxyMessageType.SHUTDOWN:
-        return DraftProxyMessage.shutdown()
+        return DraftProxyMessage.shutdown(), source_dp_rank
 
     if message.message_type == DraftProxyMessageType.ERROR:
-        return message
+        return message, source_dp_rank
 
-    return DraftProxyMessage.error_message(f"Unsupported DraftProxy message type: {message.message_type}")
+    return (
+        DraftProxyMessage.error_message(f"Unsupported DraftProxy message type: {message.message_type}"),
+        source_dp_rank,
+    )
 
 
 class DraftProxyManager:
@@ -89,39 +102,53 @@ class DraftProxyManager:
         self.init_ipc_channels()
 
     def init_ipc_channels(self):
-        import zmq
+        self.context = zmq.Context(1 + 2 * len(self.ipc_config.dp_ipc_endpoints))
+        self.recv_from_scheduler = {}
+        self.send_to_scheduler = {}
+        self.poller = zmq.Poller()
 
-        self.context = zmq.Context(2)
-        self.recv_from_scheduler = get_zmq_socket(
-            self.context,
-            zmq.PULL,
-            self.ipc_config.scheduler_to_proxy_ipc_name,
-            True,
-        )
-        self.send_to_scheduler = get_zmq_socket(
-            self.context,
-            zmq.PUSH,
-            self.ipc_config.proxy_to_scheduler_ipc_name,
-            True,
-        )
+        for dp_rank, endpoints in sorted(self.ipc_config.dp_ipc_endpoints.items()):
+            recv_socket = get_zmq_socket(
+                self.context,
+                zmq.PULL,
+                endpoints.scheduler_to_proxy_ipc_name,
+                True,
+            )
+            send_socket = get_zmq_socket(
+                self.context,
+                zmq.PUSH,
+                endpoints.proxy_to_scheduler_ipc_name,
+                True,
+            )
+            self.recv_from_scheduler[dp_rank] = recv_socket
+            self.send_to_scheduler[dp_rank] = send_socket
+            self.poller.register(recv_socket, zmq.POLLIN)
 
     def close(self):
-        if getattr(self, "recv_from_scheduler", None) is not None:
-            self.recv_from_scheduler.close(linger=0)
-        if getattr(self, "send_to_scheduler", None) is not None:
-            self.send_to_scheduler.close(linger=0)
+        for socket_map_name in ("recv_from_scheduler", "send_to_scheduler"):
+            socket_map = getattr(self, socket_map_name, None) or {}
+            for socket in socket_map.values():
+                socket.close(linger=0)
         if getattr(self, "context", None) is not None:
             self.context.term()
 
     def event_loop(self):
         try:
             while True:
-                message = self.recv_from_scheduler.recv_pyobj()
-                response = _handle_proxy_message(self.proxy, message)
-                if response is not None and response.message_type != DraftProxyMessageType.SHUTDOWN:
-                    self.send_to_scheduler.send_pyobj(response)
-                if response is not None and response.message_type == DraftProxyMessageType.SHUTDOWN:
-                    break
+                events = dict(self.poller.poll())
+                for dp_rank, recv_socket in self.recv_from_scheduler.items():
+                    if events.get(recv_socket) != zmq.POLLIN:
+                        continue
+                    message = recv_socket.recv_pyobj()
+                    response, target_dp_rank = _handle_proxy_message(self.proxy, message, dp_rank)
+                    if response is not None and target_dp_rank is not None:
+                        target_socket = self.send_to_scheduler.get(target_dp_rank)
+                        if target_socket is None:
+                            logger.error("Missing DraftProxy response socket for dp_rank=%s", target_dp_rank)
+                        else:
+                            target_socket.send_pyobj(response)
+                    if response is not None and response.message_type == DraftProxyMessageType.SHUTDOWN:
+                        return
         finally:
             self.close()
 
