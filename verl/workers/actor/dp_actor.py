@@ -492,10 +492,26 @@ class DataParallelPPOActor(BasePPOActor):
                         obs_mask = obs_mask.to(bool)
                         if obs_mask.sum() > 0:
                             from verl.utils.torch_functional import masked_mean
-                            wm_loss = -masked_mean(log_prob, obs_mask)
+                            # Sparsify: only keep top-k% hardest tokens
+                            wm_top_ratio = getattr(self.config, "wm_loss_top_ratio", 1.0)
+                            if wm_top_ratio < 1.0:
+                                per_token_loss = -log_prob  # (batch, seq)
+                                # Extract losses for observation tokens only
+                                obs_losses = per_token_loss.masked_fill(~obs_mask, float("-inf"))
+                                num_obs = obs_mask.sum().item()
+                                k = max(1, int(num_obs * wm_top_ratio))
+                                # Find threshold: k-th largest loss across all obs tokens
+                                threshold = obs_losses.view(-1).topk(k).values[-1]
+                                # Mask: only keep obs tokens with loss >= threshold
+                                topk_mask = obs_mask & (per_token_loss >= threshold)
+                                wm_loss = -masked_mean(log_prob, topk_mask)
+                                micro_batch_metrics["actor/wm_num_obs_tokens_total"] = num_obs
+                                micro_batch_metrics["actor/wm_num_obs_tokens_topk"] = topk_mask.sum().item()
+                            else:
+                                wm_loss = -masked_mean(log_prob, obs_mask)
+                                micro_batch_metrics["actor/wm_num_obs_tokens"] = obs_mask.sum().item()
                             policy_loss = policy_loss + wm_coeff * wm_loss
                             micro_batch_metrics["actor/wm_sft_loss"] = wm_loss.detach().item()
-                            micro_batch_metrics["actor/wm_num_obs_tokens"] = obs_mask.sum().item()
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz

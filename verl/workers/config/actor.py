@@ -122,6 +122,8 @@ class ActorConfig(BaseConfig):
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     # World model SFT loss: predict environment observation tokens as auxiliary task
     world_model_coeff: float = 0.0
+    # Only compute WM loss on top-k% hardest tokens (0.0 < ratio <= 1.0, default 1.0 = all tokens)
+    wm_loss_top_ratio: float = 1.0
 
     def __post_init__(self):
         """Validate actor configuration parameters."""
