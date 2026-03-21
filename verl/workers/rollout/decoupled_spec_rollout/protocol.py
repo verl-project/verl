@@ -12,13 +12,13 @@ class DraftRequestKind(str, Enum):
     PREFILL = "prefill"
     DECODE = "decode"
 
-
+# 一条 DraftResult 处于的状态
 class DraftStatus(str, Enum):
-    PENDING = "pending"
-    READY = "ready"
-    FAILED = "failed"
+    PENDING = "pending" # Draft 正在生成/还未生成完毕
+    READY = "ready" # 已生成完毕
+    FAILED = "failed" # 错误
 
-
+# IPC 通道上传输的消息种类，用于标识 DraftProxyMessage 类
 class DraftProxyMessageType(str, Enum):
     DRAFT_REQUEST = "draft_request"
     DRAFT_RESULT = "draft_result"
@@ -36,8 +36,8 @@ _NUM_SPECULATIVE_STEPS_ENV = "VERL_DRAFT_PROXY_NUM_SPECULATIVE_STEPS"
 
 @dataclass(frozen=True)
 class SessionKey:
-    request_id: str
-    session_id: Optional[str] = None
+    request_id: str # 标识单个请求的唯一id
+    session_id: Optional[str] = None 
 
     @property
     def routing_key(self) -> str:
