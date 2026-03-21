@@ -106,7 +106,6 @@ def create_training_config(model_type, strategy, device_count, model):
         engine_config=engine_config,
         optimizer_config=optimizer_config,
         checkpoint_config=None,
-        distillation_config=None,
     )
     return config
 
@@ -206,7 +205,7 @@ def test_actor_engine(strategy):
     actor_config = ActorConfig(strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1)
 
     # set ppo loss
-    ppo_loss_ = partial(ppo_loss, config=actor_config, distillation_config=None)
+    ppo_loss_ = partial(ppo_loss, config=actor_config)
     wg.set_loss_fn(ppo_loss_)
 
     # update again
@@ -404,7 +403,6 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
         engine_config=engine_config,
         optimizer_config=optimizer_config,
         checkpoint_config=checkpoint_config,
-        distillation_config=None,
     )
 
     engine.initialize()
