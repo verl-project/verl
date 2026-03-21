@@ -10,7 +10,6 @@ from .protocol import (
     DraftRequestKind,
     DraftResult,
     DraftRoute,
-    SessionKey,
     VerifyResult,
 )
 
@@ -20,7 +19,7 @@ class DraftProxy:
     verify_replica_rank: int
     num_speculative_steps: int
     draft_actor_handles: list[Any] = field(default_factory=list)
-    session_routes: dict[str, DraftRoute] = field(default_factory=dict)
+    request_routes: dict[str, DraftRoute] = field(default_factory=dict)
     inflight_per_index: list[int] = field(default_factory=list)
     pending_requests: dict[str, DraftRequest] = field(default_factory=dict)
     pending_results: dict[str, DraftResult] = field(default_factory=dict)
@@ -32,9 +31,8 @@ class DraftProxy:
         self.draft_actor_handles = list(handles)
         self.inflight_per_index = [0] * len(self.draft_actor_handles)
 
-    def acquire_route(self, session_key: SessionKey) -> DraftRoute:
-        routing_key = session_key.routing_key
-        route = self.session_routes.get(routing_key)
+    def acquire_route(self, request_id: str) -> DraftRoute:
+        route = self.request_routes.get(request_id)
         if route is not None:
             return route
         if not self.draft_actor_handles:
@@ -44,12 +42,12 @@ class DraftProxy:
             range(len(self.draft_actor_handles)),
             key=lambda i: (self.inflight_per_index[i], i),
         )
-        route = DraftRoute(session_key=session_key, draft_index=best_idx)
-        self.session_routes[routing_key] = route
+        route = DraftRoute(request_id=request_id, draft_index=best_idx)
+        self.request_routes[request_id] = route
         return route
 
     def submit_prefill(self, request: DraftRequest) -> DraftRoute:
-        route = self.acquire_route(request.session_key)
+        route = self.acquire_route(request.request_id)
         request.draft_index = route.draft_index
         self.pending_requests[request.request_id] = request
         self.inflight_per_index[route.draft_index] += 1
@@ -66,7 +64,7 @@ class DraftProxy:
         if request is None:
             if result.finished:
                 self.pending_results.pop(result.request_id, None)
-                self.release_session(SessionKey(request_id=result.request_id, session_id=result.session_id))
+                self.release_request(result.request_id)
             return
         if request.draft_index is not None:
             self.inflight_per_index[request.draft_index] = max(
@@ -74,10 +72,10 @@ class DraftProxy:
             )
         if result.finished:
             self.pending_results.pop(result.request_id, None)
-            self.release_session(SessionKey(request_id=result.request_id, session_id=result.session_id))
+            self.release_request(result.request_id)
 
-    def release_session(self, session_key: SessionKey) -> None:
-        self.session_routes.pop(session_key.routing_key, None)
+    def release_request(self, request_id: str) -> None:
+        self.request_routes.pop(request_id, None)
 
     def submit_request(self, request: DraftRequest) -> DraftRoute:
         if request.request_kind == DraftRequestKind.PREFILL:

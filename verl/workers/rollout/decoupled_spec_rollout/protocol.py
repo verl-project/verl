@@ -34,16 +34,6 @@ _VERIFY_REPLICA_RANK_ENV = "VERL_DRAFT_PROXY_VERIFY_REPLICA_RANK"
 _NUM_SPECULATIVE_STEPS_ENV = "VERL_DRAFT_PROXY_NUM_SPECULATIVE_STEPS"
 
 
-@dataclass(frozen=True)
-class SessionKey:
-    request_id: str # 标识单个请求的唯一id
-    session_id: Optional[str] = None 
-
-    @property
-    def routing_key(self) -> str:
-        return self.session_id or self.request_id
-
-
 @dataclass
 class DraftMetrics:
     queued_at: Optional[float] = None
@@ -54,7 +44,7 @@ class DraftMetrics:
 
 @dataclass
 class DraftRoute:
-    session_key: SessionKey
+    request_id: str
     draft_index: int
 
 
@@ -72,10 +62,6 @@ class DraftRequest:
     request_kind: DraftRequestKind = DraftRequestKind.DECODE
     sampling_params: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def session_key(self) -> SessionKey:
-        return SessionKey(request_id=self.request_id, session_id=self.session_id)
 
     @property
     def full_token_ids(self) -> list[int]:
