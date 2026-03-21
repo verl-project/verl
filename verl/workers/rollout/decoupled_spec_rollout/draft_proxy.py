@@ -54,9 +54,6 @@ class DraftProxy:
     def await_result(self, request_id: str) -> Optional[DraftResult]:
         return self.pending_results.get(request_id)
 
-    def notify_verify_request(self, request: DraftRequest) -> None:
-        self.pending_results.pop(request.request_id, None)
-
     def release_request(self, request_id: str) -> None:
         self.request_routes.pop(request_id, None)
         self.pending_results.pop(request_id, None)
@@ -77,12 +74,7 @@ class DraftProxy:
         return result
 
     def handle_message(self, message: DraftProxyMessage) -> Optional[DraftProxyMessage]:
-        if message.message_type == DraftProxyMessageType.VERIFY_RESULT and message.request is not None:
-            self.notify_verify_request(message.request)
-            return None
         if message.message_type == DraftProxyMessageType.REQUEST_TERMINATE and message.terminate is not None:
             self.terminate_request(message.terminate)
             return None
-        if message.message_type == DraftProxyMessageType.SHUTDOWN:
-            return DraftProxyMessage.shutdown()
-        return None
+        raise RuntimeError(f"Unsupported DraftProxy message type: {message.message_type}")

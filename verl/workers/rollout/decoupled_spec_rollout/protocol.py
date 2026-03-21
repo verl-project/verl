@@ -11,10 +11,7 @@ from typing import Any, Optional
 class DraftProxyMessageType(str, Enum):
     DRAFT_REQUEST = "draft_request"
     DRAFT_RESULT = "draft_result"
-    VERIFY_RESULT = "verify_result"
     REQUEST_TERMINATE = "request_terminate"
-    SHUTDOWN = "shutdown"
-    ERROR = "error"
 
 
 _SCHEDULER_TO_PROXY_IPC_ENV = "VERL_DRAFT_PROXY_SCHEDULER_TO_PROXY_IPC"
@@ -145,7 +142,6 @@ class DraftProxyMessage:
     request: Optional[DraftRequest] = None
     result: Optional[DraftResult] = None
     terminate: Optional[RequestTerminateMessage] = None
-    error: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
@@ -157,20 +153,8 @@ class DraftProxyMessage:
         return DraftProxyMessage(message_type=DraftProxyMessageType.DRAFT_RESULT, result=result)
 
     @staticmethod
-    def from_verify_request(request: DraftRequest) -> "DraftProxyMessage":
-        return DraftProxyMessage(message_type=DraftProxyMessageType.VERIFY_RESULT, request=request)
-
-    @staticmethod
     def from_request_terminate(terminate: RequestTerminateMessage) -> "DraftProxyMessage":
         return DraftProxyMessage(message_type=DraftProxyMessageType.REQUEST_TERMINATE, terminate=terminate)
-
-    @staticmethod
-    def shutdown() -> "DraftProxyMessage":
-        return DraftProxyMessage(message_type=DraftProxyMessageType.SHUTDOWN)
-
-    @staticmethod
-    def error_message(error: str, *, request: Optional[DraftRequest] = None) -> "DraftProxyMessage":
-        return DraftProxyMessage(message_type=DraftProxyMessageType.ERROR, request=request, error=error)
 
 
 def get_draft_proxy_runtime_env(

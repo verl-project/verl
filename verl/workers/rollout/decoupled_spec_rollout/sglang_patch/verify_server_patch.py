@@ -142,11 +142,6 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
         response = self._recv_from_draftproxy.recv_pyobj()
         if response.message_type == DraftProxyMessageType.DRAFT_RESULT and response.result is not None:
             self._decoupled_pending_draft_results[response.result.request_id] = response.result
-        elif response.message_type == DraftProxyMessageType.ERROR:
-            request_id = response.request.request_id if response.request is not None else None
-            raise RuntimeError(
-                f"DraftProxy returned error for request {request_id}: {response.error or 'Unknown DraftProxy error'}"
-            )
         else:
             raise RuntimeError(f"Unexpected DraftProxy batch response: {response.message_type}")
 
@@ -170,14 +165,6 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
         setattr(req, "decoupled_spec_draft_result", draft_result)
 
 
-def _build_verify_request_from_req(self: Scheduler, req) -> DraftRequest:
-    return DraftRequest(
-        request_id=req.rid,
-        verify_replica_rank=get_verify_replica_rank_from_env(),
-        scheduler_dp_rank=_get_scheduler_dp_rank(self),
-    )
-
-
 def _build_request_terminate_message(req, reason: RequestTerminateReason) -> RequestTerminateMessage:
     return RequestTerminateMessage(request_id=req.rid, reason=reason)
 
@@ -186,7 +173,6 @@ def _send_verify_results_and_trigger_draft(self: Scheduler, batch) -> None:
     if not _is_draftproxy_enabled(self):
         return
 
-    verify_requests = []
     next_round_requests = []
     terminate_messages = []
     for req in batch.reqs:
@@ -198,7 +184,6 @@ def _send_verify_results_and_trigger_draft(self: Scheduler, batch) -> None:
             self._decoupled_waiting_draft_rids.discard(req.rid)
             continue
 
-        verify_requests.append(_build_verify_request_from_req(self, req))
         if req.finished():
             terminate_messages.append(
                 _build_request_terminate_message(req, RequestTerminateReason.FINISHED)
@@ -208,9 +193,6 @@ def _send_verify_results_and_trigger_draft(self: Scheduler, batch) -> None:
             continue
 
         next_round_requests.append(_build_draft_request_from_req(self, req))
-
-    for verify_request in verify_requests:
-        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_verify_request(verify_request))
 
     for draft_request in next_round_requests:
         self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_draft_request(draft_request))

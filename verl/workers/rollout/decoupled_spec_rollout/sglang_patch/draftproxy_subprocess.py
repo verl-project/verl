@@ -59,24 +59,11 @@ def _handle_proxy_message(
             _resolve_target_dp_rank(source_dp_rank, message.request.scheduler_dp_rank),
         )
 
-    if message.message_type == DraftProxyMessageType.VERIFY_RESULT and message.request is not None:
-        proxy.notify_verify_request(message.request)
-        return None, None
-
     if message.message_type == DraftProxyMessageType.REQUEST_TERMINATE and message.terminate is not None:
         proxy.terminate_request(message.terminate)
         return None, None
 
-    if message.message_type == DraftProxyMessageType.SHUTDOWN:
-        return DraftProxyMessage.shutdown(), source_dp_rank
-
-    if message.message_type == DraftProxyMessageType.ERROR:
-        return message, source_dp_rank
-
-    return (
-        DraftProxyMessage.error_message(f"Unsupported DraftProxy message type: {message.message_type}"),
-        source_dp_rank,
-    )
+    raise RuntimeError(f"Unsupported DraftProxy message type: {message.message_type}")
 
 
 class DraftProxyManager:
@@ -144,8 +131,6 @@ class DraftProxyManager:
                             logger.error("Missing DraftProxy response socket for dp_rank=%s", target_dp_rank)
                         else:
                             target_socket.send_pyobj(response)
-                    if response is not None and response.message_type == DraftProxyMessageType.SHUTDOWN:
-                        return
         finally:
             self.close()
 
