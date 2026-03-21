@@ -35,7 +35,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_npu_available, is_torch_npu_available
+from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
@@ -85,8 +85,8 @@ class vLLMHttpServer:
 
     def __init__(
         self,
-        config: RolloutConfig,
-        model_config: HFModelConfig,
+        config,
+        model_config,
         rollout_mode: RolloutMode,
         workers: list[ActorHandle],
         replica_rank: int,
@@ -108,17 +108,9 @@ class vLLMHttpServer:
         """
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
 
-        self.config: RolloutConfig = omega_conf_to_dataclass(config)
-        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
-        max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
-        if self.config.max_model_len is None:
-            self.config.max_model_len = max_position_embeddings
-        else:
-            if self.config.max_model_len > max_position_embeddings:
-                raise ValueError(
-                    f"max_model_len ({self.config.max_model_len}) should be less than or equal to "
-                    f"max_position_embeddings ({max_position_embeddings})"
-                )
+        self.config = self._init_config(config)
+        self.model_config = self._init_model_config(model_config)
+        self._validate_configs()
 
         self.rollout_mode = rollout_mode
         self.workers = workers
@@ -163,12 +155,7 @@ class vLLMHttpServer:
             self._dp_rpc_port = None
             self._dp_master_port = None
 
-        logger.info(
-            f"vLLMHttpServer, replica_rank: {self.replica_rank}, node_rank: {self.node_rank}, "
-            f"{get_visible_devices_keyword()}: {cuda_visible_devices}, "
-            f"master_address: {self._master_address}, master_port: {self._master_port}, "
-            f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
-        )
+        self._post_init(cuda_visible_devices)
 
     def get_master_address(self):
         """Get master address and port for data parallel.
@@ -212,22 +199,18 @@ class vLLMHttpServer:
             self._dp_rpc_port = dp_rpc_port
 
         # 1. setup vllm serve cli args
-        engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
+        engine_kwargs = self.config.get("engine_kwargs", {}).get(self._get_engine_kwargs_key(), {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
         if self.config.cudagraph_capture_sizes:
             engine_kwargs["cuda_graph_sizes"] = self.config.cudagraph_capture_sizes
 
+        self._preprocess_engine_kwargs(engine_kwargs)
+
         # Override default generation config from hugging face model config,
         # user can still override them by passing kwargs in each request.
-        override_generation_config = dict(
-            temperature=self.config.temperature,
-            top_k=self.config.top_k,
-            top_p=self.config.top_p,
-            repetition_penalty=1.0,
-            max_new_tokens=self.config.response_length,
-        )
+        override_generation_config = self._get_override_generation_config()
         logger.info(f"override_generation_config: {override_generation_config}")
 
         logger.info(f"enable_sleep_mode: {self.config.enable_sleep_mode}")
@@ -236,64 +219,7 @@ class vLLMHttpServer:
 
             set_expandable_segments(True)
 
-        quantization = self.config.quantization
-        hf_overrides = {}
-        if is_torch_npu_available(check_device=False):
-            from verl.utils.vllm.npu_vllm_patch import check_vllm_ascend_before_server_launch
-
-            check_vllm_ascend_before_server_launch()
-        # Handle QAT (Quantization-Aware Training) configuration
-        qat_config_dict = getattr(self.config, "qat", {}) or {}
-        if qat_config_dict.get("enable", False):
-            from verl.utils.qat import QATConfig, load_quantization_config
-
-            qat_config = QATConfig(**qat_config_dict)
-            quantization_config_dict = load_quantization_config(qat_config)
-            quant_method = quantization_config_dict.get("quant_method", None)
-
-            if quant_method == "modelopt":
-                from verl.utils.modelopt import apply_modelopt_nvfp4_patches
-
-                apply_modelopt_nvfp4_patches()
-                quantization = "modelopt"
-            elif quant_method == "compressed-tensors":
-                from verl.utils.qat import apply_qat_patches
-
-                apply_qat_patches()
-                quantization = "compressed-tensors"
-
-            else:
-                raise ValueError(f"Unsupported quant_method: {quant_method}")
-            logger.info(f"QAT quantization config injected (quant_method={quant_method})")
-            hf_overrides["quantization_config"] = quantization_config_dict
-        elif quantization is not None:
-            # Handle other quantization methods (fp8, torchao)
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]
-            if quantization not in _SUPPORTED_QUANTIZATION:
-                raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
-
-            if quantization == "fp8":
-                # Ignore MoE router layers for FP8 quantization
-                all_mlp_gate_layers = []
-                for layer in range(self.model_config.hf_config.num_hidden_layers):
-                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
-
-                FP8_BLOCK_QUANT_KWARGS = {
-                    "activation_scheme": "dynamic",
-                    "fmt": "e4m3",
-                    "quant_method": "fp8",
-                    "weight_block_size": [128, 128],
-                    "ignored_layers": all_mlp_gate_layers,
-                }
-                hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
-                # Apply vllm fp8 patches
-                # Will remove the patch after vllm support on-the-fly quant for rollout natively.
-                apply_vllm_fp8_patches()
-                # for subprocesses patching
-                os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
-
-        if quantization is not None and self.config.quantization_config_file is not None:
-            hf_overrides["quantization_config_file"] = self.config.quantization_config_file
+        quantization, hf_overrides = self._apply_quantization()
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
@@ -316,7 +242,7 @@ class vLLMHttpServer:
             "load_format": self.config.load_format,
             "skip_tokenizer_init": False,
             "distributed_executor_backend": "mp",
-            "worker_extension_cls": "verl.workers.rollout.vllm_rollout.utils.vLLMColocateWorkerExtension",
+            "worker_extension_cls": self._get_worker_extension_cls(),
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_model_len": self.config.max_model_len,
             "max_num_seqs": self.config.max_num_seqs,
@@ -424,8 +350,8 @@ class vLLMHttpServer:
         if self.replica_rank == 0:
             pprint(server_args)
 
-        CMD_MODULES = [vllm.entrypoints.cli.serve]
-        parser = FlexibleArgumentParser(description="vLLM CLI")
+        CMD_MODULES = self._get_cli_modules()
+        parser = FlexibleArgumentParser(description=self._get_cli_description())
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         cmds = {}
         for cmd_module in CMD_MODULES:
@@ -632,7 +558,7 @@ class vLLMHttpServer:
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
-            await self.engine.wake_up(tags=["kv_cache", "weights"])
+            await self.engine.wake_up(tags=self._get_wake_up_tags())
             await self.engine.reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
@@ -642,16 +568,7 @@ class vLLMHttpServer:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
-            # Don't use engine.sleep(level=2) here
-            # lora only update adapter weights, so set sleep level to 1
-            if self.lora_as_adapter or is_npu_available:
-                sleep_level = 1
-            else:
-                sleep_level = 2
-            await self.engine.collective_rpc("sleep", kwargs={"level": sleep_level})
-
-            # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
-            # await self.engine.reset_encoder_cache()
+            await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
             await self.engine.sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
@@ -798,6 +715,152 @@ class vLLMHttpServer:
             logger.error(f"Error aborting request {request_id}: {e}")
             return {"aborted": False, "request_id": request_id, "error": str(e)}
 
+    # -----------------------------------------------------------------------
+    # Hook methods for subclass overrides
+    # -----------------------------------------------------------------------
+
+    def _init_config(self, config):
+        """Initialise config. Override when a specific dataclass_type is needed."""
+        return omega_conf_to_dataclass(config)
+
+    def _init_model_config(self, model_config):
+        """Initialise model_config. Override when a specific dataclass_type is needed."""
+        return omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+
+    def _validate_configs(self) -> None:
+        """Validate config/model_config after initialisation."""
+        max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
+        if self.config.max_model_len is None:
+            self.config.max_model_len = max_position_embeddings
+        else:
+            if self.config.max_model_len > max_position_embeddings:
+                raise ValueError(
+                    f"max_model_len ({self.config.max_model_len}) should be less than or equal to "
+                    f"max_position_embeddings ({max_position_embeddings})"
+                )
+
+    def _post_init(self, cuda_visible_devices: str) -> None:
+        """Called at the end of __init__. Default logs server metadata."""
+        logger.info(
+            f"{self.__class__.__name__}, replica_rank: {self.replica_rank}, node_rank: {self.node_rank}, "
+            f"{get_visible_devices_keyword()}: {cuda_visible_devices}, "
+            f"master_address: {self._master_address}, master_port: {self._master_port}, "
+            f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
+        )
+
+    def _get_engine_kwargs_key(self) -> str:
+        """Return the key under config.engine_kwargs for this engine (e.g. 'vllm')."""
+        return "vllm"
+
+    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
+        """Mutate engine_kwargs in-place before the CLI args dict is built. No-op by default."""
+        pass
+
+    def _get_override_generation_config(self) -> dict:
+        """Return the override_generation_config dict."""
+        # Override default generation config from hugging face model config,
+        # user can still override them by passing kwargs in each request.
+        return dict(
+            temperature=self.config.temperature,
+            top_k=self.config.top_k,
+            top_p=self.config.top_p,
+            repetition_penalty=1.0,
+            max_new_tokens=self.config.response_length,
+        )
+
+    def _apply_quantization(self) -> tuple[Optional[str], dict]:
+        """Process quantization config. Returns (quantization_str, hf_overrides)."""
+        quantization = self.config.quantization
+        hf_overrides = {}
+        if is_torch_npu_available(check_device=False):
+            from verl.utils.vllm.npu_vllm_patch import check_vllm_ascend_before_server_launch
+
+            check_vllm_ascend_before_server_launch()
+
+        # Handle QAT (Quantization-Aware Training) configuration
+        qat_config_dict = getattr(self.config, "qat", {}) or {}
+        if qat_config_dict.get("enable", False):
+            from verl.utils.qat import QATConfig, load_quantization_config
+
+            qat_config = QATConfig(**qat_config_dict)
+            quantization_config_dict = load_quantization_config(qat_config)
+            quant_method = quantization_config_dict.get("quant_method", None)
+
+            if quant_method == "modelopt":
+                from verl.utils.modelopt import apply_modelopt_nvfp4_patches
+
+                apply_modelopt_nvfp4_patches()
+                quantization = "modelopt"
+            elif quant_method == "compressed-tensors":
+                from verl.utils.qat import apply_qat_patches
+
+                apply_qat_patches()
+                quantization = "compressed-tensors"
+            else:
+                raise ValueError(f"Unsupported quant_method: {quant_method}")
+
+            logger.info(f"QAT quantization config injected (quant_method={quant_method})")
+            hf_overrides["quantization_config"] = quantization_config_dict
+        elif quantization is not None:
+            # Handle other quantization methods (fp8, torchao)
+            _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]
+            if quantization not in _SUPPORTED_QUANTIZATION:
+                raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
+
+            if quantization == "fp8":
+                # Ignore MoE router layers for FP8 quantization
+                all_mlp_gate_layers = []
+                for layer in range(self.model_config.hf_config.num_hidden_layers):
+                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+
+                FP8_BLOCK_QUANT_KWARGS = {
+                    "activation_scheme": "dynamic",
+                    "fmt": "e4m3",
+                    "quant_method": "fp8",
+                    "weight_block_size": [128, 128],
+                    "ignored_layers": all_mlp_gate_layers,
+                }
+                hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
+                # Apply vllm fp8 patches
+                # Will remove the patch after vllm support on-the-fly quant for rollout natively.
+                apply_vllm_fp8_patches()
+                # for subprocesses patching
+                os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+
+        if quantization is not None and self.config.quantization_config_file is not None:
+            hf_overrides["quantization_config_file"] = self.config.quantization_config_file
+
+        return quantization, hf_overrides
+
+    def _get_worker_extension_cls(self) -> str:
+        """Return the fully-qualified colocate worker extension class name."""
+        return "verl.workers.rollout.vllm_rollout.utils.vLLMColocateWorkerExtension"
+
+    def _get_cli_modules(self) -> list:
+        """Return the list of CLI command modules used for argument parsing."""
+        return [vllm.entrypoints.cli.serve]
+
+    def _get_cli_description(self) -> str:
+        """Return the description string for the CLI argument parser."""
+        return "vLLM CLI"
+
+    def _get_wake_up_tags(self) -> list[str]:
+        """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
+        return ["kv_cache", "weights"]
+
+    async def _sleep_hybrid(self):
+        """HYBRID sleep: lora adapters only need level=1; full weights need level=2."""
+        # Don't use engine.sleep(level=2) here
+        # lora only update adapter weights, so set sleep level to 1
+        if self.lora_as_adapter:
+            sleep_level = 1
+        else:
+            sleep_level = 2
+        await self.engine.collective_rpc("sleep", kwargs={"level": sleep_level})
+
+        # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
+        # await self.engine.reset_encoder_cache()
+
 
 class vLLMReplica(RolloutReplica):
     def __init__(
@@ -817,12 +880,7 @@ class vLLMReplica(RolloutReplica):
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
 
-        # NOTE: We always use MP Executor backend whether it's single-node or multi-node.
-        # For multi-node without DP (e.g TP=16), need vllm>=0.11.1, https://github.com/vllm-project/vllm/pull/23691
-        if self.config.data_parallel_size == 1 and self.nnodes > 1:
-            assert _VLLM_VERSION >= version.parse("0.11.1"), (
-                "For multi-node MP Executor, either (1) set data_parallel_size > 1 or (2) upgrade vLLM to >= 0.11.1"
-            )
+        self._validate_launch_requirements()
 
         # get (node_id, CUDA_VISIBLE_DEVICES) of all workers
         worker_infos = await asyncio.gather(
@@ -847,10 +905,11 @@ class vLLMReplica(RolloutReplica):
                 worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
+            prefix = self._get_server_name_prefix()
             name = (
-                f"vllm_server_{self.replica_rank}_{node_rank}"
+                f"{prefix}server_{self.replica_rank}_{node_rank}"
                 if not self.is_reward_model
-                else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
+                else f"{prefix}server_reward_{self.replica_rank}_{node_rank}"
             )
 
             server = self.server_class.options(
@@ -950,3 +1009,20 @@ class vLLMReplica(RolloutReplica):
                 return r
 
         return {"aborted": False, "request_id": request_id, "error": "Request not found on any server"}
+
+    # -----------------------------------------------------------------------
+    # Hook methods for subclass overrides
+    # -----------------------------------------------------------------------
+
+    def _validate_launch_requirements(self) -> None:
+        """Validate requirements before launching. Override in subclasses."""
+        # NOTE: We always use MP Executor backend whether it's single-node or multi-node.
+        # For multi-node without DP (e.g TP=16), need vllm>=0.11.1, https://github.com/vllm-project/vllm/pull/23691
+        if self.config.data_parallel_size == 1 and self.nnodes > 1:
+            assert _VLLM_VERSION >= version.parse("0.11.1"), (
+                "For multi-node MP Executor, either (1) set data_parallel_size > 1 or (2) upgrade vLLM to >= 0.11.1"
+            )
+
+    def _get_server_name_prefix(self) -> str:
+        """Return the Ray actor name prefix (e.g. 'vllm_' or 'vllm_omni_')."""
+        return "vllm_"

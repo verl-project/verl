@@ -26,7 +26,7 @@ from ray.actor import ActorHandle
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import is_torch_npu_available
-from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config import DiffusionRolloutConfig, HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
 
@@ -43,6 +43,19 @@ class TokenOutput(BaseModel):
     """logprobs of response token ids"""
     routed_experts: Optional[Any] = None
     """routed experts of response token ids"""
+    stop_reason: Optional[str] = None
+    """stop reason: 'completed', 'aborted', or None for unknown"""
+    num_preempted: Optional[int] = None
+    """number of preempted times for metric calculation"""
+    extra_fields: dict[str, Any] = {}
+    """Extra fields for dynamic addition."""
+
+
+class DiffusionOutput(BaseModel):
+    diffusion_output: list[list[list[float]]] | list[list[list[list[float]]]]
+    """generated image tensor (CHW format) / video tensor (TCHW format)"""
+    log_probs: Optional[list[float]] = None
+    """logprobs of generated image/video"""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
@@ -93,13 +106,13 @@ class RolloutReplica(ABC):
     def __init__(
         self,
         replica_rank: int,
-        config: RolloutConfig,
+        config: RolloutConfig | DiffusionRolloutConfig,
         model_config: DictConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
     ) -> None:
         self.replica_rank = replica_rank
-        self.config: RolloutConfig = omega_conf_to_dataclass(config)
+        self.config: RolloutConfig | DiffusionRolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = model_config
 
         self.world_size = (
@@ -299,6 +312,12 @@ def _load_vllm():
     return vLLMReplica
 
 
+def _load_vllm_omni():
+    from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
+
+    return vLLMOmniReplica
+
+
 def _load_sglang():
     os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
 
@@ -353,6 +372,7 @@ def _load_trtllm():
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
+RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
 
 
 # Original function for backward compatibility
