@@ -30,9 +30,6 @@ class AgentLoopWithContextManagement(AgentLoopBase, ABC):
         self.response_length = self.rollout_config.response_length
         self.context_manager: Optional[ContextManager] = None
 
-    def set_context_manager(self, context_manager: Optional[ContextManager]) -> None:
-        self.context_manager = context_manager
-
     def _build_output_from_state(self, state: ContextState) -> AgentLoopOutput:
         response_length = len(state.response_mask)
         prompt_ids = state.trajectory_ids[:-response_length] if response_length > 0 else list(state.trajectory_ids)
@@ -153,8 +150,6 @@ class SummarizerAgentLoop(AgentLoopWithContextManagement):
             outputs.append(self._build_output_from_state(state))
 
             if compression_count >= self.max_context_compressions:
-                break
-            if self.context_manager is None:
                 break
 
             next_state, compressed = await self.context_manager.check_and_compress(state)
