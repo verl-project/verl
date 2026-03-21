@@ -297,8 +297,6 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
 
 def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):
     """Extract prompt log probabilities from generation output."""
-    # For prefill-only requests, logprobs_to_extract may be passed as a
-    # way to extract onto the part of the prompt corresponding to the response
     if num_prompt_logprobs is None:
         return
 
