@@ -453,8 +453,11 @@ class ServerAdapter(BaseRollout):
             cur_available_bytes = total_available_bytes
             cur_handles = []
 
-        # Query if model supports partial loading
-        supports_partial_loading = await self.get_supports_partial_loading()
+        # Query if model supports partial loading (only leader rank has the server adapter)
+        if self.is_leader_rank:
+            supports_partial_loading = await self.get_supports_partial_loading()
+        else:
+            supports_partial_loading = False
 
         for name, param in weights:
             if supports_partial_loading:
