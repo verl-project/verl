@@ -16,6 +16,7 @@
 
 
 import os
+import torch
 from functools import wraps
 
 from verl.utils.device import is_torch_npu_available
@@ -160,6 +161,24 @@ def vllm_ascend_v013_matmul_and_reduce_wrapper(fn):
     return wrapper
 
 
+def vllm_v013_weight_loader_method_wrapper(fn):
+    @wraps(fn)
+    def wrapper(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
+        # New logic: transpose weights for specific shard_id conditions
+        if (shard_id == 'w1' or shard_id == 'w3') and param.shape[1] == self.hidden_size:
+            w13_data = param.transpose(1, 2)
+            w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
+            param.data = w13_data
+        elif shard_id == 'w2' and param.shape[2] == self.hidden_size:
+            w2_data = param.transpose(1, 2)
+            w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
+            param.data = w2_data
+        
+        return fn(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success)
+    
+    return wrapper
+    
+
 def patch_vllm013_rotary_emb():
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
@@ -198,6 +217,10 @@ if is_torch_npu_available(check_device=False):
             )
             SequenceRowParallelOp.matmul_and_reduce = vllm_ascend_v013_matmul_and_reduce_wrapper(
                 SequenceRowParallelOp.matmul_and_reduce
+            )
+            from vllm.model_executor.layers.fused_moe import FusedMoE
+            FusedMoE.weight_loader = vllm_v013_weight_loader_method_wrapper(
+                FusedMoE.weight_loader
             )
         elif _VLLM_VERSION >= version.parse("0.11.0"):
             from vllm_ascend.ops.linear_op import SequenceRowParallelOp
