@@ -493,6 +493,7 @@ class SGLangHttpServer:
         if max_possible_tokens < 0:
             return DraftResult(
                 request_id=draft_request.request_id,
+                draft_round_id=draft_request.draft_round_id,
                 draft_token_ids=[],
             )
 
@@ -507,11 +508,13 @@ class SGLangHttpServer:
         except Exception:
             return DraftResult(
                 request_id=draft_request.request_id,
+                draft_round_id=draft_request.draft_round_id,
                 draft_token_ids=[],
             )
 
         return DraftResult(
             request_id=draft_request.request_id,
+            draft_round_id=draft_request.draft_round_id,
             draft_token_ids=output.get("output_ids", []),
         )
 

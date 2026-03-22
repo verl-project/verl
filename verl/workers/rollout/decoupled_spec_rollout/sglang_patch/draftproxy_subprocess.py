@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import signal
+import time
+from dataclasses import dataclass
 from typing import Any
 
 import psutil
@@ -15,10 +17,14 @@ from sglang.utils import get_exception_traceback
 
 from verl.workers.rollout.decoupled_spec_rollout.draft_proxy import DraftProxy
 from verl.workers.rollout.decoupled_spec_rollout.protocol import (
+    DraftPollWaitMode,
     DraftProxyIpcConfig,
     DraftProxyMessage,
     DraftProxyMessageType,
+    DraftRequest,
     DraftResult,
+    PollDraftResultsRequest,
+    PollDraftResultsResponse,
     get_num_speculative_steps_from_env,
     get_verify_replica_rank_from_env,
 )
@@ -39,31 +45,22 @@ def _resolve_target_dp_rank(source_dp_rank: int, requested_dp_rank: int | None) 
     return source_dp_rank if requested_dp_rank is None else int(requested_dp_rank)
 
 
-def _handle_proxy_message(
-    proxy: DraftProxy, message: DraftProxyMessage, source_dp_rank: int
-) -> tuple[DraftProxyMessage | None, int | None]:
-    if message.message_type == DraftProxyMessageType.DRAFT_REQUEST and message.request is not None:
-        route = proxy.submit_request(message.request)
-        try:
-            actor_handle = proxy.draft_actor_handles[route.draft_index]
-            result = ray.get(actor_handle.handle_draft_request.remote(message.request))
-        except Exception as exc:
-            logger.exception("DraftProxy failed to get draft result")
-            result = DraftResult(
-                request_id=message.request.request_id,
-                draft_token_ids=[],
-            )
-        proxy.complete_request(message.request.request_id, result)
-        return (
-            DraftProxyMessage.from_draft_result(result),
-            _resolve_target_dp_rank(source_dp_rank, message.request.scheduler_dp_rank),
-        )
+@dataclass
+class PendingPoll:
+    request: PollDraftResultsRequest
+    target_dp_rank: int
+    deadline_monotonic: float | None
 
-    if message.message_type == DraftProxyMessageType.REQUEST_TERMINATE and message.terminate is not None:
-        proxy.terminate_request(message.terminate)
-        return None, None
 
-    raise RuntimeError(f"Unsupported DraftProxy message type: {message.message_type}")
+def _normalize_draft_result(request: DraftRequest, raw_result: DraftResult | None) -> DraftResult:
+    draft_token_ids = []
+    if raw_result is not None:
+        draft_token_ids = list(getattr(raw_result, "draft_token_ids", []) or [])
+    return DraftResult(
+        request_id=request.request_id,
+        draft_round_id=request.draft_round_id,
+        draft_token_ids=draft_token_ids,
+    )
 
 
 class DraftProxyManager:
@@ -83,6 +80,7 @@ class DraftProxyManager:
             draft_actor_handles=draft_actor_handles,
         )
         self.ipc_config = ipc_config
+        self.pending_polls: dict[str, PendingPoll] = {}
         self.init_ipc_channels()
 
     def init_ipc_channels(self):
@@ -116,21 +114,146 @@ class DraftProxyManager:
         if getattr(self, "context", None) is not None:
             self.context.term()
 
+    def _submit_draft_request(self, request: DraftRequest) -> None:
+        route = self.proxy.acquire_route(request.request_id)
+        actor_handle = self.proxy.draft_actor_handles[route.draft_index]
+        object_ref = actor_handle.handle_draft_request.remote(request) # 提交一个 draft 请求，不阻塞等待结果
+        self.proxy.submit_request(request, object_ref)
+
+    def _collect_completed_drafts(self) -> None:
+        inflight_items = list(self.proxy.inflight_requests.items())
+        if not inflight_items:
+            return
+
+        object_refs = [inflight.object_ref for _, inflight in inflight_items]
+        ready_refs, _ = ray.wait(
+            object_refs,
+            num_returns=len(object_refs),
+            timeout=0,
+        )
+        if not ready_refs:
+            return
+
+        ref_to_key = {inflight.object_ref: key for key, inflight in inflight_items}
+        for object_ref in ready_refs:
+            key = ref_to_key.get(object_ref)
+            if key is None:
+                continue
+
+            request = DraftRequest(
+                request_id=key.request_id,
+                verify_replica_rank=self.proxy.verify_replica_rank,
+                draft_round_id=key.draft_round_id,
+            )
+            try:
+                raw_result = ray.get(object_ref)
+            except Exception:
+                logger.exception("DraftProxy failed to get draft result")
+                raw_result = None
+
+            result = _normalize_draft_result(request, raw_result)
+            self.proxy.complete_request(key, result)
+
+    def _send_poll_response(
+        self,
+        pending_poll: PendingPoll,
+        *,
+        timed_out: bool,
+    ) -> None:
+        ready_results, missing_keys = self.proxy.peek_ready_results(pending_poll.request.keys)
+        if not ready_results and missing_keys and not timed_out:
+            return
+
+        keys_to_pop = [result.key for result in ready_results]
+        popped_results = self.proxy.pop_ready_results(keys_to_pop)
+        response = PollDraftResultsResponse(
+            poll_id=pending_poll.request.poll_id,
+            results=popped_results,
+            missing_keys=missing_keys,
+            timed_out=timed_out,
+        )
+        target_socket = self.send_to_scheduler.get(pending_poll.target_dp_rank)
+        if target_socket is None:
+            logger.error(
+                "Missing DraftProxy response socket for dp_rank=%s",
+                pending_poll.target_dp_rank,
+            )
+            return
+        target_socket.send_pyobj(DraftProxyMessage.from_poll_response(response))
+
+    def _flush_pending_polls(self) -> None:
+        now = time.monotonic()
+        for poll_id, pending_poll in list(self.pending_polls.items()):
+            _, missing_keys = self.proxy.peek_ready_results(pending_poll.request.keys)
+            if not missing_keys:
+                self._send_poll_response(pending_poll, timed_out=False)
+                self.pending_polls.pop(poll_id, None)
+                continue
+
+            if (
+                pending_poll.deadline_monotonic is not None
+                and now >= pending_poll.deadline_monotonic
+            ):
+                self._send_poll_response(pending_poll, timed_out=True)
+                self.pending_polls.pop(poll_id, None)
+
+    def _handle_poll_request(
+        self,
+        poll_request: PollDraftResultsRequest,
+        source_dp_rank: int,
+    ) -> None:
+        if poll_request.wait_mode != DraftPollWaitMode.ALL:
+            raise RuntimeError(f"Unsupported poll wait mode: {poll_request.wait_mode}")
+
+        pending_poll = PendingPoll(
+            request=poll_request,
+            target_dp_rank=_resolve_target_dp_rank(source_dp_rank, poll_request.scheduler_dp_rank),
+            deadline_monotonic=(
+                None
+                if poll_request.timeout_ms is None
+                else time.monotonic() + max(0, poll_request.timeout_ms) / 1000.0
+            ),
+        )
+        _, missing_keys = self.proxy.peek_ready_results(poll_request.keys)
+        if not missing_keys:
+            self._send_poll_response(pending_poll, timed_out=False)
+            return
+
+        self.pending_polls[poll_request.poll_id] = pending_poll
+
+    def _handle_proxy_message(self, message: DraftProxyMessage, source_dp_rank: int) -> None:
+        if message.message_type == DraftProxyMessageType.SUBMIT_DRAFT and message.request is not None:
+            self._submit_draft_request(message.request)
+            return
+
+        if (
+            message.message_type == DraftProxyMessageType.POLL_DRAFT_RESULTS
+            and message.poll_request is not None
+        ):
+            self._handle_poll_request(message.poll_request, source_dp_rank)
+            return
+
+        if message.message_type == DraftProxyMessageType.REQUEST_TERMINATE and message.terminate is not None:
+            self.proxy.terminate_request(message.terminate)
+            return
+
+        raise RuntimeError(f"Unsupported DraftProxy message type: {message.message_type}")
+
     def event_loop(self):
         try:
             while True:
-                events = dict(self.poller.poll())
+                self._collect_completed_drafts()
+                self._flush_pending_polls()
+
+                events = dict(self.poller.poll(timeout=50))
                 for dp_rank, recv_socket in self.recv_from_scheduler.items():
                     if events.get(recv_socket) != zmq.POLLIN:
                         continue
                     message = recv_socket.recv_pyobj()
-                    response, target_dp_rank = _handle_proxy_message(self.proxy, message, dp_rank)
-                    if response is not None and target_dp_rank is not None:
-                        target_socket = self.send_to_scheduler.get(target_dp_rank)
-                        if target_socket is None:
-                            logger.error("Missing DraftProxy response socket for dp_rank=%s", target_dp_rank)
-                        else:
-                            target_socket.send_pyobj(response)
+                    self._handle_proxy_message(message, dp_rank)
+
+                self._collect_completed_drafts()
+                self._flush_pending_polls()
         finally:
             self.close()
 

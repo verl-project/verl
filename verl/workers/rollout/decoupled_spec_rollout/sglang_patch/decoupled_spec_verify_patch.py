@@ -87,44 +87,60 @@ class ExternalDraftVerifyWorker:
             logger.debug("Falling back to eager verify buffers: %s", exc)
             return None, None
 
-    def _build_verify_input(self, batch: ScheduleBatch) -> EagleVerifyInput:
-        full_draft_tokens_by_req: list[list[int]] = []
-        for req in batch.reqs:
-            draft_result = getattr(req, "decoupled_spec_draft_result", None)
-            if draft_result is None:
-                raise RuntimeError(f"Missing external draft tokens for request {req.rid}.")
+    def _get_pad_token_id(self) -> int:
+        hf_config = getattr(self.model_config, "hf_config", None)
+        pad_token_id = getattr(hf_config, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = getattr(hf_config, "eos_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = 0
+        return int(pad_token_id)
 
+    def _build_req_verify_tokens(self, req, pad_token_id: int) -> list[int]:
+        tail_token = _get_req_tail_token_id(req)
+        draft_result = getattr(req, "decoupled_spec_draft_result", None)
+        proposal_tokens = []
+        includes_committed_tail = False
+        if draft_result is not None:
             proposal_tokens = list(getattr(draft_result, "draft_token_ids", []) or [])
-            if not proposal_tokens:
-                raise RuntimeError(
-                    f"External draft verification requires at least one proposed token for request {req.rid}."
-                )
+            includes_committed_tail = bool(getattr(draft_result, "includes_committed_tail", False))
 
-            tail_token = _get_req_tail_token_id(req)
-            if bool(getattr(draft_result, "includes_committed_tail", False)):
-                full_draft_tokens_by_req.append(proposal_tokens)
-            else:
-                # The current draft server returns pure proposal tokens. Prepend
-                # the latest committed token so the linear chain matches
-                # SGLang's topk=1 verify layout: [root, draft_1, ..., draft_k].
-                full_draft_tokens_by_req.append([tail_token] + proposal_tokens)
+        if includes_committed_tail:
+            full_tokens = proposal_tokens[: self.speculative_num_draft_tokens]
+            if not full_tokens or full_tokens[0] != tail_token:
+                # Without explicit alignment metadata from the drafter, any
+                # malformed root is treated as a fake verify chain.
+                full_tokens = [tail_token]
+        else:
+            full_tokens = [tail_token] + proposal_tokens
 
-        draft_token_num = min(
-            min(len(tokens) for tokens in full_draft_tokens_by_req),
-            self.speculative_num_draft_tokens,
-        )
+        if len(full_tokens) < self.speculative_num_draft_tokens:
+            full_tokens.extend([pad_token_id] * (self.speculative_num_draft_tokens - len(full_tokens)))
+        else:
+            full_tokens = full_tokens[: self.speculative_num_draft_tokens]
+
+        if full_tokens[0] != tail_token:
+            full_tokens = [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1)
+
+        return full_tokens
+
+    def _build_verify_input(self, batch: ScheduleBatch) -> EagleVerifyInput:
+        draft_token_num = self.speculative_num_draft_tokens
         if draft_token_num < 2:
             raise RuntimeError("External draft verification requires at least one draft token per request.")
 
+        pad_token_id = self._get_pad_token_id()
+        full_draft_tokens_by_req = [
+            self._build_req_verify_tokens(req, pad_token_id) for req in batch.reqs
+        ]
         spec_steps = draft_token_num - 1
-        truncated_tokens = [tokens[:draft_token_num] for tokens in full_draft_tokens_by_req]
         verified_id = torch.tensor(
-            [tokens[0] for tokens in truncated_tokens],
+            [tokens[0] for tokens in full_draft_tokens_by_req],
             dtype=torch.long,
             device=batch.device,
         )
         draft_tokens = torch.tensor(
-            [tokens[1:] for tokens in truncated_tokens],
+            [tokens[1:] for tokens in full_draft_tokens_by_req],
             dtype=torch.long,
             device=batch.device,
         )

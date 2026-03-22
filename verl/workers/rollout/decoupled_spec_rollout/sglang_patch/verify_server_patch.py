@@ -9,10 +9,13 @@ from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.utils import get_zmq_socket
 
 from verl.workers.rollout.decoupled_spec_rollout.protocol import (
+    DraftPollWaitMode,
     DraftProxyIpcConfig,
     DraftProxyMessage,
     DraftProxyMessageType,
     DraftRequest,
+    PollDraftResultsRequest,
+    PollDraftResultsResponse,
     RequestTerminateMessage,
     RequestTerminateReason,
     get_num_speculative_steps_from_env,
@@ -86,18 +89,63 @@ def _iter_live_batch_reqs(batch) -> list:
     return [req for req in batch.reqs if not req.is_retracted and not req.finished()]
 
 
+def _iter_live_reqs(reqs) -> list:
+    return [req for req in reqs if not req.is_retracted and not req.finished()]
+
+
 def _get_scheduler_dp_rank(self: Scheduler) -> int:
     dp_rank = getattr(self, "dp_rank", None)
     return 0 if dp_rank is None else int(dp_rank)
 
 
+def _next_draft_round_id(self: Scheduler, request_id: str) -> int:
+    next_round_id = int(self._decoupled_next_draft_round_by_rid.get(request_id, 0))
+    self._decoupled_next_draft_round_by_rid[request_id] = next_round_id + 1
+    return next_round_id
+
+
+def _make_poll_id(self: Scheduler) -> str:
+    self._decoupled_poll_seq += 1
+    return f"dp{_get_scheduler_dp_rank(self)}-poll-{self._decoupled_poll_seq}"
+
+
+def _get_prefill_warmup_request_ids(batch) -> set[str]:
+    decoding_rids = {req.rid for req in (batch.decoding_reqs or [])}
+    warmup_request_ids = set()
+    for req in _iter_live_batch_reqs(batch):
+        if req.rid in decoding_rids or req.is_chunked > 0:
+            continue
+        warmup_request_ids.add(req.rid)
+    return warmup_request_ids
+
+
+def _get_decode_reqs_for_poll(self: Scheduler, batch) -> list:
+    return [
+        req
+        for req in _iter_live_batch_reqs(batch)
+        if req.rid not in self._decoupled_needs_warmup_decode_rids
+    ]
+
+
+
+def _clear_local_request_draft_state(self: Scheduler, request_id: str) -> None:
+    self._decoupled_waiting_draft_keys.pop(request_id, None)
+    self._decoupled_next_draft_round_by_rid.pop(request_id, None)
+    self._decoupled_needs_warmup_decode_rids.discard(request_id)
+    for key in list(self._decoupled_pending_draft_results):
+        if key.request_id == request_id:
+            self._decoupled_pending_draft_results.pop(key, None)
+
+
 def _build_draft_request_from_req(
     self: Scheduler,
     req,
+    draft_round_id: int,
 ) -> DraftRequest:
     return DraftRequest(
         request_id=req.rid,
         verify_replica_rank=get_verify_replica_rank_from_env(),
+        draft_round_id=draft_round_id,
         scheduler_dp_rank=_get_scheduler_dp_rank(self),
         prompt_token_ids=list(req.origin_input_ids),
         committed_token_ids=list(req.output_ids),
@@ -106,66 +154,109 @@ def _build_draft_request_from_req(
     )
 
 
-def _send_draft_requests(self: Scheduler, batch) -> None:
+def _submit_draft_request(
+    self: Scheduler,
+    req,
+    *,
+    needs_warmup_decode: bool = False,
+) -> None:
+    draft_round_id = _next_draft_round_id(self, req.rid)
+    draft_request = _build_draft_request_from_req(self, req, draft_round_id=draft_round_id)
+    self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_submit_draft(draft_request))
+    self._decoupled_waiting_draft_keys[req.rid] = draft_request.key
+    if needs_warmup_decode:
+        self._decoupled_needs_warmup_decode_rids.add(req.rid)
+    setattr(req, "decoupled_spec_draft_result", None)
 
+
+def _send_draft_requests(
+    self: Scheduler,
+    batch,
+    target_reqs=None,
+    warmup_request_ids: set[str] | None = None,
+) -> None:
     assert _is_draftproxy_enabled(self), "DraftProxy for SGLangHttpServer dp_rank=%s is not enabled" % _get_scheduler_dp_rank(self)
 
-    for req in _iter_live_batch_reqs(batch):
+    reqs = _iter_live_reqs(target_reqs) if target_reqs is not None else _iter_live_batch_reqs(batch)
+    for req in reqs:
         if req.is_chunked > 0:
             continue
-        draft_request = _build_draft_request_from_req(self, req)
-        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_draft_request(draft_request))
-        self._decoupled_waiting_draft_rids.add(draft_request.request_id)
-        setattr(req, "decoupled_spec_draft_result", None)
+        _submit_draft_request(
+            self,
+            req,
+            needs_warmup_decode=bool(warmup_request_ids and req.rid in warmup_request_ids),
+        )
+
+
+def _recv_poll_response(
+    self: Scheduler,
+    poll_id: str,
+) -> PollDraftResultsResponse:
+    cached_response = self._decoupled_pending_poll_responses.pop(poll_id, None)
+    if cached_response is not None:
+        return cached_response
+
+    while True:
+        if not self._recv_from_draftproxy.poll():
+            continue
+
+        response = self._recv_from_draftproxy.recv_pyobj()
+        if (
+            response.message_type != DraftProxyMessageType.POLL_RESPONSE
+            or response.poll_response is None
+        ):
+            raise RuntimeError(f"Unexpected DraftProxy response: {response.message_type}")
+
+        poll_response = response.poll_response
+        if poll_response.poll_id == poll_id:
+            return poll_response
+        self._decoupled_pending_poll_responses[poll_response.poll_id] = poll_response
+
+
+def _bind_draft_results_to_reqs(self: Scheduler, live_reqs: list) -> None:
+    for req in live_reqs:
+        waiting_key = self._decoupled_waiting_draft_keys.get(req.rid)
+        if waiting_key is None:
+            setattr(req, "decoupled_spec_draft_result", None)
+            continue
+
+        draft_result = self._decoupled_pending_draft_results.pop(waiting_key, None)
+        if draft_result is None:
+            raise RuntimeError(f"Draft result missing for request {req.rid} round {waiting_key.draft_round_id}")
+
+        self._decoupled_waiting_draft_keys.pop(req.rid, None)
+        setattr(req, "decoupled_spec_draft_result", draft_result)
 
 
 def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
     assert _is_draftproxy_enabled(self), "DraftProxy for VerifySGLangHttpServer dp_rank=%s is not enabled" % _get_scheduler_dp_rank(self)
 
-    live_reqs = [
-        req
-        for req in (target_reqs if target_reqs is not None else batch.reqs)
-        if not req.is_retracted and not req.finished()
-    ]
+    live_reqs = _iter_live_reqs(target_reqs) if target_reqs is not None else _iter_live_batch_reqs(batch)
     if not live_reqs:
         return
 
-    missing_ids = [
-        req.rid
-        for req in live_reqs
-        if req.rid in self._decoupled_waiting_draft_rids and req.rid not in self._decoupled_pending_draft_results
-    ]
-
-    while missing_ids:
-        if not self._recv_from_draftproxy.poll(timeout=10000):
-            raise TimeoutError(
-                f"Timed out waiting for DraftProxy results for request ids: {missing_ids}"
-            )
-
-        response = self._recv_from_draftproxy.recv_pyobj()
-        if response.message_type == DraftProxyMessageType.DRAFT_RESULT and response.result is not None:
-            self._decoupled_pending_draft_results[response.result.request_id] = response.result
-        else:
-            raise RuntimeError(f"Unexpected DraftProxy batch response: {response.message_type}")
-
-        missing_ids = [
-            req.rid
-            for req in live_reqs
-            if req.rid in self._decoupled_waiting_draft_rids
-            and req.rid not in self._decoupled_pending_draft_results
-        ]
-
+    missing_keys = []
     for req in live_reqs:
-        if req.rid not in self._decoupled_waiting_draft_rids:
-            setattr(req, "decoupled_spec_draft_result", None)
+        waiting_key = self._decoupled_waiting_draft_keys.get(req.rid)
+        if waiting_key is None:
             continue
+        if waiting_key not in self._decoupled_pending_draft_results:
+            missing_keys.append(waiting_key)
 
-        draft_result = self._decoupled_pending_draft_results.pop(req.rid, None)
-        if draft_result is None:
-            raise RuntimeError(f"Draft result missing for request {req.rid}")
+    if missing_keys:
+        poll_request = PollDraftResultsRequest(
+            poll_id=_make_poll_id(self),
+            scheduler_dp_rank=_get_scheduler_dp_rank(self),
+            keys=missing_keys,
+            timeout_ms=None,
+            wait_mode=DraftPollWaitMode.ALL,
+        )
+        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_poll_request(poll_request))
+        poll_response = _recv_poll_response(self, poll_request.poll_id)
+        for result in poll_response.results:
+            self._decoupled_pending_draft_results[result.key] = result
 
-        self._decoupled_waiting_draft_rids.discard(req.rid)
-        setattr(req, "decoupled_spec_draft_result", draft_result)
+    _bind_draft_results_to_reqs(self, live_reqs)
 
 
 def _build_request_terminate_message(req, reason: RequestTerminateReason) -> RequestTerminateMessage:
@@ -183,23 +274,26 @@ def _send_verify_results_and_trigger_draft(self: Scheduler, batch) -> None:
             terminate_messages.append(
                 _build_request_terminate_message(req, RequestTerminateReason.ABORT)
             )
-            self._decoupled_pending_draft_results.pop(req.rid, None)
-            self._decoupled_waiting_draft_rids.discard(req.rid)
+            _clear_local_request_draft_state(self, req.rid)
             continue
 
         if req.finished():
             terminate_messages.append(
                 _build_request_terminate_message(req, RequestTerminateReason.FINISHED)
             )
-            self._decoupled_pending_draft_results.pop(req.rid, None)
-            self._decoupled_waiting_draft_rids.discard(req.rid)
+            _clear_local_request_draft_state(self, req.rid)
             continue
 
-        next_round_requests.append(_build_draft_request_from_req(self, req))
+        if req.rid in self._decoupled_needs_warmup_decode_rids:
+            # The first decode after prefill is a warm-up decode. Keep the
+            # prefill-submitted waiting_key so the next decode polls that round.
+            self._decoupled_needs_warmup_decode_rids.discard(req.rid)
+            continue
 
-    for draft_request in next_round_requests:
-        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_draft_request(draft_request))
-        self._decoupled_waiting_draft_rids.add(draft_request.request_id)
+        next_round_requests.append(req)
+
+    for req in next_round_requests:
+        _submit_draft_request(self, req)
 
     for terminate_message in terminate_messages:
         self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_request_terminate(terminate_message))
@@ -217,7 +311,11 @@ def _patch_verify_scheduler():
     def patched_init_ipc_channels(self, port_args):
         original_init_ipc_channels(self, port_args)
         self._decoupled_pending_draft_results = {}
-        self._decoupled_waiting_draft_rids = set()
+        self._decoupled_waiting_draft_keys = {}
+        self._decoupled_next_draft_round_by_rid = {} # request_id -> 该 request 下一次发送 DraftRequest 的 round
+        self._decoupled_needs_warmup_decode_rids = set()
+        self._decoupled_pending_poll_responses = {}
+        self._decoupled_poll_seq = 0
         self._send_to_draftproxy = None
         self._recv_from_draftproxy = None
         ipc_config = DraftProxyIpcConfig.from_env()
@@ -243,15 +341,18 @@ def _patch_verify_scheduler():
     def patched_run_batch(self, batch, pp_proxy_tensors=None):
         if batch is not None:
             if batch.forward_mode.is_decode():
-                _wait_for_draft_results(self, batch)
-            elif batch.forward_mode.is_extend() and batch.decoding_reqs:
-                _wait_for_draft_results(self, batch, target_reqs=batch.decoding_reqs)
+                target_reqs = _get_decode_reqs_for_poll(self, batch)
+                _wait_for_draft_results(self, batch, target_reqs=target_reqs)
         return original_run_batch(self, batch, pp_proxy_tensors)
 
     def patched_process_batch_result_prefill(self, batch, result): # 对于 prefill 批次的处理逻辑
         original_process_batch_result_prefill(self, batch, result)
         if self.is_generation:
-            _send_draft_requests(self, batch)
+            _send_draft_requests(
+                self,
+                batch,
+                warmup_request_ids=_get_prefill_warmup_request_ids(batch),
+            )
 
     def patched_process_batch_result_decode(self, batch, result): # 对于 decode 批次的处理逻辑
         original_process_batch_result_decode(self, batch, result)

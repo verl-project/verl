@@ -9,9 +9,14 @@ from typing import Any, Optional
 
 
 class DraftProxyMessageType(str, Enum):
-    DRAFT_REQUEST = "draft_request"
-    DRAFT_RESULT = "draft_result"
+    SUBMIT_DRAFT = "submit_draft"
+    POLL_DRAFT_RESULTS = "poll_draft_results"
+    POLL_RESPONSE = "poll_response"
     REQUEST_TERMINATE = "request_terminate"
+
+
+class DraftPollWaitMode(str, Enum):
+    ALL = "all"
 
 
 _SCHEDULER_TO_PROXY_IPC_ENV = "VERL_DRAFT_PROXY_SCHEDULER_TO_PROXY_IPC"
@@ -19,6 +24,13 @@ _PROXY_TO_SCHEDULER_IPC_ENV = "VERL_DRAFT_PROXY_PROXY_TO_SCHEDULER_IPC"
 _DP_IPC_CONFIG_ENV = "VERL_DRAFT_PROXY_DP_IPC_CONFIG"
 _VERIFY_REPLICA_RANK_ENV = "VERL_DRAFT_PROXY_VERIFY_REPLICA_RANK"
 _NUM_SPECULATIVE_STEPS_ENV = "VERL_DRAFT_PROXY_NUM_SPECULATIVE_STEPS"
+
+
+@dataclass(frozen=True)
+class DraftLookupKey:
+    # 唯一标识：某一请求某一轮次的draft
+    request_id: str
+    draft_round_id: int
 
 
 @dataclass
@@ -31,6 +43,7 @@ class DraftRoute:
 class DraftRequest:
     request_id: str
     verify_replica_rank: int
+    draft_round_id: int = 0 # 该请求 draft 的轮次
     scheduler_dp_rank: int = 0
     prompt_token_ids: list[int] = field(default_factory=list)
     committed_token_ids: list[int] = field(default_factory=list)
@@ -41,11 +54,20 @@ class DraftRequest:
     def full_token_ids(self) -> list[int]:
         return list(self.prompt_token_ids) + list(self.committed_token_ids)
 
+    @property
+    def key(self) -> DraftLookupKey:
+        return DraftLookupKey(request_id=self.request_id, draft_round_id=self.draft_round_id)
+
 
 @dataclass
 class DraftResult:
     request_id: str
+    draft_round_id: int = 0
     draft_token_ids: list[int] = field(default_factory=list)
+
+    @property
+    def key(self) -> DraftLookupKey:
+        return DraftLookupKey(request_id=self.request_id, draft_round_id=self.draft_round_id)
 
 
 class RequestTerminateReason(str, Enum):
@@ -57,6 +79,24 @@ class RequestTerminateReason(str, Enum):
 class RequestTerminateMessage:
     request_id: str
     reason: RequestTerminateReason
+    draft_round_id_upper_bound: Optional[int] = None
+
+
+@dataclass
+class PollDraftResultsRequest:
+    poll_id: str
+    scheduler_dp_rank: int = 0
+    keys: list[DraftLookupKey] = field(default_factory=list)
+    timeout_ms: Optional[int] = None
+    wait_mode: DraftPollWaitMode = DraftPollWaitMode.ALL
+
+
+@dataclass
+class PollDraftResultsResponse:
+    poll_id: str
+    results: list[DraftResult] = field(default_factory=list)
+    missing_keys: list[DraftLookupKey] = field(default_factory=list)
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,17 +180,28 @@ class DraftProxyIpcConfig:
 class DraftProxyMessage:
     message_type: DraftProxyMessageType
     request: Optional[DraftRequest] = None
-    result: Optional[DraftResult] = None
+    poll_request: Optional[PollDraftResultsRequest] = None
+    poll_response: Optional[PollDraftResultsResponse] = None
     terminate: Optional[RequestTerminateMessage] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
-    def from_draft_request(request: DraftRequest) -> "DraftProxyMessage":
-        return DraftProxyMessage(message_type=DraftProxyMessageType.DRAFT_REQUEST, request=request)
+    def from_submit_draft(request: DraftRequest) -> "DraftProxyMessage":
+        return DraftProxyMessage(message_type=DraftProxyMessageType.SUBMIT_DRAFT, request=request)
 
     @staticmethod
-    def from_draft_result(result: DraftResult) -> "DraftProxyMessage":
-        return DraftProxyMessage(message_type=DraftProxyMessageType.DRAFT_RESULT, result=result)
+    def from_poll_request(poll_request: PollDraftResultsRequest) -> "DraftProxyMessage":
+        return DraftProxyMessage(
+            message_type=DraftProxyMessageType.POLL_DRAFT_RESULTS,
+            poll_request=poll_request,
+        )
+
+    @staticmethod
+    def from_poll_response(poll_response: PollDraftResultsResponse) -> "DraftProxyMessage":
+        return DraftProxyMessage(
+            message_type=DraftProxyMessageType.POLL_RESPONSE,
+            poll_response=poll_response,
+        )
 
     @staticmethod
     def from_request_terminate(terminate: RequestTerminateMessage) -> "DraftProxyMessage":
