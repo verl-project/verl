@@ -110,6 +110,7 @@ class AdvantageEstimator(str, Enum):
     GDPO = "gdpo"
     GIFT = "gift"
 
+
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
 
 
@@ -1158,6 +1159,7 @@ def compute_gift_outcome_advantage(
 
     return scores, scores
 
+
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     """Compute token-level rewards with KL penalty.
 
@@ -2102,6 +2104,7 @@ def compute_policy_loss_cispo(
     }
     return pg_loss, pg_metrics
 
+
 # Global counter for GIFT debug output (print every N calls)
 _GIFT_DEBUG_COUNTER = 0
 _GIFT_DEBUG_INTERVAL = 100  # Print every 100 calls
@@ -2117,13 +2120,13 @@ def normalize_gift_kl(
     Normalize KL divergence group-wise for GIFT.
     Groups samples by uid (index) and normalizes: (kl - mean) / std
     Gradients flow through kl_div_sum, but mean/std are detached.
-    
+
     Args:
         kl_div_sum: KL divergence sum per sample, shape (bsz,)
         index: uid array mapping each sample to its prompt group
         epsilon: small value for numerical stability
         debug: if True, print debug information
-        
+
     Returns:
         Normalized KL divergence, shape (bsz,)
     """
@@ -2133,12 +2136,12 @@ def normalize_gift_kl(
     id2std = {}
 
     bsz = kl_div_sum.shape[0]
-    
+
     # Group samples by uid
     for i in range(bsz):
         id2kl[index[i]].append(kl_div_sum[i])
         id2indices[index[i]].append(i)
-    
+
     # Compute group-wise mean and std (detached)
     for idx in id2kl:
         if len(id2kl[idx]) == 1:
@@ -2153,18 +2156,22 @@ def normalize_gift_kl(
     if debug:
         num_groups = len(id2kl)
         group_sizes = [len(v) for v in id2kl.values()]
-        print(f"[GIFT KL Norm] num_groups={num_groups}, "
-              f"group_sizes={group_sizes[:5]}{'...' if len(group_sizes) > 5 else ''}")
+        print(
+            f"[GIFT KL Norm] num_groups={num_groups}, "
+            f"group_sizes={group_sizes[:5]}{'...' if len(group_sizes) > 5 else ''}"
+        )
         if num_groups > 0:
             first_uid = list(id2kl.keys())[0]
-            print(f"[GIFT KL Norm] first_group: uid={first_uid}, size={len(id2kl[first_uid])}, "
-                  f"mean={id2mean[first_uid].item():.4f}, std={id2std[first_uid].item():.4f}")
+            print(
+                f"[GIFT KL Norm] first_group: uid={first_uid}, size={len(id2kl[first_uid])}, "
+                f"mean={id2mean[first_uid].item():.4f}, std={id2std[first_uid].item():.4f}"
+            )
 
     # Normalize KL (gradients flow through kl_div_sum, not mean/std)
     kl_div_sum_normalized = kl_div_sum.clone()
     for i in range(bsz):
         kl_div_sum_normalized[i] = (kl_div_sum[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
-    
+
     return kl_div_sum_normalized
 
 
@@ -2174,9 +2181,9 @@ def compute_policy_loss_gift(
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
-    index: np.ndarray,
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
@@ -2185,10 +2192,11 @@ def compute_policy_loss_gift(
     """
     global _GIFT_DEBUG_COUNTER
     _GIFT_DEBUG_COUNTER += 1
-    should_debug = (_GIFT_DEBUG_COUNTER % _GIFT_DEBUG_INTERVAL == 1)  # Print on 1st, 101st, 201st, etc.
-    
+    should_debug = _GIFT_DEBUG_COUNTER % _GIFT_DEBUG_INTERVAL == 1  # Print on 1st, 101st, 201st, etc.
+
     kl_loss_coef = getattr(config, "kl_loss_coef", 1.0)
     epsilon = getattr(config, "epsilon", 1e-6)
+    index = kwargs.get("index", None)
 
     # Compute KL divergence sum per sample
     kl_div = log_prob - old_log_prob
@@ -2201,17 +2209,19 @@ def compute_policy_loss_gift(
         epsilon=epsilon,
         debug=should_debug,
     )
-    
+
     advantage_scalar = advantages[:, 0]
     mse_losses = (advantage_scalar - kl_loss_coef * kl_div_sum_normalized) ** 2
     pg_loss = mse_losses.mean()
 
     # Debug: print loss statistics (periodically)
     if should_debug:
-        print(f"[GIFT Loss] call={_GIFT_DEBUG_COUNTER}, pg_loss={pg_loss.item():.4f}, "
-              f"kl_mean={kl_div_sum.mean().item():.4f}, "
-              f"kl_norm_mean={kl_div_sum_normalized.mean().item():.4f}, "
-              f"adv_mean={advantage_scalar.mean().item():.4f}")
+        print(
+            f"[GIFT Loss] call={_GIFT_DEBUG_COUNTER}, pg_loss={pg_loss.item():.4f}, "
+            f"kl_mean={kl_div_sum.mean().item():.4f}, "
+            f"kl_norm_mean={kl_div_sum_normalized.mean().item():.4f}, "
+            f"adv_mean={advantage_scalar.mean().item():.4f}"
+        )
 
     pg_metrics = {
         "actor/pg_clipfrac": 0.0,
@@ -2220,6 +2230,7 @@ def compute_policy_loss_gift(
     }
 
     return pg_loss, pg_metrics
+
 
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
     """Compute categorical entropy loss (For backward compatibility)
