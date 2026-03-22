@@ -1,8 +1,0 @@
-# See `verl/trainer/config/config.py:RewardManagerConfig` for more details.
-_target_: verl.trainer.config.config.RewardManagerConfig
-source: register
-name: ${oc.select:reward_model.reward_manager,naive}
-module:
-  _target_: verl.trainer.config.config.ModuleConfig
-  path: null
-  name: custom_reward_manager

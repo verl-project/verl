@@ -22,12 +22,28 @@ __all__ = [
 ]
 
 try:
+    from .torchtitan import TorchTitanEngine, TorchTitanEngineWithLMHead
+
+    __all__ += ["TorchTitanEngine", "TorchTitanEngineWithLMHead"]
+except ImportError:
+    TorchTitanEngine = None
+    TorchTitanEngineWithLMHead = None
+
+try:
     from .veomni import VeOmniEngine, VeOmniEngineWithLMHead
 
     __all__ += ["VeOmniEngine", "VeOmniEngineWithLMHead"]
 except ImportError:
     VeOmniEngine = None
     VeOmniEngineWithLMHead = None
+
+try:
+    from .automodel import AutomodelEngine, AutomodelEngineWithLMHead
+
+    __all__ += ["AutomodelEngine", "AutomodelEngineWithLMHead"]
+except ImportError:
+    AutomodelEngine = None
+    AutomodelEngineWithLMHead = None
 
 # Mindspeed must be imported before Megatron to ensure the related monkey patches take effect as expected
 try:

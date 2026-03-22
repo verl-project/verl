@@ -412,6 +412,13 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.zero_grad()
             else:
                 self.actor_optimizer.step()
+
+        # Clear cached weight scales for QAT (weights changed)
+        if getattr(self.actor_module, "_qat_fuse_enabled", False):
+            from verl.utils.qat import invalidate_all_scales
+
+            invalidate_all_scales(self.actor_module)
+
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)

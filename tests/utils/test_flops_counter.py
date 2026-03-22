@@ -42,12 +42,12 @@ CONFIG = {
         },
         "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
         # 6*(vocab*hidden*2+layer*(hidden*(q+k+v+head*head_dim)+ hidden*inter*3))*token_sum +
-        # 12*sum(seqlen^2)*layer*head*head_dim
+        # 6*sum(seqlen^2)*layer*head*head_dim
         # 6*(32000*4096*2+32*(4096*4096*4+4096*11008*3))*(512+1024+2048) +
-        # 12*(512*512+1024*1024+2048*2048)*32*4096
+        # 6*(512*512+1024*1024+2048*2048)*32*4096
         # 6*(32000*4096*2+32*(4096*4096*4+4096*11008*3))*(4096+4096+4096) +
-        # 12*(4096*4096+4096*4096+4096*4096)*32*4096
-        "expected_flops_tuple": (153555818250240 / 1e12, 575955114393600 / 1e12),
+        # 6*(4096*4096+4096*4096+4096*4096)*32*4096
+        "expected_flops_tuple": (149226491215872 / 1e12, 536372695793664 / 1e12),
     },
     "qwen2": {
         "config": {  # Qwen/Qwen2.5-7B-Instruct
@@ -61,12 +61,12 @@ CONFIG = {
         },
         "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
         # 6*(vocab*hidden*2+layer*(hidden*(q+k+v+head*head_dim)+ hidden*inter*3))*token_sum +
-        # 12*sum(seqlen^2)*layer*head*head_dim
+        # 6*sum(seqlen^2)*layer*head*head_dim
         # 6*(152064*3584*2+28*(3584*(3584+512+512+3584)+3584*18944*3))*(512+1024+2048) +
-        # 12*(512*512+1024*1024+2048*2048)*28*3584
+        # 6*(512*512+1024*1024+2048*2048)*28*3584
         # 6*(152064*3584*2+28*(3584*(3584+512+512+3584)+3584*18944*3))*(4096+4096+4096) +
-        # 12*(4096*4096+4096*4096+4096*4096)*28*3584
-        "expected_flops_tuple": (170388331954176 / 1e12, 622070178250752 / 1e12),
+        # 6*(4096*4096+4096*4096+4096*4096)*28*3584
+        "expected_flops_tuple": (167073690943488 / 1e12, 591764889010176 / 1e12),
     },
     "qwen3": {
         "config": {  # Qwen/Qwen3-8B
@@ -81,12 +81,12 @@ CONFIG = {
         },
         "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
         # 6*(vocab*hidden*2+layer*(hidden*(q+k+v+head*head_dim)+ hidden*inter*3))*token_sum +
-        # 12*sum(seqlen^2)*layer*head*head_dim
+        # 6*sum(seqlen^2)*layer*head*head_dim
         # 6*(151936*4096*2+36*(4096*(128*32+128*8*2+128*32)+4096*12288*3))*(512+1024+2048) +
-        # 12*(512*512+1024*1024+2048*2048)*36*128*32
+        # 6*(512*512+1024*1024+2048*2048)*36*128*32
         # 6*(151936*4096*2+36*(4096*(128*32+128*8*2+128*32)+4096*12288*3))*(4096+4096+4096) +
-        # 12*(4096*4096+4096*4096+4096*4096)*36*128*32
-        "expected_flops_tuple": (185867930959872 / 1e12, 692924253732864 / 1e12),
+        # 6*(4096*4096+4096*4096+4096*4096)*36*128*32
+        "expected_flops_tuple": (180997438046208 / 1e12, 648394032807936 / 1e12),
     },
     "qwen3_moe": {
         "config": {  # Qwen/Qwen3-30B-A3B-Base
@@ -103,12 +103,12 @@ CONFIG = {
         },
         "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
         # 6*(vocab*hidden*2+layer*(hidden*(q+k+v+head*head_dim)+hidden*inter*top_k_exp*3 +
-        # hidden*num_experts))*token_sum + 12*sum(seqlen^2)*layer*head*head_dim
+        # hidden*num_experts))*token_sum + 6*sum(seqlen^2)*layer*head*head_dim
         # 6*(151936*2048*2+48*(2048*(128*32+128*4*2+128*32)+2048*768*8*3+2048*128))*(512+1024+2048) +
-        # 12*(512*512+1024*1024+2048*2048)*48*128*32
+        # 6*(512*512+1024*1024+2048*2048)*48*128*32
         # 6*(151936*2048*2+48*(2048*(128*32+128*4*2+128*32)+2048*768*8*3+2048*128))*(4096+4096+4096) +
-        # 12*(4096*4096+4096*4096+4096*4096)*48*128*32
-        "expected_flops_tuple": (85087060230144 / 1e12, 365944098521088 / 1e12),
+        # 6*(4096*4096+4096*4096+4096*4096)*48*128*32
+        "expected_flops_tuple": (78593069678592 / 1e12, 306570470621184 / 1e12),
     },
     "deepseek_v3": {
         "config": {  # deepseek-ai/DeepSeek-Prover-V2-671B
@@ -132,10 +132,10 @@ CONFIG = {
         "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
         # (1536*7168+128*192*1536+7168*(512+64)+128*(128+128)*512+128*128*7168) = 187105280
         # 6*(129280*7168*2+ 3*(7168*18432*3+187105280)+ 58*(187105280+7168*256+7168*2048*9*3))*(512+1024+2048) +
-        # 12*(512*512+1024*1024+2048*2048)*61*192*128
+        # 3*(512*512+1024*1024+2048*2048)*61*(192+128)*128
         # 6*(129280*7168*2+ 3*(7168*18432*3+187105280)+ 58*(187105280+7168*256+7168*2048*9*3))*(4096+4096+4096) +
-        # 12*(4096*4096+4096*4096+4096*4096)*61*192*128
-        "expected_flops_tuple": (906535995703296 / 1e12, 3674028304760832 / 1e12),
+        # 3*(4096*4096+4096*4096+4096*4096)*61*(192+128)*128
+        "expected_flops_tuple": (848766538088448 / 1e12, 3145850406567936 / 1e12),
     },
     "mistral": {
         "config": {  # mistralai/Mistral-Small-24B-Instruct-2501
@@ -159,13 +159,13 @@ CONFIG = {
         # all layers: 1342177280 + 40*555745280 = 23571988480
         # For batch [512, 1024, 2048], tokens_sum = 3584:
         # dense flops: 6 * 23571988480 * 3584 = 506892040273920
-        # attn flops: 12 * 5505024 * 40 * 128 * 32 = 10823317585920
+        # attn flops: 6 * 5505024 * 40 * 128 * 32 = 10823317585920
         # total: 517715357859840 / 1e12 = 517.71535785984
         # For batch [4096, 4096, 4096], tokens_sum = 12288:
         # dense flops: 6 * 23571988480 * 12288 = 1737915566653440
-        # attn flops: 12 * 50331648 * 40 * 128 * 32 = 98956046499840
+        # attn flops: 6 * 50331648 * 40 * 128 * 32 = 98956046499840
         # total: 1836871613153280 / 1e12 = 1836.87161315328
-        "expected_flops_tuple": (517715357859840 / 1e12, 1836871613153280 / 1e12),
+        "expected_flops_tuple": (512303699066880 / 1e12, 1787393589903360 / 1e12),
     },
     "gemma3_text": {
         "config": {  # Gemma3-12B-IT-TextOnly
@@ -198,15 +198,15 @@ CONFIG = {
         # For batch [512, 1024, 2048], tokens_sum = 3584:
         # dense flops: 6 * 12772147200 * 3584 = 274652253388800
         # seqlen_square_sum: 180355072 (calculated with sliding window logic)
-        # attn flops: 12 * 180355072 * 256 * 16 = 8864812498944
+        # attn flops: 6 * 180355072 * 256 * 16 = 8864812498944
         # total: 283517065887744 / 1e12 = 283.517065887744
         #
         # For batch [4096, 4096, 4096], tokens_sum = 12288:
         # dense flops: 6 * 12772147200 * 12288 = 941664868761600
         # seqlen_square_sum: 905969664 (calculated with sliding window logic)
-        # attn flops: 12 * 905969664 * 256 * 16 = 44530220924928
+        # attn flops: 6 * 905969664 * 256 * 16 = 44530220924928
         # total: 986195089686528 / 1e12 = 986.195089686528
-        "expected_flops_tuple": (283517065887744 / 1e12, 986195089686528 / 1e12),
+        "expected_flops_tuple": (279084659638272 / 1e12, 963929979224064 / 1e12),
     },
     "gpt_oss": {
         "config": {
@@ -274,15 +274,15 @@ CONFIG = {
         # For batch [512, 1024, 2048], tokens_sum = 3584:
         # dense flops: 6 * 4186275840 * 3584 = 90021675663360
         # seqlen_square_sum: 71565312 (calculated with sliding window logic)
-        # attn flops: 12 * 71565312 * 64 * 64 = 3517578215424
+        # attn flops: 6 * 71565312 * 64 * 64 = 3517578215424
         # total: 93539253878784 / 1e12 = 93.539253878784
         #
         # For batch [4096, 4096, 4096], tokens_sum = 12288:
         # dense flops: 6 * 4186275840 * 12288 = 308646629068800
         # seqlen_square_sum: 622854144 (calculated with sliding window logic)
-        # attn flops: 12 * 622854144 * 64 * 64 = 30613642948608
+        # attn flops: 6 * 622854144 * 64 * 64 = 30613642948608
         # total: 339260272017408 / 1e12 = 339.260272017408
-        "expected_flops_tuple": (93539253878784 / 1e12, 339260272017408 / 1e12),
+        "expected_flops_tuple": (91780464771072 / 1e12, 323953008574464 / 1e12),
     },
     "apertus": {
         "config": {  # swiss-ai/Apertus-8B
@@ -299,8 +299,8 @@ CONFIG = {
         "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
         # Calculation for Apertus (hidden_act="xielu" -> MLP uses [k_mlp=2]*H*I params; qk_norm=True -> [k_qkn=2]*H):
         # V=131072, H=4096, I=21504, L=32, k_mlp=2 (XIELU), k_qkn=2 (QK norm), S=6
-        # S*(2*V*H + L*(4*H**2 + k_mlp*H*I + k_qkn*H)) * (SUM[seqlen]) + 12*SUM[seqlen**2]*L*H
-        "expected_flops_tuple": (199154680725504 / 1e12, 732294071451648 / 1e12),
+        # S*(2*V*H + L*(4*H**2 + k_mlp*H*I + k_qkn*H)) * (SUM[seqlen]) + 6*SUM[seqlen**2]*L*H
+        "expected_flops_tuple": (194825353691136 / 1e12, 692711652851712 / 1e12),
     },
     "qwen3_vl": {
         "config": {  # Qwen/Qwen3-VL-8B
@@ -338,7 +338,7 @@ CONFIG = {
         # 6*(vocab*hidden*2
         #   + layer*(hidden*(q+k+v+o) + hidden*inter*3)
         # )*token_sum
-        # + 12*sum(seqlen^2)*layer*hidden
+        # + 6*sum(seqlen^2)*layer*hidden
         #
         # -----ViT-----
         # patch_embed_N =hidden*temporal_patch_size*in_channels* patch_size^2
@@ -362,8 +362,8 @@ CONFIG = {
         # + 6 * dense_N * (4096 + 4096 + 2048)
         # + 12 * (4096**2 + 4096**2 + 4096**2) * 27 * 16 * 72
         "expected_flops_tuple": (
-            200250312622080 / 1e12,
-            753976643420160 / 1e12,
+            195379819708416 / 1e12,
+            709446422495232 / 1e12,
         ),
     },
     "qwen3_vl_moe": {
@@ -404,7 +404,7 @@ CONFIG = {
         # 6*(vocab*hidden*2
         #   + layer*(hidden*(q+k+v+head*head_dim)+hidden*inter*top_k_exp*3+hidden*num_experts)
         # )*token_sum
-        # + 12*sum(seqlen^2)*layer*hidden
+        # + 6*sum(seqlen^2)*layer*hidden
         #
         # -----ViT-----
         # patch_embed_N =hidden*temporal_patch_size*in_channels* patch_size^2
@@ -428,8 +428,8 @@ CONFIG = {
         # + 6 * dense_N * (4096 + 4096 + 2048)
         # + 12 * (4096**2 + 4096**2 + 4096**2) * 27 * 16 * 72
         "expected_flops_tuple": (
-            99469441892352 / 1e12,
-            426996488208384 / 1e12,
+            92975451340800 / 1e12,
+            367622860308480 / 1e12,
         ),
     },
 }

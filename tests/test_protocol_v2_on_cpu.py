@@ -674,6 +674,7 @@ def test_dataproto_chunk_after_index():
 
 
 def test_concat_nested_tensor():
+    # Test 2D nested tensors
     vocab_size = 128
     a = torch.randint(low=0, high=vocab_size, size=(11,))
     b = torch.randint(low=0, high=vocab_size, size=(13,))
@@ -689,6 +690,42 @@ def test_concat_nested_tensor():
     expected = torch.cat([a, b, c, d], dim=0)
 
     assert torch.all(torch.eq(output_values, expected)).item()
+
+    # Test 3D nested tensors
+    a_3d = torch.randint(low=0, high=vocab_size, size=(4, 4))
+    b_3d = torch.randint(low=0, high=vocab_size, size=(4, 5))
+    c_3d = torch.randint(low=0, high=vocab_size, size=(4, 6))
+    d_3d = torch.randint(low=0, high=vocab_size, size=(4, 7))
+
+    nested_a_b_3d = torch.nested.as_nested_tensor([a_3d, b_3d], layout=torch.jagged)
+    nested_c_d_3d = torch.nested.as_nested_tensor([c_3d, d_3d], layout=torch.jagged)
+
+    output_3d = tu.concat_nested_tensors([nested_a_b_3d, nested_c_d_3d])
+
+    assert output_3d.shape[0] == 4
+    output_3d_unbind = output_3d.unbind(0)
+    assert torch.all(torch.eq(output_3d_unbind[0], a_3d)).item()
+    assert torch.all(torch.eq(output_3d_unbind[1], b_3d)).item()
+    assert torch.all(torch.eq(output_3d_unbind[2], c_3d)).item()
+    assert torch.all(torch.eq(output_3d_unbind[3], d_3d)).item()
+
+    # Test 4D nested tensors
+    a_4d = torch.randint(low=0, high=vocab_size, size=(2, 3, 4))
+    b_4d = torch.randint(low=0, high=vocab_size, size=(2, 3, 5))
+    c_4d = torch.randint(low=0, high=vocab_size, size=(2, 3, 3))
+    d_4d = torch.randint(low=0, high=vocab_size, size=(2, 3, 6))
+
+    nested_a_b_4d = torch.nested.as_nested_tensor([a_4d, b_4d], layout=torch.jagged)
+    nested_c_d_4d = torch.nested.as_nested_tensor([c_4d, d_4d], layout=torch.jagged)
+
+    output_4d = tu.concat_nested_tensors([nested_a_b_4d, nested_c_d_4d])
+
+    assert output_4d.shape[0] == 4
+    output_4d_unbind = output_4d.unbind(0)
+    assert torch.all(torch.eq(output_4d_unbind[0], a_4d)).item()
+    assert torch.all(torch.eq(output_4d_unbind[1], b_4d)).item()
+    assert torch.all(torch.eq(output_4d_unbind[2], c_4d)).item()
+    assert torch.all(torch.eq(output_4d_unbind[3], d_4d)).item()
 
 
 def test_concat_tensordict():
@@ -755,6 +792,15 @@ def test_chunk_tensordict():
     input_ids = torch.nested.as_nested_tensor(
         [torch.arange(4), torch.arange(5), torch.arange(6), torch.arange(7)], layout=torch.jagged
     )
+    attention_mask = torch.nested.as_nested_tensor(
+        [
+            torch.randint(low=0, high=2, size=[3, 4]),
+            torch.randint(low=0, high=2, size=[3, 5]),
+            torch.randint(low=0, high=2, size=[3, 6]),
+            torch.randint(low=0, high=2, size=[3, 7]),
+        ],
+        layout=torch.jagged,
+    )
 
     multi_modal_inputs = torch.stack(
         [
@@ -768,6 +814,7 @@ def test_chunk_tensordict():
         {
             "input_ids": input_ids,
             "position_ids": position_ids,
+            "attention_mask": attention_mask,
             "multi_modal_inputs": multi_modal_inputs,
         },
     )

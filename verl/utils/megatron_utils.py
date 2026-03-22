@@ -18,6 +18,7 @@
 
 import gc
 import inspect
+import logging
 import os
 import warnings
 from dataclasses import dataclass
@@ -30,8 +31,10 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.enums import ModelType
 from megatron.core.optimizer import ChainedOptimizer
-from megatron.core.transformer import TransformerConfig
+from megatron.core.parallel_state import get_global_memory_buffer
+from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
 
@@ -40,6 +43,10 @@ from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
+from verl.workers.config import HFModelConfig, McoreEngineConfig
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def get_model_config(model):
@@ -262,6 +269,8 @@ def make_megatron_module(
             model = provider.provide_distributed_model(
                 wrap_with_ddp=wrap_config.wrap_with_ddp,
                 ddp_config=ddp_config,
+                fp16=provider.fp16,
+                bf16=provider.bf16,
             )
 
             # Extract TransformerConfig from the created model
@@ -274,6 +283,12 @@ def make_megatron_module(
                 bf16=tf_config.bf16,
                 ddp_config=override_ddp_config,
             )
+
+        if isinstance(tf_config, MLATransformerConfig):
+            # Keep the same behavior as hf_to_mcore_config_dpskv3
+            from verl.models.mcore.patch import apply_patch
+
+            apply_patch()
     else:
 
         def megatron_model_provider(pre_process, post_process, vp_stage=None):
@@ -427,6 +442,11 @@ def offload_megatron_model_to_cpu(models):
                         # if the grad_data size is already zero, we assume that it is already offloaded
                         buffer.grad_data_size = buffer.grad_data.storage().size()
                         buffer.grad_data.storage().resize_(0)
+            # Offload frozen parameters not in DDP buffers (e.g. base model in LoRA/PEFT)
+            # DDP buffers only contain requires_grad=True params, so frozen params must be offloaded separately.
+            for param in model_chunk.module.parameters():
+                if not param.requires_grad and param.device.type != "cpu":
+                    param.data = param.data.to("cpu", non_blocking=True)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
@@ -438,7 +458,14 @@ def offload_megatron_model_to_cpu(models):
 
 
 @torch.no_grad()
-def load_megatron_model_to_gpu(models, load_grad=True):
+def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
+    """
+    Load megatron model to GPU.
+    Args:
+        models: The model to load.
+        load_grad: Whether to load gradients.
+        load_frozen_params: Whether to load frozen parameters.
+    """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
@@ -446,13 +473,27 @@ def load_megatron_model_to_gpu(models, load_grad=True):
                 for buffer in buffers:
                     # sometimes, we don't want to load grad for pure inference
                     if load_grad and hasattr(buffer, "grad_data_size"):
-                        buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                        buffer.grad_data.zero_()
+                        current_storage_size = buffer.grad_data.storage().size()
+                        if current_storage_size == 0 or current_storage_size == buffer.grad_data_size:
+                            buffer.grad_data.storage().resize_(buffer.grad_data_size)
+                            buffer.grad_data.zero_()
+                        else:
+                            # Non-standard layers (e.g. GatedDeltaNet) may have grad
+                            # buffers with mismatched storage size; skip resize and
+                            # zero in-place with current storage.
+                            buffer.grad_data.zero_()
 
                     if buffer.param_data.storage().size() == 0:
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+
+            # Load frozen parameters that were offloaded (e.g. base model in LoRA/PEFT)
+            if load_frozen_params:
+                device_id = get_device_id()
+                for param in model_chunk.module.parameters():
+                    if not param.requires_grad and param.device.type == "cpu":
+                        param.data = param.data.to(device_id, non_blocking=True)
         else:
             # we need this for ref module
             device_id = get_device_id()
@@ -575,6 +616,19 @@ def offload_megatron_optimizer(optimizers):
                         v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
                     if "exp_avg_sq" in v:
                         v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+
+        try:
+            # Free TransformerEngine's dummy weight gradients cache
+            # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.10/transformer_engine/pytorch/module/base.py#L64
+            from transformer_engine.pytorch.module.base import _dummy_wgrads
+
+            _dummy_wgrads.clear()
+        except ImportError:
+            pass
+
+        # Free Megatron-LM's global memory buffer
+        get_global_memory_buffer().buffer.clear()
+
         gc.collect()
         get_torch_device().empty_cache()
 
@@ -1242,6 +1296,29 @@ def mapping_string_to_attn_backend(args: dict) -> dict:
     return args
 
 
+def get_megatron_mtp_loss(n_micro_batch):
+    # Calculate MTP loss scale similar to Megatron-LM implementation
+    mtp_loss_scale = 1.0 / n_micro_batch
+
+    # Create a dummy total_loss_dict to collect MTP metrics
+    total_loss_dict = {}
+
+    # Track MTP metrics - this will populate total_loss_dict with MTP losses
+    MTPLossLoggingHelper.track_mtp_metrics(
+        loss_scale=mtp_loss_scale, iteration=0, writer=None, wandb_writer=None, total_loss_dict=total_loss_dict
+    )
+    # Add MTP metrics to losses_reduced if any were collected
+    # total_loss_dict: {'mtp_1 loss': tensor(value, device='cuda:0')}
+    output = {}
+    if total_loss_dict:
+        for key, value in total_loss_dict.items():
+            # Convert key to have proper prefix and format
+            formatted_key = f"mtp_losses/{key.replace(' ', '_')}"
+            # only added to the 0th batch, the MTP loss obtained is a global value, and will be the same for every batch
+            output[formatted_key] = value.cpu().item()
+    return output
+
+
 def get_megatron_module_device(models: list[Any]) -> str:
     if not models:
         return "cpu"
@@ -1258,3 +1335,136 @@ def get_megatron_module_device(models: list[Any]) -> str:
         return "cpu"
     else:
         return get_device_name()
+
+
+def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConfig):
+    """
+    Check and configure MTP (Multi-Token Prediction) settings.
+
+    Cases:
+        - mtp.enable == False and no MTP layers: return directly
+        - mtp.enable == False and has MTP layers: set num_nextn_predict_layers = 0
+        - mtp.enable == True and has MTP layers: configure override_transformer_config
+        - mtp.enable == True and no MTP layers: raise ValueError
+    """
+    has_mtp = (
+        model_config.hf_config.num_nextn_predict_layers > 0
+        if hasattr(model_config.hf_config, "num_nextn_predict_layers")
+        else False
+    )
+    enable_mtp = model_config.mtp.enable
+
+    if not enable_mtp and not has_mtp:
+        return
+    elif not enable_mtp and has_mtp:
+        model_config.hf_config.num_nextn_predict_layers = 0
+    elif enable_mtp and not has_mtp:
+        raise ValueError("enable mtp while model has no mtp layer, please use a model with mtp layer")
+    elif enable_mtp and has_mtp:
+        if "mtp_loss_scaling_factor" not in engine_config.override_transformer_config:
+            engine_config.override_transformer_config["mtp_loss_scaling_factor"] = (
+                model_config.mtp.mtp_loss_scaling_factor
+            )
+    return
+
+
+def patch_engine_mtp(module, model_config):
+    """
+    Apply MTP patches to the model module.
+
+    Args:
+        module: The model module to patch. Can be a single module or a list of modules.
+        model_config: The model configuration containing MTP settings.
+    """
+    logger.warning("Applying mtp patch...")
+    from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings, patch_postprocess
+
+    print(module)
+
+    modules = module if isinstance(module, list) else [module]
+    for m in modules:
+        patch_postprocess(m)
+        if model_config.mtp.detach_encoder:
+            patch_mtp_layer_get_embeddings(m)
+
+
+@torch.no_grad()
+def copy_megatron_model_to_cpu(models):
+    """
+    Copy Megatron model parameters to CPU memory (non-destructive copy).
+    Unlike offload_megatron_model_to_cpu which moves data, this function creates
+    independent copies on CPU while keeping GPU data intact.
+
+    Args:
+        models: List of model chunks (DDP-wrapped or unwrapped)
+
+    Returns:
+        dict: CPU state containing copied parameters and buffers
+    """
+    cpu_state = {}
+
+    for model_idx, model_chunk in enumerate(models):
+        if isinstance(model_chunk, DDP):
+            # Handle DDP-wrapped models
+            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            buffer_states = []
+
+            for buffers in model_chunk_all_buffers:
+                buffer_list = []
+                for buffer in buffers:
+                    buffer_state = {}
+
+                    # Copy parameter data to CPU
+                    if buffer.param_data.storage().size() > 0:
+                        buffer_state["param_data"] = buffer.param_data.data.cpu().clone().pin_memory()
+
+                    buffer_list.append(buffer_state)
+                buffer_states.append(buffer_list)
+
+            cpu_state[f"model_chunk_{model_idx}"] = {"buffer_states": buffer_states, "is_ddp": True}
+        else:
+            # Handle non-DDP models (ref module)
+            model_state = {}
+            for name, param in model_chunk.named_parameters():
+                param_state = {"data": param.data.cpu().clone().pin_memory()}
+                model_state[name] = param_state
+
+            cpu_state[f"model_chunk_{model_idx}"] = {"model_state": model_state, "is_ddp": False}
+
+    return cpu_state
+
+
+@torch.no_grad()
+def restore_megatron_model_from_cpu(models, cpu_state):
+    """
+    Restore Megatron model parameters from CPU memory back to GPU.
+
+    Args:
+        models: List of model chunks to restore to
+        cpu_state: CPU state dict returned from copy_megatron_model_to_cpu
+    """
+    for model_idx, model_chunk in enumerate(models):
+        chunk_key = f"model_chunk_{model_idx}"
+        if chunk_key not in cpu_state:
+            continue
+
+        chunk_state = cpu_state[chunk_key]
+
+        if chunk_state["is_ddp"] and isinstance(model_chunk, DDP):
+            # Restore DDP buffers
+            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            buffer_states = chunk_state["buffer_states"]
+
+            for buffers, buffer_list in zip(model_chunk_all_buffers, buffer_states, strict=False):
+                for buffer, buffer_state in zip(buffers, buffer_list, strict=False):
+                    # Restore parameter data
+                    if "param_data" in buffer_state:
+                        buffer.param_data.data.copy_(buffer_state["param_data"].to(buffer.param_data.device))
+
+        elif not chunk_state["is_ddp"] and not isinstance(model_chunk, DDP):
+            # Restore non-DDP models
+            model_state = chunk_state["model_state"]
+            for name, param in model_chunk.named_parameters():
+                if name in model_state:
+                    param_state = model_state[name]
+                    param.data.copy_(param_state["data"].to(param.device))

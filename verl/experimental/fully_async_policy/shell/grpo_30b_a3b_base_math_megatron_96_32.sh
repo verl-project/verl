@@ -201,12 +201,12 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.ref.megatron.context_parallel_size=${REF_CP} \
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=${REF_EP} \
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${REF_ETP} \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_manager.name=dapo \
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False \
+    +reward.reward_kwargs.max_resp_len=${max_response_length} \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
@@ -220,11 +220,10 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes="${NNODES_ROLLOUT}" \
     rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
-    rollout.total_epochs=10 \
-    rollout.test_freq="${test_freq}" \
+    trainer.total_epochs=10 \
+    trainer.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \
-    async_training.partial_rollout="${partial_rollout}" \
-    async_training.use_rollout_log_probs=True \
+    async_training.partial_rollout="${partial_rollout}"
 

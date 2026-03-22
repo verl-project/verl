@@ -23,6 +23,7 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.utils.padding import no_padding_2_padding
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -94,10 +95,11 @@ def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) ->
 
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
-    log_prob = _slice_response_from_unpad_output(model_output["log_probs"], data)
+    """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+    log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
-        entropy = _slice_response_from_unpad_output(entropy, data)
+        entropy = no_padding_2_padding(entropy, data)
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]

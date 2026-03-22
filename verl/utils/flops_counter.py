@@ -554,6 +554,7 @@ ESTIMATE_FUNC = {
     "apertus": _estimate_apertus_flops,
     "glm4v": _estimate_qwen2_flops,
     "gpt_oss": _estimate_gpt_oss_flops,
+    "mimo": _estimate_qwen2_flops,
 }
 
 

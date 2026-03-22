@@ -182,19 +182,76 @@ class TestMetric(unittest.TestCase):
         metric.extend([3.0, 1.0, 4.0, 2.0])
         self.assertEqual(metric.aggregate(), 4.0)
 
-    def test_chain_multiple_metrics(self):
-        """Test chain combines multiple Metrics."""
+    def test_aggregate_dp_sum_mean(self):
+        """Test aggregate_dp with SUM and MEAN aggregations."""
+        # Test with SUM: mean over DP ranks, then sum
         metric1 = Metric(aggregation="sum")
         metric1.extend([1.0, 2.0])
 
         metric2 = Metric(aggregation="sum")
         metric2.extend([3.0, 4.0])
 
-        chained = Metric.chain([metric1, metric2])
+        result = Metric.aggregate_dp([metric1, metric2])
 
-        self.assertEqual(chained.aggregation, AggregationType.SUM)
-        self.assertEqual(chained.values, [1.0, 2.0, 3.0, 4.0])
-        self.assertEqual(chained.aggregate(), 10.0)
+        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
+        # mean over axis 0 = [2.0, 3.0]
+        # sum = 5.0
+        self.assertEqual(result, 5.0)
+
+        # Test with MEAN: mean over DP ranks, then mean
+        metric4 = Metric(aggregation="mean")
+        metric4.extend([1.0, 2.0])
+
+        metric5 = Metric(aggregation="mean")
+        metric5.extend([3.0, 4.0])
+
+        result = Metric.aggregate_dp([metric4, metric5])
+
+        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
+        # mean over axis 0 = [2.0, 3.0]
+        # mean = 2.5
+        self.assertEqual(result, 2.5)
+
+    def test_aggregate_dp_min_max(self):
+        """Test aggregate_dp with MIN and MAX aggregations."""
+        # Test with MAX: flatten, then max
+        metric1 = Metric(aggregation="max")
+        metric1.extend([1.0, 2.0])
+
+        metric2 = Metric(aggregation="max")
+        metric2.extend([3.0, 4.0])
+
+        result = Metric.aggregate_dp([metric1, metric2])
+
+        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
+        # flatten = [1.0, 2.0, 3.0, 4.0]
+        # max = 4.0
+        self.assertEqual(result, 4.0)
+
+        # Test with MIN: flatten, then min
+        metric4 = Metric(aggregation="min")
+        metric4.extend([1.0, 2.0])
+
+        metric5 = Metric(aggregation="min")
+        metric5.extend([3.0, 4.0])
+
+        result = Metric.aggregate_dp([metric4, metric5])
+
+        # value_arrays = [[1.0, 2.0], [3.0, 4.0]]
+        # flatten = [1.0, 2.0, 3.0, 4.0]
+        # min = 1.0
+        self.assertEqual(result, 1.0)
+
+    def test_aggregate_dp_mismatched_lengths(self):
+        """Test aggregate_dp raises error with mismatched value lengths."""
+        metric1 = Metric(aggregation="sum")
+        metric1.extend([1.0, 2.0])
+
+        metric2 = Metric(aggregation="sum")
+        metric2.extend([3.0, 4.0, 5.0])  # Different length
+
+        with self.assertRaises(ValueError):
+            Metric.aggregate_dp([metric1, metric2])
 
     def test_from_dict(self):
         """Test from_dict creates Metrics from dictionary."""

@@ -20,7 +20,6 @@ from omegaconf import DictConfig
 from torch.distributed.device_mesh import init_device_mesh
 
 from verl import DataProto
-from verl.experimental.vla.envs.action_utils import prepare_actions
 from verl.experimental.vla.workers.env.env_manager import EnvManager
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
@@ -58,6 +57,7 @@ def create_env_batch_dataproto(obs, rews, terminations, truncations, infos, meta
     ret_dict = put_tensor_cpu(ret_dict)
     tensor_batch = {
         "full_image": ret_dict["obs"]["images_and_states"]["full_image"],
+        "wrist_image": ret_dict["obs"]["images_and_states"]["wrist_image"],
         "state": ret_dict["obs"]["images_and_states"]["state"],
         "rews": ret_dict["rews"],
         "terminations": ret_dict["terminations"],
@@ -106,26 +106,28 @@ class EnvWorker(Worker, DistProfilerExtension):
         if self.cfg.train.simulator_type == "libero":
             from verl.experimental.vla.envs.libero_env.libero_env import LiberoEnv
 
-            for _ in range(self.stage_num):
+            for stage_id in range(self.stage_num):
                 self.simulator_list.append(
                     EnvManager(
                         self.cfg.train,
                         rank=self._rank,
                         world_size=self._world_size,
                         env_cls=LiberoEnv,
+                        stage_id=stage_id,
                     )
                 )
 
         elif self.cfg.train.simulator_type == "isaac":
             from verl.experimental.vla.envs.isaac_env.isaac_env import IsaacEnv
 
-            for _ in range(self.stage_num):
+            for stage_id in range(self.stage_num):
                 self.simulator_list.append(
                     EnvManager(
                         self.cfg.train,
                         rank=self._rank,
                         world_size=self._world_size,
                         env_cls=IsaacEnv,
+                        stage_id=stage_id,
                     )
                 )
         else:
@@ -145,18 +147,23 @@ class EnvWorker(Worker, DistProfilerExtension):
         This function is used to interact with the environment.
         """
         chunk_actions: torch.Tensor = data.non_tensor_batch["actions"]
+        chunk_values = data.non_tensor_batch["critic_values"]
         stage_id: int = data.meta_info["stage_id"]
-        chunk_actions = prepare_actions(
-            simulator_type=self.cfg.train.simulator_type,
-            raw_chunk_actions=chunk_actions,
-            num_action_chunks=self.cfg.actor.model.num_action_chunks,
-            action_dim=self.cfg.actor.model.action_dim,
-        )
+
+        # Pi0.5 Libero is not required
+        # TODO: prepare actions according to simulator type
+        # chunk_actions = prepare_actions(
+        #     simulator_type=self.cfg.train.simulator_type,
+        #     raw_chunk_actions=chunk_actions,
+        #     num_action_chunks=self.cfg.actor.model.num_action_chunks,
+        #     action_dim=self.cfg.actor.model.action_dim,
+        # )
+
         env_info_list = {}
 
         extracted_obs, chunk_rewards, chunk_terminations, chunk_truncations, infos = self.simulator_list[
             stage_id
-        ].chunk_step(chunk_actions)
+        ].chunk_step(chunk_actions, chunk_values=chunk_values)
         chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
 
         if chunk_dones.any():

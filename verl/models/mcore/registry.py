@@ -23,13 +23,15 @@ import torch
 import torch.nn as nn
 
 from .model_forward import gptmodel_forward_no_padding, model_forward_gen
-from .model_forward_fused import fused_forward_model_gen
+from .model_forward_fused import fused_forward_model_gen, fused_forward_no_padding_gen
 
 
 class SupportedVLM(Enum):
     QWEN2_5_VL = "Qwen2_5_VLForConditionalGeneration"
     QWEN3_MOE_VL = "Qwen3VLMoeForConditionalGeneration"
     QWEN3_VL = "Qwen3VLForConditionalGeneration"
+    QWEN3_5_MOE_VL = "Qwen3_5MoeForConditionalGeneration"
+    QWEN3_5_VL = "Qwen3_5ForConditionalGeneration"
 
 
 supported_vlm = [member.value for member in SupportedVLM]
@@ -65,6 +67,18 @@ def get_mcore_forward_fused_fn(hf_config) -> Callable:
     else:
         # default to language model
         return fused_forward_model_gen(False)
+
+
+def get_mcore_forward_fused_no_padding_fn(hf_config) -> Callable:
+    """
+    Get the fused forward function for no-padding inputs.
+    """
+    assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
+    if hf_config.architectures[0] in supported_vlm:
+        return fused_forward_no_padding_gen(True)
+    else:
+        # default to language model
+        return fused_forward_no_padding_gen(False)
 
 
 # ruff: noqa
@@ -114,12 +128,12 @@ class SupportedModel(Enum):
     QWEN3 = "Qwen3ForCausalLM"  # tested
     QWEN3_MOE = "Qwen3MoeForCausalLM"  # tested
     GLM4_MOE = "Glm4MoeForCausalLM"
-
     QWEN3_TOKEN_CLASSIFICATION = "Qwen3ForTokenClassification"
     LLAMA_TOKEN_CLASSIFICATION = "LlamaForTokenClassification"
     QWEN3_MOE_VL = "Qwen3VLMoeForConditionalGeneration"
     QWEN3_VL = "Qwen3VLForConditionalGeneration"
     GPT_OSS = "GptOssForCausalLM"
+    MIMO = "MiMoForCausalLM"
 
 
 # Registry for model configuration converters
@@ -169,6 +183,7 @@ MODEL_FORWARD_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: model_forward_gen(),
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: model_forward_gen(),
     SupportedModel.GPT_OSS: model_forward_gen(),
+    SupportedModel.MIMO: model_forward_gen(),
 }
 
 # Registry for model forward functions
@@ -188,6 +203,7 @@ MODEL_FORWARD_NOPAD_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: gptmodel_forward_no_padding,
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: gptmodel_forward_no_padding,
     SupportedModel.GPT_OSS: gptmodel_forward_no_padding,
+    SupportedModel.MIMO: gptmodel_forward_no_padding,
 }
 
 # Registry for model forward functions
@@ -205,6 +221,7 @@ MODEL_FORWARD_FUSED_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.DEEPSEEK_V3: fused_forward_model_gen(),
     SupportedModel.GLM4_MOE: fused_forward_model_gen(),
     SupportedModel.GPT_OSS: fused_forward_model_gen(),
+    SupportedModel.MIMO: fused_forward_model_gen(),
 }
 
 # Registry for model weight converters

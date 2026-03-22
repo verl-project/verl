@@ -33,26 +33,23 @@ from sglang.srt.entrypoints.http_server import (
     set_global_state,
 )
 from sglang.srt.managers.io_struct import (
+    ContinueGenerationReqInput,
     GenerateReqInput,
+    PauseGenerationReqInput,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
 
-from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import (
-    get_visible_devices_keyword,
-)
+from verl.utils.device import get_visible_devices_keyword
+from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.sglang_rollout.sglang_rollout import ServerAdapter, _set_envs_and_config
-from verl.workers.rollout.utils import (
-    get_free_port,
-    get_max_position_embeddings,
-    is_valid_ipv6_address,
-    run_unvicorn,
-)
+from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
+from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -60,7 +57,6 @@ logger.setLevel(logging.INFO)
 visible_devices_keyword = get_visible_devices_keyword()
 
 
-@ray.remote(num_cpus=1)
 class SGLangHttpServer:
     """SGLang http server in single node, this is equivalent to launch server with command line:
     ```
@@ -93,7 +89,15 @@ class SGLangHttpServer:
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
-        self.config.max_model_len = get_max_position_embeddings(self.model_config.hf_config)
+        max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
+        if self.config.max_model_len is None:
+            self.config.max_model_len = max_position_embeddings
+        else:
+            if self.config.max_model_len > max_position_embeddings:
+                raise ValueError(
+                    f"max_model_len ({self.config.max_model_len}) should be less than or equal to "
+                    f"max_position_embeddings ({max_position_embeddings})"
+                )
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -101,6 +105,8 @@ class SGLangHttpServer:
         self.node_rank = node_rank
         self.nnodes = nnodes
         self.base_gpu_id = base_gpu_id
+        # model weights version, set by ServerAdapter when update weights.
+        self.global_steps = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -110,17 +116,30 @@ class SGLangHttpServer:
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
 
-        # used for NCCL process group
-        if self.node_rank == 0:
+        # used for controlling sglang server profiler
+        profiler_config = self.config.profiler
+        tool_config = None
+        if profiler_config is not None:
+            if profiler_config.tool in ["torch", "npu"]:
+                tool_config = omega_conf_to_dataclass((profiler_config.tool_config or {}).get(profiler_config.tool))
+            else:
+                logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
+                profiler_config = None
+        self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
+
+        # For multi-node, we need dist_init_addr so nodes can coordinate NCCL init.
+        # For single-node, let SGLang handle port selection internally via nccl_port,
+        # which also avoids port conflicts.
+        self._master_address = None
+        self._master_port = None
+        self._master_sock = None
+        if self.nnodes > 1 and self.node_rank == 0:
             self._master_address = self._server_address
-            self._master_port, self._master_sock = get_free_port(self._server_address)
+            self._master_port, self._master_sock = get_free_port(self._server_address, with_alive_sock=True)
             logger.info(
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
                 f"master address: {self._master_address}, port: {self._master_port}"
             )
-        else:
-            self._master_address = None
-            self._master_port = None
 
     def get_master_address(self):
         """Get master address and port for init NCCL process group."""
@@ -132,10 +151,13 @@ class SGLangHttpServer:
         return self._server_address, self._server_port
 
     async def launch_server(self, master_address: str = None, master_port: int = None):
-        if self.node_rank != 0:
-            assert master_address and master_port, "non-master node should provide master address and port"
-            self._master_address = master_address
-            self._master_port = master_port
+        if self.nnodes > 1:
+            if self.node_rank != 0:
+                assert master_address and master_port, "non-master node should provide master address and port"
+                self._master_address = master_address
+                self._master_port = master_port
+            else:
+                self._master_sock.close()
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
@@ -154,11 +176,6 @@ class SGLangHttpServer:
                 fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
-        dist_init_addr = (
-            f"[{self._master_address}]:{self._master_port}"
-            if is_valid_ipv6_address(self._master_address)
-            else f"{self._master_address}:{self._master_port}"
-        )
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         args = {
             "model_path": self.model_config.local_path,
@@ -173,7 +190,6 @@ class SGLangHttpServer:
             "ep_size": self.config.expert_parallel_size,
             "node_rank": self.node_rank,
             "load_format": self.config.load_format,
-            "dist_init_addr": dist_init_addr,
             "nnodes": self.nnodes,
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_running_requests": self.config.get("max_num_seqs", None),
@@ -189,6 +205,25 @@ class SGLangHttpServer:
             **engine_kwargs,
         }
 
+        # update lora-related args
+        if self.model_config.lora_rank > 0:
+            args.update(
+                {
+                    "enable_lora": True,
+                    "max_lora_rank": self.model_config.lora_rank,
+                    "lora_target_modules": self.model_config.target_modules,
+                }
+            )
+        # Only set dist_init_addr for multi-node; for single-node, let SGLang
+        # handle port selection internally via nccl_port to avoid conflicts.
+        if self.nnodes > 1:
+            dist_init_addr = (
+                f"[{self._master_address}]:{self._master_port}"
+                if is_valid_ipv6_address(self._master_address)
+                else f"{self._master_address}:{self._master_port}"
+            )
+            args["dist_init_addr"] = dist_init_addr
+
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
                 # Extract model name from path if it's a full path
@@ -203,11 +238,27 @@ class SGLangHttpServer:
 
         # enable_weights_cpu_backup is supported in sglang>=0.5.3
         if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
-            enable_weights_cpu_backup = True if self.rollout_mode == RolloutMode.COLOCATED else False
+            enable_weights_cpu_backup = (
+                True if self.rollout_mode == RolloutMode.COLOCATED or self.model_config.lora_rank > 0 else False
+            )
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
 
         if self.config.enable_rollout_routing_replay:
             args.update({"enable_return_routed_experts": True})
+
+        # mtp
+        if self.config.mtp.enable and self.config.mtp.enable_rollout:
+            # Enable weights CPU backup for sglang >= 0.5.6
+            if sglang.__version__ < "0.5.6":
+                raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
+
+            args["speculative_algorithm"] = self.config.mtp.speculative_algorithm
+            args["speculative_num_steps"] = self.config.mtp.speculative_num_steps
+            args["speculative_eagle_topk"] = self.config.mtp.speculative_eagle_topk
+            args["speculative_num_draft_tokens"] = self.config.mtp.speculative_num_draft_tokens
+
+            args["enable_weights_cpu_backup"] = True
+            args["enable_draft_weights_cpu_backup"] = True
 
         # NOTE: We can't directly call SGLang's launch_server since it's not an async function.
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
@@ -251,33 +302,45 @@ class SGLangHttpServer:
 
             add_prometheus_middleware(app)
 
-        self._server_port, self._server_task = await run_unvicorn(app, server_args, self._server_address)
+        self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
         self.tokenizer_manager.server_status = ServerStatus.Up
 
     async def wake_up(self):
+        if self.node_rank != 0:
+            return
+
         if self.rollout_mode == RolloutMode.HYBRID:
-            # Call all workers to switch between trainer mode and rollout mode.
-            await asyncio.gather(*[worker.wake_up.remote() for worker in self.workers])
+            # In hybrid mode, rollout is wake up in `update_weights`
+            raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             obj = ResumeMemoryOccupationReqInput(tags=["kv_cache", "weights"])
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
-            logger.info("skip wake_up in standalone mode")
+            # In standalone mode, resume kv_cache if free_cache_engine is enabled
+            obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
+            await self.tokenizer_manager.resume_memory_occupation(obj, None)
+            await self.tokenizer_manager.flush_cache()
 
     async def sleep(self):
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+
         if self.rollout_mode == RolloutMode.HYBRID:
-            await asyncio.gather(*[worker.sleep.remote() for worker in self.workers])
+            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache", "weights"])
+            await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.COLOCATED:
             obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache", "weights"])
             await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.STANDALONE:
-            logger.info("skip sleep in standalone mode")
+            # In standalone mode, resume kv_cache if free_cache_engine is enabled
+            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
+            await self.tokenizer_manager.release_memory_occupation(obj, None)
 
     async def clear_kv_cache(self):
-        obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
-        await self.tokenizer_manager.release_memory_occupation(obj, None)
+        if self.node_rank == 0:
+            await self.tokenizer_manager.flush_cache()
 
     async def generate(
         self,
@@ -289,7 +352,7 @@ class SGLangHttpServer:
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+        max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
 
         if max_possible_tokens < 0:
             raise ValueError(
@@ -303,7 +366,11 @@ class SGLangHttpServer:
             # support vllm-style 'max_tokens' param
             max_new_tokens = sampling_params.pop("max_tokens")
         else:
-            max_new_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            # Cap max_tokens by response_length to ensure tensor alignment,
+            # and by remaining budget to prevent OOM in multi-turn rollouts.
+            max_new_tokens = min(
+                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
+            )
 
         # Clamp max_new_tokens to the valid range [0, max_possible_tokens]
         max_new_tokens = max(0, min(max_new_tokens, max_possible_tokens))
@@ -329,7 +396,13 @@ class SGLangHttpServer:
 
         generate_request = GenerateReqInput(**request)
 
+        # Add lora request
+        if self.model_config.lora_rank > 0:
+            generate_request.lora_path = SGLANG_LORA_NAME
+
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
+        finish_reason = output["meta_info"]["finish_reason"]
+        finish_reason = finish_reason["type"] if finish_reason else None
         if return_logprob:
             output_token_logprobs = output["meta_info"]["output_token_logprobs"]
             log_probs, token_ids = zip(
@@ -357,22 +430,56 @@ class SGLangHttpServer:
                     -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
                 )
 
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts)
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            routed_experts=routed_experts,
+            stop_reason=finish_reason,
+            extra_fields={"global_steps": self.global_steps},
+        )
 
+    async def set_global_steps(self, global_steps: int):
+        """Set the global steps of the model weights."""
+        self.global_steps = global_steps
 
-_rollout_worker_actor_cls = ray.remote(ServerAdapter)
+    async def abort_all_requests(self):
+        await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+
+    async def resume_generation(self):
+        await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+
+    async def start_profile(self, **kwargs):
+        if (
+            self.profiler_controller.check_enable()
+            and self.profiler_controller.check_this_rank()
+            and self.profiler_controller.is_discrete_mode()
+        ):
+            profile_args = build_sglang_profiler_args(
+                self.profiler_controller.config, self.profiler_controller.tool_config, self.replica_rank
+            )
+            await self.tokenizer_manager.start_profile(**profile_args)
+
+    async def stop_profile(self):
+        if (
+            self.profiler_controller.check_enable()
+            and self.profiler_controller.check_this_rank()
+            and self.profiler_controller.is_discrete_mode()
+        ):
+            await self.tokenizer_manager.stop_profile()
 
 
 class SGLangReplica(RolloutReplica):
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        """Get rollout worker actor class for colocated and standalone mode."""
-        worker_dict_cls = RayClassWithInitArgs(
-            cls=_rollout_worker_actor_cls,
-            config=self.config,
-            model_config=self.model_config,
-            device_mesh=None,
-        )
-        return worker_dict_cls
+    def __init__(
+        self,
+        replica_rank: int,
+        config: RolloutConfig,
+        model_config: HFModelConfig,
+        gpus_per_node: int = 8,
+        is_reward_model: bool = False,
+        is_teacher_model: bool = False,
+    ):
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
+        self.server_class = ray.remote(SGLangHttpServer)
 
     async def launch_servers(self):
         """Launch http server in each node."""
@@ -420,18 +527,20 @@ class SGLangReplica(RolloutReplica):
             )
 
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
-            name = (
-                f"sglang_server_{self.replica_rank}_{node_rank}"
-                if not self.is_reward_model
-                else f"sglang_server_reward_{self.replica_rank}_{node_rank}"
-            )
-            server = SGLangHttpServer.options(
+            if self.is_reward_model:
+                name = f"sglang_server_reward_{self.replica_rank}_{node_rank}"
+            elif self.is_teacher_model:
+                name = f"sglang_server_teacher_{self.replica_rank}_{node_rank}"
+            else:
+                name = f"sglang_server_{self.replica_rank}_{node_rank}"
+            server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
                 runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
                 name=name,
+                max_concurrency=self.max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
@@ -446,7 +555,9 @@ class SGLangReplica(RolloutReplica):
             self.servers.append(server)
 
         # launch http server in each node
-        master_address, master_port = await self.servers[0].get_master_address.remote()
+        master_address, master_port = None, None
+        if self.nnodes > 1:
+            master_address, master_port = await self.servers[0].get_master_address.remote()
         await asyncio.gather(
             *[
                 server.launch_server.remote(master_address=master_address, master_port=master_port)

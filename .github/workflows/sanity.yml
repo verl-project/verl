@@ -90,7 +90,7 @@ jobs:
           fi
       - name: Assert SGLang naming convention
         run: |
-          if grep -rIn --exclude-dir=.git --exclude-dir=.github --exclude-dir=venv --exclude-dir=__pycache__ -E 'Sglang|sgLang|sglAng|sglaNg|sglanG' .; then
+          if grep -rIn --exclude-dir=.git --exclude-dir=.github --exclude-dir=venv --exclude-dir=__pycache__ --exclude=ascend_sglang_best_practices.rst -E 'Sglang|sgLang|sglAng|sglaNg|sglanG' .; then
             echo "Please use SGLang or sglang as the formal name of SGLang rollout engine"
             exit 1
           fi

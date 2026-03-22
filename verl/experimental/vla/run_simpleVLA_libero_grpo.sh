@@ -57,6 +57,7 @@ $PYTHON -m verl.experimental.vla.main_ppo \
     env.train.video_cfg.save_video=True \
     env.train.video_cfg.video_base_dir=${VIDEO_OUTPUT} \
     env.train.seed=42 \
+    +actor_rollout_ref.algorithm='grpo' \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.rollout.mode=async_envloop \

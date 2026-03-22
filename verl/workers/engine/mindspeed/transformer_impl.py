@@ -41,8 +41,16 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
     ):
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
 
-        repatch_config = {"use_flash_attn": True}
-        if self.engine_config.context_parallel_size > 1:
-            repatch_config["context_parallel_size"] = self.engine_config.context_parallel_size
-
-        repatch(repatch_config)
+    def _init_device_mesh(self):
+        # repatch must happen before initialize_model_parallel so that
+        # initialize_model_parallel_cp_wrapper is in effect when the call is made.
+        # The initial MindSpeed patch pass sees context_parallel_size=1 (default) because
+        # verl passes CP size via hydra config rather than --context-parallel-size CLI arg,
+        # so the CP ring-rank initialization wrapper is not registered on the first pass.
+        if repatch is not None:
+            repatch_config = dict(self.engine_config.get("override_transformer_config", {}))
+            repatch_config.setdefault("use_flash_attn", True)
+            if self.engine_config.context_parallel_size > 1:
+                repatch_config["context_parallel_size"] = self.engine_config.context_parallel_size
+            repatch(repatch_config)
+        super()._init_device_mesh()

@@ -22,13 +22,14 @@ from omegaconf import DictConfig
 from transformers.utils import get_json_schema
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
-from verl.experimental.agent_loop import AgentLoopManager
-from verl.experimental.agent_loop.agent_loop import get_trajectory_info
+from verl.checkpoint_engine import CheckpointEngineManager
+from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer, get_trajectory_info
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
-from verl.trainer.ppo.reward import compute_reward, load_reward_manager
 from verl.utils import hf_tokenizer
+from verl.utils.config import omega_conf_to_dataclass
+from verl.workers.config import CheckpointEngineConfig
 
 
 @pytest.fixture
@@ -43,10 +44,10 @@ def init_config() -> DictConfig:
                 # test sleep/wake_up with fsdp offload
                 "actor_rollout_ref.actor.fsdp_config.param_offload=True",
                 "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
-                "reward_model.reward_manager=dapo",
-                "+reward_model.reward_kwargs.overlong_buffer_cfg.enable=False",
-                "+reward_model.reward_kwargs.overlong_buffer_cfg.len=3072",
-                "+reward_model.reward_kwargs.max_resp_len=4096",
+                "reward.reward_manager.name=dapo",
+                "+reward.reward_kwargs.overlong_buffer_cfg.enable=False",
+                "+reward.reward_kwargs.overlong_buffer_cfg.len=3072",
+                "+reward.reward_kwargs.max_resp_len=4096",
             ],
         )
 
@@ -76,11 +77,7 @@ def test_single_turn(init_config):
         }
     )
 
-    agent_loop_manager = AgentLoopManager(init_config)
-    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    reward_fn = load_reward_manager(
-        init_config, tokenizer, num_examine=0, **init_config.reward_model.get("reward_kwargs", {})
-    )
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
     raw_prompts = [
         [
@@ -115,7 +112,9 @@ def test_single_turn(init_config):
 
     # check compute score
     assert result.batch["rm_scores"].shape == result.batch["responses"].shape
-    reward_tensor, reward_extra_info = compute_reward(result, reward_fn)
+    reward_tensor = result.batch["rm_scores"]
+    reward_extra_keys = result.meta_info.get("reward_extra_keys", [])
+    reward_extra_info = {key: result.non_tensor_batch[key] for key in reward_extra_keys}
     assert reward_tensor.shape == result.batch["responses"].shape
     assert "acc" in reward_extra_info, f"reward_extra_info {reward_extra_info} should contain 'acc'"
     assert reward_extra_info["acc"].shape == (len(result),), f"invalid acc: {reward_extra_info['acc']}"
@@ -225,7 +224,7 @@ def test_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
     init_config.actor_rollout_ref.rollout.calculate_log_probs = True
-    agent_loop_manager = AgentLoopManager(init_config)
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences  ===========================
     raw_prompts = [
@@ -348,6 +347,16 @@ def test_tool_agent_with_interaction(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path = interaction_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
     agent_loop_manager = init_agent_loop_manager(init_config)
+    checkpoint_engine_config = omega_conf_to_dataclass(
+        init_config.actor_rollout_ref.rollout.checkpoint_engine, CheckpointEngineConfig
+    )
+    checkpoint_manager = CheckpointEngineManager(
+        config=checkpoint_engine_config,
+        trainer=agent_loop_manager.worker_group,
+        replicas=agent_loop_manager.rollout_replicas,
+    )
+    checkpoint_manager.sleep_replicas()
+    checkpoint_manager.update_weights()
 
     # =========================== 2. Generate sequences  ===========================
     raw_prompts = [
@@ -444,3 +453,70 @@ async def test_get_trajectory_info():
     trajectory_info = await get_trajectory_info(step, index, validate=False)
 
     assert trajectory_info == expected_info
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GlobalRequestLoadBalancer unit tests (lightweight, no GPU required)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def ray_for_lb():
+    ray.init(ignore_reinit_error=True)
+    yield
+    ray.shutdown()
+
+
+class TestLoadBalancerRouting:
+    """Least-loaded selection."""
+
+    def test_distributes_across_servers(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2"])
+        servers = [ray.get(lb.acquire_server.remote(request_id=f"r{i}")) for i in range(3)]
+        assert sorted(servers) == ["s0", "s1", "s2"]
+
+    def test_new_requests_route_to_least_loaded(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2"])
+        # Load s0 with 3 inflight requests
+        ray.get(lb.acquire_server.remote(request_id="a"))  # -> s0
+        ray.get(lb.acquire_server.remote(request_id="a"))  # sticky -> s0
+        ray.get(lb.acquire_server.remote(request_id="a"))  # sticky -> s0
+        # Load s1 with 1 inflight request
+        ray.get(lb.acquire_server.remote(request_id="b"))  # -> s1
+        # s2 has 0 inflight, so next new request must go to s2
+        s_new = ray.get(lb.acquire_server.remote(request_id="d"))
+        assert s_new == "s2"
+
+    def test_release_rebalances(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        s0 = ray.get(lb.acquire_server.remote(request_id="r0"))
+        s1 = ray.get(lb.acquire_server.remote(request_id="r1"))
+        assert s0 != s1
+        ray.get(lb.release_server.remote(server_id=s0))
+        ray.get(lb.release_server.remote(server_id=s1))
+        s2 = ray.get(lb.acquire_server.remote(request_id="r2"))
+        s3 = ray.get(lb.acquire_server.remote(request_id="r3"))
+        assert s2 != s3
+
+    def test_release_invalid_server_raises(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        with pytest.raises(ray.exceptions.RayTaskError, match="Invalid server_id") as excinfo:
+            ray.get(lb.release_server.remote(server_id="nonexistent"))
+        assert "Invalid server_id" in str(excinfo.value)
+
+    def test_release_without_inflight_raises(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        with pytest.raises(ray.exceptions.RayTaskError, match="no inflight") as excinfo:
+            ray.get(lb.release_server.remote(server_id="s1"))
+        assert "no inflight" in str(excinfo.value)
+
+
+class TestLoadBalancerStickySession:
+    """Request-level sticky session."""
+
+    def test_same_request_id_same_server(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2", "s3"])
+        s0 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))
+        ray.get(lb.release_server.remote(server_id=s0))
+        s1 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))
+        assert s0 == s1
