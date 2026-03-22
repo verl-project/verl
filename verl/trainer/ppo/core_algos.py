@@ -107,9 +107,8 @@ class AdvantageEstimator(str, Enum):
     GRPO_VECTORIZED = "grpo_vectorized"
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
     TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
-    GIFT = "gift"
     GDPO = "gdpo"
-
+    GIFT = "gift"
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
 
