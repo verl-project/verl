@@ -39,8 +39,7 @@ from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
 
 
-@ray.remote(num_cpus=10, max_concurrency=100)
-class FullyAsyncRollouter(SeparateRayPPOTrainer):
+class FullyAsyncRolllouterBase(SeparateRayPPOTrainer):
     """
     Asynchronous sample generator, responsible for continuously generating training samples
     and putting them into MessageQueue
@@ -685,3 +684,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         }
 
         return stats
+
+
+# Ray actor wrapper — existing code uses FullyAsyncRollouter.remote(...)
+FullyAsyncRollouter = ray.remote(num_cpus=10, max_concurrency=100)(FullyAsyncRolllouterBase)

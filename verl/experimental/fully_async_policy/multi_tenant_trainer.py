@@ -17,7 +17,7 @@ from verl.experimental.fully_async_policy.detach_utils import (
     TenantConfig,
     assemble_batch_from_rollout_samples,
 )
-from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer, TrainingStopException
+from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainerBase, TrainingStopException
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -31,7 +31,7 @@ _TENANT_VERSION_BASE = 100000
 
 
 @ray.remote(num_cpus=10)
-class MultiTenantTrainer(FullyAsyncTrainer):
+class MultiTenantTrainer(FullyAsyncTrainerBase):
     """Multi-tenant trainer: polls per-tenant queues, swaps adapters, per-tenant weight sync."""
 
     def __init__(

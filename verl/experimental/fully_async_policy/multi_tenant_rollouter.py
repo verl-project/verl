@@ -17,7 +17,7 @@ from verl.experimental.fully_async_policy.detach_utils import (
     prepare_single_generation_data,
     safe_create_task,
 )
-from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
+from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRolllouterBase
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -25,7 +25,7 @@ from verl.trainer.ppo.utils import Role, WorkerType
 
 
 @ray.remote(num_cpus=10, max_concurrency=100)
-class MultiTenantRollouter(FullyAsyncRollouter):
+class MultiTenantRollouter(FullyAsyncRolllouterBase):
     """Multi-tenant rollouter: per-tenant data loading, generation with tenant LoRA, per-tenant queues."""
 
     def __init__(

@@ -50,8 +50,7 @@ class TrainingStopException(Exception):
     pass
 
 
-@ray.remote(num_cpus=10)
-class FullyAsyncTrainer(SeparateRayPPOTrainer):
+class FullyAsyncTrainerBase(SeparateRayPPOTrainer):
     """
     A fully asynchronous PPO trainer that obtains samples from a MessageQueue for training.
     Based on an improved implementation of OneStepOffRayTrainer
@@ -770,3 +769,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             for key, value in batch.meta_info.items():
                 if key.startswith("fully_async") or key.startswith("timing_s"):
                     metrics[key] = value
+
+
+# Ray actor wrapper — existing code uses FullyAsyncTrainer.remote(...)
+FullyAsyncTrainer = ray.remote(num_cpus=10)(FullyAsyncTrainerBase)
