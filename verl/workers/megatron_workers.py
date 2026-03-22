@@ -219,7 +219,7 @@ class MegatronWorker(Worker):
                 provider.moe_token_dispatcher_type = "alltoall"
                 provider.moe_router_load_balancing_type = "none"
 
-                qat_enabled = self.config.actor.get("qat", {}).get("enable", False)
+                qat_enabled = getattr(self.config, "actor", {}).get("qat", {}).get("enable", False)
                 if qat_enabled:
                     from verl.utils.modelopt import patch_provider_for_qat
 
