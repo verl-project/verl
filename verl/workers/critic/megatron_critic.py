@@ -24,6 +24,7 @@ from typing import Iterable
 import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
+from megatron.core.distributed import finalize_model_grads
 from megatron.core.optimizer import DistributedOptimizer, OptimizerConfig
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
@@ -33,6 +34,7 @@ from verl import DataProto
 from verl.trainer.ppo import core_algos
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
+from verl.utils.megatron_utils import get_model_config
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
@@ -77,6 +79,9 @@ class MegatronPPOCritic(BasePPOCritic):
                 "reduce_grads_use_alltoall": False,
             }
         )
+
+        config = get_model_config(self.critic_module[0])
+        config.finalize_model_grads_func = finalize_model_grads
 
     def _validate_config(self, config) -> None:
         """Validate config options not implemented for Megatron backend"""
