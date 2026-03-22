@@ -453,11 +453,17 @@ class ServerAdapter(BaseRollout):
             cur_available_bytes = total_available_bytes
             cur_handles = []
 
-        # Query if model supports partial loading (only leader rank has the server adapter)
+        # Only the leader rank can query supports_partial_loading; broadcast the result to all ranks
+        # in this DP replica so non-leaders can use it below. Must use get_global_rank(group, 0)
+        # instead of src=0 because each DP replica has a different leader global rank.
+        exclude_dp_group = self.hybrid_device_mesh["exclude_dp"].get_group()
+        spl_tensor = torch.zeros(1, dtype=torch.int32)
         if self.is_leader_rank:
             supports_partial_loading = await self.get_supports_partial_loading()
-        else:
-            supports_partial_loading = False
+            spl_tensor[0] = int(supports_partial_loading)
+        leader_global_rank = dist.get_global_rank(exclude_dp_group, 0)
+        await asyncio.to_thread(dist.broadcast, spl_tensor, src=leader_global_rank, group=exclude_dp_group)
+        supports_partial_loading = bool(spl_tensor.item())
 
         for name, param in weights:
             if supports_partial_loading:
