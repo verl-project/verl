@@ -40,6 +40,7 @@ from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.vllm import TensorLoRARequest
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -557,10 +558,20 @@ class vLLMHttpServer:
 
         prompt = TokensPrompt(prompt_token_ids=prompt_ids, multi_modal_data=multi_modal_data)
 
-        # Add lora request
+        # Add lora request — support per-request lora_int_id for multi-tenant
         lora_request = None
-        if self.lora_as_adapter:
-            # Make sure we also check that the lora is already loaded in the engine
+        request_lora_int_id = sampling_params.pop("_lora_int_id", None)
+        if request_lora_int_id is not None:
+            # Multi-tenant: use the per-request lora_int_id
+            loaded_loras = await self.engine.list_loras()
+            if request_lora_int_id in loaded_loras:
+                lora_request = LoRARequest(
+                    lora_name=str(request_lora_int_id),
+                    lora_int_id=request_lora_int_id,
+                    lora_path=VLLM_LORA_PATH,  # dummy path — weights loaded via TensorLoRARequest
+                )
+        elif self.lora_as_adapter:
+            # Single-tenant fallback: use the default hardcoded lora
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
                 lora_request = LoRARequest(
@@ -612,6 +623,34 @@ class vLLMHttpServer:
             num_preempted=num_preempted,
             extra_fields={"global_steps": self.global_steps},
         )
+
+    async def add_tenant_lora(self, lora_int_id: int, peft_config: dict, lora_tensors: dict):
+        """Add or update a tenant's LoRA adapter in the vLLM engine.
+
+        Used by multi-tenant training to sync per-tenant adapters to the rollout engine.
+        """
+        if self.node_rank != 0:
+            return
+
+        # Remove existing adapter for this tenant if present
+        loaded_loras = await self.engine.list_loras()
+        if lora_int_id in loaded_loras:
+            await self.engine.collective_rpc(
+                "remove_lora", kwargs={"lora_id": lora_int_id}
+            )
+
+        # Add the updated adapter
+        lora_request = TensorLoRARequest(
+            lora_name=str(lora_int_id),
+            lora_int_id=lora_int_id,
+            lora_path=VLLM_LORA_PATH,
+            peft_config=peft_config,
+            lora_tensors=lora_tensors,
+        )
+        await self.engine.collective_rpc(
+            "add_lora", kwargs={"lora_request": lora_request}
+        )
+        logger.info(f"[vLLMHttpServer] Added tenant LoRA adapter lora_int_id={lora_int_id}")
 
     async def wake_up(self):
         if self.node_rank != 0:

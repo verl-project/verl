@@ -127,3 +127,28 @@ class DetachActorWorker(ActorRolloutRefWorker):
         """
         if n in self.cpu_saved_models:
             del self.cpu_saved_models[n]
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_lora_adapter_weights(self):
+        """Extract LoRA adapter weights and peft_config from the current model.
+
+        Returns only the LoRA adapter parameters (not the base model), suitable
+        for loading into vLLM via TensorLoRARequest.
+
+        Returns:
+            tuple: (lora_state_dict, peft_config) where lora_state_dict is a dict
+                   of {name: cpu_tensor} and peft_config is the PEFT configuration dict.
+                   Returns (None, None) if the model has no LoRA adapter.
+        """
+        per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+            base_sync_done=True,
+        )
+        if peft_config is None:
+            return None, None
+        # Collect the generator into a dict of CPU tensors
+        state_dict = {}
+        for name, tensor in per_tensor_param:
+            if hasattr(tensor, "full_tensor"):
+                tensor = tensor.full_tensor()
+            state_dict[name] = tensor.detach().cpu()
+        return state_dict, peft_config

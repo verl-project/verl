@@ -25,6 +25,37 @@ from verl.trainer.ppo.ray_trainer import compute_response_mask
 
 
 @dataclass
+class TenantConfig:
+    """Configuration for a single tenant in multi-tenant training"""
+
+    name: str
+    train_file: str
+    val_file: str
+    lora_int_id: int  # unique per tenant for vLLM multi-LoRA
+
+
+def parse_tenants(tenants_str: str) -> list[TenantConfig]:
+    """Parse TENANTS env var format: 'name:train_file:val_file,...'
+
+    Each tenant gets a unique lora_int_id starting from 1.
+    """
+    tenants = []
+    for i, entry in enumerate(tenants_str.split(",")):
+        parts = entry.strip().split(":")
+        if len(parts) != 3:
+            raise ValueError(f"Invalid tenant entry '{entry}'. Expected 'name:train_file:val_file'")
+        tenants.append(
+            TenantConfig(
+                name=parts[0],
+                train_file=parts[1],
+                val_file=parts[2],
+                lora_int_id=i + 1,  # 1-indexed to avoid 0
+            )
+        )
+    return tenants
+
+
+@dataclass
 class RolloutSample:
     """Enhanced rollout sample containing both original batch info and AgentLoopOutput"""
 
@@ -37,6 +68,9 @@ class RolloutSample:
 
     # Processing metadata
     rollout_status: dict[str, Any]
+
+    # Multi-tenant: which tenant this sample belongs to (None for single-tenant)
+    tenant_id: str | None = None
 
 
 @dataclass
