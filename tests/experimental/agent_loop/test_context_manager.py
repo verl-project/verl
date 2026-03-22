@@ -72,9 +72,11 @@ async def test_sliding_window_should_compress_ignores_already_compressed_observa
         keep_last_n_observations=1,
         tokenizer=tokenizer,
     )
+    obs1 = "<tool_response>[Compressed]</tool_response>"
+    obs2 = "<tool_response>obs2</tool_response>"
     state = _build_state(
         prompt_text="PROMPT",
-        response_text=("<tool_response>[Compressed]</tool_response><tool_response>obs2</tool_response>"),
+        response_text=obs1 + obs2,
         messages=[
             {"role": "user", "content": "prompt"},
             {"role": "tool", "content": "[Compressed]"},
@@ -96,9 +98,10 @@ async def test_sliding_window_compress_rewrites_messages_and_response_segment():
         keep_last_n_observations=1,
         tokenizer=tokenizer,
     )
-    response_text = (
-        "<tool_response>obs1</tool_response><tool_response>obs2</tool_response><tool_response>obs3</tool_response>"
-    )
+    obs1 = "<tool_response>obs1</tool_response>"
+    obs2 = "<tool_response>obs2</tool_response>"
+    obs3 = "<tool_response>obs3</tool_response>"
+    response_text = obs1 + obs2 + obs3
     state = _build_state(
         prompt_text="PROMPT",
         response_text=response_text,
@@ -115,13 +118,10 @@ async def test_sliding_window_compress_rewrites_messages_and_response_segment():
     compressed_state, compressed = await manager.check_and_compress(state)
     compressed_response_ids = compressed_state.trajectory_ids[-len(compressed_state.response_mask) :]
     compressed_response_text = tokenizer.decode(compressed_response_ids)
+    compressed_obs = "<tool_response>[Compressed]</tool_response>"
 
     assert compressed
-    assert compressed_response_text == (
-        "<tool_response>[Compressed]</tool_response>"
-        "<tool_response>[Compressed]</tool_response>"
-        "<tool_response>obs3</tool_response>"
-    )
+    assert compressed_response_text == compressed_obs + compressed_obs + obs3
     assert compressed_state.messages[1]["content"] == "[Compressed]"
     assert compressed_state.messages[2]["content"] == "[Compressed]"
     assert compressed_state.messages[3]["content"] == "obs3"
@@ -160,9 +160,11 @@ async def test_sliding_window_compress_raises_when_no_new_observation_is_removed
         keep_last_n_observations=1,
         tokenizer=tokenizer,
     )
+    obs1 = "<tool_response>[Compressed]</tool_response>"
+    obs2 = "<tool_response>obs2</tool_response>"
     state = _build_state(
         prompt_text="PROMPT",
-        response_text=("<tool_response>[Compressed]</tool_response><tool_response>obs2</tool_response>"),
+        response_text=obs1 + obs2,
         messages=[
             {"role": "user", "content": "prompt"},
             {"role": "tool", "content": "[Compressed]"},
@@ -171,7 +173,7 @@ async def test_sliding_window_compress_raises_when_no_new_observation_is_removed
     )
 
     with pytest.raises(ValueError, match="removed zero observations unexpectedly"):
-        await manager._compress(state)
+        await manager._compress_impl(state)
 
 
 @pytest.mark.asyncio
@@ -200,7 +202,11 @@ async def test_summarizer_should_compress_only_checks_current_generated_tokens()
 @pytest.mark.asyncio
 async def test_summarizer_compress_keeps_last_summary_when_multiple_exist():
     tokenizer = _FakeTokenizer()
-    response_text = "thinking...<summary>old summary</summary>more thinking...<summary>new summary</summary>"
+    prefix = "thinking..."
+    summary_old = "<summary>old summary</summary>"
+    middle = "more thinking..."
+    summary_new = "<summary>new summary</summary>"
+    response_text = prefix + summary_old + middle + summary_new
     manager = SummarizerContextManager(tokenizer=tokenizer)
     state = _build_state(
         prompt_text="PROMPT",
@@ -213,13 +219,15 @@ async def test_summarizer_compress_keeps_last_summary_when_multiple_exist():
 
     compressed_state, compressed = await manager.check_and_compress(state)
     assert compressed
-    assert compressed_state.messages[-1]["content"] == "<summary>new summary</summary>"
+    assert compressed_state.messages[-1]["content"] == summary_new
 
 
 @pytest.mark.asyncio
 async def test_summarizer_compress_keeps_original_prompt_and_last_summary():
     tokenizer = _FakeTokenizer()
-    response_text = "thinking...<summary>new summary</summary>"
+    prefix = "thinking..."
+    summary_text = "<summary>new summary</summary>"
+    response_text = prefix + summary_text
     manager = SummarizerContextManager(tokenizer=tokenizer)
     state = _build_state(
         prompt_text="PROMPT",
@@ -235,7 +243,6 @@ async def test_summarizer_compress_keeps_original_prompt_and_last_summary():
     )
 
     compressed_state, compressed = await manager.check_and_compress(state)
-    summary_text = "<summary>new summary</summary>"
     summary_ids = tokenizer.encode(summary_text)
 
     assert compressed
@@ -263,4 +270,4 @@ async def test_summarizer_compress_raises_when_summary_is_missing():
     )
 
     with pytest.raises(ValueError, match="expected a <summary> block"):
-        await manager._compress(state)
+        await manager._compress_impl(state)

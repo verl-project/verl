@@ -42,7 +42,7 @@ class ContextManager(ABC):
     async def check_and_compress(self, state: ContextState) -> tuple[ContextState, bool]:
         if not await self._should_compress(state):
             return state, False
-        compressed_state = await self._compress(state)
+        compressed_state = await self._compress_impl(state)
         return compressed_state, compressed_state != state
 
     @abstractmethod
@@ -50,7 +50,7 @@ class ContextManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def _compress(self, state: ContextState) -> ContextState:
+    async def _compress_impl(self, state: ContextState) -> ContextState:
         raise NotImplementedError
 
 
@@ -101,7 +101,7 @@ class SlidingWindowContextManager(ContextManager):
                 observation_count += 1
         return observation_count >= self.compress_when_m_observations
 
-    async def _compress(self, state: ContextState) -> ContextState:
+    async def _compress_impl(self, state: ContextState) -> ContextState:
         """Remove earlier observations and keep only the last N observations."""
         response_length = len(state.response_mask)
 
@@ -221,7 +221,7 @@ class SummarizerContextManager(ContextManager):
         response_text = self.tokenizer.decode(generated_response_ids, skip_special_tokens=False)
         return self.summary_pattern.search(response_text) is not None
 
-    async def _compress(self, state: ContextState) -> ContextState:
+    async def _compress_impl(self, state: ContextState) -> ContextState:
         """Keep the last summarization only, prepended with original prompts."""
         response_length = len(state.response_mask)
 

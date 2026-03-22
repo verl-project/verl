@@ -56,6 +56,8 @@ class _FakeTokenizer:
 
 
 class _QueuedServerManager:
+    """Minimal fake server manager that returns pre-seeded responses in order."""
+
     def __init__(self, tokenizer: _FakeTokenizer, responses: list[str]):
         self._tokenizer = tokenizer
         self._responses = list(responses)
@@ -87,6 +89,8 @@ class _QueuedServerManager:
 def _build_loop(
     *, responses: list[str], max_context_compressions: int = 4
 ) -> tuple[SummarizerAgentLoop, _FakeTokenizer]:
+    """Build a summarizer agent loop with deterministic fake dependencies for unit tests."""
+
     config = OmegaConf.create(
         {
             "actor_rollout_ref": {
@@ -107,6 +111,11 @@ def _build_loop(
         max_context_compressions=max_context_compressions,
     )
     return loop, tokenizer
+
+
+def test_summarizer_agent_loop_rejects_negative_max_context_compressions():
+    with pytest.raises(ValueError, match="max_context_compressions must be non-negative"):
+        _build_loop(responses=["hello"], max_context_compressions=-1)
 
 
 @pytest.mark.asyncio
@@ -164,3 +173,36 @@ async def test_summarizer_agent_loop_run_returns_single_output_without_summary()
     assert len(outputs) == 1
     assert tokenizer.decode(outputs[0].response_ids) == "plain final answer"
     assert outputs[0].response_mask == [1] * len(outputs[0].response_ids)
+
+
+@pytest.mark.asyncio
+async def test_summarizer_agent_loop_run_respects_zero_max_context_compressions():
+    summary_text = "<summary>compressed summary</summary>"
+    first_response = f"thinking...{summary_text}"
+    loop, tokenizer = _build_loop(responses=[first_response], max_context_compressions=0)
+
+    outputs = await loop.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "hello"}])
+
+    assert len(outputs) == 1
+    assert len(loop.server_manager.calls) == 1
+    assert tokenizer.decode(outputs[0].response_ids) == first_response
+
+
+@pytest.mark.asyncio
+async def test_summarizer_agent_loop_run_supports_multiple_compressions_until_cap():
+    summary1 = "<summary>summary 1</summary>"
+    summary2 = "<summary>summary 2</summary>"
+    responses = [
+        f"step1...{summary1}",
+        f"step2...{summary2}",
+        "final answer",
+    ]
+    loop, tokenizer = _build_loop(responses=responses, max_context_compressions=2)
+
+    outputs = await loop.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "hello"}])
+
+    assert len(outputs) == 3
+    assert len(loop.server_manager.calls) == 3
+    assert tokenizer.decode(outputs[0].response_ids) == responses[0]
+    assert tokenizer.decode(outputs[1].response_ids) == summary1 + responses[1]
+    assert tokenizer.decode(outputs[2].response_ids) == summary2 + responses[2]
