@@ -63,6 +63,7 @@ from verl.utils.fsdp_utils import (
     MixedPrecisionPolicy,
     apply_fsdp2,
     collect_lora_params,
+    collect_merged_lora_params,
     fsdp2_load_full_state_dict,
     fsdp_version,
     get_fsdp_wrap_policy,
@@ -481,11 +482,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 attn_implementation=attn_implementation,
             )
 
-            # Apply Liger kernel to the model if use_liger is set to True
+            # Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with verl's forward patching)
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
-                _apply_liger_kernel_to_instance(model=actor_module)
+                _apply_liger_kernel_to_instance(
+                    model=actor_module,
+                    fused_linear_cross_entropy=False,
+                    swiglu=True,
+                )
 
             fused_kernel_options = self.config.model.get("fused_kernel_options", None)
             fused_kernels_backend = (
@@ -748,6 +753,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # used for LoRA
         self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
         self.layered_summon = self.config.rollout.get("layered_summon", False)
+        self.peft_merge: bool = model_config.lora.get("merge", False)
 
         # 5. switch to trainer mode
         # NOTE: It's critical that hybrid engine in trainer mode initially to load checkpoint.
@@ -767,13 +773,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         if hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
-            params = collect_lora_params(
-                module=self.actor_module_fsdp,
-                layered_summon=self.config.rollout.get("layered_summon", False),
-                base_sync_done=self.base_sync_done,
-            )
-            if not self.base_sync_done:
-                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            if self.peft_merge:
+                # Merge LoRA into base weights and extract with HF key names.
+                # Required for backends (e.g. SGLang) whose load_weights() expects
+                # standard HF param names and can't handle LoRA delta keys.
+                params = collect_merged_lora_params(module=self.actor_module_fsdp)
+                # Full merged weights, not LoRA deltas — clear peft_config so
+                # downstream update_weights treats these as plain HF params.
+                peft_config = None
+                self.base_sync_done = True
+            else:
+                params = collect_lora_params(
+                    module=self.actor_module_fsdp,
+                    layered_summon=self.config.rollout.get("layered_summon", False),
+                    base_sync_done=self.base_sync_done,
+                )
+                if not self.base_sync_done:
+                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
             params = self.actor_module_fsdp.state_dict()
 
@@ -786,10 +802,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # separately collect and update LoRA weights and base model weights through their respective interfaces.
         # Here: params contains LoRA weights, base_model_params contains base model weights.
         # Only needed if the rollout engine actually sleeps/frees weights (free_cache_engine=True).
+        # Skip when peft_merge=True: params already contains full merged weights.
         if (
             peft_config is not None
             and getattr(self.rollout, "sleep_level", None) == 2
             and self.config.rollout.free_cache_engine
+            and not self.peft_merge
         ):
             base_model_params = collect_lora_params(
                 module=self.actor_module_fsdp,
@@ -808,14 +826,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         set_expandable_segments(False)
 
-        if peft_config is not None and self.base_sync_done:
-            per_tensor_param = params.items() if isinstance(params, dict) else params  # Fixed: handle dict case
-        else:
-            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            per_tensor_param = (
-                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
-                for name, param in params.items()
+        # Ensure all params are on GPU before sending to rollout engine.
+        # collect_lora_params returns CPU tensors via .detach().cpu(), so the
+        # previous base_sync_done fast-path silently passed CPU tensors through,
+        # which could cause errors in backends that expect GPU tensors (e.g.
+        # SGLang's CUDA IPC serializer).
+        device = get_device_id()
+        _items = params.items() if isinstance(params, dict) else params
+        per_tensor_param = (
+            (
+                name,
+                param.to(device, non_blocking=True).full_tensor()
+                if isinstance(param, DTensor)
+                else param.to(device, non_blocking=False),
             )
+            for name, param in _items
+        )
 
         # QAT: quantize weights before sending to vLLM
         if self._qat_enabled:
@@ -842,6 +868,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             peft_config is not None
             and getattr(self.rollout, "sleep_level", None) == 2
             and self.config.rollout.free_cache_engine
+            and not self.peft_merge
         ):
             per_tensor_base_params = (
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)

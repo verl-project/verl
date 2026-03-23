@@ -44,7 +44,7 @@ dist_checkpointing_path: null
 dist_checkpointing_prefix: ''
 
 # Make optimizer distributed checkpoint fully reshardable (TP/PP/EP/DP) as opposed to plain DP reshardability
-dist_ckpt_optim_fully_reshardable: True
+dist_ckpt_optim_fully_reshardable: False
 
 # Use as little memory as possible during save and load by using Gloo.
 # Has effect only when `dist_ckpt_optim_fully_reshardable` is enabled

@@ -168,5 +168,4 @@ jobs:
       - name: Running the E2E test with fully_async_policy algorithm (Megatron)
         run: |
           ray stop --force
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           bash tests/special_e2e/run_fully_async_policy.sh
