@@ -241,6 +241,9 @@ class RobActorRolloutRefWorker(ActorRolloutRefWorker):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
+        # Initialize QAT config before _build_model_optimizer
+        self._init_qat_config()
+
         from omegaconf import OmegaConf
 
         override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))

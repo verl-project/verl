@@ -27,6 +27,7 @@ from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncT
 from verl.experimental.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
 from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
 from verl.trainer.ppo.utils import Role
+from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 
 
@@ -203,6 +204,7 @@ def main(config):
     from time import time
 
     start_time = time()
+    auto_set_device(config)
     # TODO: unify rollout config with actor_rollout_ref
     config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
     config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node

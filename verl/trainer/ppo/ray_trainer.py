@@ -40,6 +40,7 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
+from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -50,7 +51,14 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import (
+    Role,
+    WorkerType,
+    need_critic,
+    need_reference_policy,
+    need_reward_model,
+    need_teacher_policy,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -62,7 +70,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.config import FSDPEngineConfig
+from verl.workers.config import DistillationConfig, FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -211,6 +219,8 @@ def compute_advantage(
                 "Please set actor.calculate_sum_pi_squared=True in config."
             )
             adv_kwargs["sum_pi_squared"] = data.batch["sum_pi_squared"]
+            # old_log_probs needed for path-variance proxy: w_t = 1 - 2*exp(old_log_probs) + sum_pi_squared
+            adv_kwargs["old_log_probs"] = data.batch["old_log_probs"]
             # Get pre-computed rollout IS weights if available
             rollout_is_weights = data.batch.get("rollout_is_weights", None)
             adv_kwargs["rollout_is_weights"] = rollout_is_weights
@@ -280,6 +290,7 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
+        self.use_teacher_policy = need_teacher_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
 
@@ -693,6 +704,7 @@ class RayPPOTrainer:
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
                 config=self.config.actor_rollout_ref,
+                distillation_config=self.config.get("distillation"),
                 role=str(actor_role),
             )
             self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
@@ -820,6 +832,20 @@ class RayPPOTrainer:
         # Note: mode is always "async" since sync mode is deprecated
         self.async_rollout_mode = True
 
+        # initialize teacher loop manager
+        if self.use_teacher_policy:
+            from verl.experimental.teacher_loop import TeacherModelManager
+
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            self.teacher_model_manager = TeacherModelManager(
+                config=self.config.distillation,
+                resource_pool=teacher_resource_pool,
+            )
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
+        else:
+            self.teacher_model_manager = None
+            self.distillation_config = None
+
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
@@ -834,12 +860,15 @@ class RayPPOTrainer:
 
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
+        # To stream teacher computation with actor rollout, we instead pass the full manager so that the
+        # teacher loop workers can sleep/wake together with rollout workers
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=reward_loop_worker_handles,
+            teacher_model_manager=self.teacher_model_manager,
         )
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
@@ -1143,6 +1172,7 @@ class RayPPOTrainer:
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
             routed_experts = tu.get(output, "routed_experts")
+
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
             # step 4. No padding to padding
             entropy = no_padding_2_padding(entropy, batch_td)
@@ -1171,6 +1201,11 @@ class RayPPOTrainer:
             # step 2: convert from padding to no-padding
             batch_td = left_right_2_no_padding(batch_td)
             calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+            distillation_use_topk = (
+                self.distillation_config.distillation_loss.loss_settings.use_topk
+                if is_distillation_enabled(self.config.get("distillation"))
+                else False
+            )
             ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
             ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
             ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1179,13 +1214,14 @@ class RayPPOTrainer:
             tu.assign_non_tensor(
                 batch_td,
                 calculate_entropy=calculate_entropy,
+                distillation_use_topk=distillation_use_topk,
                 global_batch_size=ppo_mini_batch_size,
                 mini_batch_size=ppo_mini_batch_size,
                 epochs=ppo_epochs,
                 seed=seed,
                 dataloader_kwargs={"shuffle": shuffle},
+                compute_loss=True,
             )
-
             actor_output = self.actor_rollout_wg.update_actor(batch_td)
             actor_output = tu.get(actor_output, "metrics")
             actor_output = rename_dict(actor_output, "actor/")

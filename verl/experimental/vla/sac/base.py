@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import torch
 
@@ -38,6 +38,24 @@ class SupportSACTraining:
 
     def sac_init(self):
         raise NotImplementedError("Subclasses must implement sac_init method.")
+
+    def sac_get_critic_parameters(self) -> list[torch.nn.Parameter]:
+        """Get the parameters of the critic head for optimization.
+
+        Returns:
+            A list of torch.nn.Parameter objects representing the critic head parameters.
+        """
+
+        raise NotImplementedError("Subclasses must implement sac_get_critic_parameters method.")
+
+    def sac_get_named_actor_parameters(self) -> list[tuple[str, torch.nn.Parameter]]:
+        """Get named actor parameters for optimization/EMA updates.
+
+        Returns:
+            A list of (name, parameter) tuples representing actor-side trainable parameters.
+        """
+
+        raise NotImplementedError("Subclasses must implement sac_get_named_actor_parameters method.")
 
     def sac_forward_critic(
         self,
@@ -67,15 +85,20 @@ class SupportSACTraining:
     def sac_forward_actor(
         self,
         state_features: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        is_first_micro_batch: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], dict[str, float]]:
         """Compute actions and their log probabilities from state features.
 
         Args:
             state_features: Any data structure representing the processed state features.
+            is_first_micro_batch: Whether the current forward corresponds to the first
+                micro batch of the actor update step.
 
         Returns:
             actions: torch.Tensor of shape (B, n_action_steps, action_dim), sampled actions.
-            log_probs: torch.Tensor of shape (B,), log probabilities of the sampled actions.
+            log_probs: Optional torch.Tensor of shape (B,), log probabilities of sampled actions.
+                Can be None when SAC is configured to train without entropy/log-prob terms.
+            metrics: Scalar metrics produced by actor forward, used by outer trainer for logging.
         """
 
         raise NotImplementedError("Subclasses must implement sac_forward_actor method.")
@@ -95,6 +118,16 @@ class SupportSACTraining:
         """
 
         raise NotImplementedError("Subclasses must implement sac_forward_state_features method.")
+
+    def bc_loss(
+        self,
+        state_features: Any,
+        actions: dict[str, torch.Tensor],
+        valids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute behavior cloning loss for actor regularization."""
+
+        raise NotImplementedError("Subclasses must implement bc_loss method.")
 
     def sac_update_target_network(self, tau: float):
         """Update the target network heads using Polyak averaging.

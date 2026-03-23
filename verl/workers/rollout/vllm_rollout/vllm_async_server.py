@@ -35,7 +35,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword
+from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
@@ -49,6 +49,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_PATH,
     SuppressSignalInThread,
     build_cli_args_from_config,
+    extract_prompt_logprobs,
     get_vllm_max_lora_rank,
 )
 
@@ -517,6 +518,12 @@ class vLLMHttpServer:
             final_res = output
         assert final_res is not None
 
+        extra_fields = {"global_steps": self.global_steps}
+        extract_prompt_logprobs(
+            output=final_res,
+            num_prompt_logprobs=sampling_params.prompt_logprobs,
+            result_dict=extra_fields,
+        )
         token_ids = final_res.outputs[0].token_ids
         log_probs = None
         if sampling_params.logprobs is not None:
@@ -546,7 +553,7 @@ class vLLMHttpServer:
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
-            extra_fields={"global_steps": self.global_steps},
+            extra_fields=extra_fields,
         )
 
     async def wake_up(self):
@@ -773,6 +780,11 @@ class vLLMHttpServer:
         quantization = self.config.quantization
         hf_overrides = {}
 
+        if is_torch_npu_available(check_device=False):
+            from verl.utils.vllm.npu_vllm_patch import check_vllm_ascend_before_server_launch
+
+            check_vllm_ascend_before_server_launch()
+
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
         if qat_config_dict.get("enable", False):
@@ -857,8 +869,9 @@ class vLLMReplica(RolloutReplica):
         model_config: HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
     ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
         self.server_class = ray.remote(vLLMHttpServer)
 
     async def launch_servers(self):
@@ -893,12 +906,12 @@ class vLLMReplica(RolloutReplica):
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
             prefix = self._get_server_name_prefix()
-            name = (
-                f"{prefix}server_{self.replica_rank}_{node_rank}"
-                if not self.is_reward_model
-                else f"{prefix}server_reward_{self.replica_rank}_{node_rank}"
-            )
-
+            if self.is_reward_model:
+                name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}"
+            elif self.is_teacher_model:
+                name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}"
+            else:
+                name = f"{prefix}server_{self.replica_rank}_{node_rank}"
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,

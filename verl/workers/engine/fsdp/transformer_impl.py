@@ -989,11 +989,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         return model_inputs, output_args
 
-    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict):
+    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
+        distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
 
         model_output = {}
 
@@ -1029,6 +1030,18 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         entropy_rmpad = torch.utils.checkpoint.checkpoint(
                             self.compute_entropy_from_logits, logits_rmpad
                         )
+
+                # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
+                if distillation_use_topk:
+                    outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
+                    cu_seqlens = input_ids.offsets()
+                    for k, v in outputs.items():
+                        v = v.squeeze(0)
+                        assert v.shape == log_probs.shape, f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
+                        if self.use_ulysses_sp:
+                            pad_size = output_args["pad_size"]
+                            v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                        model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
             # gather log_prob if sp > 1
             if self.use_ulysses_sp:
@@ -1112,7 +1125,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
             )  # prevent model thinks we are generating
 
             model_output = self.prepare_model_outputs(
-                output=raw_output, output_args=output_args, micro_batch=micro_batch
+                output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
             )
 
             if loss_function is not None:
@@ -1139,7 +1152,7 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
     The only difference between critic and actor is how the raw model output is processed
     """
 
-    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict):
+    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
 

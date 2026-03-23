@@ -340,7 +340,7 @@ def preprocess_thd_no_padding(
     shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
-        position_ids_rmpad = torch.zeros(shape, dtype=torch.long, device=input_ids.device)
+        position_ids_rmpad = torch.zeros(shape[0], dtype=torch.long, device=input_ids.device)
         if need_roll:
             saved_roll_dict = {}
             saved_position_roll_dict = {}

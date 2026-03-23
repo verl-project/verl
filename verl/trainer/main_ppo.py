@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
@@ -235,6 +236,18 @@ class TaskRunner:
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.teacher_model.enable_resource_pool:
+            if distillation_config.teacher_model.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
+            if distillation_config.teacher_model.nnodes <= 0:
+                raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
+
+            teacher_pool = [
+                distillation_config.teacher_model.n_gpus_per_node
+            ] * distillation_config.teacher_model.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
+
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
@@ -251,6 +264,18 @@ class TaskRunner:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
                 self.mapping[Role.RewardModel] = "global_pool"
+
+    def add_teacher_model_resource_pool(self, config):
+        """Add teacher model worker if enabled."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        if is_distillation_enabled(config.get("distillation")):
+            # we do not use teacher model workers, so we only register teacher model in resource pool
+            # without registering a teacher model worker in role-worker mapping
+            if config.distillation.teacher_model.enable_resource_pool:
+                self.mapping[Role.TeacherModel] = "teacher_pool"
+            else:
+                self.mapping[Role.TeacherModel] = "global_pool"
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
@@ -291,6 +316,8 @@ class TaskRunner:
         self.add_critic_worker(config)
 
         self.add_reward_model_resource_pool(config)
+
+        self.add_teacher_model_resource_pool(config)
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)

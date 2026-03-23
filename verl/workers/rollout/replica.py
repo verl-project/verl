@@ -51,11 +51,11 @@ class TokenOutput(BaseModel):
     """Extra fields for dynamic addition."""
 
 
-class ImageOutput(BaseModel):
-    image: list[list[list[float]]]
-    """generated image tensor (CHW format)"""
+class DiffusionOutput(BaseModel):
+    diffusion_output: list[list[list[float]]] | list[list[list[list[float]]]]
+    """generated image tensor (CHW format) / video tensor (TCHW format)"""
     log_probs: Optional[list[float]] = None
-    """logprobs of generated image"""
+    """logprobs of generated image/video"""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
@@ -110,6 +110,7 @@ class RolloutReplica(ABC):
         model_config: DictConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
     ) -> None:
         self.replica_rank = replica_rank
         self.config: RolloutConfig | DiffusionRolloutConfig = omega_conf_to_dataclass(config)
@@ -127,6 +128,7 @@ class RolloutReplica(ABC):
         )
         self.nnodes = self.world_size // self.gpus_per_replica_node
         self.is_reward_model = is_reward_model
+        self.is_teacher_model = is_teacher_model
 
         self.rollout_mode: RolloutMode = None
         self.workers: list[ActorHandle] = []
@@ -177,13 +179,18 @@ class RolloutReplica(ABC):
         self.resource_pool = resource_pool
         use_gpu = self.rollout_worker_use_gpu()
 
+        if self.is_reward_model:
+            name_prefix = f"rollout_reward_colocate_{self.replica_rank}"
+        elif self.is_teacher_model:
+            name_prefix = f"rollout_teacher_colocate_{self.replica_rank}"
+        else:
+            name_prefix = f"rollout_colocate_{self.replica_rank}"
+
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
-            name_prefix=f"rollout_colocate_{self.replica_rank}"
-            if not self.is_reward_model
-            else f"rollout_reward_colocate_{self.replica_rank}",
+            name_prefix=name_prefix,
             use_gpu=use_gpu,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )
@@ -194,11 +201,12 @@ class RolloutReplica(ABC):
         """Init standalone rollout server, create new resource pool for this rollout."""
         # create resource pool for this rollout
         self.rollout_mode = RolloutMode.STANDALONE
-        resource_pool_name = (
-            f"rollout_pool_{self.replica_rank}"
-            if not self.is_reward_model
-            else f"rollout_pool_reward_{self.replica_rank}"
-        )
+        if self.is_reward_model:
+            resource_pool_name = f"rollout_pool_reward_{self.replica_rank}"
+        elif self.is_teacher_model:
+            resource_pool_name = f"rollout_pool_teacher_{self.replica_rank}"
+        else:
+            resource_pool_name = f"rollout_pool_{self.replica_rank}"
         resource_pool_spec = {
             resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
         }
@@ -208,13 +216,17 @@ class RolloutReplica(ABC):
 
         # create worker group for this rollout
         use_gpu = self.rollout_worker_use_gpu()
+        if self.is_reward_model:
+            name_prefix = f"rollout_reward_standalone_{self.replica_rank}"
+        elif self.is_teacher_model:
+            name_prefix = f"rollout_teacher_standalone_{self.replica_rank}"
+        else:
+            name_prefix = f"rollout_standalone_{self.replica_rank}"
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
-            name_prefix=f"rollout_standalone_{self.replica_rank}"
-            if not self.is_reward_model
-            else f"rollout_reward_standalone_{self.replica_rank}",
+            name_prefix=name_prefix,
             use_gpu=use_gpu,
             device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
         )

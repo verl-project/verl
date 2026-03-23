@@ -20,7 +20,7 @@ import ray
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs
+from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
@@ -31,7 +31,8 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl.workers.rollout.diffusion_sampling_utils import build_diffusion_backend_sampling_params
-from verl.workers.rollout.replica import ImageOutput
+from verl.workers.rollout.replica import DiffusionOutput
+
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
@@ -52,7 +53,6 @@ _OMNI_DIRECT_DIFFUSION_PARAMS = {
     "guidance_scale",
     "max_sequence_length",
 }
-
 
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
@@ -107,7 +107,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     async def run_server(self, args: argparse.Namespace):
-        engine_args = AsyncOmniEngineArgs.from_cli_args(args)
+        engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
         # TODO (mike): read custom_pipeline from CLI
@@ -145,7 +145,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         priority: int = 0,
-    ) -> ImageOutput:
+    ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
 
@@ -195,7 +195,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             final_res = output
         assert final_res is not None
 
-        image = (self._to_tensor(final_res.images[0]) / 255.0).tolist()
+        diffusion_output = (self._to_tensor(final_res.images[0]) / 255.0).tolist()
 
         # Extract extra data from custom_output (populated by DiffusionEngine)
         mm_output = final_res.custom_output or {}
@@ -242,8 +242,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if final_res.request_output is not None and hasattr(final_res.request_output, "num_preempted"):
             num_preempted = final_res.request_output.num_preempted
 
-        return ImageOutput(
-            image=image,
+        return DiffusionOutput(
+            diffusion_output=diffusion_output,
             log_probs=log_probs,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
