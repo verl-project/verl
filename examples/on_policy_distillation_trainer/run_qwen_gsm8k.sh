@@ -124,10 +124,6 @@ ALGORITHM=(
     algorithm.use_kl_in_reward=False
 )
 
-RAY=(
-    +ray_kwargs.ray_init.address=$RAY_INIT_ADDRESS
-)
-
 TRAINER=(
     trainer.logger='["console","wandb"]'
     trainer.project_name=$PROJECT_NAME
@@ -152,7 +148,6 @@ python3 -m verl.trainer.main_ppo \
     --config-name='ppo_trainer.yaml' \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
-    "${RAY[@]}" \
     "${MODEL[@]}" \
     "${DISTILLATION[@]}" \
     "${ROLLOUT[@]}" \
