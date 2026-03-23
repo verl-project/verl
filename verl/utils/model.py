@@ -592,10 +592,10 @@ def get_parallel_gptmodel_from_config(
     # # for layer in parallel_model.decoder.layers:
     # layer.self_attention.core_attention.flash_attention.softmax_scale = None
     if post_process and value:
-        from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+        from verl.models.mcore.bridge import LinearForLastLayer
 
         parallel_model.output_layer = LinearForLastLayer(
-            input_size=tfconfig.hidden_size, output_size=1, config=tfconfig
+            input_size=tfconfig.hidden_size, output_size=1, sequence_parallel=tfconfig.sequence_parallel
         )
     return parallel_model
 

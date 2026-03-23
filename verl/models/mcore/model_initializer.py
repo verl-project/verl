@@ -87,10 +87,10 @@ class BaseModelInitializer(ABC):
         )
 
         if post_process and value:
-            from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+            from verl.models.mcore.bridge import LinearForLastLayer
 
             model.output_layer = LinearForLastLayer(
-                input_size=self.tfconfig.hidden_size, output_size=1, config=self.tfconfig
+                input_size=self.tfconfig.hidden_size, output_size=1, sequence_parallel=self.tfconfig.sequence_parallel
             )
 
         return model
@@ -267,10 +267,10 @@ class Qwen25VLModel(BaseModelInitializer):
         )
 
         if post_process and value:
-            from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+            from verl.models.mcore.bridge import LinearForLastLayer
 
             qwen25_vl_model.language_model.output_layer = LinearForLastLayer(
-                input_size=tfconfig.hidden_size, output_size=1, config=tfconfig
+                input_size=tfconfig.hidden_size, output_size=1, sequence_parallel=tfconfig.sequence_parallel
             )
 
         return qwen25_vl_model
