@@ -231,7 +231,7 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
-    """Multi-modal inputs for processors (e.g., pixel_values, image_grid_thw)."""
+    """Multi-modal inputs for processors (e.g. pixel_values, image_grid_thw, video_grid_thw)."""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
@@ -275,7 +275,7 @@ class _InternalDiffusionAgentLoopOutput(DiffusionAgentLoopOutput):
     response_logprobs: Optional[torch.Tensor] = None
     """Log probabilities for the response tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
-    """Multi-modal inputs for processors (e.g., pixel_values, image_grid_thw)."""
+    """Multi-modal inputs for processors (e.g. pixel_values, image_grid_thw, video_grid_thw)."""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
@@ -1043,7 +1043,6 @@ class DiffusionAgentLoopWorker:
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: DiffusionModelConfig = omega_conf_to_dataclass(model_config)
 
-        # for recipe to change
         if not hasattr(self, "server_manager"):
             self.server_manager = AsyncLLMServerManager(
                 config,
@@ -1081,7 +1080,7 @@ class DiffusionAgentLoopWorker:
         Returns:
             DataProto: Output batch.
             - prompts: [bsz, prompt_length], prompt token ids from dataset.
-            - responses: [bsz, channel, height, width],  output images from diffusion generation.
+            - responses: diffusion output, typically [bsz, C, H, W] (image) or [bsz, T, C, H, W] (video).
             - rm_scores (optional): [bsz, 1], reward model scores.
             - meta_info:
               - metrics: List[dict], per-sample agent loop metrics.
@@ -1225,7 +1224,7 @@ class DiffusionAgentLoopWorker:
             batch = TensorDict(
                 {
                     "prompts": prompts,  # [1, prompt_length]
-                    "responses": responses,  # [1, channel, height, width]
+                    "responses": responses,  # [1, C, H, W] or [1, T, C, H, W]
                     "attention_mask": attention_mask,  # [1, prompt_length]
                     "input_ids": input_ids,  # [1, prompt_length]
                 },
