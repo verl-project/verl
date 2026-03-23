@@ -60,7 +60,6 @@ if is_npu_available:
     # throws "not supported in npu" on Ascend NPU.
     # See https://github.com/Ascend/pytorch/blob/294cdf5335439b359991cecc042957458a8d38ae/torch_npu/utils/npu_intercept.py#L109
     # for details.
-
     import torch
 
     try:
