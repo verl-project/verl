@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import dataclasses
 import logging
 from dataclasses import asdict
 from typing import Any, Optional
@@ -30,7 +31,6 @@ from vllm_omni.outputs import OmniRequestOutput
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
-from verl.workers.rollout.diffusion_sampling_utils import build_diffusion_backend_sampling_params
 from verl.workers.rollout.replica import DiffusionOutput
 
 from verl.workers.rollout.utils import run_uvicorn
@@ -44,15 +44,8 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
-_OMNI_DIRECT_DIFFUSION_PARAMS = {
-    "height",
-    "width",
-    "num_inference_steps",
-    "seed",
-    "true_cfg_scale",
-    "guidance_scale",
-    "max_sequence_length",
-}
+_OMNI_FIELDS = {f.name for f in dataclasses.fields(OmniDiffusionSamplingParams)}
+
 
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
@@ -172,15 +165,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if multi_modal_data:
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
-        # Translate generic diffusion request fields into Omni-specific names
-        sampling_kwargs = build_diffusion_backend_sampling_params(
-            sampling_params,
-            model_extra_configs=self.model_config.extra_configs,
-            direct_param_names=_OMNI_DIRECT_DIFFUSION_PARAMS,
-        )
+        omni_kwargs: dict[str, Any] = {}
+        extra_args: dict[str, Any] = {}
+        for k, v in sampling_params.items():
+            if v is None:
+                continue
+            if k in _OMNI_FIELDS:
+                omni_kwargs[k] = v
+            else:
+                extra_args[k] = v
+        if extra_args:
+            omni_kwargs["extra_args"] = extra_args
         if lora_request is not None:
-            sampling_kwargs["lora_request"] = lora_request
-        diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
+            omni_kwargs["lora_request"] = lora_request
+        diffusion_sampling_params = OmniDiffusionSamplingParams(**omni_kwargs)
 
         # Call AsyncOmni.generate() with the correct API
         generator = self.engine.generate(
