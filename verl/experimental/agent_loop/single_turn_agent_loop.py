@@ -88,10 +88,19 @@ class SingleTurnAgentLoop(AgentLoopBase):
 class DiffusionSingleTurnAgentLoop(AgentLoopBase):
     """Agent loop for diffusion model serving."""
 
-    async def run(self, sampling_params: dict[str, Any], **kwargs) -> DiffusionAgentLoopOutput:
-        raw_prompt = kwargs["raw_prompt"]
+    _DATASET_ONLY_KEYS = frozenset({
+        "raw_prompt",
+        "raw_negative_prompt",
+        "data_source",
+        "reward_model",
+        "index",
+    })
 
-        raw_negative_prompt = kwargs.get("raw_negative_prompt")
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> DiffusionAgentLoopOutput:
+        raw_prompt = kwargs.pop("raw_prompt")
+        raw_negative_prompt = kwargs.pop("raw_negative_prompt", None)
+        for key in self._DATASET_ONLY_KEYS:
+            kwargs.pop(key, None)
 
         # 1. extract images and videos from messages
         multi_modal_data = await self.process_vision_info(raw_prompt)
@@ -116,6 +125,7 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
                 image_data=images,
                 video_data=videos,
                 negative_prompt_ids=negative_prompt_ids,
+                **kwargs,
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
