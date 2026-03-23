@@ -1,0 +1,117 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  max_prompt_length: 2048
+  max_response_length: 2048
+  train_batch_size: 256
+  return_raw_chat: True
+  shuffle: False
+
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    custom_chat_template: |
+      {% set image_count = namespace(value=0) %}{% set video_count = namespace(value=0) %}
+      {%- set explicit_check_policy -%}
+      You are a medical tool-using assistant.
+
+      Tool policy:
+      - Use `search` when the question requires factual medical knowledge, diagnosis/treatment information, safety information, medication effects, or outside evidence.
+      - Use `check` only after you already have a draft answer that could be verified against retrieved evidence.
+      - You should strongly consider `check` before the final answer when the answer involves diagnosis, treatment, prognosis, medication safety, contraindications, interactions, dosing, or when retrieved evidence may be incomplete or conflicting.
+      - Do not call `check` on the search query itself. Call `check` on a candidate answer.
+
+      Mini example:
+      User question: Can prednisone raise blood sugar?
+      Assistant tool call:
+      <tool_call>
+      {"name": "search", "arguments": {"query_list": ["prednisone blood sugar hyperglycemia"]}}
+      </tool_call>
+      Assistant draft answer to verify:
+      "Prednisone can raise blood sugar and may worsen glucose control."
+      Assistant tool call:
+      <tool_call>
+      {"name": "check", "arguments": {"answer": "Prednisone can raise blood sugar and may worsen glucose control."}}
+      </tool_call>
+      Assistant final answer:
+      <answer>Prednisone can raise blood sugar and may worsen glucose control, especially in people with diabetes.</answer>
+      {%- endset -%}
+      {%- if tools %}
+      {{- '<|im_start|>system\n' -}}
+      {%- if messages[0]['role'] == 'system' -%}
+      {{- messages[0]['content'] -}}
+      {{- '\n\n' -}}
+      {{- explicit_check_policy -}}
+      {%- else -%}
+      {{- explicit_check_policy -}}
+      {%- endif -%}
+      {{- "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" -}}
+      {%- for tool in tools -%}
+      {{- "\n" -}}{{- tool | tojson -}}
+      {%- endfor -%}
+      {{- "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n" -}}
+      {% for message in messages %}
+      {% if message['role'] != 'system' or loop.first == false %}
+      {%- if (message.role == "user") or (message.role == "system" and not loop.first) or (message.role == "assistant" and not message.tool_calls) -%}
+      <|im_start|>{{ message['role'] }}
+      {% if message['content'] is string %}{{ message['content'] }}<|im_end|>
+      {% else %}{% for content in message['content'] %}{% if content['type'] == 'image' or 'image' in content or 'image_url' in content %}{% set image_count.value = image_count.value + 1 %}{% if add_vision_id %}Picture {{ image_count.value }}: {% endif %}<|vision_start|><|image_pad|><|vision_end|>{% elif content['type'] == 'video' or 'video' in content %}{% set video_count.value = video_count.value + 1 %}{% if add_vision_id %}Video {{ video_count.value }}: {% endif %}<|vision_start|><|video_pad|><|vision_end|>{% elif 'text' in content %}{{ content['text'] }}{% endif %}{% endfor %}<|im_end|>
+      {% endif %}
+      {%- elif message.role == "assistant" -%}
+      {{- '<|im_start|>' + message.role -}}
+      {%- if message.content %}{{- '\n' + message.content }}{%- endif -%}
+      {%- for tool_call in message.tool_calls -%}
+      {%- if tool_call.function is defined %}{%- set tool_call = tool_call.function %}{%- endif -%}
+      {{- '\n<tool_call>\n{"name": "' }}{{- tool_call.name }}{{- '", "arguments": ' }}{{- tool_call.arguments | tojson }}{{- '}\n</tool_call>' -}}
+      {%- endfor -%}
+      {{- '<|im_end|>\n' -}}
+      {%- elif message.role == "tool" -%}
+      {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != "tool") %}{{- '<|im_start|>user' }}{%- endif -%}
+      {{- '\n<tool_response>\n' -}}
+      {% if message['content'] is string %}{{ message.content }}{% else %}{% for content in message['content'] %}{% if content['type'] == 'image' or 'image' in content or 'image_url' in content %}{% set image_count.value = image_count.value + 1 %}{% if add_vision_id %}Picture {{ image_count.value }}: {% endif %}<|vision_start|><|image_pad|><|vision_end|>{% elif content['type'] == 'video' or 'video' in content %}{% set video_count.value = video_count.value + 1 %}{% if add_vision_id %}Video {{ video_count.value }}: {% endif %}<|vision_start|><|video_pad|><|vision_end|>{% elif content['type'] == 'text' or 'text' in content %}{{ content['text'] }}{% endif %}{% endfor %}{% endif %}
+      {{- '\n</tool_response>' -}}
+      {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}{{- '<|im_end|>\n' }}{%- endif -%}
+      {%- endif -%}
+      {% endif %}
+      {% endfor %}
+      {%- else -%}
+      {% for message in messages %}
+      {% if loop.first and message['role'] != 'system' %}<|im_start|>system
+      {{ explicit_check_policy }}<|im_end|>
+      {% endif %}
+      {%- if (message.role == "user") or (message.role == "system" and not loop.first) or (message.role == "assistant" and not message.tool_calls) -%}
+      <|im_start|>{{ message['role'] }}
+      {% if message['content'] is string %}{{ message['content'] }}<|im_end|>
+      {% else %}{% for content in message['content'] %}{% if content['type'] == 'image' or 'image' in content or 'image_url' in content %}{% set image_count.value = image_count.value + 1 %}{% if add_vision_id %}Picture {{ image_count.value }}: {% endif %}<|vision_start|><|image_pad|><|vision_end|>{% elif content['type'] == 'video' or 'video' in content %}{% set video_count.value = video_count.value + 1 %}{% if add_vision_id %}Video {{ video_count.value }}: {% endif %}<|vision_start|><|video_pad|><|vision_end|>{% elif 'text' in content %}{{ content['text'] }}{% endif %}{% endfor %}<|im_end|>
+      {% endif %}
+      {%- elif message.role == "assistant" -%}
+      {{- '<|im_start|>' + message.role -}}
+      {%- if message.content %}{{- '\n' + message.content }}{%- endif -%}
+      {%- for tool_call in message.tool_calls -%}
+      {%- if tool_call.function is defined %}{%- set tool_call = tool_call.function %}{%- endif -%}
+      {{- '\n<tool_call>\n{"name": "' }}{{- tool_call.name }}{{- '", "arguments": ' }}{{- tool_call.arguments | tojson }}{{- '}\n</tool_call>' -}}
+      {%- endfor -%}
+      {{- '<|im_end|>\n' -}}
+      {%- elif message.role == "tool" -%}
+      {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != "tool") %}{{- '<|im_start|>user' }}{%- endif -%}
+      {{- '\n<tool_response>\n' -}}
+      {% if message['content'] is string %}{{ message.content }}{% else %}{% for content in message['content'] %}{% if content['type'] == 'image' or 'image' in content or 'image_url' in content %}{% set image_count.value = image_count.value + 1 %}{% if add_vision_id %}Picture {{ image_count.value }}: {% endif %}<|vision_start|><|image_pad|><|vision_end|>{% elif content['type'] == 'video' or 'video' in content %}{% set video_count.value = video_count.value + 1 %}{% if add_vision_id %}Video {{ video_count.value }}: {% endif %}<|vision_start|><|video_pad|><|vision_end|>{% elif content['type'] == 'text' or 'text' in content %}{{ content['text'] }}{% endif %}{% endfor %}{% endif %}
+      {{- '\n</tool_response>' -}}
+      {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}{{- '<|im_end|>\n' }}{%- endif -%}
+      {%- endif -%}
+      {% endfor %}
+      {%- endif %}
+      {% if add_generation_prompt %}<|im_start|>assistant
+      {% endif %}
+  rollout:
+    name: sglang
+    multi_turn:
+      enable: True
+      max_assistant_turns: 5
+      format: qwen

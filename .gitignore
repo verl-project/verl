@@ -129,4 +129,7 @@ ENV/
 logs
 log
 outputs
-.history
+.historyeval_*.json
+*.out
+logs/
+merged_qwen2.5_*/
