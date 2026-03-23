@@ -195,14 +195,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             final_res = output
         assert final_res is not None
 
-        diffusion_output = (self._to_tensor(final_res.images[0]) / 255.0).tolist()
+        diffusion_output = self._to_tensor(final_res.images[0]).float() / 255.0
 
         # Extract extra data from custom_output (populated by DiffusionEngine)
         mm_output = final_res.custom_output or {}
 
         if sampling_params.get("logprobs", False):
             all_log_probs = mm_output.get("all_log_probs")
-            log_probs = all_log_probs[0].tolist() if all_log_probs is not None else None
+            log_probs = all_log_probs[0] if all_log_probs is not None else None
         else:
             log_probs = None
 

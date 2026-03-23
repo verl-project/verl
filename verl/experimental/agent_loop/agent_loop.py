@@ -239,11 +239,13 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
 class DiffusionAgentLoopOutput(BaseModel):
     """Agent loop output."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     prompt_ids: list[int]
     """Prompt token ids."""
-    response_diffusion_output: list[list[list[float]]] | list[list[list[list[float]]]]
-    """Response diffusion output: image (CHW format) / video (TCHW format)."""
-    response_logprobs: Optional[list[float]] = None
+    response_diffusion_output: Any
+    """Response diffusion output: image tensor (CHW) / video tensor (TCHW)."""
+    response_logprobs: Optional[Any] = None
     """Log probabilities for the response tokens."""
     multi_modal_data: Optional[dict[str, Any]] = None
     """Multi-modal data for multi-modal tools."""
@@ -1175,11 +1177,17 @@ class DiffusionAgentLoopWorker:
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
             prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
-        response_diffusion_output = torch.tensor(output.response_diffusion_output).unsqueeze(0)
+        if isinstance(output.response_diffusion_output, torch.Tensor):
+            response_diffusion_output = output.response_diffusion_output.unsqueeze(0)
+        else:
+            response_diffusion_output = torch.tensor(output.response_diffusion_output).unsqueeze(0)
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            response_logprobs = torch.tensor(output.response_logprobs).unsqueeze(0)
+            if isinstance(output.response_logprobs, torch.Tensor):
+                response_logprobs = output.response_logprobs.unsqueeze(0)
+            else:
+                response_logprobs = torch.tensor(output.response_logprobs).unsqueeze(0)
 
         attention_mask = prompt_output["attention_mask"]
         input_ids = prompt_output["input_ids"]
