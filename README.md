@@ -1,29 +1,27 @@
-<div align="center">
- 👋 Hi, everyone!
-    verl is a RL training library initiated by <b>ByteDance Seed team</b> and maintained by the verl community.
-    <br>
-    <br>
-</div>
 
-<div align="center">
 
-<a href="https://deepwiki.com/volcengine/verl"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
-[![GitHub Repo stars](https://img.shields.io/github/stars/volcengine/verl)](https://github.com/volcengine/verl/stargazers)
-[![Twitter](https://img.shields.io/twitter/follow/verl_project)](https://twitter.com/verl_project)
-<a href="https://join.slack.com/t/verl-project/shared_invite/zt-3c6mc2khw-v0lo6NfDPuFP6OnkrZwfqw"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack&amp"></a>
-<a href="https://arxiv.org/pdf/2409.19256"><img src="https://img.shields.io/static/v1?label=EuroSys&message=Paper&color=red"></a>
-[![Documentation](https://img.shields.io/badge/documentation-blue)](https://verl.readthedocs.io/en/latest/)
-<a href="https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/WeChat.JPG"><img src="https://img.shields.io/badge/微信-green?logo=wechat&amp"></a>
+## MedRAGChecker Follow-up Fork
 
-</div>
+This repository is the follow-up `VERL` codebase for our MedRAGChecker line of work.
+It extends `verl` with the training and evaluation components needed for checker-centric,
+medical multi-turn RL, where an agent first searches for evidence and then decides when and
+how to invoke a checker.
 
-![seed logo](https://github.com/user-attachments/assets/c42e675e-497c-4508-8bb9-093ad4d1f216)
+Compared with upstream `verl`, this fork mainly adds:
 
-<h1 style="text-align: center;">verl: Volcano Engine Reinforcement Learning for LLMs</h1>
+- Medical multi-turn `search + checker` tool integration for SGLang rollouts
+- A MedRAG-style checker service and the corresponding `verl` tool wrapper
+- Guarded checker invocation logic so the checker complements retrieval instead of replacing it
+- Reward / evaluation utilities for checker usage, support-contradiction signals, and tool statistics
+- Training and ablation scripts for `search_r1_like` style medical checker experiments
 
-verl is a flexible, efficient and production-ready RL training library for large language models (LLMs).
+If you are looking for the MedRAGChecker-specific workflow, the main entry points are:
 
-verl is the open-source version of **[HybridFlow: A Flexible and Efficient RLHF Framework](https://arxiv.org/abs/2409.19256v2)** paper.
+- Training config: [`examples/sglang_multiturn/config/search_multiturn_grpo_explicitcheck.yaml`](examples/sglang_multiturn/config/search_multiturn_grpo_explicitcheck.yaml)
+- Tool config: [`examples/sglang_multiturn/config/tool_config/medical_search_checker_tool_config.yaml`](examples/sglang_multiturn/config/tool_config/medical_search_checker_tool_config.yaml)
+- Main training script: [`examples/sglang_multiturn/search_r1_like/run_qwen2.5-7b_search_checker_ablation_2gpu.sh`](examples/sglang_multiturn/search_r1_like/run_qwen2.5-7b_search_checker_ablation_2gpu.sh)
+- Evaluation script: [`evaluate/evaluate_search_r1.py`](evaluate/evaluate_search_r1.py)
+- Checker service: [`search_r1_preprocess/checker_medrag.py`](search_r1_preprocess/checker_medrag.py)
 
 verl is flexible and easy to use with:
 
