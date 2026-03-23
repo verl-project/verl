@@ -19,14 +19,31 @@ import platform
 import signal
 import threading
 from types import MethodType
-from typing import Any, Literal, get_args
+from typing import Any, Literal, Optional, get_args
 
 import torch
+from vllm.outputs import RequestOutput
 
 from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
+
+try:
+    from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
+
+    from verl.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
+
+    _VLLM_OMNI_AVAILABLE = True
+except ImportError:  # vllm_omni and related utilities are optional
+    CustomPipelineWorkerExtension = None  # type: ignore[assignment]
+    OmniTensorLoRARequest = None  # type: ignore[assignment]
+    VLLMOmniHijack = None  # type: ignore[assignment]
+    _VLLM_OMNI_AVAILABLE = False
+
+# Use object as fallback base so the class definition is always valid even when
+# vllm_omni is not installed (None is not a valid base class).
+_OmniWorkerBase = CustomPipelineWorkerExtension if _VLLM_OMNI_AVAILABLE else object
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -236,6 +253,72 @@ class vLLMColocateWorkerExtension:
         return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
 
+class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
+    """
+    The class for vLLM-Omni's worker to inherit from, in the colocate setting.
+    By defining an extension class, the code can work no matter what is
+    the underlying worker class. This way, the code can be compatible
+    with both vLLM V0 and V1.
+    NOTE: we define this class in a separate module, and the main module
+    should pass the full qualified name as `worker_extension_cls` argument.
+
+    Feature support:
+    1. LoRA
+    """
+
+    def __new__(cls, **kwargs):
+        assert _VLLM_OMNI_AVAILABLE, "vLLM-Omni is required to use vLLMOmniColocateWorkerExtension"
+        set_death_signal()
+
+        # 1. patch for Lora
+        VLLMOmniHijack.hijack()
+
+        return super().__new__(cls)
+
+    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+        """Update the weights of the rollout model."""
+
+        from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
+
+        # In async mode, make sure the old lora is removed before adding the new one
+        if peft_config and base_sync_done:
+            self.remove_lora(VLLM_LORA_INT_ID)
+
+        assert self.device is not None
+        receiver = BucketedWeightReceiver(
+            zmq_handle=self._get_zmq_handle(),
+            device=self.device,
+            use_shm=use_shm,
+        )
+        receiver.receive_weights(
+            on_bucket_received=lambda weights: self._update_weights(
+                weights, peft_config=peft_config, base_sync_done=base_sync_done
+            )
+        )
+
+    def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
+        if peft_config and base_sync_done:
+            weights = dict(weights)
+            lora_request = OmniTensorLoRARequest(
+                lora_name=VLLM_LORA_NAME,
+                lora_int_id=VLLM_LORA_INT_ID,
+                lora_path=VLLM_LORA_PATH,
+                peft_config=peft_config,
+                lora_tensors=weights,
+            )
+            self.add_lora(lora_request)
+            logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
+        else:
+            logger.info("Loading standard weights (async)")
+            self.load_weights(weights)
+
+    def _get_zmq_handle(self) -> str:
+        """Get ZMQ handle for communication."""
+        if not hasattr(self, "device_uuid") or not self.device_uuid:
+            self.device_uuid = get_device_uuid(self.device.index)
+        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+
+
 class SuppressSignalInThread:
     def __enter__(self):
         self.original_signal = signal.signal
@@ -292,3 +375,39 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
             # Use json.dumps for dict to ensure valid JSON format
             cli_args.append(json.dumps(v) if isinstance(v, dict) else str(v))
     return cli_args
+
+
+def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):
+    """Extract prompt log probabilities from generation output."""
+    if num_prompt_logprobs is None:
+        return
+
+    prompt_logprobs_ls, prompt_ids_ls = [], []
+    # NOTE: logprob of first prompt token is None.
+    for logprobs_dict in output.prompt_logprobs[1:]:
+        if num_prompt_logprobs == 0:
+            token_id_str = list(logprobs_dict.keys())[0]
+            logprob = logprobs_dict[token_id_str].logprob
+            prompt_logprobs_ls.append([logprob])
+            prompt_ids_ls.append([int(token_id_str)])
+        else:
+            prompt_ids = [None] * num_prompt_logprobs
+            prompt_logprobs = [None] * num_prompt_logprobs
+            # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
+            assert len(logprobs_dict) in [num_prompt_logprobs, num_prompt_logprobs + 1], len(logprobs_dict)
+            for token_id_str, token_logprob in logprobs_dict.items():
+                rank = token_logprob.rank
+                if rank > num_prompt_logprobs:
+                    continue  # the sampled token is not in the top-k
+                logprob = token_logprob.logprob
+                prompt_ids[rank - 1] = int(token_id_str)
+                prompt_logprobs[rank - 1] = logprob
+            prompt_logprobs_ls.append(prompt_logprobs)
+            prompt_ids_ls.append(prompt_ids)
+
+    # NOTE: pad a dummy prompt logprob for last prompt token.
+    prompt_logprobs_ls.append([0.0] * max(num_prompt_logprobs, 1))
+    prompt_ids_ls.append([0] * max(num_prompt_logprobs, 1))
+
+    result_dict["prompt_ids"] = prompt_ids_ls
+    result_dict["prompt_logprobs"] = prompt_logprobs_ls

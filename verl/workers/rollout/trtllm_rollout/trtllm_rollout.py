@@ -453,8 +453,20 @@ class ServerAdapter(BaseRollout):
             cur_available_bytes = total_available_bytes
             cur_handles = []
 
-        # Query if model supports partial loading
-        supports_partial_loading = await self.get_supports_partial_loading()
+        # Non-VLM never supports partial loading. For VLM, leader queries and broadcasts to all
+        # ranks in the DP replica; use get_global_rank(group, 0) since each replica has a different leader.
+        is_vlm = self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
+        if not is_vlm:
+            supports_partial_loading = False
+        else:
+            exclude_dp_group = self.hybrid_device_mesh["exclude_dp"].get_group()
+            spl_tensor = torch.zeros(1, dtype=torch.int32)
+            if self.is_leader_rank:
+                supports_partial_loading = await self.get_supports_partial_loading()
+                spl_tensor[0] = int(supports_partial_loading)
+            leader_global_rank = dist.get_global_rank(exclude_dp_group, 0)
+            await asyncio.to_thread(dist.broadcast, spl_tensor, src=leader_global_rank, group=exclude_dp_group)
+            supports_partial_loading = bool(spl_tensor.item())
 
         for name, param in weights:
             if supports_partial_loading:

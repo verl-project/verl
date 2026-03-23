@@ -19,13 +19,14 @@ env:
     simulator_type: libero
     max_episode_steps: 512
     reward_coef: 1.0
+    step_penalty: 0.001
     only_eval: False
     video_cfg:
       save_video: True
       video_base_dir: /tmp/videos
     num_envs: 16
     seed: 42
-    task_suite_name: libero_10
+    task_suite_name: libero_spatial
     init_params:
       camera_depths: False
       camera_heights: 256
@@ -42,21 +43,36 @@ actor_rollout_ref:
   model:
     override_config:
       sac_enable: True
-      double_q: True
+      flow_sde_enable: True
+      flow_sde_noise_level: 0.065
+      flow_sde_rollout_noise_scale: 1.0
+      flow_sde_train_noise_scale: 1.0
+      flow_sde_initial_beta: 1.0
+      flow_sde_beta_min: 0.02
+      flow_sde_beta_schedule_T: 4000
   actor:
     sac:
-      gamma: 0.998
-      tau: 0.005
-      initial_alpha: 0.01
-      auto_entropy: true
-      alpha_type: softplus
+      gamma: 0.99
+      tau: 1.0
+      bc_loss_coef: 0
+      initial_alpha: 0
+      critic_replay_positive_sample_ratio: 0.5
+      actor_replay_positive_sample_ratio: 0.8
+      auto_entropy: False
+      alpha_type: exp
       alpha_lr: 0.0003
-      target_entropy: -32.0
-    critic_warmup_steps: 100
-    replay_pool_save_interval: 30
+      target_entropy: -64.0
+    critic_lr: 0.0001
+    critic_weight_decay: 0
+    warm_rollout_steps: 23
+    critic_warmup_steps: 200
+    actor_update_interval: 1
+    actor_ema_enabled: true
+    actor_ema_decay: 0.95
+    replay_pool_save_interval: 500
     num_images_in_input: 1
     traj_mini_batch_size: 16
-    replay_pool_capacity: 1000
+    replay_pool_single_size: 2000
     replay_pool_save_dir: /tmp/replay_pools
     fsdp_config:
       wrap_policy:

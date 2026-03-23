@@ -23,6 +23,7 @@ from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
+    "DiffusionSamplingConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -30,6 +31,7 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
+    "DiffusionRolloutConfig",
     "CheckpointEngineConfig",
 ]
 
@@ -41,6 +43,15 @@ class SamplingConfig(BaseConfig):
     top_p: float = 1.0
     do_sample: bool = True
     n: int = 1
+
+
+@dataclass
+class DiffusionSamplingConfig(BaseConfig):
+    do_sample: bool = True
+    n: int = 1
+    noise_level: float = 0.0
+    num_inference_steps: int = 40
+    seed: int = 42
 
 
 @dataclass
@@ -136,7 +147,15 @@ class CheckpointEngineConfig(BaseConfig):
 
 @dataclass
 class RolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format", "expert_parallel_size", "moe_tensor_parallel_size"}
+    _mutable_fields = {
+        "max_model_len",
+        "load_format",
+        "engine_kwargs",
+        "prompt_length",
+        "response_length",
+        "expert_parallel_size",
+        "moe_tensor_parallel_size",
+    }
 
     name: Optional[str] = MISSING
     mode: str = "async"
@@ -291,3 +310,28 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+
+@dataclass
+class DiffusionRolloutConfig(RolloutConfig):
+    _mutable_fields = {"max_model_len", "load_format"}
+
+    val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
+
+    # diffusion use
+    height: int = 512
+
+    width: int = 512
+
+    num_inference_steps: int = 10
+
+    guidance_scale: float = 4.5
+
+    def __post_init__(self):
+        """Validate diffusion rollout config"""
+        super().__post_init__()
+
+        if self.pipeline_model_parallel_size > 1 and self.name == "vllm_omni":
+            raise NotImplementedError(
+                f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
+            )
