@@ -1149,6 +1149,7 @@ class DiffusionAgentLoopWorker:
         for k, v in output.extra_fields.items():
             if isinstance(v, torch.Tensor):
                 # handle prompt embedding padding
+                # TODO (andy): reduce padding length for more effiency
                 if k in ["prompt_embeds", "negative_prompt_embeds"]:
                     pad_tuple = (0, 0, 0, self.max_prompt_embed_length - v.shape[0])
                     v = F.pad(v, pad_tuple, value=0)
