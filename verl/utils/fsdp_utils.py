@@ -543,6 +543,8 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
 
+    if isinstance(fsdp_transformer_layer_cls_to_wrap, set):
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
@@ -841,6 +843,94 @@ def fsdp_merge_unmerge(module: nn.Module, do_merge: bool):
             if isinstance(submodule, FSDPModule) and name != "":  # skip root model
                 with FSDP.summon_full_params(submodule, writeback=True, with_grads=False):
                     _merge_or_unmerge_lora_(submodule, merge=do_merge)
+
+
+def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
+    """Merge LoRA into base weights and extract full state dict with HF key names.
+
+    For rollout backends (e.g. SGLang) whose load_weights() expects standard
+    HuggingFace parameter names and handles QKV/gate_up fusion internally.
+    Sending LoRA delta keys to these backends fails with KeyError.
+
+    This function:
+    1. Merges LoRA adapters into base weights (layer-by-layer for FSDP2)
+    2. Extracts the full merged state dict with clean HF key names
+    3. Unmerges LoRA adapters to restore training state
+
+    For FSDP2, extraction is done layer-by-layer to avoid OOM from
+    all-gathering the entire model at once.
+
+    Args:
+        module: The FSDP-wrapped PeftModel to extract merged weights from.
+
+    Returns:
+        OrderedDict mapping HF parameter names to CPU tensors.
+    """
+    ver = fsdp_version(module)
+    assert ver in [1, 2], f"collect_merged_lora_params requires FSDP module, got version {ver}"
+
+    merged_params = OrderedDict()
+    peft_model = getattr(module, "_fsdp_wrapped_module", module)
+
+    from peft.tuners.lora import LoraLayer
+
+    def _backup_base_weights(mod):
+        """Clone base weights of LoRA target modules before merge."""
+        backups = {}
+        for mname, m in mod.named_modules():
+            if isinstance(m, LoraLayer):
+                base = m.get_base_layer()
+                backups[mname] = base.weight.data.clone()
+        return backups
+
+    def _restore_base_weights(mod, backups):
+        """Restore base weights from backup, avoiding merge/unmerge drift."""
+        for mname, m in mod.named_modules():
+            if isinstance(m, LoraLayer) and mname in backups:
+                base = m.get_base_layer()
+                base.weight.data.copy_(backups[mname])
+        _clean_merged_lora_(mod)
+
+    def _clean_key(key):
+        key = key.replace("_fsdp_wrapped_module.", "")
+        key = key.replace("base_model.model.", "")
+        key = key.replace(".base_layer", "")
+        return key
+
+    if ver == 1:
+        with FSDP.summon_full_params(module, writeback=True, with_grads=False):
+            backups = _backup_base_weights(module)
+            _merge_or_unmerge_lora_(module, merge=True)
+            model = peft_model.base_model.model
+            for name, param in model.state_dict().items():
+                if any(x in name for x in ["_flat_param", "lora_"]):
+                    continue
+                name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
+                merged_params[name] = (
+                    param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+                )
+            _restore_base_weights(module, backups)
+        get_torch_device().empty_cache()
+    else:
+        # FSDP2: backup sharded weights, merge per-leaf, extract via full_tensor(), restore.
+        # We use backup_base_model_weights (which works with DTensor shards) instead of
+        # extracting inside summon_full_params, because submodule.state_dict() inside summon
+        # can return local shards instead of full tensors for some parameters.
+        base_weights_backup = backup_base_model_weights(module)
+        fsdp_merge_unmerge(module, do_merge=True)
+
+        for pname, param in module.named_parameters():
+            if any(x in pname for x in ["_flat_param", "lora_"]):
+                continue
+            clean_key = _clean_key(pname)
+            val = param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+            merged_params[clean_key] = val
+
+        restore_base_model_weights(module, base_weights_backup)
+        _clean_merged_lora_(module)
+        get_torch_device().empty_cache()
+
+    return merged_params
 
 
 def backup_base_model_weights(module):

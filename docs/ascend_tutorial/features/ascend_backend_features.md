@@ -43,7 +43,7 @@ Last updated: 03/03/2026.
 ### 2. sglang:
 
 对于sglang推理后端，昇腾通过直接向sglang社区进行持续建设与维护来支持相关功能。
-此外在verl中使用sglang还涉及以下组件, 我们在[quick start](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/ascend_sglang_quick_start.rst)中提供详细说明与一键安装脚本。
+此外在verl中使用sglang还涉及以下组件, 我们在[quick start](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_sglang_quick_start.rst)中提供详细说明与一键安装脚本。
 
 | 组件| 描述|
 | --- | --- |

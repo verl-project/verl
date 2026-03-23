@@ -19,17 +19,17 @@ from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
 
 from verl.utils.device import get_device_name
-from verl.workers.config import DiffusersModelConfig
+from verl.workers.config import DiffusionModelConfig
 
 from .base import DiffusionModelBase
 
 
-def set_timesteps(scheduler: SchedulerMixin, model_config: DiffusersModelConfig):
+def set_timesteps(scheduler: SchedulerMixin, model_config: DiffusionModelConfig):
     """Set correct timesteps and sigmas for diffusion model schedulers.
 
     Args:
         scheduler (SchedulerMixin): the scheduler used for the diffusion process.
-        model_config (DiffusersModelConfig): the configuration of the diffusion model.
+        model_config (DiffusionModelConfig): the configuration of the diffusion model.
         device (str): the device to move the timesteps and sigmas to.
     """
     DiffusionModelBase.get_class(model_config).set_timesteps(scheduler, model_config, get_device_name())
@@ -38,7 +38,7 @@ def set_timesteps(scheduler: SchedulerMixin, model_config: DiffusersModelConfig)
 def forward_and_sample_previous_step(
     module: ModelMixin,
     scheduler: SchedulerMixin,
-    model_config: DiffusersModelConfig,
+    model_config: DiffusionModelConfig,
     model_inputs: dict,
     negative_model_inputs: Optional[dict],
     scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
@@ -51,7 +51,7 @@ def forward_and_sample_previous_step(
     Args:
         module (ModelMixin): the diffusion model to be forwarded.
         scheduler (SchedulerMixin): the scheduler used for the diffusion process.
-        model_config (DiffusersModelConfig): the configuration of the diffusion model.
+        model_config (DiffusionModelConfig): the configuration of the diffusion model.
         model_inputs (dict[str, torch.Tensor]): the inputs to the diffusion model.
         negative_model_inputs (Optional[dict[str, torch.Tensor]]): the negative inputs for guidance.
         scheduler_inputs (Optional[TensorDict | dict[str, torch.Tensor]]): the extra inputs for the scheduler,

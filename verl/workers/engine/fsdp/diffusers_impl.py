@@ -57,7 +57,7 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import append_to_dict, convert_to_regular_types
-from verl.workers.config import DiffusersModelConfig, FSDPEngineConfig, FSDPOptimizerConfig
+from verl.workers.config import DiffusionModelConfig, FSDPEngineConfig, FSDPOptimizerConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, prepare_micro_batches
@@ -79,7 +79,7 @@ class DiffusersFSDPEngine(BaseEngine):
 
     def __init__(
         self,
-        model_config: DiffusersModelConfig,
+        model_config: DiffusionModelConfig,
         engine_config: FSDPEngineConfig,
         optimizer_config: FSDPOptimizerConfig,
         checkpoint_config: CheckpointConfig,

@@ -877,6 +877,7 @@ def compute_optimal_token_baseline_advantage(
     rollout_is_weights: torch.Tensor = None,
     handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantages using Optimal Token Baseline (OTB).
@@ -995,6 +996,7 @@ def compute_multi_turn_optimal_token_baseline_advantage(
     rollout_is_weights: torch.Tensor = None,
     handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantages using Optimal Token Baseline (OTB).

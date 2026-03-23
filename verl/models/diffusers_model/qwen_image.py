@@ -20,7 +20,7 @@ from diffusers.models.transformers.transformer_qwenimage import QwenImageTransfo
 from diffusers.pipelines.qwenimage.pipeline_qwenimage import calculate_shift
 from tensordict import TensorDict
 
-from verl.workers.config import DiffusersModelConfig
+from verl.workers.config import DiffusionModelConfig
 
 from .base import DiffusionModelBase
 from .schedulers import FlowMatchSDEDiscreteScheduler
@@ -29,7 +29,7 @@ from .schedulers import FlowMatchSDEDiscreteScheduler
 @DiffusionModelBase.register("QwenImagePipeline")
 class QwenImage(DiffusionModelBase):
     @classmethod
-    def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusersModelConfig, device: str):
+    def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
         vae_scale_factor = 8
         latent_height, latent_width = (
             model_config.height // vae_scale_factor // 2,
@@ -51,7 +51,7 @@ class QwenImage(DiffusionModelBase):
         cls,
         module: QwenImageTransformer2DModel,
         scheduler: FlowMatchSDEDiscreteScheduler,
-        model_config: DiffusersModelConfig,
+        model_config: DiffusionModelConfig,
         model_inputs: dict[str, torch.Tensor],
         negative_model_inputs: Optional[dict[str, torch.Tensor]],
         scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],

@@ -19,7 +19,7 @@ import torch
 from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
 
-from verl.workers.config import DiffusersModelConfig
+from verl.workers.config import DiffusionModelConfig
 
 
 class DiffusionModelBase(ABC):
@@ -32,7 +32,7 @@ class DiffusionModelBase(ABC):
 
     To register a new model, decorate the subclass with ``@DiffusionModelBase.register("your-model-name")``.
     The name must match the pipeline ``_class_name`` from ``model_index.json`` (i.e.
-    the ``architecture`` field of ``DiffusersModelConfig``, which is auto-detected by default).
+    the ``architecture`` field of ``DiffusionModelConfig``, which is auto-detected by default).
     """
 
     _registry: dict[str, type["DiffusionModelBase"]] = {}
@@ -55,7 +55,7 @@ class DiffusionModelBase(ABC):
         return decorator
 
     @classmethod
-    def get_class(cls, model_config: DiffusersModelConfig) -> type["DiffusionModelBase"]:
+    def get_class(cls, model_config: DiffusionModelConfig) -> type["DiffusionModelBase"]:
         """Return the registered subclass for *model_config.architecture*.
 
         Raises:
@@ -72,14 +72,14 @@ class DiffusionModelBase(ABC):
 
     @classmethod
     @abstractmethod
-    def set_timesteps(cls, scheduler: SchedulerMixin, model_config: DiffusersModelConfig, device: str):
+    def set_timesteps(cls, scheduler: SchedulerMixin, model_config: DiffusionModelConfig, device: str):
         """
         Abstract method for setting timesteps and sigmas for diffusion model schedulers during model init,
         and move the timesteps and sigmas to the correct device.
 
         Args:
             scheduler (SchedulerMixin): the scheduler used for the diffusion process.
-            model_config (DiffusersModelConfig): the configuration of the diffusion model.
+            model_config (DiffusionModelConfig): the configuration of the diffusion model.
             device (str): the device to move the timesteps and sigmas to.
         """
         pass
@@ -90,7 +90,7 @@ class DiffusionModelBase(ABC):
         cls,
         module: ModelMixin,
         scheduler: SchedulerMixin,
-        model_config: DiffusersModelConfig,
+        model_config: DiffusionModelConfig,
         model_inputs: dict[str, torch.Tensor],
         negative_model_inputs: Optional[dict[str, torch.Tensor]],
         scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
@@ -102,7 +102,7 @@ class DiffusionModelBase(ABC):
         Args:
             module (ModelMixin): the diffusion model to be forwarded.
             scheduler (SchedulerMixin): the scheduler used for the diffusion process.
-            model_config (DiffusersModelConfig): the configuration of the diffusion model.
+            model_config (DiffusionModelConfig): the configuration of the diffusion model.
             model_inputs (dict[str, torch.Tensor]): the inputs to the diffusion model.
             negative_model_inputs (Optional[dict[str, torch.Tensor]]): the negative inputs for guidance.
             scheduler_inputs (Optional[TensorDict | dict[str, torch.Tensor]]): the extra inputs for the scheduler,
