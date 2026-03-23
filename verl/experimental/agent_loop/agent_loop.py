@@ -1030,6 +1030,8 @@ class DiffusionAgentLoopWorker:
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
+        teacher_load_balancer_handle: ray.actor.ActorHandle = None,
     ):
         """Initialize agent loop manager.
         Args:
@@ -1464,10 +1466,11 @@ class AgentLoopManager:
         if self.distillation_enabled:
             teacher_server_handles = self.teacher_model_manager.server_handles
             teacher_server_addresses = self.teacher_model_manager.server_addresses
-            worker_kwargs["teacher_servers"] = list(
-                zip(teacher_server_addresses, teacher_server_handles, strict=True)
-            )
-            worker_kwargs["teacher_load_balancer_handle"] = self.teacher_global_load_balancer
+            teacher_servers = list(zip(teacher_server_addresses, teacher_server_handles, strict=True))
+            teacher_load_balancer_handle = self.teacher_global_load_balancer
+        else:
+            teacher_servers = None
+            teacher_load_balancer_handle = None
 
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         for i in range(num_workers):
@@ -1479,7 +1482,14 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(**worker_kwargs)
+                ).remote(
+                    self.config,
+                    servers,
+                    load_balancer_handle,
+                    teacher_servers,
+                    teacher_load_balancer_handle,
+                    self.reward_loop_worker_handles,
+                )
             )
 
     async def _init_global_load_balancer(self) -> None:
