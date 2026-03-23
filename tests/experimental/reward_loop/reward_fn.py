@@ -195,6 +195,10 @@ async def compute_score_ocr(
 
     # recognized many unrelated characters, only add one character penalty
     dist = min(dist, len(gt))
-    score = 1 - dist / len(gt)
+    if len(gt) > 0:
+        score = 1 - dist / len(gt)
+    else:
+        # If ground truth is empty, score is 1.0 only if the OCR text is also empty.
+        score = 1.0 if len(text) == 0 else 0.0
 
     return {"score": score, "genrm_response": grm_response}
