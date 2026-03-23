@@ -570,6 +570,8 @@ def get_parallel_gptmodel_from_config(
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
     from megatron.core.models.gpt.gpt_model import GPTModel
 
+    from verl.models.mcore.config_converter import get_hf_rope_theta
+
     use_te = True
     assert tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
     transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
@@ -586,7 +588,7 @@ def get_parallel_gptmodel_from_config(
         post_process=post_process,
         share_embeddings_and_output_weights=share_embeddings_and_output_weights,
         position_embedding_type="rope",
-        rotary_base=hf_config.rope_theta,
+        rotary_base=get_hf_rope_theta(hf_config),
         **rope_scaling_args,
     )
     # # for layer in parallel_model.decoder.layers:
