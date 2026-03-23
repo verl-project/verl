@@ -72,13 +72,9 @@ class DecoupledSGLangServerAdapter(BaseRollout):
         self.local_rank = adapter_layout.local_rank
         self.server_actor_name = adapter_layout.server_actor_name
         self.is_leader_rank = self.local_rank == 0 and self.decoupled_spec_role != DecoupledSpecRole.DRAFT
+        self.server_actor = None
 
-    async def _init_server_adapter(self):
-        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
-            return
-        if self._engine is not None:
-            return
-
+    def _ensure_device_mesh(self) -> None:
         if self.device_mesh is None:
             assert torch.distributed.is_initialized(), "torch distributed must be initialized"
             infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
@@ -89,7 +85,16 @@ class DecoupledSGLangServerAdapter(BaseRollout):
                 "cpu", mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
             )
 
-        if self.device_mesh["infer_tp"].get_local_rank() != 0:
+    def _should_control_server(self) -> bool:
+        # Each HTTP server actor is launched per node, so only one local rank
+        # should issue control-plane requests for that node.
+        return self.local_rank == 0
+
+    async def _init_server_adapter(self):
+        if self._engine is not None:
+            return
+
+        if not self._should_control_server():
             return
 
         self.server_actor = ray.get_actor(self.server_actor_name)
@@ -99,8 +104,9 @@ class DecoupledSGLangServerAdapter(BaseRollout):
             f"server address: {server_address}, port: {server_port}"
         )
         host = f"[{server_address}]" if is_valid_ipv6_address(server_address) else server_address
+        model_path = self.model_config.local_path or self.model_config.path
         self._engine = AsyncHttpServerAdapter(
-            model_path=self.model_config.local_path,
+            model_path=model_path,
             host=host,
             port=server_port,
             launch_server=False,
@@ -108,17 +114,13 @@ class DecoupledSGLangServerAdapter(BaseRollout):
         )
 
     async def resume(self, tags: list[str]):
-        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
-            return
         await self._init_server_adapter()
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+        if self._should_control_server() and self.config.free_cache_engine:
             await self._engine.resume_memory_occupation(tags=tags)
 
     async def release(self):
-        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
-            return
         await self._init_server_adapter()
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+        if self._should_control_server() and self.config.free_cache_engine:
             await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
 
     async def update_weights(
@@ -129,6 +131,7 @@ class DecoupledSGLangServerAdapter(BaseRollout):
 
         from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 
+        self._ensure_device_mesh()
         await self._init_server_adapter()
 
         update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
@@ -150,7 +153,7 @@ class DecoupledSGLangServerAdapter(BaseRollout):
                 device_mesh=self.device_mesh,
             )
 
-        if self.device_mesh["infer_tp"].get_local_rank() == 0:
+        if self._should_control_server():
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
