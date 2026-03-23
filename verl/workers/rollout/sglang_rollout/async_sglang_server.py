@@ -18,7 +18,6 @@ import json
 import logging
 import os
 from typing import Any, Optional
-from uuid import uuid4
 
 import ray
 import sglang
@@ -479,45 +478,6 @@ class SGLangHttpServer:
             extra_fields={"global_steps": self.global_steps},
         )
 
-    async def handle_draft_request(self, draft_request):
-        from verl.workers.rollout.decoupled_spec_rollout.protocol import DraftResult
-        from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.draft_server_patch import (
-            build_generate_req_from_draft_request,
-        )
-
-        if self.server_role != "draft":
-            raise ValueError("handle_draft_request is only supported on draft servers")
-
-        prompt_ids = draft_request.full_token_ids
-        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
-        if max_possible_tokens < 0:
-            return DraftResult(
-                request_id=draft_request.request_id,
-                draft_round_id=draft_request.draft_round_id,
-                draft_token_ids=[],
-            )
-
-        max_new_tokens = max(0, min(draft_request.num_speculative_steps, max_possible_tokens))
-        generate_request = build_generate_req_from_draft_request(
-            draft_request,
-            request_id=f"draft-{draft_request.request_id}-{uuid4().hex[:8]}",
-            max_new_tokens=max_new_tokens,
-        )
-        try:
-            output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
-        except Exception:
-            return DraftResult(
-                request_id=draft_request.request_id,
-                draft_round_id=draft_request.draft_round_id,
-                draft_token_ids=[],
-            )
-
-        return DraftResult(
-            request_id=draft_request.request_id,
-            draft_round_id=draft_request.draft_round_id,
-            draft_token_ids=output.get("output_ids", []),
-        )
-
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
         self.global_steps = global_steps
@@ -558,6 +518,12 @@ class SGLangReplica(RolloutReplica):
         is_reward_model: bool = False,
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        if self.config.enable_decoupled_spec:
+            from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.draft_server_patch import (
+                install_draft_server_patches,
+            )
+
+            install_draft_server_patches(SGLangHttpServer)
         self.server_class = ray.remote(SGLangHttpServer)
 
     async def launch_servers(self):

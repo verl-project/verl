@@ -52,17 +52,6 @@ class PendingPoll:
     deadline_monotonic: float | None
 
 
-def _normalize_draft_result(request: DraftRequest, raw_result: DraftResult | None) -> DraftResult:
-    draft_token_ids = []
-    if raw_result is not None:
-        draft_token_ids = list(getattr(raw_result, "draft_token_ids", []) or [])
-    return DraftResult(
-        request_id=request.request_id,
-        draft_round_id=request.draft_round_id,
-        draft_token_ids=draft_token_ids,
-    )
-
-
 class DraftProxyManager:
     """Detokenizer-like manager process for DraftProxy."""
 
@@ -121,37 +110,39 @@ class DraftProxyManager:
         self.proxy.submit_request(request, object_ref)
 
     def _collect_completed_drafts(self) -> None:
+        # (request_id, draft_round_id) -> (draft_index, object_ref)
         inflight_items = list(self.proxy.inflight_requests.items())
+
         if not inflight_items:
             return
 
         object_refs = [inflight.object_ref for _, inflight in inflight_items]
+
+        # 非阻塞 挑选出已完成的 DraftRequest
         ready_refs, _ = ray.wait(
             object_refs,
             num_returns=len(object_refs),
             timeout=0,
         )
+
         if not ready_refs:
             return
 
-        ref_to_key = {inflight.object_ref: key for key, inflight in inflight_items}
+        ref_to_key = {inflight.object_ref: key for key, inflight in inflight_items} # 维护 ref_to_key 是为了出错的时候能输出信息
+
         for object_ref in ready_refs:
             key = ref_to_key.get(object_ref)
             if key is None:
                 continue
 
-            request = DraftRequest(
-                request_id=key.request_id,
-                verify_replica_rank=self.proxy.verify_replica_rank,
-                draft_round_id=key.draft_round_id,
-            )
             try:
-                raw_result = ray.get(object_ref)
+                result = ray.get(object_ref)
+                assert isinstance(result, DraftResult)
+                assert result.request_id == key.request_id
+                assert result.draft_round_id == key.draft_round_id
             except Exception:
                 logger.exception("DraftProxy failed to get draft result")
-                raw_result = None
-
-            result = _normalize_draft_result(request, raw_result)
+                assert False
             self.proxy.complete_request(key, result)
 
     def _send_poll_response(
@@ -223,7 +214,7 @@ class DraftProxyManager:
 
     def _handle_proxy_message(self, message: DraftProxyMessage, source_dp_rank: int) -> None:
         if message.message_type == DraftProxyMessageType.SUBMIT_DRAFT and message.request is not None:
-            self._submit_draft_request(message.request)
+            self._submit_draft_request(message.request) # verifier 向 DraftProxy 提交一个 DraftRequest->转发给 drafter
             return
 
         if (

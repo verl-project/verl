@@ -96,33 +96,22 @@ class ExternalDraftVerifyWorker:
             pad_token_id = 0
         return int(pad_token_id)
 
-    def _build_req_verify_tokens(self, req, pad_token_id: int) -> list[int]:
-        tail_token = _get_req_tail_token_id(req)
+    def _build_req_verify_tokens(self, req, pad_token_id: int) -> list[int]: # 返回内容：last verified token + num_speculative_steps * draft token
+        tail_token = _get_req_tail_token_id(req) # 该 request 最后一个已经 commit 的 token
         draft_result = getattr(req, "decoupled_spec_draft_result", None)
-        proposal_tokens = []
-        includes_committed_tail = False
-        if draft_result is not None:
-            proposal_tokens = list(getattr(draft_result, "draft_token_ids", []) or [])
-            includes_committed_tail = bool(getattr(draft_result, "includes_committed_tail", False))
 
-        if includes_committed_tail:
-            full_tokens = proposal_tokens[: self.speculative_num_draft_tokens]
-            if not full_tokens or full_tokens[0] != tail_token:
-                # Without explicit alignment metadata from the drafter, any
-                # malformed root is treated as a fake verify chain.
-                full_tokens = [tail_token]
-        else:
-            full_tokens = [tail_token] + proposal_tokens
+        assert draft_result is not None, "draft_result is None"
 
-        if len(full_tokens) < self.speculative_num_draft_tokens:
-            full_tokens.extend([pad_token_id] * (self.speculative_num_draft_tokens - len(full_tokens)))
-        else:
-            full_tokens = full_tokens[: self.speculative_num_draft_tokens]
+        if(tail_token == draft_result.draft_token_ids[0]): # 比对成功
+            draft_len = len(draft_result.draft_token_ids)
+            # 如果 drafter 返回的 draft token 数量与 num_speculative_steps 一致，则直接返回
+            if draft_len == self.speculative_num_draft_tokens:
+                return draft_result.draft_token_ids
+            else:
+                return draft_result.draft_token_ids + [pad_token_id] * (self.speculative_num_draft_tokens - draft_len)
 
-        if full_tokens[0] != tail_token:
-            full_tokens = [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1)
+        return [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1) # 比对不通过，则通过 pad_token_id 填充出 fake VerifyInput
 
-        return full_tokens
 
     def _build_verify_input(self, batch: ScheduleBatch) -> EagleVerifyInput:
         draft_token_num = self.speculative_num_draft_tokens
