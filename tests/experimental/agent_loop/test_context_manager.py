@@ -62,6 +62,11 @@ def _build_state(
     response_logprobs: list[float] | None = None,
     routed_experts=None,
 ) -> ContextState:
+    """Build a ContextState from raw text strings for use in tests.
+
+    prompt_text / response_text are char-encoded by _FakeTokenizer.
+    response_mask defaults to all-ones (fully generated); response_logprobs defaults to empty.
+    """
     tokenizer = _FakeTokenizer()
     prompt_ids = tokenizer.encode(prompt_text)
     response_ids = tokenizer.encode(response_text)
@@ -83,6 +88,11 @@ def _build_state(
 
 
 def _build_expected_summary_suffix_ids(tokenizer: _FakeTokenizer, summary_text: str) -> list[int]:
+    """Return the token ids that SummarizerContextManager appends after compression.
+
+    Mirrors the manager's logic: apply_chat_template on the summary message,
+    then strip the system-prompt prefix.
+    """
     system_prompt_ids = initialize_system_prompt(tokenizer)
     summary_ids = tokenizer.apply_chat_template(
         [{"role": "assistant", "content": summary_text}],
@@ -94,6 +104,7 @@ def _build_expected_summary_suffix_ids(tokenizer: _FakeTokenizer, summary_text: 
 
 @pytest.mark.asyncio
 async def test_sliding_window_should_compress_ignores_already_compressed_observations():
+    # One observation is already compressed, one is not. Uncompressed count < M, so compression should not trigger.
     tokenizer = _FakeTokenizer()
     manager = SlidingWindowContextManager(
         compress_when_m_observations=2,
@@ -120,6 +131,8 @@ async def test_sliding_window_should_compress_ignores_already_compressed_observa
 
 @pytest.mark.asyncio
 async def test_sliding_window_compress_rewrites_messages_and_response_segment():
+    # 3 observations reach threshold M=3; keep last N=1, replace the first two with placeholders
+    # in both token ids and messages. After compression, response_mask is all-zero and routed_experts is cleared.
     tokenizer = _FakeTokenizer()
     manager = SlidingWindowContextManager(
         compress_when_m_observations=3,
@@ -160,6 +173,8 @@ async def test_sliding_window_compress_rewrites_messages_and_response_segment():
 
 @pytest.mark.asyncio
 async def test_sliding_window_check_and_compress_returns_false_below_threshold():
+    # Only 1 observation, below threshold M=2; check_and_compress should return the original state
+    # with compressed=False.
     manager = SlidingWindowContextManager(
         compress_when_m_observations=2,
         keep_last_n_observations=1,
@@ -182,6 +197,8 @@ async def test_sliding_window_check_and_compress_returns_false_below_threshold()
 
 @pytest.mark.asyncio
 async def test_sliding_window_compress_raises_when_no_new_observation_is_removed():
+    # Two observations but the first is already a placeholder, so _compress_impl removes zero new
+    # observations and should raise ValueError.
     tokenizer = _FakeTokenizer()
     manager = SlidingWindowContextManager(
         compress_when_m_observations=2,
@@ -206,6 +223,8 @@ async def test_sliding_window_compress_raises_when_no_new_observation_is_removed
 
 @pytest.mark.asyncio
 async def test_summarizer_should_compress_only_checks_current_generated_tokens():
+    # The response contains a prior <summary> (mask=0, treated as prompt), but the current generation has none.
+    # Ensures _should_compress only inspects mask=1 tokens, so compression should not trigger.
     tokenizer = _FakeTokenizer()
     old_summary = "<summary>previous summary</summary>"
     current_generation = "new response without summary"
@@ -229,6 +248,7 @@ async def test_summarizer_should_compress_only_checks_current_generated_tokens()
 
 @pytest.mark.asyncio
 async def test_summarizer_compress_keeps_last_summary_when_multiple_exist():
+    # Response contains two <summary> blocks; after compression only the last one should be kept.
     tokenizer = _FakeTokenizer()
     prefix = "thinking..."
     summary_old = "<summary>old summary</summary>"
@@ -253,6 +273,10 @@ async def test_summarizer_compress_keeps_last_summary_when_multiple_exist():
 
 @pytest.mark.asyncio
 async def test_summarizer_compress_keeps_original_prompt_and_last_summary():
+    # Multi-turn conversation (assistant + tool) after compression:
+    # - messages retains only system/user turns plus the final summary assistant message
+    # - trajectory_ids keeps the original prompt prefix; the tail is replaced with summary token ids
+    # - response_mask and response_logprobs are all-zero; routed_experts is cleared
     tokenizer = _FakeTokenizer()
     previous_assistant = "intermediate reasoning"
     tool_observation = "tool observation"
@@ -298,6 +322,7 @@ async def test_summarizer_compress_keeps_original_prompt_and_last_summary():
 
 @pytest.mark.asyncio
 async def test_summarizer_compress_raises_when_summary_is_missing():
+    # Response has no <summary> block; calling _compress_impl directly should raise ValueError.
     manager = SummarizerContextManager(tokenizer=_FakeTokenizer())
     state = _build_state(
         prompt_text="PROMPT",

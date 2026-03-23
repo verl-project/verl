@@ -218,8 +218,8 @@ class SummarizerContextManager(ContextManager):
         if response_length == 0:
             return False
         response_ids = state.trajectory_ids[-response_length:]
-        # IMPORTANT: should only consider if there is a summarization in current generation, otherwise
-        # may get into a infinite loop as previous summarization may continuously trigger the compression.
+        # NOTE: Should only consider the summarization in generated tokens of current trajectory, otherwise we
+        # will get into a infinite loop as previous summarization may continuously trigger the compression.
         generated_response_ids = [
             token_id for token_id, token_mask in zip(response_ids, state.response_mask, strict=False) if token_mask == 1
         ]

@@ -57,7 +57,11 @@ class _FakeTokenizer:
 
 
 class _QueuedServerManager:
-    """Minimal fake server manager that returns pre-seeded responses in order."""
+    """Minimal fake server manager that returns pre-seeded responses in order.
+
+    Pops one response string per generate() call and records each call in self.calls
+    so tests can inspect the prompt_ids passed to the model.
+    """
 
     def __init__(self, tokenizer: _FakeTokenizer, responses: list[str]):
         self._tokenizer = tokenizer
@@ -115,6 +119,11 @@ def _build_loop(
 
 
 def _build_expected_summary_ids(tokenizer: _FakeTokenizer, summary_text: str) -> list[int]:
+    """Return the token ids that the loop prepends after summarization compression.
+
+    Mirrors SummarizerContextManager: apply_chat_template on the summary assistant
+    message with additional generation tokens, then strip the system-prompt prefix.
+    """
     system_prompt_ids = initialize_system_prompt(tokenizer)
     summary_ids = tokenizer.apply_chat_template(
         [{"role": "assistant", "content": summary_text}],
@@ -125,12 +134,15 @@ def _build_expected_summary_ids(tokenizer: _FakeTokenizer, summary_text: str) ->
 
 
 def test_summarizer_agent_loop_rejects_negative_max_context_compressions():
+    # Passing a negative compression cap should raise ValueError at construction time.
     with pytest.raises(ValueError, match="max_context_compressions must be non-negative"):
         _build_loop(responses=["hello"], max_context_compressions=-1)
 
 
 @pytest.mark.asyncio
 async def test_build_output_from_state_handles_empty_response():
+    # When response_mask is empty, the entire trajectory should become prompt_ids
+    # and response_ids / response_mask should both be empty lists.
     loop, _ = _build_loop(responses=[])
     state = ContextState(
         messages=[{"role": "user", "content": "hi"}],
@@ -153,6 +165,10 @@ async def test_build_output_from_state_handles_empty_response():
 
 @pytest.mark.asyncio
 async def test_summarizer_agent_loop_run_returns_multiple_outputs_after_summary_compression():
+    # First generation contains a <summary>; the loop compresses and generates again.
+    # Verifies: two outputs are returned, both calls share the same request_id,
+    # the second output starts with the summary token ids (mask=0) followed by the
+    # new generation (mask=1).
     summary_text = "<summary>compressed summary</summary>"
     first_response = f"thinking...{summary_text}"
     second_response = "final answer"
@@ -178,6 +194,8 @@ async def test_summarizer_agent_loop_run_returns_multiple_outputs_after_summary_
 
 @pytest.mark.asyncio
 async def test_summarizer_agent_loop_run_returns_single_output_without_summary():
+    # No <summary> in the response means no compression; run() returns exactly one output
+    # with all tokens marked as generated (response_mask all-ones).
     loop, tokenizer = _build_loop(responses=["plain final answer"], max_context_compressions=4)
 
     outputs = await loop.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "hello"}])
@@ -189,6 +207,8 @@ async def test_summarizer_agent_loop_run_returns_single_output_without_summary()
 
 @pytest.mark.asyncio
 async def test_summarizer_agent_loop_run_respects_zero_max_context_compressions():
+    # max_context_compressions=0 means compression is never applied even if a <summary>
+    # is present; run() stops after the first generation with a single output.
     summary_text = "<summary>compressed summary</summary>"
     first_response = f"thinking...{summary_text}"
     loop, tokenizer = _build_loop(responses=[first_response], max_context_compressions=0)
@@ -202,6 +222,9 @@ async def test_summarizer_agent_loop_run_respects_zero_max_context_compressions(
 
 @pytest.mark.asyncio
 async def test_summarizer_agent_loop_run_supports_multiple_compressions_until_cap():
+    # Two consecutive compressions (cap=2): each compressed output starts with the
+    # corresponding summary ids (mask=0) followed by the new generation (mask=1).
+    # Verifies that the loop chains compressions correctly up to the cap.
     summary1 = "<summary>summary 1</summary>"
     summary2 = "<summary>summary 2</summary>"
     responses = [
