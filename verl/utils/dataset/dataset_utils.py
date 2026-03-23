@@ -76,6 +76,7 @@ class SFTTensorCollator:
                     offsets = torch.zeros(len(tensors) + 1, dtype=torch.long)
                     torch.cumsum(lengths, dim=0, out=offsets[1:])
                     final_batch[key] = torch.nested.nested_tensor_from_jagged(values, offsets=offsets)
+                    final_batch[key]._ragged_idx = 2
                 else:
                     final_batch[key] = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
             else:
