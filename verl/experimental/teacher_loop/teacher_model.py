@@ -96,11 +96,10 @@ class TeacherModelManager:
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
     def _initialize_async_server_manager(self):
-        from verl.experimental.agent_loop.agent_loop import DEFAULT_ROUTING_CACHE_SIZE, GlobalRequestLoadBalancer
+        from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer
 
         self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
             server_actor_ids=self.server_addresses,
-            cache_size=DEFAULT_ROUTING_CACHE_SIZE,
         )
 
     def _initialize_router(self):

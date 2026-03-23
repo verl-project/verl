@@ -525,7 +525,7 @@ class AgentLoopWorker:
                     teacher_servers,
                     load_balancer_handle=teacher_load_balancer_handle,
                     distillation_config=self.distillation_config,
-                    pad_token_id=self.tokenizer.pad_token_id,
+                    pad_token_id=self.model_config.tokenizer.pad_token_id,
                 )
         else:
             self.teacher_server_manager = None
