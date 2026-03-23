@@ -321,15 +321,29 @@ class SGLangHttpServer:
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
 
+    @property
+    def lora_as_adapter(self) -> bool:
+        return (
+            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
+        ) and not self.model_config.lora.get("merge", False)
+
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        # When using LoRA as adapter (merge=False), only release kv_cache —
+        # keep base weights in GPU so we only need to sync adapter deltas.
+        # Mirrors the vLLM sleep() pattern in vllm_async_server.py.
+        if self.lora_as_adapter:
+            tags = ["kv_cache"]
+        else:
+            tags = ["kv_cache", "weights"]
+
         if self.rollout_mode == RolloutMode.HYBRID:
-            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache", "weights"])
+            obj = ReleaseMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache", "weights"])
+            obj = ReleaseMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             # In standalone mode, resume kv_cache if free_cache_engine is enabled
