@@ -169,6 +169,152 @@ class AsyncLLMServerManager:
             self._release_server(server_id)
 
 
+def _get_teacher_sampling_params(
+    distillation_config: DistillationConfig,
+    distillation_loss_config: DistillationLossConfig,
+) -> dict[str, Any]:
+    """Get sampling parameters for teacher model when computing log probabilities for distillation."""
+    if distillation_config.teacher_model.inference.temperature != 1.0:
+        raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
+
+    num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
+    return {
+        "max_tokens": 1,
+        "temperature": distillation_config.teacher_model.inference.temperature,
+        "prompt_logprobs": num_logprobs,
+    }
+
+
+def _extract_valid_prompt_and_response_ids(data: DataProto) -> tuple[list[int], list[int]]:
+    """Extract valid prompt and response token ids from padded batch data.
+    TODO(wuxibin): remove padding and use tensordict.
+    """
+    assert len(data) == 1, "Teacher logprob computation expects a single sample"
+
+    prompts = data.batch["prompts"][0]
+    responses = data.batch["responses"][0]
+    attention_mask = data.batch["attention_mask"][0]
+    prompt_length = prompts.shape[0]
+
+    valid_prompt_length = int(attention_mask[:prompt_length].sum().item())
+    valid_response_length = int(attention_mask[prompt_length:].sum().item())
+
+    prompt_ids = normalize_token_ids(prompts[-valid_prompt_length:] if valid_prompt_length > 0 else [])
+    response_ids = normalize_token_ids(responses[:valid_response_length])
+    return prompt_ids, response_ids
+
+
+def _pad_teacher_outputs(
+    teacher_ids: torch.Tensor,
+    teacher_logprobs: torch.Tensor,
+    *,
+    prompt_width: int,
+    response_width: int,
+    prompt_length: int,
+    response_length: int,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # TODO(wuxibin): remove padding and use tensordict.
+    left_pad_size = prompt_width - prompt_length
+    right_pad_size = response_width - response_length
+    padding = (0, 0, left_pad_size, right_pad_size)
+    return (
+        F.pad(teacher_ids, padding, value=pad_token_id).unsqueeze(0),
+        F.pad(teacher_logprobs, padding, value=0.0).unsqueeze(0),
+    )
+
+
+class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
+    """Teacher-specific async client used for distillation logprob computation."""
+
+    def __init__(
+        self,
+        config: DictConfig,
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
+        distillation_config: DictConfig | DistillationConfig,
+        pad_token_id: int,
+    ):
+        super().__init__(config=config, servers=servers, load_balancer_handle=load_balancer_handle)
+        if isinstance(distillation_config, DistillationConfig):
+            self.distillation_config = distillation_config
+        else:
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
+        self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+        self.pad_token_id = pad_token_id
+
+    async def compute_teacher_logprobs_single(
+        self,
+        *,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        multi_modal_data: Optional[dict[str, Any]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute teacher log probabilities for a single prompt-response pair."""
+        multi_modal_data = multi_modal_data or {}
+        teacher_output = await self.generate(
+            request_id=uuid4().hex,
+            prompt_ids=prompt_ids + response_ids,
+            sampling_params=_get_teacher_sampling_params(self.distillation_config, self.distillation_loss_config),
+            image_data=multi_modal_data.get("images"),
+            video_data=multi_modal_data.get("videos"),
+        )
+        teacher_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
+        teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
+        assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(prompt_ids + response_ids)
+        return teacher_ids, teacher_logprobs
+
+    async def compute_teacher_logprobs_batch(self, data: DataProto) -> DataProto:
+        """Compute teacher log probabilities for a batch of prompt-response pairs."""
+        multi_modal_data_batch = data.non_tensor_batch.get("teacher_multi_modal_data")
+        tasks = []
+        lengths = []
+        prompt_width = data.batch["prompts"].shape[1]
+        response_width = data.batch["responses"].shape[1]
+
+        # Compute logprobs for each sample in the batch
+        for i in range(len(data)):
+            item = data[i : i + 1]
+            prompt_ids, response_ids = _extract_valid_prompt_and_response_ids(item)
+            multi_modal_data = None if multi_modal_data_batch is None else multi_modal_data_batch[i]
+            lengths.append((len(prompt_ids), len(response_ids)))
+            tasks.append(
+                asyncio.create_task(
+                    self.compute_teacher_logprobs_single(
+                        prompt_ids=prompt_ids,
+                        response_ids=response_ids,
+                        multi_modal_data=multi_modal_data,
+                    )
+                )
+            )
+        outputs = await asyncio.gather(*tasks)
+
+        # Pad the teacher logprobs and ids
+        padded_teacher_ids = []
+        padded_teacher_logprobs = []
+        for (teacher_ids, teacher_logprobs), (prompt_length, response_length) in zip(outputs, lengths, strict=True):
+            padded_ids, padded_logprobs = _pad_teacher_outputs(
+                teacher_ids,
+                teacher_logprobs,
+                prompt_width=prompt_width,
+                response_width=response_width,
+                prompt_length=prompt_length,
+                response_length=response_length,
+                pad_token_id=self.pad_token_id,
+            )
+            padded_teacher_ids.append(padded_ids)
+            padded_teacher_logprobs.append(padded_logprobs)
+
+        batch = TensorDict(
+            {
+                "teacher_ids": torch.stack(padded_teacher_ids),
+                "teacher_logprobs": torch.stack(padded_teacher_logprobs),
+            },
+            batch_size=len(data),
+        )
+        return DataProto(batch=batch)
+
+
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
 
@@ -432,20 +578,27 @@ class AgentLoopWorker:
         self.distillation_config = config.get("distillation", None)
         self.distillation_enabled = is_distillation_enabled(self.distillation_config)
         if self.distillation_enabled:
-            if teacher_servers is None:
-                raise ValueError("Distillation is enabled but no teacher servers provided.")
-            if teacher_load_balancer_handle is None:
-                raise ValueError("Distillation is enabled but no teacher load balancer provided.")
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.distillation_config)
             self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+            self.stream_teacher_with_rollout = self.distillation_config.teacher_model.enable_resource_pool
 
-            # for recipe to change
-            if not hasattr(self, "teacher_server_manager"):
-                self.teacher_server_manager = AsyncLLMServerManager(
-                    config,
-                    teacher_servers,
-                    load_balancer_handle=teacher_load_balancer_handle,
-                )
+            if self.stream_teacher_with_rollout:
+                if teacher_servers is None:
+                    raise ValueError("Distillation streaming is enabled but no teacher servers were provided.")
+                if teacher_load_balancer_handle is None:
+                    raise ValueError("Distillation streaming is enabled but no teacher load balancer was provided.")
+                if not hasattr(self, "teacher_server_manager"):
+                    self.teacher_server_manager = AsyncTeacherLLMServerManager(
+                        config,
+                        teacher_servers,
+                        load_balancer_handle=teacher_load_balancer_handle,
+                        distillation_config=self.distillation_config,
+                        pad_token_id=self.model_config.tokenizer.pad_token_id,
+                    )
+            else:
+                self.teacher_server_manager = None
+        else:
+            self.stream_teacher_with_rollout = False
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
@@ -714,11 +867,16 @@ class AgentLoopWorker:
             output.extra_fields.pop("teacher_logprobs", None),
         )
         if teacher_ids is not None and teacher_logprobs is not None:
-            left_pad_size = prompt_output["input_ids"].shape[1] - len(output.prompt_ids)
-            right_pad_size = response_output["input_ids"].shape[1] - len(output.response_ids)
-            padding = (0, 0, left_pad_size, right_pad_size)  # pad the sequence dimension
-            teacher_ids = F.pad(teacher_ids, padding, value=self.tokenizer.pad_token_id).unsqueeze(0)
-            teacher_logprobs = F.pad(teacher_logprobs, padding, value=0.0).unsqueeze(0)
+            # TODO(wuxibin): remove padding and use tensordict.
+            teacher_ids, teacher_logprobs = _pad_teacher_outputs(
+                teacher_ids,
+                teacher_logprobs,
+                prompt_width=prompt_output["input_ids"].shape[1],
+                response_width=response_output["input_ids"].shape[1],
+                prompt_length=len(output.prompt_ids),
+                response_length=len(output.response_ids),
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
 
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
@@ -837,40 +995,12 @@ class AgentLoopWorker:
 
     async def _compute_teacher_logprobs(self, output: AgentLoopOutput, prompt_ids, response_ids, validate):
         """Compute teacher logprobs for single sample."""
-        if self.distillation_enabled and not validate:
-            # This assumes that the teacher processes multi-modal data in the same way as the student
-            multi_modal_data = output.multi_modal_data
-            images = multi_modal_data.get("images")
-            videos = multi_modal_data.get("videos")
-
-            if self.distillation_config.teacher_model.inference.temperature != 1.0:
-                raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
-
-            num_logprobs = (
-                self.distillation_loss_config.topk if self.distillation_loss_config.loss_settings.use_topk else 0
+        if self.stream_teacher_with_rollout and not validate:
+            teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                prompt_ids=prompt_ids,
+                response_ids=response_ids,
+                multi_modal_data=output.multi_modal_data,
             )
-            sampling_params = {
-                "max_tokens": 1,
-                "temperature": self.distillation_config.teacher_model.inference.temperature,
-                "prompt_logprobs": num_logprobs,
-            }
-            teacher_output = await self.teacher_server_manager.generate(
-                request_id=uuid4().hex,
-                prompt_ids=prompt_ids + response_ids,
-                sampling_params=sampling_params,
-                image_data=images,
-                video_data=videos,
-            )
-            response_ids_ls, response_logprobs_ls = (
-                teacher_output.extra_fields["prompt_ids"],
-                teacher_output.extra_fields["prompt_logprobs"],
-            )
-            # Shapes: # S, (1 or K), where S is the response length, K is either 1 or topk depending on
-            # the distillation loss settings.
-            teacher_ids = torch.tensor(response_ids_ls, dtype=torch.int32)
-            teacher_logprobs = torch.tensor(response_logprobs_ls)
-            assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(prompt_ids + response_ids)
-
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
 
@@ -893,7 +1023,7 @@ class AgentLoopWorker:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
         if inputs[0].routed_experts is not None:
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
-        if self.distillation_enabled and not validate:
+        if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
         batch = TensorDict(
@@ -934,6 +1064,9 @@ class AgentLoopWorker:
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
         if any(mmi is not None for mmi in multi_modal_inputs_list):
             non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
+        if self.distillation_enabled and not self.stream_teacher_with_rollout:
+            teacher_multi_modal_data = [input.multi_modal_data for input in inputs]
+            non_tensor_batch["teacher_multi_modal_data"] = np.array(teacher_multi_modal_data, dtype=object)
 
         metrics = [input.metrics.model_dump() for input in inputs]
         # Collect extra fields from all inputs and convert them to np.ndarray
@@ -1020,6 +1153,9 @@ class AgentLoopManager:
 
         self.teacher_model_manager = teacher_model_manager
         self.distillation_enabled = is_distillation_enabled(self.config.get("distillation", None))
+        self.stream_teacher_with_rollout = (
+            self.distillation_enabled and self.config.distillation.teacher_model.enable_resource_pool
+        )
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -1099,11 +1235,11 @@ class AgentLoopManager:
         load_balancer_handle = self.global_load_balancer
         servers = list(zip(self.server_addresses, self.server_handles, strict=True))
 
-        if self.distillation_enabled:
+        if self.stream_teacher_with_rollout:
             teacher_server_handles = self.teacher_model_manager.server_handles
             teacher_server_addresses = self.teacher_model_manager.server_addresses
             teacher_servers = list(zip(teacher_server_addresses, teacher_server_handles, strict=True))
-            teacher_load_balancer_handle = self.teacher_global_load_balancer
+            teacher_load_balancer_handle = self.teacher_model_manager.load_balancer_handle
         else:
             teacher_servers = None
             teacher_load_balancer_handle = None
@@ -1133,11 +1269,6 @@ class AgentLoopManager:
             server_actor_ids=self.server_addresses,
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
         )
-        if self.distillation_enabled:
-            self.teacher_global_load_balancer = GlobalRequestLoadBalancer.remote(
-                server_actor_ids=self.teacher_model_manager.server_addresses,
-                max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
-            )
 
     @auto_await
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
@@ -1149,7 +1280,7 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
-        if self.distillation_enabled:
+        if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.wake_up()
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
@@ -1158,7 +1289,7 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        if self.distillation_enabled:
+        if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.sleep()
         output = DataProto.concat(outputs)
 
