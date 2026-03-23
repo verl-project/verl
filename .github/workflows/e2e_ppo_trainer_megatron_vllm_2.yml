@@ -124,8 +124,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps --force-reinstall .
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@83a7c11 --no-deps --no-build-isolation
-          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@5455f0a --no-deps --no-build-isolation
+          pip3 install megatron-bridge --no-deps
           pip3 install "nvidia-modelopt[torch]>=0.37.0" transformers==4.57.1
       - name: Prepare GSM8K dataset
         run: |
