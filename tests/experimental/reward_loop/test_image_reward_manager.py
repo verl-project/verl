@@ -14,11 +14,9 @@
 
 import os
 
-import numpy as np
 import ray
 import torch
 from hydra import compose, initialize_config_dir
-from PIL import Image
 
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
@@ -26,13 +24,11 @@ from verl.utils import hf_tokenizer
 
 
 def create_data_samples(tokenizer, data_source="ocr") -> DataProto:
-    images = ["tests/experimental/reward_loop/assets/ocr.jpg"]
-    prompts = ['a photo of displaying "OCR"']
-    pil_images = [np.array(Image.open(img).convert("RGB").resize((512, 512))) for img in images]
-    responses = [torch.tensor(img).permute(2, 0, 1) / 255.0 for img in pil_images]
-    data_source = [data_source] * len(images)
-    reward_info = [{"ground_truth": "OCR"}] * len(images)
-    extra_info = [{}] * len(images)
+    prompts = ['a photo of displaying "OCR"'] * 3
+    responses = [torch.randn((3, 512, 512))] * 3
+    data_source = [data_source] * len(responses)
+    reward_info = [{"ground_truth": "OCR"}] * len(responses)
+    extra_info = [{}] * len(responses)
 
     responses = torch.stack(responses)
     prompt_length = 1024

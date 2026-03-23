@@ -121,6 +121,14 @@ jobs:
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py
 
+      - name: Install Levenshtein to compute OCR score
+        run: |
+          pip3 install python-Levenshtein
+      - name: Running vllm agent loop with image reward manager tests on 2 L20 GPUs
+        run: |
+          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_image_reward_manager.py
+
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, reward_model_vllm]
