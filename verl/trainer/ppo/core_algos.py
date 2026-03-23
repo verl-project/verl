@@ -811,9 +811,12 @@ def agg_loss(
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
     elif loss_agg_mode.startswith("seq-mean"):
-        # TODO: Correct and unify the denominator logic.
         if global_batch_size is not None:
-            seq_denominator = global_batch_size * dp_size
+            # Normalize by global_batch_size and multiply by dp_size to cancel FSDP
+            # gradient averaging, consistent with the token-mean branch:
+            #   token-mean: loss = local_sum / global_tokens * dp_size
+            #   seq-mean:   loss = local_seq_sum / global_batch_size * dp_size
+            seq_denominator = global_batch_size / dp_size
         else:  # The default logic which is only correct when the batch sizes are even.
             local_bsz = loss_mat.shape[0]
             seq_denominator = local_bsz
