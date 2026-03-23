@@ -53,7 +53,7 @@ def init_config() -> DictConfig:
 
     config.actor_rollout_ref.rollout.nnodes = 1
 
-    qwen_pipeline = "verl.models.diffusers_model.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb"
+    qwen_pipeline = "verl.models.diffusion.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb"
     config.actor_rollout_ref.rollout.engine_kwargs.vllm_omni = {"custom_pipeline": qwen_pipeline}
     config.reward.reward_manager.name = "image"
     config.trainer.n_gpus_per_node = 4

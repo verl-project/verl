@@ -55,7 +55,7 @@ DEFAULT_PROMPTS = [
     "A watercolor painting of a lighthouse on a cliff at sunset with crashing waves.",
 ]
 DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, distorted, bad anatomy, extra limbs"
-DEFAULT_QWEN_PIPELINE = "verl.models.diffusers_model.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb"
+DEFAULT_QWEN_PIPELINE = "verl.models.diffusion.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb"
 PROMPT_TEMPLATE_ENCODE_START_IDX = 34
 
 
