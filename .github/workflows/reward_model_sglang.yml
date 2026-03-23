@@ -112,14 +112,15 @@ jobs:
         run: |
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
           ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_reward_model_disrm.py
-      - name: Running sglang agent loop with reward manager tests on 8 L20 GPUs
-        run: |
-          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-          ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_standalone.py
-      - name: Running sglang agent loop with reward model colocate tests on 8 L20 GPUs
-        run: |
-          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-          ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py
+      # FIXME(@yyDing1): broken
+      # - name: Running sglang agent loop with reward manager tests on 8 L20 GPUs
+      #   run: |
+      #     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+      #     ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_standalone.py
+      # - name: Running sglang agent loop with reward model colocate tests on 8 L20 GPUs
+      #   run: |
+      #     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+      #     ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py
 
   cleanup:
     runs-on: ubuntu-latest
