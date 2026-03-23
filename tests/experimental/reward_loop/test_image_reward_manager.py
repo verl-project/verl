@@ -87,7 +87,7 @@ def test_reward_model_genrm():
     config.reward.reward_model.rollout.tensor_model_parallel_size = 2
     config.reward.reward_model.rollout.skip_tokenizer_init = False
     config.reward.reward_model.rollout.prompt_length = 2048
-    config.reward.reward_model.rollout.response_length = 4096
+    config.reward.reward_model.rollout.response_length = 32
 
     # 1. init reward model manager
     reward_loop_manager = RewardLoopManager(config)
