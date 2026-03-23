@@ -28,6 +28,7 @@ from .optimizer import OptimizerConfig
 
 __all__ = [
     "PolicyLossConfig",
+    "SelfDistillationConfig",
     "RouterReplayConfig",
     "ActorConfig",
     "FSDPActorConfig",
@@ -36,6 +37,80 @@ __all__ = [
     "QATConfig",
     "TorchTitanActorConfig",
 ]
+
+
+@dataclass
+class SelfDistillationConfig(BaseConfig):
+    """Configuration for self-distillation loss.
+
+    Args:
+        Distillation is enabled when policy_loss.loss_mode == "sdpo".
+        full_logit_distillation (bool): Whether to use full-logit KL distillation.
+        alpha (float): KL interpolation coefficient.
+            0.0=forward KL, 1.0=reverse KL, in-between=JSD.
+        success_reward_threshold (float): Minimum sequence reward to be considered successful.
+        teacher_regularization (str): Teacher regularization mode.
+            Options: "ema", "trust_region", "none".
+        teacher_update_rate (Optional[float]): Teacher update/mixing rate in [0,1].
+            If null, falls back to ema_update_rate.
+        ema_update_rate (float): Deprecated alias for teacher_update_rate.
+        distillation_topk (Optional[int]): If set, use top-k logits for distillation.
+        distillation_add_tail (bool): Whether to add a tail bucket for top-k distillation.
+        max_reprompt_len (int): Maximum length of the reprompted prompt.
+        reprompt_truncation (str): Truncation method for the reprompted prompt
+            (recommended to use "right" or "error").
+        dont_reprompt_on_self_success (bool): Whether to not reprompt on self-success.
+        remove_thinking_from_demonstration (bool): Whether to remove <think>...</think>
+            tags from successful demonstrations before reprompting.
+        is_clip (Optional[float]): Clip value for distillation IS ratio; None disables IS weighting.
+        reprompt_template (str): Template for reprompting. Uses {prompt}, {solution}, {feedback} placeholders.
+        solution_template (str): Template for formatting solution section.
+            Uses {successful_previous_attempt} placeholder.
+        feedback_template (str): Template for formatting feedback section. Uses {feedback_raw} placeholder.
+        include_environment_feedback (bool): Whether to include environment feedback
+            in reprompting for wrong attempts.
+        environment_feedback_only_without_solution (bool): If True, only use feedback
+            when no solution is available (ignore feedback when solution exists).
+    """
+
+    full_logit_distillation: bool = True
+    alpha: float = 0.0
+    success_reward_threshold: float = 1.0
+    teacher_regularization: str = "ema"
+    teacher_update_rate: Optional[float] = None
+    ema_update_rate: float = 0.05
+    distillation_topk: Optional[int] = None
+    distillation_add_tail: bool = True
+    max_reprompt_len: int = 10240
+    reprompt_truncation: str = "right"
+    dont_reprompt_on_self_success: bool = False
+    remove_thinking_from_demonstration: bool = False
+    is_clip: Optional[float] = None
+    reprompt_template: str = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question.\n"
+    solution_template: str = "\nCorrect solution:\n\n{successful_previous_attempt}\n\n"
+    feedback_template: str = "\nThe following is feedback from your unsuccessful earlier attempt:\n\n{feedback_raw}\n\n"
+    include_environment_feedback: bool = False
+    environment_feedback_only_without_solution: bool = False
+
+    def __post_init__(self):
+        if not 0.0 <= self.alpha <= 1.0:
+            raise ValueError(f"self_distillation.alpha must be in [0,1], got {self.alpha}")
+        valid_regularization_modes = {"ema", "trust_region", "none"}
+        if self.teacher_regularization not in valid_regularization_modes:
+            raise ValueError(
+                "self_distillation.teacher_regularization must be one of "
+                f"{sorted(valid_regularization_modes)}, got {self.teacher_regularization}"
+            )
+        if not 0.0 <= self.ema_update_rate <= 1.0:
+            raise ValueError(f"self_distillation.ema_update_rate must be in [0,1], got {self.ema_update_rate}")
+        if self.teacher_update_rate is not None and not 0.0 <= self.teacher_update_rate <= 1.0:
+            raise ValueError(f"self_distillation.teacher_update_rate must be in [0,1], got {self.teacher_update_rate}")
+        if self.distillation_topk is not None and self.distillation_topk <= 0:
+            raise ValueError(
+                f"self_distillation.distillation_topk must be a positive integer, got {self.distillation_topk}"
+            )
+        if self.is_clip is not None and self.is_clip <= 0:
+            raise ValueError(f"self_distillation.is_clip must be positive, got {self.is_clip}")
 
 
 @dataclass
@@ -74,7 +149,7 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'.
+        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'sdpo'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.
@@ -175,6 +250,7 @@ class ActorConfig(BaseConfig):
     engine: BaseConfig = field(default_factory=BaseConfig)
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
+    self_distillation: SelfDistillationConfig = field(default_factory=SelfDistillationConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
 
     # Store global batch info for loss aggregation:
