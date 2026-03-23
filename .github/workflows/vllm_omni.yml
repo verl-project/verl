@@ -58,6 +58,7 @@ on:
       # Entrypoints
       - ".github/workflows/vllm_omni.yml"
       - "tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py"
+      - "tests/experimental/agent_loop/test_diffusion_agent_loop.py"
       - "verl/workers/rollout/vllm_rollout/vllm_omni_async_server.py"
       - "verl/models/diffusion/**"
 
@@ -115,6 +116,10 @@ jobs:
         run: |
           ray stop --force
           pytest tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py -v -s
+      - name: Test diffusion agent loop
+        run: |
+          ray stop --force
+          pytest tests/experimental/agent_loop/test_diffusion_agent_loop.py -v -s
 
   cleanup:
     runs-on: ubuntu-latest
