@@ -76,6 +76,10 @@ tiled_mlp:
   # number of shards to split the input. Higher values reduce peak memory but may slightly impact performance.
   num_shards: 4
 
+# whether to enable Vision DP (distribute ViT computation across Ulysses SP ranks by image).
+# Only effective when ulysses_sequence_parallel_size > 1.
+vision_dp: False
+
 # MTP
 mtp:
 
