@@ -24,6 +24,7 @@ from verl.workers.config.model import MtpConfig
 __all__ = [
     "SamplingConfig",
     "MultiTurnConfig",
+    "TriageConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
     "TraceConfig",
@@ -44,6 +45,51 @@ class SamplingConfig(BaseConfig):
 
 
 @dataclass
+class TriageBudgetLevelConfig(BaseConfig):
+    max_search: int = 1
+    max_check: int = 0
+    max_turn: int = 2
+
+
+@dataclass
+class TriageBudgetConfig(BaseConfig):
+    easy: TriageBudgetLevelConfig = field(default_factory=TriageBudgetLevelConfig)
+    medium: TriageBudgetLevelConfig = field(
+        default_factory=lambda: TriageBudgetLevelConfig(max_search=2, max_check=1, max_turn=4)
+    )
+    hard: TriageBudgetLevelConfig = field(
+        default_factory=lambda: TriageBudgetLevelConfig(max_search=4, max_check=2, max_turn=6)
+    )
+
+
+@dataclass
+class TriageHeuristicConfig(BaseConfig):
+    easy_threshold: float = 0.35
+    hard_threshold: float = 0.65
+    long_words: int = 120
+    long_chars: int = 700
+
+
+@dataclass
+class TriageEscalationConfig(BaseConfig):
+    on_search_error: bool = True
+    on_empty_search: bool = True
+    on_checker_http_error: bool = True
+    contradiction_threshold: float = 0.30
+    support_threshold: float = 0.40
+    reset_counters_on_search_error: bool = True
+
+
+@dataclass
+class TriageConfig(BaseConfig):
+    enable: bool = False
+    online_escalation: bool = True
+    budget: TriageBudgetConfig = field(default_factory=TriageBudgetConfig)
+    heuristic: TriageHeuristicConfig = field(default_factory=TriageHeuristicConfig)
+    escalation: TriageEscalationConfig = field(default_factory=TriageEscalationConfig)
+
+
+@dataclass
 class MultiTurnConfig(BaseConfig):
     _mutable_fields = {"max_assistant_turns", "max_user_turns"}
 
@@ -59,6 +105,7 @@ class MultiTurnConfig(BaseConfig):
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
+    triage: TriageConfig = field(default_factory=TriageConfig)
 
 
 @dataclass

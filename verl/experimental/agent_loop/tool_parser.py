@@ -339,3 +339,131 @@ class Qwen3XMLToolParser(ToolParser):
         except Exception as e:
             logger.exception(f"Error in extracting tool call from response: {e}")
             return text, []
+
+
+@ToolParser.register("search_r1")
+class SearchR1ToolParser(ToolParser):
+    """Tool parser for SearchR1 format: <search>query</search>."""
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.search_regex = regex.compile(r"<search(?P<attrs>\s+[^>]*)?>(?P<body>.*?)</search>", regex.DOTALL)
+        self.search_self_closing_regex = regex.compile(r"<search(?P<attrs>\s+[^>]*)?/\s*>", regex.DOTALL)
+
+    @staticmethod
+    def _extract_search_queries(attrs: str | None, body: str) -> list[str]:
+        attrs = attrs or ""
+        body = body or ""
+
+        query_list_match = regex.search(r"""query_list\s*=\s*\[(.*?)\]""", attrs, regex.DOTALL | regex.IGNORECASE)
+        if query_list_match:
+            items = [
+                m.group(1).strip()
+                for m in regex.finditer(r"""["'](.*?)["']""", query_list_match.group(1), regex.DOTALL)
+                if m.group(1).strip()
+            ]
+            if items:
+                return items
+
+        query_match = regex.search(r"""query\s*=\s*["'](.*?)["']""", attrs, regex.DOTALL | regex.IGNORECASE)
+        if query_match:
+            query = query_match.group(1).strip()
+            if query:
+                return [query]
+
+        body = body.strip()
+        return [body] if body else []
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        loop = get_event_loop()
+        text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
+
+        function_calls = []
+
+        for match in self.search_regex.finditer(text):
+            for query in self._extract_search_queries(match.group("attrs"), match.group("body")):
+                arguments = json.dumps({"query_list": [query]}, ensure_ascii=False)
+                function_calls.append(FunctionCall(name="search", arguments=arguments))
+
+        for match in self.search_self_closing_regex.finditer(text):
+            for query in self._extract_search_queries(match.group("attrs"), ""):
+                arguments = json.dumps({"query_list": [query]}, ensure_ascii=False)
+                function_calls.append(FunctionCall(name="search", arguments=arguments))
+
+        if not function_calls:
+            return text, []
+
+        content = self.search_regex.sub("", text)
+        content = self.search_self_closing_regex.sub("", content)
+        return content, function_calls
+
+
+@ToolParser.register("search_r1_with_checker")
+class SearchR1WithCheckerToolParser(ToolParser):
+    """Tool parser for SearchR1 checker format: <search> and <check> tags."""
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.search_regex = regex.compile(r"<search(?P<attrs>\s+[^>]*)?>(?P<body>.*?)</search>", regex.DOTALL)
+        self.search_self_closing_regex = regex.compile(r"<search(?P<attrs>\s+[^>]*)?/\s*>", regex.DOTALL)
+        self.check_regex = regex.compile(r"<check>(.*?)</check>", regex.DOTALL)
+
+    @staticmethod
+    def _extract_search_queries(attrs: str | None, body: str) -> list[str]:
+        attrs = attrs or ""
+        body = body or ""
+
+        query_list_match = regex.search(r"""query_list\s*=\s*\[(.*?)\]""", attrs, regex.DOTALL | regex.IGNORECASE)
+        if query_list_match:
+            items = [
+                m.group(1).strip()
+                for m in regex.finditer(r"""["'](.*?)["']""", query_list_match.group(1), regex.DOTALL)
+                if m.group(1).strip()
+            ]
+            if items:
+                return items
+
+        attr_match = regex.search(r"""query\s*=\s*["'](.*?)["']""", attrs, regex.DOTALL | regex.IGNORECASE)
+        if attr_match:
+            query = attr_match.group(1).strip()
+            if query:
+                return [query]
+
+        body = body.strip()
+        return [body] if body else []
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        loop = get_event_loop()
+        text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
+
+        function_calls = []
+
+        for match in self.search_regex.finditer(text):
+            for query in self._extract_search_queries(match.group("attrs"), match.group("body")):
+                arguments = json.dumps({"query_list": [query]}, ensure_ascii=False)
+                function_calls.append(FunctionCall(name="search", arguments=arguments))
+                logger.warning("[search_r1_with_checker] search query: %s", query[:300])
+
+        for match in self.search_self_closing_regex.finditer(text):
+            for query in self._extract_search_queries(match.group("attrs"), ""):
+                arguments = json.dumps({"query_list": [query]}, ensure_ascii=False)
+                function_calls.append(FunctionCall(name="search", arguments=arguments))
+                logger.warning("[search_r1_with_checker] search query: %s", query[:300])
+
+        for match in self.check_regex.findall(text):
+            answer = match.strip()
+            if answer:
+                arguments = json.dumps({"answer": answer}, ensure_ascii=False)
+                function_calls.append(FunctionCall(name="check", arguments=arguments))
+                logger.warning("[search_r1_with_checker] checker_input_answer: %s", answer[:200])
+
+        content = self.search_regex.sub("", text)
+        content = self.search_self_closing_regex.sub("", content)
+        content = self.check_regex.sub("", content)
+        return content, function_calls
