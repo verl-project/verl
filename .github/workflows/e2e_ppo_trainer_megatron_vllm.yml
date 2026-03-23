@@ -125,6 +125,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps --force-reinstall .
+          pip3 install megatron-bridge --no-deps
           pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
           pip3 install math-verify
       - name: Prepare GSM8K dataset
@@ -145,8 +146,6 @@ jobs:
       - name: clean up and install Megatron-Bridge
         run: |
           rm -rf checkpoints
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@83a7c11 --no-deps --no-build-isolation
-          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@5455f0a --no-deps --no-build-isolation
           pip3 install "nvidia-modelopt[torch]>=0.37.0" transformers==4.57.1
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge LoRA e2e to pre-load and save (Deepseek)
         run: |
@@ -181,6 +180,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install megatron-bridge --no-deps
           pip3 install math-verify
       - name: Prepare GSM8K dataset
         run: |
