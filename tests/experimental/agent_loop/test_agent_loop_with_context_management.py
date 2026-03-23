@@ -22,6 +22,7 @@ from omegaconf import OmegaConf
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, DictConfigWrap
 from verl.experimental.agent_loop.agent_loop_with_context_management import SummarizerAgentLoop
 from verl.experimental.agent_loop.context_manager import ContextState
+from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from verl.workers.rollout.replica import TokenOutput
 
@@ -113,6 +114,16 @@ def _build_loop(
     return loop, tokenizer
 
 
+def _build_expected_summary_ids(tokenizer: _FakeTokenizer, summary_text: str) -> list[int]:
+    system_prompt_ids = initialize_system_prompt(tokenizer)
+    summary_ids = tokenizer.apply_chat_template(
+        [{"role": "assistant", "content": summary_text}],
+        add_generation_prompt=True,
+        tokenize=True,
+    )
+    return summary_ids[len(system_prompt_ids) :]
+
+
 def test_summarizer_agent_loop_rejects_negative_max_context_compressions():
     with pytest.raises(ValueError, match="max_context_compressions must be non-negative"):
         _build_loop(responses=["hello"], max_context_compressions=-1)
@@ -145,9 +156,10 @@ async def test_summarizer_agent_loop_run_returns_multiple_outputs_after_summary_
     summary_text = "<summary>compressed summary</summary>"
     first_response = f"thinking...{summary_text}"
     second_response = "final answer"
+    raw_prompt = [{"role": "user", "content": "hello"}]
     loop, tokenizer = _build_loop(responses=[first_response, second_response], max_context_compressions=1)
 
-    outputs = await loop.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "hello"}])
+    outputs = await loop.run(sampling_params={}, raw_prompt=raw_prompt)
 
     assert len(outputs) == 2
     assert len(loop.server_manager.calls) == 2
@@ -155,10 +167,10 @@ async def test_summarizer_agent_loop_run_returns_multiple_outputs_after_summary_
 
     first_output_text = tokenizer.decode(outputs[0].response_ids)
     second_output_text = tokenizer.decode(outputs[1].response_ids)
-    summary_ids = tokenizer.encode(summary_text)
+    summary_ids = _build_expected_summary_ids(tokenizer, summary_text)
 
     assert first_output_text == first_response
-    assert second_output_text == summary_text + second_response
+    assert second_output_text == tokenizer.decode(summary_ids) + second_response
     assert outputs[0].response_mask == [1] * len(outputs[0].response_ids)
     assert outputs[1].response_mask[: len(summary_ids)] == [0] * len(summary_ids)
     assert outputs[1].response_mask[len(summary_ids) :] == [1] * len(tokenizer.encode(second_response))
@@ -197,12 +209,15 @@ async def test_summarizer_agent_loop_run_supports_multiple_compressions_until_ca
         f"step2...{summary2}",
         "final answer",
     ]
+    raw_prompt = [{"role": "user", "content": "hello"}]
     loop, tokenizer = _build_loop(responses=responses, max_context_compressions=2)
 
-    outputs = await loop.run(sampling_params={}, raw_prompt=[{"role": "user", "content": "hello"}])
+    outputs = await loop.run(sampling_params={}, raw_prompt=raw_prompt)
 
     assert len(outputs) == 3
     assert len(loop.server_manager.calls) == 3
+    summary1_ids = _build_expected_summary_ids(tokenizer, summary1)
+    summary2_ids = _build_expected_summary_ids(tokenizer, summary2)
     assert tokenizer.decode(outputs[0].response_ids) == responses[0]
-    assert tokenizer.decode(outputs[1].response_ids) == summary1 + responses[1]
-    assert tokenizer.decode(outputs[2].response_ids) == summary2 + responses[2]
+    assert tokenizer.decode(outputs[1].response_ids) == tokenizer.decode(summary1_ids) + responses[1]
+    assert tokenizer.decode(outputs[2].response_ids) == tokenizer.decode(summary2_ids) + responses[2]

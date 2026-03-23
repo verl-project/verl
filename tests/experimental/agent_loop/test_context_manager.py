@@ -21,6 +21,7 @@ from verl.experimental.agent_loop.context_manager import (
     SlidingWindowContextManager,
     SummarizerContextManager,
 )
+from verl.utils.chat_template import initialize_system_prompt
 
 
 class _FakeTokenizer:
@@ -33,6 +34,23 @@ class _FakeTokenizer:
     def decode(self, token_ids: list[int], skip_special_tokens: bool = False) -> str:
         del skip_special_tokens
         return "".join(chr(token_id) for token_id in token_ids)
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools=None,
+        add_generation_prompt: bool = True,
+        tokenize: bool = True,
+        **kwargs,
+    ) -> list[int] | str:
+        del tools, kwargs
+        text = "".join(f"<{message['role']}>{message['content']}" for message in messages)
+        if add_generation_prompt:
+            text += "<assistant>"
+        if not tokenize:
+            return text
+        return self.encode(text)
 
 
 def _build_state(
@@ -62,6 +80,16 @@ def _build_state(
         num_turns=3,
         extra_fields={"source": "test"},
     )
+
+
+def _build_expected_summary_suffix_ids(tokenizer: _FakeTokenizer, summary_text: str) -> list[int]:
+    system_prompt_ids = initialize_system_prompt(tokenizer)
+    summary_ids = tokenizer.apply_chat_template(
+        [{"role": "assistant", "content": summary_text}],
+        add_generation_prompt=True,
+        tokenize=True,
+    )
+    return summary_ids[len(system_prompt_ids) :]
 
 
 @pytest.mark.asyncio
@@ -207,14 +235,15 @@ async def test_summarizer_compress_keeps_last_summary_when_multiple_exist():
     middle = "more thinking..."
     summary_new = "<summary>new summary</summary>"
     response_text = prefix + summary_old + middle + summary_new
+    prompt_messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+    ]
     manager = SummarizerContextManager(tokenizer=tokenizer)
     state = _build_state(
-        prompt_text="PROMPT",
+        prompt_text=tokenizer.apply_chat_template(prompt_messages, tokenize=False),
         response_text=response_text,
-        messages=[
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "prompt"},
-        ],
+        messages=prompt_messages,
     )
 
     compressed_state, compressed = await manager.check_and_compress(state)
@@ -225,32 +254,42 @@ async def test_summarizer_compress_keeps_last_summary_when_multiple_exist():
 @pytest.mark.asyncio
 async def test_summarizer_compress_keeps_original_prompt_and_last_summary():
     tokenizer = _FakeTokenizer()
-    prefix = "thinking..."
+    previous_assistant = "intermediate reasoning"
+    tool_observation = "tool observation"
+    thinking = "thinking..."
     summary_text = "<summary>new summary</summary>"
-    response_text = prefix + summary_text
+    final_assistant = thinking + summary_text
+    response_text = previous_assistant + tool_observation + final_assistant
+    response_mask = [1] * len(previous_assistant) + [0] * len(tool_observation) + [1] * len(final_assistant)
+    prompt_messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+    ]
     manager = SummarizerContextManager(tokenizer=tokenizer)
     state = _build_state(
-        prompt_text="PROMPT",
+        prompt_text=tokenizer.apply_chat_template(prompt_messages, tokenize=False),
         response_text=response_text,
         messages=[
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "prompt"},
-            {"role": "assistant", "content": "intermediate reasoning"},
-            {"role": "tool", "content": "tool observation"},
+            *prompt_messages,
+            {"role": "assistant", "content": previous_assistant},
+            {"role": "tool", "content": tool_observation},
+            {"role": "assistant", "content": final_assistant},
         ],
+        response_mask=response_mask,
         response_logprobs=[0.1] * len(response_text),
         routed_experts="stale-routes",
     )
 
     compressed_state, compressed = await manager.check_and_compress(state)
-    summary_ids = tokenizer.encode(summary_text)
+    compressed_messages = [*prompt_messages, {"role": "assistant", "content": summary_text}]
+    summary_ids = _build_expected_summary_suffix_ids(tokenizer, summary_text)
 
     assert compressed
-    assert compressed_state.messages == [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "prompt"},
-        {"role": "assistant", "content": summary_text},
-    ]
+    assert compressed_state.messages == compressed_messages
+    assert (
+        compressed_state.trajectory_ids[: len(state.trajectory_ids) - len(state.response_mask)]
+        == state.trajectory_ids[: len(state.trajectory_ids) - len(state.response_mask)]
+    )
     assert compressed_state.trajectory_ids[-len(summary_ids) :] == summary_ids
     assert compressed_state.response_mask == [0] * len(summary_ids)
     assert compressed_state.response_logprobs == [0.0] * len(summary_ids)

@@ -65,7 +65,10 @@ class SummarizerAgentLoop(AgentLoopWithContextManagement):
             raise ValueError("max_context_compressions must be non-negative.")
 
         self.max_context_compressions = max_context_compressions
-        self.context_manager = SummarizerContextManager(tokenizer=self.tokenizer)
+        self.context_manager = SummarizerContextManager(
+            tokenizer=self.tokenizer,
+            apply_chat_template_kwargs=self.apply_chat_template_kwargs,
+        )
 
     async def _generate_next_state(
         self,

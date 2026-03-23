@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
+from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
+from verl.utils.tokenizer import normalize_token_ids
 
 
 @dataclass
@@ -195,12 +197,15 @@ class SummarizerContextManager(ContextManager):
         summary_pattern: str = r"(<summary>)(.*?)(</summary>)",
         *,
         tokenizer: Any,
+        apply_chat_template_kwargs: Optional[dict[str, Any]] = None,
     ):
         if tokenizer is None:
             raise ValueError("tokenizer must be provided for SummarizerContextManager.")
 
         self.tokenizer = tokenizer
         self.summary_pattern = re.compile(summary_pattern, re.DOTALL)
+        self.apply_chat_template_kwargs = apply_chat_template_kwargs or {}
+        self.system_prompt_length = len(initialize_system_prompt(self.tokenizer, **self.apply_chat_template_kwargs))
 
     async def _should_compress(self, state: ContextState) -> bool:
         """Return True only when a model-generated summary exists in the current generated
@@ -242,16 +247,27 @@ class SummarizerContextManager(ContextManager):
         if summary_match is None:
             raise ValueError("SummarizerContextManager.compress expected a <summary> block but found none.")
 
-        summary_text = summary_match.group(0)
-        summary_ids = self.tokenizer.encode(summary_text, add_special_tokens=False)
-
         compressed_messages = []
         # Only keep the prompts from user and system, and append it with summarization
         for message in state.messages:
             if message.get("role") in {"assistant", "tool"}:
                 break
             compressed_messages.append(dict(message))
+        summary_text = summary_match.group(0)
         compressed_messages.append({"role": "assistant", "content": summary_text})
+
+        # NOTE: We use chat_template to rebuild the trajectory_ids because we need 'add_generation_prompt' to encourage
+        # the model continuously infering after the </summary> tag. Otherwise, model may directly output EOS and stop.
+        # Meanwhile, we should keep the original prompt_ids unchanged, since it may have multi-modal data.
+        # The system prompt prefix is removed here to align with the incremental append behavior in ToolAgentLoop.
+        tokenized_summary = apply_chat_template(
+            self.tokenizer,
+            [{"role": "assistant", "content": summary_text}],
+            add_generation_prompt=True,
+            tokenize=True,
+            **self.apply_chat_template_kwargs,
+        )
+        summary_ids = normalize_token_ids(tokenized_summary)[self.system_prompt_length :]
 
         # Reconstruct the context state
         compressed_trajectory_ids = prompt_ids + summary_ids
