@@ -106,9 +106,6 @@ width: 512
 # number of inference steps for diffusion model rollout
 num_inference_steps: 10
 
-# guidance scale for classifier-free guidance
-guidance_scale: 4.5
-
 # Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail
 engine_kwargs:
 

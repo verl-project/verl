@@ -317,8 +317,6 @@ class DiffusionRolloutConfig(RolloutConfig):
 
     num_inference_steps: int = 10
 
-    guidance_scale: float = 4.5
-
     def __post_init__(self):
         """Validate diffusion rollout config"""
         super().__post_init__()

@@ -91,10 +91,7 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> DiffusionAgentLoopOutput:
         raw_prompt = kwargs["raw_prompt"]
 
-        if self.config.actor_rollout_ref.rollout.guidance_scale > 0:
-            raw_negative_prompt = kwargs["raw_negative_prompt"]
-        else:
-            raw_negative_prompt = None
+        raw_negative_prompt = kwargs.get("raw_negative_prompt")
 
         # 1. extract images and videos from messages
         multi_modal_data = await self.process_vision_info(raw_prompt)
