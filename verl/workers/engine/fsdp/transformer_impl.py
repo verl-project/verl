@@ -131,6 +131,7 @@ class FSDPEngine(BaseEngine):
         # set FSDP offload params
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
+        self._is_optimizer_lazy_offload = self.engine_config.optimizer_lazy_offload
         self._is_lora = self.model_config.lora_rank > 0
 
         # QAT (Quantization-Aware Training)
@@ -621,6 +622,9 @@ class FSDPEngine(BaseEngine):
         """
         assert self.optimizer_config.clip_grad is not None
 
+        if self._is_optimizer_lazy_offload:
+            load_fsdp_optimizer(self.optimizer, get_device_id())
+
         if isinstance(self.module, FSDP):
             grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
         elif isinstance(self.module, FSDPModule):
@@ -644,6 +648,9 @@ class FSDPEngine(BaseEngine):
             from verl.utils.qat.core import invalidate_all_scales
 
             invalidate_all_scales(self.module)
+
+        if self._is_optimizer_lazy_offload:
+            offload_fsdp_optimizer(self.optimizer)
 
         return grad_norm.item()
 
@@ -725,7 +732,7 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.module)
 
-        if self._is_offload_optimizer:
+        if self._is_offload_optimizer or self._is_optimizer_lazy_offload:
             offload_fsdp_optimizer(self.optimizer)
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):

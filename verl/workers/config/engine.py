@@ -250,6 +250,8 @@ class FSDPEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["fsdp", "fsdp2"], f"strategy {self.strategy} not supported"
+        if self.optimizer_offload and self.optimizer_lazy_offload:
+            raise ValueError("optimizer_lazy_offload and optimizer_offload cannot both be True")
 
 
 @dataclass
