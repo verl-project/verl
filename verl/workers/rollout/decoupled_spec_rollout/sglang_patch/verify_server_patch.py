@@ -30,6 +30,7 @@ from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.decoupled_spec_ver
 
 # Set by SGLangHttpServer.launch_server immediately before verify launch_subprocesses runs.
 _pending_draft_actor_names: list[str] | None = None
+_pending_draft_actor_namespace: str | None = None
 
 
 def set_pending_draft_actor_names(names: list[str] | None) -> None:
@@ -39,6 +40,15 @@ def set_pending_draft_actor_names(names: list[str] | None) -> None:
     print(
         "[decoupled_spec][verify_server] set_pending_draft_actor_names "
         f"num_names={0 if _pending_draft_actor_names is None else len(_pending_draft_actor_names)}"
+    )
+
+
+def set_pending_draft_actor_namespace(namespace: str | None) -> None:
+    global _pending_draft_actor_namespace
+    _pending_draft_actor_namespace = namespace
+    print(
+        "[decoupled_spec][verify_server] set_pending_draft_actor_namespace "
+        f"namespace={_pending_draft_actor_namespace!r}"
     )
 
 logger = logging.getLogger(__name__)
@@ -589,12 +599,18 @@ def launch_subprocesses(
     )
     detoken_proc.start()
 
-    global _pending_draft_actor_names
+    global _pending_draft_actor_names, _pending_draft_actor_namespace
     draft_actor_names = _pending_draft_actor_names
     _pending_draft_actor_names = None
+    draft_actor_namespace = _pending_draft_actor_namespace
+    _pending_draft_actor_namespace = None
     print(
         "[decoupled_spec][verify_server] consume_pending_draft_actor_names "
         f"num_names={0 if draft_actor_names is None else len(draft_actor_names)}"
+    )
+    print(
+        "[decoupled_spec][verify_server] consume_pending_draft_actor_namespace "
+        f"namespace={draft_actor_namespace!r}"
     )
 
     ipc_config = DraftProxyIpcConfig.from_env()
@@ -606,11 +622,13 @@ def launch_subprocesses(
                 server_args,
                 port_args,
                 draft_actor_names,
+                draft_actor_namespace,
             ),
         ).start()
         print(
             "[decoupled_spec][verify_server] draftproxy_process_started "
-            f"num_names={len(draft_actor_names)} elapsed_s={time.perf_counter() - draftproxy_launch_start:.6f}"
+            f"num_names={len(draft_actor_names)} namespace={draft_actor_namespace!r} "
+            f"elapsed_s={time.perf_counter() - draftproxy_launch_start:.6f}"
         )
 
     if server_args.tokenizer_worker_num == 1:

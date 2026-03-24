@@ -41,8 +41,8 @@ def _maybe_init_ray():
         logger.exception("Failed to initialize Ray in DraftProxy subprocess")
 
 
-def _resolve_actor_handles(actor_names: list[str]) -> list[Any]:
-    return [ray.get_actor(actor_name) for actor_name in actor_names]
+def _resolve_actor_handles(actor_names: list[str], namespace: str | None = None) -> list[Any]:
+    return [ray.get_actor(actor_name, namespace=namespace) for actor_name in actor_names]
 
 
 def _resolve_target_dp_rank(source_dp_rank: int, requested_dp_rank: int | None) -> int:
@@ -316,6 +316,7 @@ def run_draftproxy_process(
     server_args: ServerArgs,
     port_args: PortArgs,
     draft_actor_names: list[str] | None = None,
+    draft_actor_namespace: str | None = None,
     draftproxy_manager_class=DraftProxyManager,
 ):
     _ = port_args
@@ -332,7 +333,7 @@ def run_draftproxy_process(
             raise ValueError("DraftProxy IPC config is not configured")
         if not draft_actor_names:
             raise ValueError("DraftProxy draft_actor_names are not configured")
-        draft_actor_handles = _resolve_actor_handles(draft_actor_names)
+        draft_actor_handles = _resolve_actor_handles(draft_actor_names, namespace=draft_actor_namespace)
         manager = draftproxy_manager_class(
             verify_replica_rank=get_verify_replica_rank_from_env(),
             num_speculative_steps=get_num_speculative_steps_from_env(),
@@ -342,7 +343,8 @@ def run_draftproxy_process(
         print(
             "[decoupled_spec][draftproxy] process_ready "
             f"verify_replica_rank={get_verify_replica_rank_from_env()} "
-            f"num_drafters={len(draft_actor_handles)} elapsed_s={time.perf_counter() - process_start:.6f}"
+            f"num_drafters={len(draft_actor_handles)} namespace={draft_actor_namespace!r} "
+            f"elapsed_s={time.perf_counter() - process_start:.6f}"
         )
         manager.event_loop()
     except Exception:

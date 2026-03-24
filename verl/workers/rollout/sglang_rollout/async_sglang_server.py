@@ -311,9 +311,11 @@ class SGLangHttpServer:
                 raise ValueError("enable_decoupled_spec verify SGLangHttpServer requires non-empty draft_actor_names")
             from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.verify_server_patch import (
                 set_pending_draft_actor_names,
+                set_pending_draft_actor_namespace,
             )
 
             set_pending_draft_actor_names(self.draft_actor_names)
+            set_pending_draft_actor_namespace(ray.get_runtime_context().namespace)
         launch_components = {}
         if self.config.enable_decoupled_spec:
             from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.apply_patch import (
