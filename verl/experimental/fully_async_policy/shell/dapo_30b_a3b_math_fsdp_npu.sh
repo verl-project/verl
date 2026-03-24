@@ -77,10 +77,6 @@ ref_offload=True
 actor_offload=False
 gen_tp=2
 fsdp_size=16
-rollout_is=null
-rollout_rs=seq_mean_k1
-rollout_rs_threshold=0.999_1.01
-rollout_token_veto_threshold=1e-4
 
 
 python3 -m verl.experimental.fully_async_policy.fully_async_main \
