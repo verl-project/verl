@@ -63,8 +63,21 @@ class DecoupledSGLangServerAdapter(BaseRollout):
             local_world_size=local_world_size,
             world_size=world_size,
         )
+        self.active_in_decoupled_spec = adapter_layout is not None
         if adapter_layout is None:
-            raise RuntimeError("DecoupledSGLangServerAdapter requires enable_decoupled_spec=True")
+            self.decoupled_spec_role = None
+            self.replica_rank = replica_rank if replica_rank != -1 else -1
+            self.rollout_rank = -1
+            self.node_rank = -1
+            self.local_rank = -1
+            self.server_actor_name = None
+            self.is_leader_rank = False
+            self.server_actor = None
+            print(
+                "[decoupled_spec][server_adapter] inactive_rank "
+                f"global_rank={rank} world_size={world_size} assigned_ranks_skipped=True"
+            )
+            return
 
         self.decoupled_spec_role = adapter_layout.role
         self.replica_rank = adapter_layout.replica_rank if replica_rank == -1 else replica_rank
@@ -92,6 +105,9 @@ class DecoupledSGLangServerAdapter(BaseRollout):
         return self.local_rank == 0
 
     async def _init_server_adapter(self):
+        if not self.active_in_decoupled_spec:
+            return
+
         if self._engine is not None:
             return
 
@@ -127,6 +143,8 @@ class DecoupledSGLangServerAdapter(BaseRollout):
         )
 
     async def resume(self, tags: list[str]):
+        if not self.active_in_decoupled_spec:
+            return
         resume_start = time.perf_counter()
         await self._init_server_adapter()
         if self._should_control_server() and self.config.free_cache_engine:
@@ -144,6 +162,8 @@ class DecoupledSGLangServerAdapter(BaseRollout):
             )
 
     async def release(self):
+        if not self.active_in_decoupled_spec:
+            return
         release_start = time.perf_counter()
         await self._init_server_adapter()
         if self._should_control_server() and self.config.free_cache_engine:
@@ -162,6 +182,8 @@ class DecoupledSGLangServerAdapter(BaseRollout):
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
     ):
+        if not self.active_in_decoupled_spec:
+            return
         if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
             print(
                 "[decoupled_spec][server_adapter] skip_update_weights "

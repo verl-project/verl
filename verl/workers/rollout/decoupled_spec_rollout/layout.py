@@ -255,10 +255,7 @@ def resolve_server_adapter_layout(
         role = DecoupledSpecRole.VERIFY
         server_prefix = "sglang_server"
     else:
-        raise ValueError(
-            f"global_rank {global_rank} is outside assigned decoupled-spec ranks "
-            f"[0, {topo.assigned_gpu_count}) for world_size={world_size}"
-        )
+        return None
 
     node_rank = rollout_rank // local_world_size
     local_rank = rollout_rank % local_world_size
