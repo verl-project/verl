@@ -247,6 +247,9 @@ class FSDPEngine(BaseEngine):
                     f"Unsupported model type: {self.model_config.model_type}"
                 )
                 self.model_config.hf_config.num_labels = 1
+                self.model_config.hf_config.classifier_dropout = 0.0
+                self.model_config.hf_config.hidden_dropout = "0"
+                self.model_config.hf_config.summary_dropout_prob = 0.0
                 module = load_valuehead_model(
                     local_path=self.model_config.local_path,
                     torch_dtype=torch_dtype,

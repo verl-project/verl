@@ -229,21 +229,14 @@ class MegatronEngine(BaseEngine):
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
-        # TODO: add more cases
-        is_value_model = (
-            "ForTokenClassification" in self.model_config.architectures[0]
-            or "ForSequenceClassification" in self.model_config.architectures[0]
-        )
-
-        self.is_value_model = is_value_model
-
+        self.is_value_model = self.model_config.model_type == "value_model"
         if self.engine_config.forward_only:
             wrap_with_ddp = False
         else:
             wrap_with_ddp = True
 
         wrap_config = McoreModuleWrapperConfig(
-            is_value_model=is_value_model,  # actor is not value model
+            is_value_model=self.is_value_model,
             share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
@@ -263,7 +256,9 @@ class MegatronEngine(BaseEngine):
         print(f"module: {len(module)}")
 
         if self.engine_config.use_dist_checkpointing:
-            load_mcore_dist_weights(module, self.engine_config.dist_checkpointing_path, is_value_model=is_value_model)
+            load_mcore_dist_weights(
+                module, self.engine_config.dist_checkpointing_path, is_value_model=self.is_value_model
+            )
         else:
             if self.vanilla_bridge:
                 self.bridge.load_weights(module, self.model_config.local_path)
