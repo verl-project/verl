@@ -276,15 +276,29 @@ class TaskRunner:
             config: Training configuration object containing all parameters needed
                    for setting up and running the PPO training process.
         """
-        # Print the initial configuration. `resolve=True` will evaluate symbolic values.
-        from pprint import pprint
-
         from omegaconf import OmegaConf
 
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
-        pprint(OmegaConf.to_container(config, resolve=True))
+        print_full_config = os.getenv("VERL_PRINT_FULL_CONFIG", "0") == "1"
+        if print_full_config:
+            # resolve=True will evaluate symbolic values.
+            from pprint import pprint
+
+            pprint(OmegaConf.to_container(config, resolve=True))
+        else:
+            # Keep startup logging concise to avoid blocking on giant pretty-print output.
+            print(
+                "TaskRunner config summary: "
+                f"trainer.nnodes={config.trainer.nnodes}, "
+                f"trainer.n_gpus_per_node={config.trainer.n_gpus_per_node}, "
+                f"actor.strategy={config.actor_rollout_ref.actor.strategy}, "
+                f"rollout.name={config.actor_rollout_ref.rollout.name}, "
+                f"model.path={config.actor_rollout_ref.model.path}, "
+                f"train_files={config.data.train_files}, "
+                f"val_files={config.data.val_files}"
+            )
         OmegaConf.resolve(config)
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
