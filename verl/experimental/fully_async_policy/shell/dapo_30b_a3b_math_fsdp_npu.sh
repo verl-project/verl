@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-export ENABLE_FULLY_ASYNC=1
 set -xeuo pipefail
 
 # Test script for fully_async_policy E2E regression testing
