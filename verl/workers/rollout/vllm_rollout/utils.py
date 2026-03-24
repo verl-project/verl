@@ -64,6 +64,17 @@ def get_device_uuid(device_id: int) -> str:
         return current_platform.get_device_uuid(device_id)
 
 
+def build_zmq_ipc_handle(device_uuid: str) -> str:
+    """Build a run-scoped IPC socket path to avoid cross-run collisions."""
+    namespace = os.environ.get("VERL_ZMQ_NAMESPACE") or os.environ.get("JOB_ID") or ""
+    if not namespace and os.environ.get("PBS_JOBID"):
+        namespace = os.environ["PBS_JOBID"].split(".", 1)[0]
+
+    safe_namespace = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in namespace)
+    suffix = f"-{safe_namespace}" if safe_namespace else ""
+    return f"ipc:///tmp/rl-colocate-zmq-{device_uuid}{suffix}.sock"
+
+
 def get_vllm_max_lora_rank(lora_rank: int):
     """
     For vLLM, automatically adjusts the `max_lora_rank` to the nearest allowed value.
@@ -233,7 +244,7 @@ class vLLMColocateWorkerExtension:
         """Get ZMQ handle for communication."""
         if not hasattr(self, "device_uuid") or not self.device_uuid:
             self.device_uuid = get_device_uuid(self.device.index)
-        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        return build_zmq_ipc_handle(self.device_uuid)
 
 
 class SuppressSignalInThread:

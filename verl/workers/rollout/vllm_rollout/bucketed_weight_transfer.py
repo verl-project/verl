@@ -156,6 +156,16 @@ class BucketedWeightSender:
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
         self.socket = self.zmq_context.socket(zmq.REQ)
+
+        if self.zmq_handle.startswith("ipc://"):
+            socket_path = self.zmq_handle[len("ipc://") :]
+            if os.path.exists(socket_path):
+                try:
+                    os.remove(socket_path)
+                    logger.warning(f"Removed stale ZMQ IPC socket path before bind: {socket_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to remove stale ZMQ IPC socket path {socket_path}: {e}")
+
         self.socket.bind(self.zmq_handle)
 
     def _init_buffer(self):
