@@ -80,7 +80,7 @@ def get_node_info():
         labels_dict = node.get("Labels", {})
         node_id = labels_dict.get("L0", "")
 
-        if node_id and ":" in node_id:
+        if node_id:
             has_l0 = True
 
         l_labels = []
@@ -89,9 +89,11 @@ def get_node_info():
             if key.startswith("L") and len(key) > 1:
                 try:
                     n = int(key[1:])
-                    value = value.split(":")
-                    l_labels.append((n, value[0]))
-                    l_blocks.append((n, int(value[1])))
+                    parts = value.split(":")
+                    label_value = parts[0]
+                    block_value = int(parts[1]) if len(parts) > 1 else 1
+                    l_labels.append((n, label_value))
+                    l_blocks.append((n, block_value))
                     height = max(height, n)
                 except ValueError:
                     continue

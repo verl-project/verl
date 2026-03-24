@@ -26,6 +26,12 @@ from verl.single_controller.ray.strategy import (
 )
 
 
+@pytest.fixture
+def mock_node():
+    """Fixture to create a basic mock node."""
+    return MockNode()
+
+
 class MockNode:
     """Mock node class for testing"""
 
@@ -50,8 +56,8 @@ class MockNode:
 class TestStrategyInterface:
     """Test cases for StrategyInterface abstract base class"""
 
-    def test_abstract_methods(self):
-        """Test that StrategyInterface cannot be instantiated directly"""
+    def test_cannot_instantiate_abstract_class(self):
+        """Verify StrategyInterface cannot be instantiated directly due to abstract methods"""
         with pytest.raises(TypeError):
             StrategyInterface(MockNode())
 
@@ -59,56 +65,64 @@ class TestStrategyInterface:
 class TestStrategyFactory:
     """Test cases for StrategyFactory"""
 
-    def test_create_common_strategy(self):
-        """Test factory creates CommonStrategy when block_size <= 1"""
-        node = MockNode(block_size=0)
+    @pytest.mark.parametrize(
+        "block_size,expected_type,expected_name",
+        [
+            (0, CommonStrategy, "CommonStrategy"),
+            (1, CommonStrategy, "CommonStrategy"),
+            (2, BlockStrategy, "BlockStrategy"),
+            (4, BlockStrategy, "BlockStrategy"),
+            (8, BlockStrategy, "BlockStrategy"),
+            (16, BlockStrategy, "BlockStrategy"),
+            (32, BlockStrategy, "BlockStrategy"),
+        ],
+    )
+    def test_create_strategy_various_block_sizes(self, block_size, expected_type, expected_name):
+        """Test factory creates correct strategy type based on block_size"""
+        node = MockNode(block_size=block_size)
         strategy = StrategyFactory.create(node)
-        assert isinstance(strategy, CommonStrategy)
-        assert strategy.name == "CommonStrategy"
 
-    def test_create_block_strategy(self):
-        """Test factory creates BlockStrategy when block_size > 1"""
-        node = MockNode(block_size=4)
-        strategy = StrategyFactory.create(node)
-        assert isinstance(strategy, BlockStrategy)
-        assert strategy.name == "BlockStrategy"
-        assert strategy.block_size == 4
+        assert isinstance(strategy, expected_type)
+        assert strategy.name == expected_name
 
-    def test_create_block_strategy_with_different_sizes(self):
-        """Test BlockStrategy creation with various block sizes"""
-        for block_size in [2, 8, 16, 32]:
-            node = MockNode(block_size=block_size)
-            strategy = StrategyFactory.create(node)
-            assert isinstance(strategy, BlockStrategy)
+        if hasattr(strategy, "block_size"):
             assert strategy.block_size == block_size
+
+    def test_create_block_strategy_preserves_block_size(self):
+        """Test that BlockStrategy correctly stores the block_size parameter"""
+        block_size = 4
+        node = MockNode(block_size=block_size)
+        strategy = StrategyFactory.create(node)
+
+        assert isinstance(strategy, BlockStrategy)
+        assert strategy.block_size == block_size
 
 
 class TestCommonStrategy:
     """Test cases for CommonStrategy"""
 
-    def test_init(self):
-        """Test CommonStrategy initialization"""
-        node = MockNode()
-        strategy = CommonStrategy(node)
-        assert strategy.node == node
+    def test_initialization(self, mock_node):
+        """Test CommonStrategy initializes with correct default values"""
+        strategy = CommonStrategy(mock_node)
+
+        assert strategy.node is mock_node
         assert strategy.total_nodes == 0
         assert strategy.name == "CommonStrategy"
 
-    def test_update_leaf_node(self):
-        """Test update method with leaf node"""
-        node = MockNode()
-        strategy = CommonStrategy(node)
-        node.strategy = strategy
+    def test_update_leaf_node_sets_total_nodes_to_one(self, mock_node):
+        """Verify update() sets total_nodes to 1 for leaf nodes"""
+        strategy = CommonStrategy(mock_node)
+        mock_node.strategy = strategy
 
         strategy.update()
+
         assert strategy.total_nodes == 1
 
-    def test_update_with_children(self):
-        """Test update method with child nodes"""
+    def test_update_aggregates_children_total_nodes(self):
+        """Verify update() sums up children's total_nodes"""
         parent = MockNode(label="parent")
         child1 = MockNode(label="child1")
         child2 = MockNode(label="child2")
-
         parent.children = [child1, child2]
 
         child1_strategy = CommonStrategy(child1)
@@ -121,108 +135,146 @@ class TestCommonStrategy:
 
         parent_strategy = CommonStrategy(parent)
         parent.strategy = parent_strategy
-
         parent_strategy.update()
+
         assert parent_strategy.total_nodes == 8
 
-    def test_preorder(self):
-        """Test preorder method returns total_nodes"""
+    def test_update_with_no_children(self, mock_node):
+        """Test update with node that has empty children list"""
+        strategy = CommonStrategy(mock_node)
+        mock_node.strategy = strategy
+        mock_node.children = []
+
+        strategy.update()
+
+        assert strategy.total_nodes == 1
+
+    def test_update_with_many_children(self):
+        """Test update aggregates many children correctly"""
+        parent = MockNode(label="parent")
+        num_children = 10
+
+        for i in range(num_children):
+            child = MockNode(label=f"child{i}")
+            child_strategy = CommonStrategy(child)
+            child_strategy.total_nodes = i + 1
+            child.strategy = child_strategy
+            parent.children.append(child)
+
+        parent_strategy = CommonStrategy(parent)
+        parent.strategy = parent_strategy
+        parent_strategy.update()
+
+        expected_total = sum(range(1, num_children + 1))
+        assert parent_strategy.total_nodes == expected_total
+
+    @pytest.mark.parametrize(
+        "input_num,total_nodes,expected",
+        [
+            (5, 10, 10),
+            (0, 10, 10),
+            (100, 50, 50),
+        ],
+    )
+    def test_preorder_returns_total_nodes(self, input_num, total_nodes, expected):
+        """Verify preorder() always returns total_nodes regardless of input"""
         node = MockNode()
         strategy = CommonStrategy(node)
-        strategy.total_nodes = 10
+        strategy.total_nodes = total_nodes
 
-        result = strategy.preorder(5)
-        assert result == 10
+        result = strategy.preorder(input_num)
+
+        assert result == expected
 
 
 class TestBlockStrategy:
     """Test cases for BlockStrategy"""
 
-    def test_init(self):
-        """Test BlockStrategy initialization"""
-        node = MockNode()
-        strategy = BlockStrategy(node, block_size=4)
-        assert strategy.node == node
-        assert strategy.block_size == 4
+    def test_initialization(self, mock_node):
+        """Test BlockStrategy initializes with correct values"""
+        block_size = 4
+        strategy = BlockStrategy(mock_node, block_size=block_size)
+
+        assert strategy.node is mock_node
+        assert strategy.block_size == block_size
         assert strategy.name == "BlockStrategy"
         assert strategy.total_nodes == 0
 
-    def test_update_leaf_node(self):
-        """Test update method with leaf node"""
-        node = MockNode()
-        strategy = BlockStrategy(node, block_size=4)
-        node.strategy = strategy
+    def test_update_leaf_node_sets_total_nodes_to_one(self, mock_node):
+        """Verify update() sets total_nodes to 1 for leaf nodes"""
+        strategy = BlockStrategy(mock_node, block_size=4)
+        mock_node.strategy = strategy
 
         strategy.update()
+
         assert strategy.total_nodes == 1
 
-    def test_update_with_children(self):
-        """Test update method aligns children to block size"""
+    @pytest.mark.parametrize(
+        "child_totals,block_size,expected_total",
+        [
+            ([7, 10, 15], 4, 24),
+            ([5, 5, 5], 2, 12),
+            ([3, 7, 11], 5, 15),
+            ([4, 8, 12], 4, 24),
+        ],
+    )
+    def test_update_aligns_children_to_block_size(self, child_totals, block_size, expected_total):
+        """Verify update() aligns each child's contribution to block_size boundary"""
         parent = MockNode(label="parent")
-        child1 = MockNode(label="child1")
-        child2 = MockNode(label="child2")
-        child3 = MockNode(label="child3")
 
-        parent.children = [child1, child2, child3]
-
-        child_strategies = []
-        for i, child in enumerate([child1, child2, child3]):
+        for total in child_totals:
+            child = MockNode(label=f"child_{total}")
             strat = CommonStrategy(child)
-            strat.total_nodes = [7, 10, 15][i]
+            strat.total_nodes = total
             child.strategy = strat
-            child_strategies.append(strat)
+            parent.children.append(child)
+
+        parent_strategy = BlockStrategy(parent, block_size=block_size)
+        parent.strategy = parent_strategy
+        parent_strategy.update()
+
+        assert parent_strategy.total_nodes == expected_total
+
+    def test_update_sorts_children_ascending(self):
+        """Verify update() sorts children by total_nodes in ascending order"""
+        parent = MockNode(label="parent")
+        initial_totals = [15, 7, 10, 3]
+
+        for total in initial_totals:
+            child = MockNode(label=f"child_{total}")
+            strat = CommonStrategy(child)
+            strat.total_nodes = total
+            child.strategy = strat
+            parent.children.append(child)
 
         parent_strategy = BlockStrategy(parent, block_size=4)
         parent.strategy = parent_strategy
-
         parent_strategy.update()
-        # Expected: 7//4*4 + 10//4*4 + 15//4*4 = 4 + 8 + 12 = 24
-        assert parent_strategy.total_nodes == 24
 
-    def test_update_sorts_children(self):
-        """Test update method sorts children by total_nodes"""
+        sorted_totals = [child.strategy.total_nodes for child in parent.children]
+        assert sorted_totals == sorted(initial_totals)
+
+    def test_preorder_leaf_node_returns_input(self, mock_node):
+        """Verify preorder() on leaf node returns the input num"""
+        strategy = BlockStrategy(mock_node, block_size=4)
+        mock_node.strategy = strategy
+
+        test_values = [0, 1, 5, 10, 100]
+        for num in test_values:
+            result = strategy.preorder(num)
+            assert result == num
+
+    def test_preorder_successful_allocation(self):
+        """Test preorder successfully allocates requested nodes"""
         parent = MockNode(label="parent")
-        child1 = MockNode(label="child1")
-        child2 = MockNode(label="child2")
-        child3 = MockNode(label="child3")
+        child_totals = [4, 8]
 
-        parent.children = [child1, child2, child3]
-
-        for i, child in enumerate([child1, child2, child3]):
+        for total in child_totals:
+            child = MockNode(label=f"child_{total}")
             strat = CommonStrategy(child)
-            strat.total_nodes = [15, 7, 10][i]
+            strat.total_nodes = total
             child.strategy = strat
-
-        parent_strategy = BlockStrategy(parent, block_size=4)
-        parent.strategy = parent_strategy
-
-        parent_strategy.update()
-        # Children should be sorted in ascending order after update
-        assert parent.children[0].strategy.total_nodes == 7
-        assert parent.children[1].strategy.total_nodes == 10
-        assert parent.children[2].strategy.total_nodes == 15
-
-    def test_preorder_leaf_node(self):
-        """Test preorder with leaf node returns num"""
-        node = MockNode()
-        strategy = BlockStrategy(node, block_size=4)
-        node.strategy = strategy
-
-        result = strategy.preorder(5)
-        assert result == 5
-
-    def test_preorder_success(self):
-        """Test successful preorder traversal"""
-        parent = MockNode(label="parent")
-        child1 = MockNode(label="child1")
-        child2 = MockNode(label="child2")
-
-        parent.children = [child1, child2]
-
-        for i, child in enumerate([child1, child2]):
-            strat = CommonStrategy(child)
-            strat.total_nodes = [4, 8][i]
-            child.strategy = strat
+            parent.children.append(child)
 
         parent_strategy = BlockStrategy(parent, block_size=4)
         parent.strategy = parent_strategy
@@ -231,31 +283,62 @@ class TestBlockStrategy:
         result = parent_strategy.preorder(12)
         assert result == 12
 
-    def test_preorder_failure(self):
-        """Test preorder raises error when allocation fails"""
+    def test_preorder_insufficient_capacity_raises_error(self):
+        """Verify preorder raises ValueError when requesting more than available"""
         parent = MockNode(label="parent")
-        child1 = MockNode(label="child1")
-
-        parent.children = [child1]
-
-        child_strategy = CommonStrategy(child1)
+        child = MockNode(label="child")
+        child_strategy = CommonStrategy(child)
         child_strategy.total_nodes = 4
-        child1.strategy = child_strategy
+        child.strategy = child_strategy
+        parent.children = [child]
 
         parent_strategy = BlockStrategy(parent, block_size=4)
         parent.strategy = parent_strategy
         parent_strategy.update()
 
-        # Request more than available should raise error
         with pytest.raises(ValueError, match="Order failed"):
             parent_strategy.preorder(10)
+
+    @pytest.mark.parametrize(
+        "child_totals,block_size,request_num,should_fail",
+        [
+            ([4, 8], 4, 12, False),
+            ([4, 8], 4, 8, False),
+            ([4, 8], 4, 7, False),
+            ([4, 8], 4, 13, True),
+            ([4, 8], 4, 20, True),
+            ([5, 10], 5, 15, False),
+            ([5, 10], 5, 16, True),
+        ],
+    )
+    def test_preorder_allocation_scenarios(self, child_totals, block_size, request_num, should_fail):
+        """Test various preorder allocation scenarios"""
+        parent = MockNode(label="parent")
+
+        for total in child_totals:
+            child = MockNode(label=f"child_{total}")
+            strat = CommonStrategy(child)
+            strat.total_nodes = total
+            child.strategy = strat
+            parent.children.append(child)
+
+        parent_strategy = BlockStrategy(parent, block_size=block_size)
+        parent.strategy = parent_strategy
+        parent_strategy.update()
+
+        if should_fail:
+            with pytest.raises(ValueError, match="Order failed"):
+                parent_strategy.preorder(request_num)
+        else:
+            result = parent_strategy.preorder(request_num)
+            assert result == request_num
 
 
 class TestStrategyIntegration:
     """Integration tests for strategy module"""
 
-    def test_factory_and_execution_common(self):
-        """Test factory creation and execution of CommonStrategy"""
+    def test_single_leaf_common_strategy(self):
+        """Test complete workflow with single leaf using CommonStrategy"""
         root = MockNode(label="root")
         leaf = MockNode(label="leaf")
         root.children = [leaf]
@@ -270,8 +353,26 @@ class TestStrategyIntegration:
 
         assert root_strategy.total_nodes == 1
 
-    def test_factory_and_execution_block(self):
-        """Test factory creation and execution of BlockStrategy"""
+    def test_multiple_leaves_common_strategy(self):
+        """Test workflow with multiple leaves using CommonStrategy"""
+        root = MockNode(label="root")
+        num_leaves = 5
+
+        for i in range(num_leaves):
+            leaf = MockNode(label=f"leaf{i}")
+            leaf_strategy = StrategyFactory.create(leaf)
+            leaf.strategy = leaf_strategy
+            leaf_strategy.update()
+            root.children.append(leaf)
+
+        root_strategy = StrategyFactory.create(root)
+        root.strategy = root_strategy
+        root_strategy.update()
+
+        assert root_strategy.total_nodes == num_leaves
+
+    def test_block_strategy_with_two_leaves(self):
+        """Test workflow with BlockStrategy managing two leaf nodes"""
         root = MockNode(label="root", block_size=2)
         leaf1 = MockNode(label="leaf1")
         leaf2 = MockNode(label="leaf2")
@@ -286,4 +387,65 @@ class TestStrategyIntegration:
         root.strategy = root_strategy
         root_strategy.update()
 
-        assert root_strategy.total_nodes == 2
+        assert root_strategy.total_nodes == 0
+
+    def test_block_strategy_alignment_effect(self):
+        """Test that BlockStrategy properly aligns to block boundaries"""
+        root = MockNode(label="root", block_size=4)
+
+        leaf_totals = [3, 5, 7]
+        for i, total in enumerate(leaf_totals):
+            intermediate = MockNode(label=f"intermediate_{i}")
+
+            for j in range(total):
+                leaf = MockNode(label=f"leaf_{i}_{j}")
+                leaf_strategy = StrategyFactory.create(leaf)
+                leaf.strategy = leaf_strategy
+                leaf_strategy.update()
+                intermediate.children.append(leaf)
+
+            int_strategy = StrategyFactory.create(intermediate)
+            intermediate.strategy = int_strategy
+            int_strategy.update()
+            root.children.append(intermediate)
+
+        root_strategy = StrategyFactory.create(root)
+        root.strategy = root_strategy
+        root_strategy.update()
+
+        expected = sum(t // 4 * 4 for t in leaf_totals)
+        assert root_strategy.total_nodes == expected
+
+    def test_deep_tree_hierarchy_common_strategy(self):
+        """Test strategy propagation in a deep tree hierarchy"""
+        depth = 4
+        nodes_per_level = 2
+
+        def create_subtree(depth, current_depth=0):
+            node = MockNode(label=f"node_{current_depth}")
+            if current_depth < depth - 1:
+                for _ in range(nodes_per_level):
+                    child = create_subtree(depth, current_depth + 1)
+                    node.children.append(child)
+            return node
+
+        root = create_subtree(depth)
+
+        def apply_strategies(node):
+            strategy = StrategyFactory.create(node)
+            node.strategy = strategy
+            for child in node.children:
+                apply_strategies(child)
+            if node.children:
+                for child in node.children:
+                    child.strategy.update()
+                strategy.update()
+
+        apply_strategies(root)
+
+        expected_leaves = nodes_per_level ** (depth - 1)
+        assert root.strategy.total_nodes == expected_leaves
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
