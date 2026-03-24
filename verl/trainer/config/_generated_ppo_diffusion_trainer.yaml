@@ -228,9 +228,14 @@ actor_rollout_ref:
     mode: async
     nnodes: 0
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
+    temperature: 1.0
+    top_k: -1
+    top_p: 1
     prompt_length: ${oc.select:data.max_prompt_length,512}
+    response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
     gpu_memory_utilization: 0.5
+    ignore_eos: false
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
@@ -253,18 +258,38 @@ actor_rollout_ref:
     disable_log_stats: true
     do_sample: true
     'n': 1
-    height: 512
-    width: 512
-    num_inference_steps: 10
+    over_sample_rate: 0
+    multi_stage_wake_up: false
     engine_kwargs:
+      vllm: {}
+      sglang: {}
+      trtllm: {}
       vllm_omni: {}
     val_kwargs:
       _target_: verl.workers.config.DiffusionSamplingConfig
+      top_k: -1
+      top_p: 1.0
+      temperature: 0
       'n': 1
       do_sample: false
       num_inference_steps: 40
       noise_level: 0.0
       seed: 42
+    multi_turn:
+      _target_: verl.workers.config.MultiTurnConfig
+      enable: false
+      max_assistant_turns: null
+      tool_config_path: null
+      max_user_turns: null
+      max_parallel_calls: 1
+      max_tool_response_length: 256
+      tool_response_truncate_side: middle
+      interaction_config_path: null
+      use_inference_chat_template: false
+      tokenization_sanity_check_mode: strict
+      format: hermes
+      num_repeat_rollouts: null
+    calculate_log_probs: false
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -279,6 +304,17 @@ actor_rollout_ref:
       backend: naive
       update_weights_bucket_megabytes: 2048
       engine_kwargs: {}
+    trace:
+      _target_: verl.workers.config.TraceConfig
+      project_name: ${oc.select:trainer.project_name,null}
+      experiment_name: ${oc.select:trainer.experiment_name,null}
+      backend: null
+      token2text: false
+      max_samples_per_step_per_worker: null
+    skip_rollout: false
+    skip_dump_dir: /tmp/rollout_dump
+    skip_tokenizer_init: true
+    enable_rollout_routing_replay: false
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
@@ -287,6 +323,12 @@ actor_rollout_ref:
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
       tool_config:
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.contents,[]}
+          level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
+          analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
+          discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
@@ -297,6 +339,13 @@ actor_rollout_ref:
       port: 9090
       file: /tmp/ray/session_latest/metrics/prometheus/prometheus.yml
       served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
+    quantization: null
+    quantization_config_file: null
+    mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
+    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
+    height: 512
+    width: 512
+    num_inference_steps: 10
     layered_summon: false
   model:
     _target_: verl.workers.config.DiffusionModelConfig
