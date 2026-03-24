@@ -10,7 +10,7 @@ import ray
 from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.decoupled_spec_rollout.layout import compute_decoupled_spec_topology
+from verl.workers.rollout.decoupled_spec_rollout.layout import DecoupledSpecRole, compute_decoupled_spec_topology
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica
 from verl.workers.rollout.sglang_rollout.async_sglang_server import SGLangHttpServer, visible_devices_keyword
 
@@ -29,6 +29,7 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(SGLangHttpServer)
+        self._base_gpu_id_override = 0
 
     async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
         """Bind this replica to the correct worker slice using decoupled-spec topology (subclass implements slice)."""
@@ -70,14 +71,12 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
                 f"worker_visible_devices={worker_visible_devices}"
             )
         base_gpu_id = 0
-        replica_world_size = self.world_size
         if os.environ.get(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}", None):
-            base_gpu_id = (0 + self.replica_rank * replica_world_size) % self.gpus_per_node
+            base_gpu_id = self._base_gpu_id_override
             print(
                 "[decoupled_spec][BaseDecoupledSGLangReplica] base_gpu_id_override "
                 f"server_role={self.server_role} replica_rank={self.replica_rank} "
-                f"base_gpu_id={base_gpu_id} gpus_per_node={self.gpus_per_node} "
-                f"replica_world_size={replica_world_size}"
+                f"base_gpu_id={base_gpu_id} gpus_per_node={self.gpus_per_node}"
             )
 
         for node_rank in range(self.nnodes):
@@ -108,7 +107,8 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
                 f"server_role={self.server_role} replica_rank={self.replica_rank} "
                 f"node_rank={node_rank} node_id={node_id} worker_slice=[{start_idx}:{end_idx}] "
                 f"worker_visible_devices_set={node_cuda_visible_devices_set} "
-                f"cuda_visible_devices={node_cuda_visible_devices} model_path={model_path}"
+                f"cuda_visible_devices={node_cuda_visible_devices} base_gpu_id={base_gpu_id} "
+                f"model_path={model_path}"
             )
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
@@ -179,13 +179,15 @@ class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
     async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
         rollout_cfg = self._topology_rollout_config if self._topology_rollout_config is not None else self.config
         topo = compute_decoupled_spec_topology(rollout_cfg, world_size=worker_group.world_size)
-        start = topo.verify_gpu_count + self.replica_rank * topo.draft_world_size
-        end = start + topo.draft_world_size
+        start, end = topo.get_replica_worker_range(DecoupledSpecRole.DRAFT, self.replica_rank)
+        self._base_gpu_id_override = topo.get_replica_base_gpu_id(
+            DecoupledSpecRole.DRAFT, self.replica_rank, self.gpus_per_node
+        )
         print(
             "[decoupled_spec][DraftSGLangReplica] init_hybrid_decoupled "
             f"server_role={self.server_role} replica_rank={self.replica_rank} "
             f"start={start} end={end} draft_world_size={topo.draft_world_size} "
-            f"verify_gpu_count={topo.verify_gpu_count}"
+            f"verify_gpu_count={topo.verify_gpu_count} base_gpu_id={self._base_gpu_id_override}"
         )
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start:end]
@@ -215,13 +217,15 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
 
     async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
         topo = compute_decoupled_spec_topology(self.config, world_size=worker_group.world_size)
-        start = self.replica_rank * topo.verify_world_size
-        end = start + topo.verify_world_size
+        start, end = topo.get_replica_worker_range(DecoupledSpecRole.VERIFY, self.replica_rank)
+        self._base_gpu_id_override = topo.get_replica_base_gpu_id(
+            DecoupledSpecRole.VERIFY, self.replica_rank, self.gpus_per_node
+        )
         print(
             "[decoupled_spec][VerifySGLangReplica] init_hybrid_decoupled "
             f"server_role={self.server_role} replica_rank={self.replica_rank} "
             f"start={start} end={end} verify_world_size={topo.verify_world_size} "
-            f"num_draft_handles={len(self.draft_actor_handles)}"
+            f"num_draft_handles={len(self.draft_actor_handles)} base_gpu_id={self._base_gpu_id_override}"
         )
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start:end]

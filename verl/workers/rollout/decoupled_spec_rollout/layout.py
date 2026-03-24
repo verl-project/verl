@@ -18,7 +18,18 @@ class DecoupledSpecRole(str, Enum):
 
 @dataclass(frozen=True)
 class DecoupledSpecTopology:
-    """GPU / replica counts for decoupled speculative rollout (verify first, then draft in global rank space)."""
+    """GPU / replica counts for decoupled speculative rollout.
+
+    Worker/GPU layout is draft-first in global rank space:
+    - ranks ``[0, draft_gpu_count)`` belong to draft replicas
+    - ranks ``[draft_gpu_count, draft_gpu_count + verify_gpu_count)`` belong to verifier replicas
+
+    Public replica ranks are shared across roles and ordered draft-first so they
+    can be reasoned about as a single namespace:
+    - drafts use shared replica ranks ``[0, num_draft_replicas)``
+    - verifiers use shared replica ranks
+      ``[num_draft_replicas, num_draft_replicas + num_verify_replicas)``
+    """
 
     world_size: int
     verify_world_size: int
@@ -27,6 +38,68 @@ class DecoupledSpecTopology:
     draft_gpu_count: int
     num_verify_replicas: int
     num_draft_replicas: int
+
+    @property
+    def num_total_replicas(self) -> int:
+        return self.num_draft_replicas + self.num_verify_replicas
+
+    def get_shared_replica_rank(self, role: DecoupledSpecRole | str, role_replica_rank: int) -> int:
+        role = DecoupledSpecRole(role)
+        if role == DecoupledSpecRole.DRAFT:
+            if not 0 <= role_replica_rank < self.num_draft_replicas:
+                raise ValueError(
+                    f"draft role_replica_rank out of range: {role_replica_rank}, "
+                    f"num_draft_replicas={self.num_draft_replicas}"
+                )
+            return role_replica_rank
+
+        if not 0 <= role_replica_rank < self.num_verify_replicas:
+            raise ValueError(
+                f"verify role_replica_rank out of range: {role_replica_rank}, "
+                f"num_verify_replicas={self.num_verify_replicas}"
+            )
+        return self.num_draft_replicas + role_replica_rank
+
+    def get_role_replica_rank(self, role: DecoupledSpecRole | str, shared_replica_rank: int) -> int:
+        role = DecoupledSpecRole(role)
+        if role == DecoupledSpecRole.DRAFT:
+            if not 0 <= shared_replica_rank < self.num_draft_replicas:
+                raise ValueError(
+                    f"shared draft replica_rank out of range: {shared_replica_rank}, "
+                    f"num_draft_replicas={self.num_draft_replicas}"
+                )
+            return shared_replica_rank
+
+        verify_start = self.num_draft_replicas
+        verify_end = verify_start + self.num_verify_replicas
+        if not verify_start <= shared_replica_rank < verify_end:
+            raise ValueError(
+                f"shared verify replica_rank out of range: {shared_replica_rank}, "
+                f"verify_rank_range=[{verify_start}, {verify_end})"
+            )
+        return shared_replica_rank - verify_start
+
+    def get_replica_worker_range(self, role: DecoupledSpecRole | str, shared_replica_rank: int) -> tuple[int, int]:
+        role = DecoupledSpecRole(role)
+        role_replica_rank = self.get_role_replica_rank(role, shared_replica_rank)
+        if role == DecoupledSpecRole.DRAFT:
+            start = role_replica_rank * self.draft_world_size
+            end = start + self.draft_world_size
+        else:
+            start = self.draft_gpu_count + role_replica_rank * self.verify_world_size
+            end = start + self.verify_world_size
+        return start, end
+
+    def get_replica_base_gpu_id(
+        self,
+        role: DecoupledSpecRole | str,
+        shared_replica_rank: int,
+        gpus_per_node: int,
+    ) -> int:
+        if gpus_per_node <= 0:
+            raise ValueError(f"gpus_per_node must be > 0, got {gpus_per_node}")
+        start, _ = self.get_replica_worker_range(role, shared_replica_rank)
+        return start % gpus_per_node
 
 
 @dataclass(frozen=True)
@@ -90,8 +163,9 @@ def compute_decoupled_spec_topology(
     """Compute verify/draft GPU counts and replica counts for decoupled speculative rollout.
 
     Global worker layout (indices in ``worker_group.workers``):
-    - ranks ``[0, verify_gpu_count)``: verify replicas (each replica is ``verify_world_size`` workers)
-    - ranks ``[verify_gpu_count, world_size)``: draft replicas (each replica is ``draft_world_size`` workers)
+    - ranks ``[0, draft_gpu_count)``: draft replicas (each replica is ``draft_world_size`` workers)
+    - ranks ``[draft_gpu_count, draft_gpu_count + verify_gpu_count)``:
+      verify replicas (each replica is ``verify_world_size`` workers)
     """
     rollout_config = omega_conf_to_dataclass(config, dataclass_type=RolloutConfig)
     verify_world_size = (
@@ -154,17 +228,20 @@ def resolve_server_adapter_layout(
 
     topo = compute_decoupled_spec_topology(rollout_config, world_size=world_size)
 
-    if global_rank < topo.verify_gpu_count:
-        replica_rank = global_rank // topo.verify_world_size
-        rollout_rank = global_rank - replica_rank * topo.verify_world_size
-        role = DecoupledSpecRole.VERIFY
-        server_prefix = "sglang_server"
-    else:
-        offset = global_rank - topo.verify_gpu_count
-        replica_rank = offset // topo.draft_world_size
-        rollout_rank = offset - replica_rank * topo.draft_world_size
+    if global_rank < topo.draft_gpu_count:
+        offset = global_rank
+        role_replica_rank = offset // topo.draft_world_size
+        replica_rank = topo.get_shared_replica_rank(DecoupledSpecRole.DRAFT, role_replica_rank)
+        rollout_rank = offset - role_replica_rank * topo.draft_world_size
         role = DecoupledSpecRole.DRAFT
         server_prefix = "sglang_draft_server"
+    else:
+        offset = global_rank - topo.draft_gpu_count
+        role_replica_rank = offset // topo.verify_world_size
+        replica_rank = topo.get_shared_replica_rank(DecoupledSpecRole.VERIFY, role_replica_rank)
+        rollout_rank = offset - role_replica_rank * topo.verify_world_size
+        role = DecoupledSpecRole.VERIFY
+        server_prefix = "sglang_server"
 
     node_rank = rollout_rank // local_world_size
     local_rank = rollout_rank % local_world_size

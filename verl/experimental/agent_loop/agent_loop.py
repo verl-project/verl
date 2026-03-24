@@ -968,7 +968,8 @@ class AgentLoopManager:
         await asyncio.gather(*[r.init_hybrid_decoupled(self.worker_group) for r in draft_replicas])
         draft_actor_handles = [r.draft_actor_handle for r in draft_replicas]
 
-        for replica_rank in range(topo.num_verify_replicas):
+        for verify_replica_rank in range(topo.num_verify_replicas):
+            replica_rank = topo.get_shared_replica_rank("verify", verify_replica_rank)
             self.rollout_replicas.append(
                 VerifySGLangReplica(
                     replica_rank=replica_rank,
