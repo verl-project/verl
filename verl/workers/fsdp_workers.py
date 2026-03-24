@@ -244,10 +244,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
             self._is_optimizer_lazy_offload = self.config.actor.fsdp_config.get("optimizer_lazy_offload", False)
 
-            if self._is_offload_optimizer and self._is_optimizer_lazy_offload:
-                raise ValueError("optimizer_lazy_offload is not supported when optimizer_offload is True")
-
-
         elif self._is_ref:
             # TODO: it seems that manual offload is slowly than FSDP offload
             self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
