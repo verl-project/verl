@@ -177,11 +177,13 @@ def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
     ``rope_parameters["rope_theta"]``, optionally nested per attention pattern when ``rope_parameters`` maps names
     to parameter dicts.
     """
+    # For transformers <= 4.57.6
     if hasattr(hf_config, "rope_theta"):
         return hf_config.rope_theta
     if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_theta"):
         return hf_config.text_config.rope_theta
 
+    # For transformers >= 5.0.0, check rope_parameters dict (optionally nested) for rope_theta
     rp = None
     if hasattr(hf_config, "rope_parameters"):
         rp = hf_config.rope_parameters
