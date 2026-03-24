@@ -192,11 +192,7 @@ class RolloutCorrectionConfig(BaseConfig):
         Returns:
             RolloutCorrectionConfig configured for decoupled mode with token-level IS
         """
-        return cls(
-            rollout_is="token",
-            rollout_is_threshold=threshold,
-            rollout_rs=None,
-        )
+        return cls(rollout_is="token", rollout_is_threshold=threshold, rollout_rs=None)
 
     @classmethod
     def decoupled_seq_is(cls, threshold: float = 2.0) -> "RolloutCorrectionConfig":
@@ -210,11 +206,7 @@ class RolloutCorrectionConfig(BaseConfig):
         Returns:
             RolloutCorrectionConfig configured for decoupled mode with sequence-level IS
         """
-        return cls(
-            rollout_is="sequence",
-            rollout_is_threshold=threshold,
-            rollout_rs=None,
-        )
+        return cls(rollout_is="sequence", rollout_is_threshold=threshold, rollout_rs=None)
 
     @classmethod
     def decoupled_token_icepop(
@@ -235,11 +227,7 @@ class RolloutCorrectionConfig(BaseConfig):
         Returns:
             RolloutCorrectionConfig configured for decoupled mode with token-level IcePop
         """
-        return cls(
-            rollout_is="token",
-            rollout_is_threshold=f"{threshold_lower}_{threshold}",
-            rollout_rs=None,
-        )
+        return cls(rollout_is="token", rollout_is_threshold=f"{threshold_lower}_{threshold}", rollout_rs=None)
 
     @classmethod
     def decoupled_seq_is_rs(
