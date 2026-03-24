@@ -1,0 +1,50 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Diffusion / FlowGRPO job: same trainer stack as ppo_trainer with diffusion rollout + model defaults.
+defaults:
+
+  # Full PPO job (algorithm, trainer, profiler, ray, distillation, critic, etc.)
+  - ppo_trainer
+
+  # Replace LLM rollout with diffusion rollout (vLLM-Omni, height/width/steps, etc.)
+  - override rollout@actor_rollout_ref.rollout: diffusion_rollout
+
+  # Replace hf_model with diffusion model config
+  - override model@actor_rollout_ref.model: diffusion_model
+
+  # Self overrides apply after composition
+  - _self_
+
+# Dataset config (inherits legacy_data from ppo_trainer; override fields here)
+data:
+
+  # get ground-truth based on data_source, now support ["ocr", "prompt"]
+  data_source: "prompt"
+
+# config for actor, rollout and reference model
+actor_rollout_ref:
+
+  # Model config
+  model:
+
+    # Select diffusion agent loop and DiffusionModelConfig
+    model_type: "diffusion_model"
+
+  # Actor config
+  actor:
+
+    # PPO clip ratio (FlowGRPO-style; tighter than default 0.2)
+    clip_ratio: 0.0001
+
+    # Maximum absolute value for advantage clipping
+    clip_ratio_high: 5.0
+
+# config for the trainer
+trainer:
+
+  # Experiment name for run identification in tracking tools (diffusion / FlowGRPO examples)
+  experiment_name: ocr

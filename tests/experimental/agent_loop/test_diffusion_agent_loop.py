@@ -27,7 +27,7 @@ def init_config() -> DictConfig:
     from hydra import compose, initialize_config_dir
 
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
-        config = compose(config_name="ppo_diffusion_trainer")
+        config = compose(config_name="diffusion_trainer")
 
     model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
     config.actor_rollout_ref.model.path = model_path
