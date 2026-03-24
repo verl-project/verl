@@ -19,9 +19,21 @@ engine_kwargs:
 
 # Sampling parameters used during validation (diffusion-specific).
 val_kwargs:
+  
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.DiffusionSamplingConfig
+
+  # whether to repeat n times for validation
   n: 1
+
+  # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
+
+  # number of inference steps for diffusion model rollout
   num_inference_steps: 40
+
+  # noise level for diffusion model rollout
   noise_level: 0.0
+
+  # random seed for validation
   seed: 42
