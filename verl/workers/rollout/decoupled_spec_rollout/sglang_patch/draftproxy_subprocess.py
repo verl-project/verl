@@ -63,6 +63,7 @@ class DraftProxyManager:
         draft_actor_handles: list[Any],
         ipc_config: DraftProxyIpcConfig,
     ):
+        init_start = time.perf_counter()
         self.proxy = DraftProxy(
             verify_replica_rank=verify_replica_rank,
             num_speculative_steps=num_speculative_steps,
@@ -71,8 +72,15 @@ class DraftProxyManager:
         self.ipc_config = ipc_config
         self.pending_polls: dict[str, PendingPoll] = {}
         self.init_ipc_channels()
+        print(
+            "[decoupled_spec][draftproxy] manager_init_done "
+            f"verify_replica_rank={verify_replica_rank} num_speculative_steps={num_speculative_steps} "
+            f"num_drafters={len(draft_actor_handles)} dp_endpoints={len(self.ipc_config.dp_ipc_endpoints)} "
+            f"elapsed_s={time.perf_counter() - init_start:.6f}"
+        )
 
     def init_ipc_channels(self):
+        init_start = time.perf_counter()
         self.context = zmq.Context(1 + 2 * len(self.ipc_config.dp_ipc_endpoints))
         self.recv_from_scheduler = {}
         self.send_to_scheduler = {}
@@ -94,6 +102,12 @@ class DraftProxyManager:
             self.recv_from_scheduler[dp_rank] = recv_socket
             self.send_to_scheduler[dp_rank] = send_socket
             self.poller.register(recv_socket, zmq.POLLIN)
+        print(
+            "[decoupled_spec][draftproxy] init_ipc_channels_done "
+            f"verify_replica_rank={self.proxy.verify_replica_rank} "
+            f"dp_ranks={sorted(self.ipc_config.dp_ipc_endpoints.keys())} "
+            f"elapsed_s={time.perf_counter() - init_start:.6f}"
+        )
 
     def close(self):
         for socket_map_name in ("recv_from_scheduler", "send_to_scheduler"):
@@ -104,10 +118,17 @@ class DraftProxyManager:
             self.context.term()
 
     def _submit_draft_request(self, request: DraftRequest) -> None:
+        submit_start = time.perf_counter()
         route = self.proxy.acquire_route(request.request_id)
         actor_handle = self.proxy.draft_actor_handles[route.draft_index]
         object_ref = actor_handle.handle_draft_request.remote(request) # 提交一个 draft 请求，不阻塞等待结果
         self.proxy.submit_request(request, object_ref)
+        print(
+            "[decoupled_spec][draftproxy] submit_to_drafter_done "
+            f"verify_replica_rank={self.proxy.verify_replica_rank} request_id={request.request_id} "
+            f"draft_round_id={request.draft_round_id} source_dp_rank={request.scheduler_dp_rank} "
+            f"draft_index={route.draft_index} elapsed_s={time.perf_counter() - submit_start:.6f}"
+        )
 
     def _collect_completed_drafts(self) -> None:
         # (request_id, draft_round_id) -> (draft_index, object_ref)
@@ -136,6 +157,7 @@ class DraftProxyManager:
                 continue
 
             try:
+                result_start = time.perf_counter()
                 result = ray.get(object_ref)
                 assert isinstance(result, DraftResult)
                 assert result.request_id == key.request_id
@@ -144,6 +166,12 @@ class DraftProxyManager:
                 logger.exception("DraftProxy failed to get draft result")
                 assert False
             self.proxy.complete_request(key, result)
+            print(
+                "[decoupled_spec][draftproxy] collect_completed_draft_done "
+                f"verify_replica_rank={self.proxy.verify_replica_rank} request_id={key.request_id} "
+                f"draft_round_id={key.draft_round_id} draft_tokens={len(result.draft_token_ids)} "
+                f"elapsed_s={time.perf_counter() - result_start:.6f}"
+            )
 
     def _send_poll_response(
         self,
@@ -151,6 +179,7 @@ class DraftProxyManager:
         *,
         timed_out: bool,
     ) -> None:
+        send_start = time.perf_counter()
         ready_results, missing_keys = self.proxy.peek_ready_results(pending_poll.request.keys)
         if not ready_results and missing_keys and not timed_out:
             return
@@ -171,6 +200,13 @@ class DraftProxyManager:
             )
             return
         target_socket.send_pyobj(DraftProxyMessage.from_poll_response(response))
+        print(
+            "[decoupled_spec][draftproxy] send_poll_response_done "
+            f"verify_replica_rank={self.proxy.verify_replica_rank} poll_id={pending_poll.request.poll_id} "
+            f"target_dp_rank={pending_poll.target_dp_rank} results={len(popped_results)} "
+            f"missing_keys={len(missing_keys)} timed_out={timed_out} "
+            f"elapsed_s={time.perf_counter() - send_start:.6f}"
+        )
 
     def _flush_pending_polls(self) -> None:
         now = time.monotonic()
@@ -193,6 +229,7 @@ class DraftProxyManager:
         poll_request: PollDraftResultsRequest,
         source_dp_rank: int,
     ) -> None:
+        handle_start = time.perf_counter()
         if poll_request.wait_mode != DraftPollWaitMode.ALL:
             raise RuntimeError(f"Unsupported poll wait mode: {poll_request.wait_mode}")
 
@@ -208,11 +245,29 @@ class DraftProxyManager:
         _, missing_keys = self.proxy.peek_ready_results(poll_request.keys)
         if not missing_keys:
             self._send_poll_response(pending_poll, timed_out=False)
+            print(
+                "[decoupled_spec][draftproxy] handle_poll_request_immediate "
+                f"verify_replica_rank={self.proxy.verify_replica_rank} poll_id={poll_request.poll_id} "
+                f"source_dp_rank={source_dp_rank} keys={len(poll_request.keys)} "
+                f"elapsed_s={time.perf_counter() - handle_start:.6f}"
+            )
             return
 
         self.pending_polls[poll_request.poll_id] = pending_poll
+        print(
+            "[decoupled_spec][draftproxy] handle_poll_request_pending "
+            f"verify_replica_rank={self.proxy.verify_replica_rank} poll_id={poll_request.poll_id} "
+            f"source_dp_rank={source_dp_rank} keys={len(poll_request.keys)} "
+            f"missing_keys={len(missing_keys)} pending_polls={len(self.pending_polls)} "
+            f"elapsed_s={time.perf_counter() - handle_start:.6f}"
+        )
 
     def _handle_proxy_message(self, message: DraftProxyMessage, source_dp_rank: int) -> None:
+        print(
+            "[decoupled_spec][draftproxy] handle_proxy_message "
+            f"verify_replica_rank={self.proxy.verify_replica_rank} source_dp_rank={source_dp_rank} "
+            f"message_type={message.message_type}"
+        )
         if message.message_type == DraftProxyMessageType.SUBMIT_DRAFT and message.request is not None:
             self._submit_draft_request(message.request) # verifier 向 DraftProxy 提交一个 DraftRequest->转发给 drafter
             return
@@ -231,6 +286,10 @@ class DraftProxyManager:
         raise RuntimeError(f"Unsupported DraftProxy message type: {message.message_type}")
 
     def event_loop(self):
+        print(
+            "[decoupled_spec][draftproxy] event_loop_start "
+            f"verify_replica_rank={self.proxy.verify_replica_rank}"
+        )
         try:
             while True:
                 self._collect_completed_drafts()
@@ -260,6 +319,7 @@ def run_draftproxy_process(
     setproctitle.setproctitle("sglang::draftproxy")
     configure_logger(server_args)
     parent_process = psutil.Process().parent()
+    process_start = time.perf_counter()
 
     try:
         _maybe_init_ray()
@@ -273,6 +333,11 @@ def run_draftproxy_process(
             num_speculative_steps=get_num_speculative_steps_from_env(),
             draft_actor_handles=draft_actor_handles,
             ipc_config=ipc_config,
+        )
+        print(
+            "[decoupled_spec][draftproxy] process_ready "
+            f"verify_replica_rank={get_verify_replica_rank_from_env()} "
+            f"num_drafters={len(draft_actor_handles)} elapsed_s={time.perf_counter() - process_start:.6f}"
         )
         manager.event_loop()
     except Exception:

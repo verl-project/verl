@@ -34,10 +34,19 @@ class DraftProxy:
     def register_draft_handles(self, handles: list[Any]) -> None:
         self.draft_actor_handles = list(handles)
         self.inflight_per_index = [0] * len(self.draft_actor_handles)
+        print(
+            f"[decoupled_spec][draft_proxy][verifier_rank={self.verify_replica_rank}]register_draft_handles "
+            f"num_drafters={len(self.draft_actor_handles)}"
+        )
 
     def acquire_route(self, request_id: str) -> DraftRoute:
         route = self.request_routes.get(request_id)
         if route is not None:
+            print(
+                f"[decoupled_spec][draft_proxy][verifier_rank={self.verify_replica_rank}]reuse_route "
+                f"request_id={request_id} "
+                f"draft_index={route.draft_index} inflight_per_index={self.inflight_per_index}"
+            )
             return route
         if not self.draft_actor_handles:
             raise ValueError("DraftProxy has no registered draft actor handles")
@@ -48,6 +57,11 @@ class DraftProxy:
         )
         route = DraftRoute(request_id=request_id, draft_index=best_idx)
         self.request_routes[request_id] = route
+        print(
+            f"[decoupled_spec][draft_proxy][verifier_rank={self.verify_replica_rank}]acquire_route "
+            f"request_id={request_id} "
+            f"draft_index={best_idx} inflight_per_index={self.inflight_per_index}"
+        )
         return route
 
     def _release_inflight(self, key: DraftLookupKey) -> None:
@@ -65,6 +79,12 @@ class DraftProxy:
             object_ref=object_ref,
         )
         self.inflight_per_index[route.draft_index] += 1
+        print(
+            f"[decoupled_spec][draft_proxy][verifier_rank={self.verify_replica_rank}]submit_request "
+            f"request_id={request.request_id} "
+            f"draft_round_id={request.draft_round_id} draft_index={route.draft_index} "
+            f"inflight_total={len(self.inflight_requests)} inflight_per_index={self.inflight_per_index}"
+        )
         return route
 
     def peek_ready_results(
@@ -94,8 +114,18 @@ class DraftProxy:
         for key in list(self.ready_results):
             if key.request_id == request_id:
                 self.ready_results.pop(key, None)
+        print(
+            f"[decoupled_spec][draft_proxy][verifier_rank={self.verify_replica_rank}]release_request "
+            f"request_id={request_id} "
+            f"remaining_routes={len(self.request_routes)} ready_results={len(self.ready_results)}"
+        )
 
     def terminate_request(self, message: RequestTerminateMessage) -> None:
+        print(
+            f"[decoupled_spec][draft_proxy][verifier_rank={self.verify_replica_rank}]terminate_request_start "
+            f"request_id={message.request_id} "
+            f"reason={message.reason} upper_bound={message.draft_round_id_upper_bound}"
+        )
         upper_bound = message.draft_round_id_upper_bound
         for key in list(self.inflight_requests):
             if key.request_id != message.request_id:
@@ -121,8 +151,20 @@ class DraftProxy:
         ) if upper_bound is not None else False
         if upper_bound is None or (not has_newer_inflight and not has_newer_ready):
             self.release_request(message.request_id)
+        print(
+            f"[decoupled_spec][draft_proxy][verifier_rank={self.verify_replica_rank}]terminate_request_done "
+            f"request_id={message.request_id} "
+            f"inflight_total={len(self.inflight_requests)} ready_results={len(self.ready_results)} "
+            f"inflight_per_index={self.inflight_per_index}"
+        )
 
     def complete_request(self, key: DraftLookupKey, result: DraftResult) -> Optional[DraftResult]:
         self._release_inflight(key)
         self.ready_results[key] = result
+        print(
+            f"[decoupled_spec][draft_proxy][verifier_rank={self.verify_replica_rank}]complete_request "
+            f"request_id={key.request_id} "
+            f"draft_round_id={key.draft_round_id} draft_tokens={len(result.draft_token_ids)} "
+            f"inflight_total={len(self.inflight_requests)} ready_results={len(self.ready_results)}"
+        )
         return result

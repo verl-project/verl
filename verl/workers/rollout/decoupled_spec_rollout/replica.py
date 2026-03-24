@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Any, Optional
 
 import ray
@@ -40,6 +41,11 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
         return {"server_role": self.server_role}
 
     async def launch_servers(self):
+        print(
+            "[decoupled_spec][BaseDecoupledSGLangReplica] launch_servers_start "
+            f"server_role={self.server_role} replica_rank={self.replica_rank} "
+            f"world_size={self.world_size} nnodes={self.nnodes}"
+        )
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
@@ -80,6 +86,11 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
                 )
             )
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
+            print(
+                "[decoupled_spec][BaseDecoupledSGLangReplica] launch_server_actor "
+                f"server_role={self.server_role} replica_rank={self.replica_rank} "
+                f"node_rank={node_rank} node_id={node_id} cuda_visible_devices={node_cuda_visible_devices}"
+            )
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
@@ -119,6 +130,11 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
             if is_valid_ipv6_address(server_address)
             else f"{server_address}:{server_port}"
         )
+        print(
+            "[decoupled_spec][BaseDecoupledSGLangReplica] launch_servers_done "
+            f"server_role={self.server_role} replica_rank={self.replica_rank} "
+            f"server_address={self._server_address}"
+        )
 
 
 class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
@@ -145,6 +161,11 @@ class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
         rollout_cfg = self._topology_rollout_config if self._topology_rollout_config is not None else self.config
         topo = compute_decoupled_spec_topology(rollout_cfg, world_size=worker_group.world_size)
         start = topo.verify_gpu_count + self.replica_rank * topo.draft_world_size
+        print(
+            "[decoupled_spec][DraftSGLangReplica] init_hybrid_decoupled "
+            f"server_role={self.server_role} replica_rank={self.replica_rank} "
+            f"start={start} draft_world_size={topo.draft_world_size} verify_gpu_count={topo.verify_gpu_count}"
+        )
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start : start + topo.draft_world_size]
         await self.launch_servers()
@@ -174,6 +195,12 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
     async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
         topo = compute_decoupled_spec_topology(self.config, world_size=worker_group.world_size)
         start = self.replica_rank * topo.verify_world_size
+        print(
+            "[decoupled_spec][VerifySGLangReplica] init_hybrid_decoupled "
+            f"server_role={self.server_role} replica_rank={self.replica_rank} "
+            f"start={start} verify_world_size={topo.verify_world_size} "
+            f"num_draft_handles={len(self.draft_actor_handles)}"
+        )
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start : start + topo.verify_world_size]
         await self.launch_servers()

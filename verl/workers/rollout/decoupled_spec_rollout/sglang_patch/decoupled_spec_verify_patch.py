@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import torch
 from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -97,23 +98,45 @@ class ExternalDraftVerifyWorker:
         return int(pad_token_id)
 
     def _build_req_verify_tokens(self, req, pad_token_id: int) -> list[int]: # 返回内容：last verified token + num_speculative_steps * draft token
+        build_start = time.perf_counter()
         tail_token = _get_req_tail_token_id(req) # 该 request 最后一个已经 commit 的 token
         draft_result = getattr(req, "decoupled_spec_draft_result", None)
 
         assert draft_result is not None, "draft_result is None"
+        if not draft_result.draft_token_ids:
+            print("receive empty draft result, for request may hit max_model_len in drafter")
+            return [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1)
 
-        if(tail_token == draft_result.draft_token_ids[0]): # 比对成功
+        if tail_token == draft_result.draft_token_ids[0]: # 比对成功
             draft_len = len(draft_result.draft_token_ids)
             # 如果 drafter 返回的 draft token 数量与 num_speculative_steps 一致，则直接返回
             if draft_len == self.speculative_num_draft_tokens:
+                print(
+                    "[decoupled_spec][verify_worker] build_req_verify_tokens_match_full "
+                    f"request_id={req.rid} draft_round_id={draft_result.draft_round_id} "
+                    f"draft_len={draft_len} elapsed_s={time.perf_counter() - build_start:.6f}"
+                )
                 return draft_result.draft_token_ids
             else:
+                print(
+                    "[decoupled_spec][verify_worker] build_req_verify_tokens_match_pad "
+                    f"request_id={req.rid} draft_round_id={draft_result.draft_round_id} "
+                    f"draft_len={draft_len} target_len={self.speculative_num_draft_tokens} "
+                    f"elapsed_s={time.perf_counter() - build_start:.6f}"
+                )
                 return draft_result.draft_token_ids + [pad_token_id] * (self.speculative_num_draft_tokens - draft_len)
 
+        print(
+            "[decoupled_spec][verify_worker] build_req_verify_tokens_mismatch "
+            f"request_id={req.rid} draft_round_id={draft_result.draft_round_id} "
+            f"tail_token={tail_token} first_draft_token={draft_result.draft_token_ids[0]} "
+            f"elapsed_s={time.perf_counter() - build_start:.6f}"
+        )
         return [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1) # 比对不通过，则通过 pad_token_id 填充出 fake VerifyInput
 
 
     def _build_verify_input(self, batch: ScheduleBatch) -> EagleVerifyInput:
+        build_start = time.perf_counter()
         draft_token_num = self.speculative_num_draft_tokens
         if draft_token_num < 2:
             raise RuntimeError("External draft verification requires at least one draft token per request.")
@@ -170,7 +193,7 @@ class ExternalDraftVerifyWorker:
             position_buf=position_buf,
         )
 
-        return EagleVerifyInput(
+        verify_input = EagleVerifyInput(
             draft_token=flat_draft_tokens,
             custom_mask=tree_mask,
             positions=positions,
@@ -185,22 +208,50 @@ class ExternalDraftVerifyWorker:
             seq_lens_sum=seq_lens_sum,
             seq_lens_cpu=batch.seq_lens_cpu,
         )
+        print(
+            "[decoupled_spec][verify_worker] build_verify_input_done "
+            f"batch_size={batch.batch_size()} draft_token_num={draft_token_num} "
+            f"elapsed_s={time.perf_counter() - build_start:.6f}"
+        )
+        return verify_input
 
     def forward_batch_generation(self, batch: ScheduleBatch) -> GenerationBatchResult:
+        forward_start = time.perf_counter()
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
             model_worker_batch = batch.get_model_worker_batch()
-            return self.target_worker.forward_batch_generation(model_worker_batch)
+            result = self.target_worker.forward_batch_generation(model_worker_batch)
+            print(
+                "[decoupled_spec][verify_worker] forward_batch_generation_extend_done "
+                f"batch_size={batch.batch_size()} elapsed_s={time.perf_counter() - forward_start:.6f}"
+            )
+            return result
 
+        verify_input_start = time.perf_counter()
         spec_info = self._build_verify_input(batch)
+        print(
+            "[decoupled_spec][verify_worker] build_verify_input_stage_done "
+            f"batch_size={batch.batch_size()} elapsed_s={time.perf_counter() - verify_input_start:.6f}"
+        )
         can_use_full_graph_path = spec_info.draft_token_num == self.speculative_num_draft_tokens
+        verify_start = time.perf_counter()
         logits_output, verify_output, _, can_run_cuda_graph = self.verify(batch, spec_info)
-        return GenerationBatchResult(
+        print(
+            "[decoupled_spec][verify_worker] verify_done "
+            f"batch_size={batch.batch_size()} accepted_tokens={sum(verify_output.accept_length_per_req_cpu)} "
+            f"elapsed_s={time.perf_counter() - verify_start:.6f}"
+        )
+        result = GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=verify_output.verified_id,
             num_accepted_tokens=sum(verify_output.accept_length_per_req_cpu),
             accept_length_per_req_cpu=verify_output.accept_length_per_req_cpu,
             can_run_cuda_graph=can_run_cuda_graph and can_use_full_graph_path,
         )
+        print(
+            "[decoupled_spec][verify_worker] forward_batch_generation_decode_done "
+            f"batch_size={batch.batch_size()} total_elapsed_s={time.perf_counter() - forward_start:.6f}"
+        )
+        return result
 
 
 def patch_speculative_worker_factory() -> None:

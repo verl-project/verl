@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Generator
 
 import ray
@@ -97,6 +98,12 @@ class DecoupledSGLangServerAdapter(BaseRollout):
         if not self._should_control_server():
             return
 
+        init_start = time.perf_counter()
+        print(
+            "[decoupled_spec][server_adapter] init_server_adapter_start "
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+            f"node_rank={self.node_rank} local_rank={self.local_rank} server_actor_name={self.server_actor_name}"
+        )
         self.server_actor = ray.get_actor(self.server_actor_name)
         server_address, server_port = await self.server_actor.get_server_address.remote()
         logger.debug(
@@ -112,48 +119,125 @@ class DecoupledSGLangServerAdapter(BaseRollout):
             launch_server=False,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+        print(
+            "[decoupled_spec][server_adapter] init_server_adapter_done "
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+            f"node_rank={self.node_rank} host={host} port={server_port} "
+            f"elapsed_s={time.perf_counter() - init_start:.6f}"
+        )
 
     async def resume(self, tags: list[str]):
+        resume_start = time.perf_counter()
         await self._init_server_adapter()
         if self._should_control_server() and self.config.free_cache_engine:
+            print(
+                "[decoupled_spec][server_adapter] resume_start "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                f"node_rank={self.node_rank} tags={tags}"
+            )
             await self._engine.resume_memory_occupation(tags=tags)
+            print(
+                "[decoupled_spec][server_adapter] resume_done "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                f"node_rank={self.node_rank} tags={tags} "
+                f"elapsed_s={time.perf_counter() - resume_start:.6f}"
+            )
 
     async def release(self):
+        release_start = time.perf_counter()
         await self._init_server_adapter()
         if self._should_control_server() and self.config.free_cache_engine:
+            print(
+                "[decoupled_spec][server_adapter] release_start "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                f"node_rank={self.node_rank} tags=['kv_cache', 'weights']"
+            )
             await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
+            print(
+                "[decoupled_spec][server_adapter] release_done "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                f"node_rank={self.node_rank} elapsed_s={time.perf_counter() - release_start:.6f}"
+            )
 
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
     ):
         if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
+            print(
+                "[decoupled_spec][server_adapter] skip_update_weights "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} global_steps={global_steps}"
+            )
             return
 
         from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 
+        total_start = time.perf_counter()
         self._ensure_device_mesh()
         await self._init_server_adapter()
+        print(
+            "[decoupled_spec][server_adapter] update_weights_start "
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+            f"node_rank={self.node_rank} local_rank={self.local_rank} global_steps={global_steps}"
+        )
 
         update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
         if self.config.get("quantization", None) == "fp8":
             from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
             logger.info("Convert bf16 weights to fp8 format before loading")
+            quant_start = time.perf_counter()
             fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
             weights = fp8_quantizer_helper.quant_weights_by_name(
                 weights,
                 dtype=self.model_config.hf_config.dtype,
             )
+            print(
+                "[decoupled_spec][server_adapter] update_weights_quantized "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                f"elapsed_s={time.perf_counter() - quant_start:.6f}"
+            )
 
+        batch_idx = 0
         async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+            batch_idx += 1
+            batch_start = time.perf_counter()
+            param_count = len(params_batch) if hasattr(params_batch, "__len__") else -1
+            print(
+                "[decoupled_spec][server_adapter] update_weights_bucket_start "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                f"batch_idx={batch_idx} param_count={param_count}"
+            )
             await sgl_update_weights(
                 engine=self._engine,
                 params_batch=params_batch,
                 device_mesh_key="infer_tp",
                 device_mesh=self.device_mesh,
             )
+            print(
+                "[decoupled_spec][server_adapter] update_weights_bucket_done "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                f"batch_idx={batch_idx} param_count={param_count} "
+                f"elapsed_s={time.perf_counter() - batch_start:.6f}"
+            )
 
         if self._should_control_server():
+            flush_start = time.perf_counter()
             await self._engine.flush_cache()
+            print(
+                "[decoupled_spec][server_adapter] update_weights_flush_cache_done "
+                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                f"elapsed_s={time.perf_counter() - flush_start:.6f}"
+            )
             if global_steps is not None:
+                global_steps_start = time.perf_counter()
                 await self.server_actor.set_global_steps.remote(global_steps)
+                print(
+                    "[decoupled_spec][server_adapter] update_weights_set_global_steps_done "
+                    f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+                    f"global_steps={global_steps} elapsed_s={time.perf_counter() - global_steps_start:.6f}"
+                )
+        print(
+            "[decoupled_spec][server_adapter] update_weights_done "
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+            f"batches={batch_idx} total_elapsed_s={time.perf_counter() - total_start:.6f}"
+        )
