@@ -98,7 +98,7 @@ RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.
 
 RUN pip install --upgrade transformers==5.3.0
 
-RUN pip install git+https://github.com/volcengine/verl.git@v0.7.0 && \
+RUN pip install git+https://github.com/volcengine/verl.git@v0.7.1 && \
     pip uninstall -y verl
 
 RUN apt-get update && apt-get install -y curl \
