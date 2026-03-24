@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logger
+import logging
+
 import ray
 from ray.util.placement_group import placement_group
 
 from .tree_topology import TreeTopology
+
+logger = logging.getLogger(__name__)
 
 
 def topology_aware_schedule(pgs, strategy, pg_name_prefix, lifetime):
