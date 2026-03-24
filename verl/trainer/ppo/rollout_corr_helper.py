@@ -545,7 +545,7 @@ def compute_rollout_correction_weights(
             - "sequence": Per-sequence weight (product of tokens; unbiased, high variance)
         rollout_is_threshold: Threshold specification for IS weights.
             - Single float or float-like string: TIS, clamp weights to the upper bound
-            - "lower_upper" string: ICE-POP, zero weights outside [lower, upper]
+            - "lower_upper" string: IcePop, zero weights outside [lower, upper]
         rollout_is_batch_normalize: Whether to normalize IS weights to have mean=1.0 per batch,
             default False.
 
@@ -589,7 +589,7 @@ def compute_rollout_correction_weights(
     # Zero out weights for padding tokens using response mask
     raw_rollout_is_weights = raw_rollout_is_weights * response_mask
 
-    # Apply TIS for a single upper bound and ICE-POP for a lower_upper string.
+    # Apply TIS for a single upper bound and IcePop for a lower_upper string.
     if not use_icepop:
         rollout_is_weights = raw_rollout_is_weights.clamp(max=rollout_is_threshold_upper)
     else:
@@ -674,7 +674,7 @@ def compute_is_metrics(
     Args:
         rollout_is_weights: Truncated IS weights (π_train / π_rollout),
             shape (batch_size, seq_length).
-        raw_rollout_is_weights: Raw masked IS weights before TIS / ICE-POP processing,
+        raw_rollout_is_weights: Raw masked IS weights before TIS / IcePop processing,
             shape (batch_size, seq_length).
         log_ratio_for_metrics: Log ratio of training to rollout probabilities (unclamped),
             shape varies by aggregation level.
@@ -738,7 +738,7 @@ def compute_is_metrics(
         metrics["rollout_is_min"] = rollout_is_weights.masked_fill(~mask_bool, float("inf")).min().item()
 
     # Compute standard deviation / ESS from the actual applied weights so exact
-    # ICE-POP diagnostics preserve zeroed-out coefficients.
+    # IcePop diagnostics preserve zeroed-out coefficients.
     mask_count: torch.Tensor = response_mask.sum()
     if mask_count > 1:
         weights_for_std: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
@@ -807,7 +807,7 @@ def compute_rollout_correction_and_rejection_mask(
         rollout_is: IS weight aggregation level (see compute_rollout_correction_weights for options).
             Set to None to disable IS weight computation.
         rollout_is_threshold: Threshold specification for IS weights.
-            Single float implies TIS; "lower_upper" implies ICE-POP.
+            Single float implies TIS; "lower_upper" implies IcePop.
         rollout_rs: Rejection sampling aggregation modes as a comma separated string
             (see compute_rollout_rejection_mask for the full list). Set to None to disable
             rejection sampling.

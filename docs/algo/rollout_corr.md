@@ -53,25 +53,21 @@ Rollout Correction provides a unified framework to handle **general off-policy p
 **Common off-policy scenarios:**
 
 1. **Policy Mismatch** (Implementation Differences)
-
    - Different precision: FP8 vs FP16 vs BF16 vs FP32
    - Different backends: vLLM vs SGLang vs FSDP vs Megatron
    - Different implementations even with identical weights
 
 2. **Temporal Lag** (Model Staleness)
-
    - Rollout uses older checkpoint while training has progressed
    - Asynchronous rollout workers with stale parameters
    - Common in distributed/async RL systems
 
 3. **Replay Buffers**
-
    - Training on historical trajectories from earlier iterations
    - Experience replay from different policy versions
    - Data augmentation or resampling strategies
 
 4. **Off-Policy Algorithms**
-
    - Behavioral cloning from expert demonstrations
    - DAPO (data from auxiliary policies)
    - Any algorithm using trajectories from a different policy
@@ -93,9 +89,9 @@ This critical implementation mistake that leads to RL training collapse was iden
 
 **Mathematically correct approaches:**
 
-- **Decoupled mode**: Three policies (π_rollout, π_old, π_θ) with IS correction from π_rollout to π_old
-- **Bypass mode**: Two policies (π_rollout = π_old, π_θ) using actual rollout policy as PPO anchor
-- **Bypass + Policy Gradient mode**: Two policies (π_rollout, π_θ) with IS/RS correction and no PPO clipping
+- **Decoupled mode**: Three policies (π*rollout, π_old, π*θ) with IS correction from π_rollout to π_old
+- **Bypass mode**: Two policies (π*rollout = π_old, π*θ) using actual rollout policy as PPO anchor
+- **Bypass + Policy Gradient mode**: Two policies (π*rollout, π*θ) with IS/RS correction and no PPO clipping
 
 See [Mathematical Formulations](rollout_corr_math.md#37-common-implementation-mistake) for detailed explanation.
 
@@ -104,8 +100,7 @@ See [Mathematical Formulations](rollout_corr_math.md#37-common-implementation-mi
 The implementation cleanly separates two orthogonal mechanisms:
 
 1. **IS Weights** (`rollout_is_weights`): Continuous reweighting for gradient correction
-
-   - Policy ratio: π_old/π_rollout (decoupled) or π_θ/π_rollout (bypass)
+   - Policy ratio: π*old/π_rollout (decoupled) or π*θ/π_rollout (bypass)
    - **Safety-bounded**: Clamped to [exp(-20), exp(20)] ≈ [2e-9, 5e8] to prevent overflow
      - Token level: Bounds per-token ratios
      - Sequence level: Bounds product of ratios (broadcast to all tokens)
@@ -170,7 +165,7 @@ For advanced customization or YAML-based configs:
 algorithm:
   rollout_correction:
     rollout_is: token # IS weights: "token", "sequence", or null
-    rollout_is_threshold: 2.0 # TIS upper bound, or "0.5_5.0" for ICE-POP
+    rollout_is_threshold: 2.0 # TIS upper bound, or "0.5_5.0" for IcePop
     rollout_is_batch_normalize: false # Batch normalize IS weights to mean=1.0
     rollout_rs: null # Rejection sampling: comma-separated canonical options (e.g. "token_k1,seq_max_k2")
     rollout_rs_threshold: null # Threshold spec: float(s) or "lower_upper" string(s)
@@ -225,7 +220,7 @@ Importance sampling weights aggregation level:
 - `null` = No IS weights computed (metrics-only mode)
 - `"token"`: Per-token IS weights
   - **Decoupled mode**: ρ_t = π_old(t)/π_rollout(t)
-  - **Bypass/Pure IS mode**: ρ_t = π_θ(t)/π_rollout(t)
+  - **Bypass/Pure IS mode**: ρ*t = π*θ(t)/π_rollout(t)
   - Independent truncation per token
   - Typical threshold: 1.5 - 5.0
 - `"sequence"`: Per-sequence weight ρ_seq = ∏_t ρ_t
@@ -239,10 +234,10 @@ All IS weights are safety-bounded to [exp(-20), exp(20)] ≈ [2e-9, 5e8]
 Threshold specification for IS weighting. Default: `2.0`
 
 - Single float or float-like string: TIS via `.clamp(max=rollout_is_threshold)`
-- `"lower_upper"` string such as `"0.5_5.0"`: ICE-POP, zero weights outside `[lower, upper]`
+- `"lower_upper"` string such as `"0.5_5.0"`: IcePop, zero weights outside `[lower, upper]`
 - Applied to IS weights for variance reduction
 - Separate from rejection sampling (controlled by `rollout_rs` parameters)
-- Unlike `rollout_rs`, ICE-POP does not modify `response_mask`; it only changes the IS coefficients
+- Unlike `rollout_rs`, IcePop does not modify `response_mask`; it only changes the IS coefficients
 
 ### `rollout_is_batch_normalize` (bool)
 
@@ -288,12 +283,10 @@ The rollout correction framework is built from **orthogonal components** that ca
 ### Key Components
 
 1. **Operating Mode** (Section: [Operation Modes](#operation-modes))
-
-   - **Decoupled**: Three policies (π_rollout, π_old, π_θ) with separate π_old computation
-   - **Bypass**: Two policies (π_rollout = π_old, π_θ), skips π_old computation
+   - **Decoupled**: Three policies (π*rollout, π_old, π*θ) with separate π_old computation
+   - **Bypass**: Two policies (π*rollout = π_old, π*θ), skips π_old computation
 
 2. **Loss Function** (in bypass mode, controlled by `loss_type`)
-
    - **PPO-clip** (`loss_type="ppo_clip"`, default): PPO clipped objective (IS handled by ratio)
    - **REINFORCE** (`loss_type="reinforce"`): Policy gradient with explicit IS weights (no clipping)
 
@@ -313,27 +306,27 @@ This section provides detailed guidance on choosing and using the verified prese
 
 #### Available Preset Methods
 
-| Preset Method                                                                  | Estimator        | Mode               | IS Level | RS Level | Properties                              |
-| ------------------------------------------------------------------------------ | ---------------- | ------------------ | -------- | -------- | --------------------------------------- |
-| **Decoupled PPO Mode** (3 policies: π_rollout, π_old, π_θ)                     |
-| `decoupled_token_is()`                                                         | Token-TIS        | Decoupled          | token    | -        | Token-level IS weights                    |
-| `decoupled_seq_is()`                                                           | Seq-TIS          | Decoupled          | sequence | -        | Sequence-level IS weights               |
-| `decoupled_seq_is_rs()`                                                        | Seq-MIS          | Decoupled          | sequence | sequence | Sequence IS + seq_sum_k1 RS               |
-| `decoupled_geo_rs()`                                                           | Geo-RS           | Decoupled          | -        | sequence | Geometric RS (seq_mean_k1)               |
-| `decoupled_geo_rs_token_tis()`                                                 | Geo-RS-Token-TIS | Decoupled          | token    | sequence | Geometric RS + token IS |
+| Preset Method                                                                  | Estimator        | Mode               | IS Level | RS Level | Properties                    |
+| ------------------------------------------------------------------------------ | ---------------- | ------------------ | -------- | -------- | ----------------------------- |
+| **Decoupled PPO Mode** (3 policies: π*rollout, π_old, π*θ)                     |
+| `decoupled_token_is()`                                                         | Token-TIS        | Decoupled          | token    | -        | Token-level IS weights        |
+| `decoupled_seq_is()`                                                           | Seq-TIS          | Decoupled          | sequence | -        | Sequence-level IS weights     |
+| `decoupled_seq_is_rs()`                                                        | Seq-MIS          | Decoupled          | sequence | sequence | Sequence IS + seq_sum_k1 RS   |
+| `decoupled_geo_rs()`                                                           | Geo-RS           | Decoupled          | -        | sequence | Geometric RS (seq_mean_k1)    |
+| `decoupled_geo_rs_token_tis()`                                                 | Geo-RS-Token-TIS | Decoupled          | token    | sequence | Geometric RS + token IS       |
 | **K3 KL Estimator** (more stable for small KL values)                          |
-| `decoupled_k3_rs()`                                                            | K3-RS            | Decoupled          | -        | sequence       | seq_mean_k3 RS             |
-| `decoupled_k3_rs_token_tis()`                                                  | K3-RS-Token-TIS  | Decoupled          | token    | sequence       | seq_mean_k3 RS  + token IS        |
+| `decoupled_k3_rs()`                                                            | K3-RS            | Decoupled          | -        | sequence | seq_mean_k3 RS                |
+| `decoupled_k3_rs_token_tis()`                                                  | K3-RS-Token-TIS  | Decoupled          | token    | sequence | seq_mean_k3 RS + token IS     |
 | **Bypass Mode (PPO-clip)** (2 policies; ratio handles IS, RS masks outliers)   |
-| `bypass_ppo_clip()`                                                            | -                | Bypass (PPO-clip)  | -        | -        | PPO-clip only                           |
-| `bypass_ppo_clip_geo_rs()`                                                     | Geo-RS           | Bypass (PPO-clip)  | -        | sequence | PPO-clip + Geo-RS                       |
-| `bypass_ppo_clip_k3_rs()`                                                      | K3-RS            | Bypass (PPO-clip)  | -        | sequence       | PPO-clip + K3-RS                       |
+| `bypass_ppo_clip()`                                                            | -                | Bypass (PPO-clip)  | -        | -        | PPO-clip only                 |
+| `bypass_ppo_clip_geo_rs()`                                                     | Geo-RS           | Bypass (PPO-clip)  | -        | sequence | PPO-clip + Geo-RS             |
+| `bypass_ppo_clip_k3_rs()`                                                      | K3-RS            | Bypass (PPO-clip)  | -        | sequence | PPO-clip + K3-RS              |
 | **Bypass Mode (REINFORCE)** (2 policies; explicit IS weights, no PPO clipping) |
-| `bypass_pg_is()`                                                               | Seq-TIS          | Bypass (REINFORCE) | sequence | -        | REINFORCE with explicit IS              |
-| `bypass_pg_geo_rs()`                                                           | Geo-RS           | Bypass (REINFORCE) | -        | sequence | REINFORCE with Geo-RS                   |
-| `bypass_pg_geo_rs_token_tis()`                                                 | Geo-RS-Token-TIS | Bypass (REINFORCE) | token    | sequence | REINFORCE + Geo-RS + token IS       |
+| `bypass_pg_is()`                                                               | Seq-TIS          | Bypass (REINFORCE) | sequence | -        | REINFORCE with explicit IS    |
+| `bypass_pg_geo_rs()`                                                           | Geo-RS           | Bypass (REINFORCE) | -        | sequence | REINFORCE with Geo-RS         |
+| `bypass_pg_geo_rs_token_tis()`                                                 | Geo-RS-Token-TIS | Bypass (REINFORCE) | token    | sequence | REINFORCE + Geo-RS + token IS |
 | **Other**                                                                      |
-| `disabled()`                                                                   | -                | -                  | -        | -        | Metrics only, no correction             |
+| `disabled()`                                                                   | -                | -                  | -        | -        | Metrics only, no correction   |
 
 **Note:**
 
@@ -490,7 +483,7 @@ config = RolloutCorrectionConfig.bypass_ppo_clip()
 
 **Components:**
 
-- **Operating Mode**: Bypass (2 policies: π_rollout = π_old, π_θ)
+- **Operating Mode**: Bypass (2 policies: π*rollout = π_old, π*θ)
 - **Loss**: PPO-clip (IS handled by ratio, no explicit IS weights)
 - **IS Aggregation**: None (PPO ratio handles it)
 - **RS**: None
@@ -536,7 +529,7 @@ config = RolloutCorrectionConfig.bypass_pg_is(threshold=2.0)
 
 **Components:**
 
-- **Operating Mode**: Bypass (2 policies: π_rollout, π_θ)
+- **Operating Mode**: Bypass (2 policies: π*rollout, π*θ)
 - **Loss**: REINFORCE (policy gradient with explicit IS weights, no PPO clipping)
 - **IS Aggregation**: Sequence-level
 - **RS**: None
@@ -732,11 +725,11 @@ This workflow uses bypass mode for efficiency.
 1. **Start with metrics only** to understand the off-policy gap:
 
    ```yaml
-    rollout_correction:
-      rollout_is: null
-      rollout_rs: null
-      bypass_mode: true # Bypass mode (recommended)
-      loss_type: ppo_clip # Default: PPO clipped objective
+   rollout_correction:
+     rollout_is: null
+     rollout_rs: null
+     bypass_mode: true # Bypass mode (recommended)
+     loss_type: ppo_clip # Default: PPO clipped objective
    ```
 
    Monitor `rollout_corr/kl`, `rollout_corr/log_ppl_abs_diff`, `rollout_corr/chi2_token` to assess off-policy gap.
@@ -744,25 +737,25 @@ This workflow uses bypass mode for efficiency.
 2. **Enable rejection sampling** if you see high outlier fractions:
 
    ```yaml
-    rollout_correction:
-      rollout_is: null
-      rollout_rs: sequence # or "geometric" for higher sensitivity
-      rollout_rs_threshold: 2.0
-      bypass_mode: true # Bypass mode
-      loss_type: ppo_clip # or "reinforce" for explicit IS weights
+   rollout_correction:
+     rollout_is: null
+     rollout_rs: sequence # or "geometric" for higher sensitivity
+     rollout_rs_threshold: 2.0
+     bypass_mode: true # Bypass mode
+     loss_type: ppo_clip # or "reinforce" for explicit IS weights
    ```
 
    This excludes outliers from training without modifying gradients.
 
 3. **Enable full IS correction** (with REINFORCE loss) once comfortable with metrics:
    ```yaml
-    rollout_correction:
-      rollout_is: sequence # Recommended: unbiased, suitable for most cases
-      rollout_is_threshold: 2.0
-      rollout_rs: sequence # or "geometric" for more aggressive filtering
-      rollout_rs_threshold: 2.0
-      bypass_mode: true # Bypass mode
-      loss_type: reinforce # REINFORCE with explicit IS weights
+   rollout_correction:
+     rollout_is: sequence # Recommended: unbiased, suitable for most cases
+     rollout_is_threshold: 2.0
+     rollout_rs: sequence # or "geometric" for more aggressive filtering
+     rollout_rs_threshold: 2.0
+     bypass_mode: true # Bypass mode
+     loss_type: reinforce # REINFORCE with explicit IS weights
    ```
 
 **Benefits of bypass mode:**
@@ -807,15 +800,12 @@ These metrics cover both:
 #### **Core IS Weight Metrics**
 
 - **`rollout_is_mean`**: Mean importance sampling weight across all valid tokens
-
   - Value close to 1.0 indicates minimal off-policy gap
 
 - **`rollout_is_std`**: Standard deviation of IS weights
-
   - Higher values indicate greater variance in IS weights
 
 - **`rollout_is_min`**: Minimum IS weight observed
-
   - Shows the most underweighted token/sequence
   - For sequence/geometric: computed from unclamped log-space ratios (true minimum)
   - For token: computed from safety-bounded weights
@@ -836,7 +826,6 @@ These metrics cover both:
 #### **Threshold Exceedance Metrics**
 
 - **`rollout_is_ratio_fraction_high`**: Fraction of weights exceeding upper threshold
-
   - Shows how often truncation/masking occurs on high end
   - For sequence/geometric: computed from unclamped log-space ratios (true exceedance)
   - For token: computed from safety-bounded weights (before threshold clamping)
@@ -849,7 +838,6 @@ These metrics cover both:
 #### **Sequence-Level Metrics** (for sequence aggregation)
 
 - **`rollout_is_seq_mean`**: Mean IS weight at sequence level
-
   - Should match `rollout_is_mean` for sequence-level aggregation
 
 - **`rollout_is_seq_std`**: Standard deviation of sequence-level IS weights
@@ -859,7 +847,6 @@ These metrics cover both:
 - **`rollout_is_seq_max`**: Maximum sequence-level IS weight
 
 - **`rollout_is_seq_max_deviation`**: Maximum absolute deviation from 1.0 at sequence level
-
   - Shows worst-case sequence off-policy gap
 
 - **`rollout_is_seq_fraction_high`**: Fraction of sequences exceeding upper threshold
@@ -869,7 +856,6 @@ These metrics cover both:
 #### **Rejection Sampling Metrics** (when `rollout_rs` is enabled)
 
 - **`rollout_rs_masked_fraction`**: Fraction of tokens rejected via rejection sampling
-
   - **Important**: Rejection sampling modifies `response_mask` (sets rejected tokens to 0)
   - **Separate from IS weights**: IS weights are still truncated; rejection is an independent filtering step
   - Only present when `rollout_rs` is enabled (token/sequence/geometric)
@@ -889,52 +875,43 @@ These metrics cover both:
 
 In bypass/pure IS mode, metrics measure the drift between π_θ and π_rollout directly.
 
-- **`training_ppl`**: Perplexity of training reference policy (π_old in decoupled mode, π_θ in bypass/pure IS mode)
-
+- **`training_ppl`**: Perplexity of training reference policy (π*old in decoupled mode, π*θ in bypass/pure IS mode)
   - **Formula**: `exp(-mean(log_probs))`
   - Lower values indicate higher model confidence
 
 - **`rollout_ppl`**: Perplexity of rollout policy π_rollout (e.g., vLLM BF16)
 
 - **`ppl_ratio`**: Ratio of training PPL to rollout PPL
-
   - **Formula**: `exp(mean(log(training_ppl / rollout_ppl)))`
   - **Meaning**: > 1.0 means training is less confident than rollout
 
 - **`training_log_ppl`**: Log perplexity of training policy
-
   - Useful for identifying trends (linear scale)
 
 - **`rollout_log_ppl`**: Log perplexity of rollout policy
 
 - **`log_ppl_diff`**: Mean difference in log perplexities
-
   - **Formula**: `mean(log_ppl_rollout - log_ppl_training)`
   - Sign indicates which policy is more confident
 
 - **`log_ppl_abs_diff`**: Mean absolute log perplexity difference
-
   - Magnitude of off-policy gap regardless of direction
 
 - **`log_ppl_diff_max`**: Maximum log perplexity difference across sequences
-
   - Identifies worst-case sequence
 
 - **`log_ppl_diff_min`**: Minimum log perplexity difference across sequences
 
 - **`kl`**: KL divergence KL(π_rollout || π_training)
-
   - **Formula**: `mean(log_prob_rollout - log_prob_training)`
   - **Note**: Can be negative (rollout is less confident)
 
 - **`k3_kl`**: K3 divergence (equals KL(π_rollout || π_training) in expectation)
-
   - **Formula**: `mean(exp(log_ratio) - log_ratio - 1)`
   - More stable than direct KL (non-negative per token)
   - Always >= 0
 
 - **`chi2_token`**: Chi-squared divergence at token level
-
   - **Formula**: `mean(ratio²) - 1` where ratio = π_training/π_rollout
   - Measures second moment of IS weight distribution
   - Always non-negative

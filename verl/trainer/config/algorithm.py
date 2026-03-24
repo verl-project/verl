@@ -87,7 +87,7 @@ class RolloutCorrectionConfig(BaseConfig):
         rollout_is_threshold (str | float): Threshold specification for IS weighting.
             Typical range: 1.5-5.0 for token level, 2.0-10.0 for sequence level.
             - Single float or float-like string (e.g. ``2.0``): TIS, clamp weights to the upper bound
-            - ``"lower_upper"`` string (e.g. ``"0.5_5.0"``): ICE-POP, zero weights outside [lower, upper]
+            - ``"lower_upper"`` string (e.g. ``"0.5_5.0"``): IcePop, zero weights outside [lower, upper]
             Default: 2.0
 
         rollout_is_batch_normalize (bool): Apply batch normalization to IS weights.
@@ -222,18 +222,18 @@ class RolloutCorrectionConfig(BaseConfig):
         threshold: float = 5.0,
         threshold_lower: float = 0.5,
     ) -> "RolloutCorrectionConfig":
-        """Decoupled Mode with exact token-level ICE-POP.
+        """Decoupled Mode with exact token-level IcePop.
 
         Keeping response_mask unchanged and
         zeroing token IS weights outside
         [threshold_lower, threshold].
 
         Args:
-            threshold (float): Upper ICE-POP bound. Default: 5.0
-            threshold_lower (float): Lower ICE-POP bound. Default: 0.5
+            threshold (float): Upper IcePop bound. Default: 5.0
+            threshold_lower (float): Lower IcePop bound. Default: 0.5
 
         Returns:
-            RolloutCorrectionConfig configured for decoupled mode with token-level ICE-POP
+            RolloutCorrectionConfig configured for decoupled mode with token-level IcePop
         """
         return cls(
             rollout_is="token",
@@ -384,17 +384,17 @@ class RolloutCorrectionConfig(BaseConfig):
         threshold: float = 5.0,
         threshold_lower: float = 0.5,
     ) -> "RolloutCorrectionConfig":
-        """Bypass mode with REINFORCE loss and exact token-level ICE-POP.
+        """Bypass mode with REINFORCE loss and exact token-level IcePop.
 
         Uses explicit IS weights in bypass mode and zeroes out token weights
         outside [threshold_lower, threshold] without modifying response_mask.
 
         Args:
-            threshold (float): Upper ICE-POP bound. Default: 5.0
-            threshold_lower (float): Lower ICE-POP bound. Default: 0.5
+            threshold (float): Upper IcePop bound. Default: 5.0
+            threshold_lower (float): Lower IcePop bound. Default: 0.5
 
         Returns:
-            RolloutCorrectionConfig configured for bypass mode with REINFORCE + token-level ICE-POP
+            RolloutCorrectionConfig configured for bypass mode with REINFORCE + token-level IcePop
         """
         return cls(
             rollout_is="token",

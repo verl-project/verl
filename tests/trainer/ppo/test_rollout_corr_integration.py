@@ -231,7 +231,7 @@ class TestRolloutISIntegration:
         assert not torch.allclose(pg_loss_no_weights, pg_loss_with_weights)
 
     def test_exact_icepop_matches_filtered_weighted_ppo_loss(self, config_with_rollout_is):
-        """ICE-POP should match the local RL zero-weight semantics."""
+        """IcePop should match the local RL zero-weight semantics."""
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         old_log_prob = torch.tensor([[-1.0, -1.0, -1.0]], device=device)

@@ -7,7 +7,7 @@ rollout_is: null
 
 # Threshold for IS weighting:
 # - float / float-like string: TIS upper bound
-# - "lower_upper" string: ICE-POP bounds
+# - "lower_upper" string: IcePop bounds
 rollout_is_threshold: 2.0
 
 # RS aggregation level: null (disabled), e.g. "token_k1", "seq_sum_k1", "seq_mean_k3"

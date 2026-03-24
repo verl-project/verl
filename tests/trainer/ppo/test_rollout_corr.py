@@ -366,7 +366,7 @@ def test_mask_mode():
 
 
 def test_exact_icepop_zeroes_weights_without_changing_mask():
-    """ICE-POP should zero OOB IS weights while preserving response_mask."""
+    """IcePop should zero OOB IS weights while preserving response_mask."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     raw_is_weights = torch.tensor([[0.4, 0.8, 6.0]], device=device)
