@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any, Optional
+from typing import Optional
 
 import ray
 
@@ -206,6 +206,11 @@ class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
         """Ray actor handle for this draft replica's HTTP server (node 0)."""
         return self._server_handle
 
+    @property
+    def draft_actor_name(self) -> str:
+        """Stable Ray actor name for this draft replica's control-plane server (node 0)."""
+        return self._build_server_name(0)
+
 
 class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
     server_role = "verify"
@@ -218,10 +223,10 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
         model_config: HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
-        draft_actor_handles: Optional[list[Any]] = None,
+        draft_actor_names: Optional[list[str]] = None,
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
-        self.draft_actor_handles = list(draft_actor_handles or [])
+        self.draft_actor_names = list(draft_actor_names or [])
 
     async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
         topo = compute_decoupled_spec_topology(self.config, world_size=worker_group.world_size)
@@ -233,7 +238,7 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
             "[decoupled_spec][VerifySGLangReplica] init_hybrid_decoupled "
             f"server_role={self.server_role} replica_rank={self.replica_rank} "
             f"start={start} end={end} verify_world_size={topo.verify_world_size} "
-            f"num_draft_handles={len(self.draft_actor_handles)} base_gpu_id={self._base_gpu_id_override}"
+            f"num_draft_names={len(self.draft_actor_names)} base_gpu_id={self._base_gpu_id_override}"
         )
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start:end]
@@ -241,5 +246,5 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
 
     def _build_extra_server_kwargs(self) -> dict:
         extra_kwargs = super()._build_extra_server_kwargs()
-        extra_kwargs["draft_actor_handles"] = self.draft_actor_handles
+        extra_kwargs["draft_actor_names"] = self.draft_actor_names
         return extra_kwargs

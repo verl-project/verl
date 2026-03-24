@@ -83,7 +83,7 @@ class SGLangHttpServer:
         cuda_visible_devices: str,
         base_gpu_id: int,
         server_role: Optional[str] = None,
-        draft_actor_handles: Optional[list[Any]] = None,
+        draft_actor_names: Optional[list[str]] = None,
     ):
         model_path = getattr(model_config, "local_path", None) or getattr(model_config, "path", None)
         print(
@@ -113,7 +113,7 @@ class SGLangHttpServer:
         self.nnodes = nnodes
         self.base_gpu_id = base_gpu_id
         self.server_role = server_role
-        self.draft_actor_handles = list(draft_actor_handles or [])
+        self.draft_actor_names = list(draft_actor_names or [])
         self.draft_proxy_ipc_config = None
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
@@ -307,13 +307,13 @@ class SGLangHttpServer:
             )
         server_args = ServerArgs(**args)
         if self.config.enable_decoupled_spec and self.server_role == "verify" and self.node_rank == 0:
-            if not self.draft_actor_handles:
-                raise ValueError("enable_decoupled_spec verify SGLangHttpServer requires non-empty draft_actor_handles")
+            if not self.draft_actor_names:
+                raise ValueError("enable_decoupled_spec verify SGLangHttpServer requires non-empty draft_actor_names")
             from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.verify_server_patch import (
-                set_pending_draft_actor_handles,
+                set_pending_draft_actor_names,
             )
 
-            set_pending_draft_actor_handles(self.draft_actor_handles)
+            set_pending_draft_actor_names(self.draft_actor_names)
         launch_components = {}
         if self.config.enable_decoupled_spec:
             from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.apply_patch import (

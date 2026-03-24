@@ -29,16 +29,16 @@ from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.decoupled_spec_ver
 )
 
 # Set by SGLangHttpServer.launch_server immediately before verify launch_subprocesses runs.
-_pending_draft_actor_handles: list | None = None
+_pending_draft_actor_names: list[str] | None = None
 
 
-def set_pending_draft_actor_handles(handles: list | None) -> None:
-    """Pass drafter Ray actor handles from the verify server process into launch_subprocesses (cannot use env JSON)."""
-    global _pending_draft_actor_handles
-    _pending_draft_actor_handles = list(handles) if handles else None
+def set_pending_draft_actor_names(names: list[str] | None) -> None:
+    """Pass drafter Ray actor names from the verify server process into launch_subprocesses."""
+    global _pending_draft_actor_names
+    _pending_draft_actor_names = list(names) if names else None
     print(
-        "[decoupled_spec][verify_server] set_pending_draft_actor_handles "
-        f"num_handles={0 if _pending_draft_actor_handles is None else len(_pending_draft_actor_handles)}"
+        "[decoupled_spec][verify_server] set_pending_draft_actor_names "
+        f"num_names={0 if _pending_draft_actor_names is None else len(_pending_draft_actor_names)}"
     )
 
 logger = logging.getLogger(__name__)
@@ -589,28 +589,28 @@ def launch_subprocesses(
     )
     detoken_proc.start()
 
-    global _pending_draft_actor_handles
-    draft_actor_handles = _pending_draft_actor_handles
-    _pending_draft_actor_handles = None
+    global _pending_draft_actor_names
+    draft_actor_names = _pending_draft_actor_names
+    _pending_draft_actor_names = None
     print(
-        "[decoupled_spec][verify_server] consume_pending_draft_actor_handles "
-        f"num_handles={0 if draft_actor_handles is None else len(draft_actor_handles)}"
+        "[decoupled_spec][verify_server] consume_pending_draft_actor_names "
+        f"num_names={0 if draft_actor_names is None else len(draft_actor_names)}"
     )
 
     ipc_config = DraftProxyIpcConfig.from_env()
-    if ipc_config is not None and draft_actor_handles:
+    if ipc_config is not None and draft_actor_names:
         draftproxy_launch_start = time.perf_counter()
         mp.Process(
             target=run_draftproxy_process,
             args=(
                 server_args,
                 port_args,
-                draft_actor_handles,
+                draft_actor_names,
             ),
         ).start()
         print(
             "[decoupled_spec][verify_server] draftproxy_process_started "
-            f"num_handles={len(draft_actor_handles)} elapsed_s={time.perf_counter() - draftproxy_launch_start:.6f}"
+            f"num_names={len(draft_actor_names)} elapsed_s={time.perf_counter() - draftproxy_launch_start:.6f}"
         )
 
     if server_args.tokenizer_worker_num == 1:
