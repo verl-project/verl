@@ -206,6 +206,8 @@ class DecoupledSGLangServerAdapter(BaseRollout):
         if self.config.get("quantization", None) == "fp8":
             from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
+            print("[decoupled_spec][server_adapter] convert bf16 weights to fp8 format before loading")
+
             logger.info("Convert bf16 weights to fp8 format before loading")
             quant_start = time.perf_counter()
             fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
@@ -218,6 +220,12 @@ class DecoupledSGLangServerAdapter(BaseRollout):
                 f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
                 f"elapsed_s={time.perf_counter() - quant_start:.6f}"
             )
+
+
+        print(
+            "[decoupled_spec][server_adapter] start updating weights by buckets..."
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+        )
 
         batch_idx = 0
         async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
@@ -241,7 +249,7 @@ class DecoupledSGLangServerAdapter(BaseRollout):
                 f"batch_idx={batch_idx} param_count={param_count} "
                 f"elapsed_s={time.perf_counter() - batch_start:.6f}"
             )
-
+        
         if self._should_control_server():
             flush_start = time.perf_counter()
             await self._engine.flush_cache()
