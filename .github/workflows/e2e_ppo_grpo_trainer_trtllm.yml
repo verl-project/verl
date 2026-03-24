@@ -207,7 +207,7 @@ jobs:
       - name: clean up
         run: |
           rm -rf checkpoints
-  e2e_grpo_trainer_fsdp-vlm:
+  e2e_grpo_trainer_megatron-vlm:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
