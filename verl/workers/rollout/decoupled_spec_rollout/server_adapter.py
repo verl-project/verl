@@ -194,7 +194,15 @@ class DecoupledSGLangServerAdapter(BaseRollout):
         from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 
         total_start = time.perf_counter()
+        print(
+            "[decoupled_spec][server_adapter] update_weights-start_ensure_device_mesh"
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+        )
         self._ensure_device_mesh()
+        print(
+            "[decoupled_spec][server_adapter] update_weights-ensure_device_mesh_done"
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+        )
         await self._init_server_adapter()
         print(
             "[decoupled_spec][server_adapter] update_weights_start "
@@ -249,7 +257,7 @@ class DecoupledSGLangServerAdapter(BaseRollout):
                 f"batch_idx={batch_idx} param_count={param_count} "
                 f"elapsed_s={time.perf_counter() - batch_start:.6f}"
             )
-        
+
         if self._should_control_server():
             flush_start = time.perf_counter()
             await self._engine.flush_cache()
