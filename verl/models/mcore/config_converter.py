@@ -36,10 +36,16 @@ def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
     ``rope_parameters["rope_theta"]``, optionally nested per attention pattern when ``rope_parameters`` maps names
     to parameter dicts.
     """
-    theta = getattr(hf_config, "rope_theta", None)
-    if theta is not None:
-        return theta
-    rp = getattr(hf_config, "rope_parameters", None)
+    if hasattr(hf_config, "rope_theta"):
+        return hf_config.rope_theta
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_theta"):
+        return hf_config.text_config.rope_theta
+
+    rp = None
+    if hasattr(hf_config, "rope_parameters"):
+        rp = hf_config.rope_parameters
+    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_parameters"):
+        rp = hf_config.text_config.rope_parameters
     if isinstance(rp, dict):
         if "rope_theta" in rp:
             return rp["rope_theta"]
