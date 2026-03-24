@@ -43,6 +43,18 @@ class DecoupledSpecTopology:
     def num_total_replicas(self) -> int:
         return self.num_draft_replicas + self.num_verify_replicas
 
+    @property
+    def verify_replica_rank_start(self) -> int:
+        return self.num_draft_replicas
+
+    @property
+    def verify_replica_rank_end(self) -> int:
+        return self.verify_replica_rank_start + self.num_verify_replicas
+
+    @property
+    def assigned_gpu_count(self) -> int:
+        return self.draft_gpu_count + self.verify_gpu_count
+
     def get_shared_replica_rank(self, role: DecoupledSpecRole | str, role_replica_rank: int) -> int:
         role = DecoupledSpecRole(role)
         if role == DecoupledSpecRole.DRAFT:
@@ -58,7 +70,7 @@ class DecoupledSpecTopology:
                 f"verify role_replica_rank out of range: {role_replica_rank}, "
                 f"num_verify_replicas={self.num_verify_replicas}"
             )
-        return self.num_draft_replicas + role_replica_rank
+        return self.verify_replica_rank_start + role_replica_rank
 
     def get_role_replica_rank(self, role: DecoupledSpecRole | str, shared_replica_rank: int) -> int:
         role = DecoupledSpecRole(role)
@@ -70,8 +82,8 @@ class DecoupledSpecTopology:
                 )
             return shared_replica_rank
 
-        verify_start = self.num_draft_replicas
-        verify_end = verify_start + self.num_verify_replicas
+        verify_start = self.verify_replica_rank_start
+        verify_end = self.verify_replica_rank_end
         if not verify_start <= shared_replica_rank < verify_end:
             raise ValueError(
                 f"shared verify replica_rank out of range: {shared_replica_rank}, "
@@ -235,13 +247,18 @@ def resolve_server_adapter_layout(
         rollout_rank = offset - role_replica_rank * topo.draft_world_size
         role = DecoupledSpecRole.DRAFT
         server_prefix = "sglang_draft_server"
-    else:
+    elif global_rank < topo.assigned_gpu_count:
         offset = global_rank - topo.draft_gpu_count
         role_replica_rank = offset // topo.verify_world_size
         replica_rank = topo.get_shared_replica_rank(DecoupledSpecRole.VERIFY, role_replica_rank)
         rollout_rank = offset - role_replica_rank * topo.verify_world_size
         role = DecoupledSpecRole.VERIFY
         server_prefix = "sglang_server"
+    else:
+        raise ValueError(
+            f"global_rank {global_rank} is outside assigned decoupled-spec ranks "
+            f"[0, {topo.assigned_gpu_count}) for world_size={world_size}"
+        )
 
     node_rank = rollout_rank // local_world_size
     local_rank = rollout_rank % local_world_size
