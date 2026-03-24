@@ -147,6 +147,7 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip3 install cupy-cuda12x==13.6.0
+          pip3 install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
