@@ -11,5 +11,6 @@
         "initializer_list": "cpp",
         "utility": "cpp"
     },
-    "iis.configDir": ""
+    "iis.configDir": "",
+    "wecode-cpp.languageProvider": "Tag"
 }
