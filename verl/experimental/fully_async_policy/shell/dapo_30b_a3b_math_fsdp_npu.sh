@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-set -xeuo pipefail
 export ENABLE_FULLY_ASYNC=1
+set -xeuo pipefail
+
+# Test script for fully_async_policy E2E regression testing
+# This script runs fully async PPO training with both FSDP2 and Megatron backends
+# to ensure the asynchronous training mechanism works correctly
+
 NUM_GPUS=${NUM_GPUS:-2}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
-TRAIN_FILE=./dapo-math-17k.parquet
-TEST_FILE=./aime-2024.parquet
+TRAIN_FILE=dapo-math-17k.parquet
+TEST_FILE=aime-2024.parquet
+
+CKPTS_DIR=/mnt/share/w00914260/Qwen3_30B_A3B_async
 
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B}
-MODEL_PATH=./Qwen3-30B-A3B
+MODEL_PATH=Qwen3-30B-A3B
+# hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 
 rollout_mode="async"
@@ -18,12 +26,20 @@ if [ "$rollout_mode" = "async" ]; then
     return_raw_chat="True"
 fi
 
+# Fully async specific parameters
+n_gpus_rollout=16
+n_gpus_training=16
+n_nodes_rollout=1
+n_nodes_train=1
+
 # Algorithm parameters
 adv_estimator=grpo
+
 use_kl_in_reward=False
 kl_coef=0.0
 use_kl_loss=False
 kl_loss_coef=0.0
+
 clip_ratio_low=0.2
 clip_ratio_high=0.28
 
@@ -34,48 +50,41 @@ enable_overlong_buffer=True
 overlong_buffer_len=$((1024 * 6))
 overlong_penalty_factor=1.0
 
-# Training parameters
-loss_agg_mode="token-mean"
-
 # Algorithm
 temperature=1.0
 top_p=1.0
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 val_top_p=0.7
 
-# Fully async specific parameters
-n_gpus_rollout=16
-n_gpus_training=16
-n_nodes_rollout=1
-n_nodes_train=1
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
 n_resp_per_prompt=4
 train_prompt_mini_bsz=32
-total_rollout_steps=$(((512*300)))
+total_rollout_steps=$(((64*100)))
 test_freq=25
-staleness_threshold=0.3 
+staleness_threshold=0.45
+
 
 trigger_parameter_sync_step=2
-partial_rollout=True
+partial_rollout=True #True False
 enforce_eager=False
-nccl_timeout=7200 
+nccl_timeout=7200 #3600
 
 # Performance Related Parameter
-sp_size=8 
+sp_size=8 # 8 4
 use_dynamic_bsz=True
-actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / 2))
-infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / 2))
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / 8))
+infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / 8))
 ref_offload=True
 actor_offload=False
-gen_tp=2 
-fsdp_size=$((n_gpus_training * n_nodes_train)) 
-
+gen_tp=2
+fsdp_size=16
 rollout_is=null
 rollout_rs=seq_mean_k1
 rollout_rs_threshold=0.999_1.01
 rollout_token_veto_threshold=1e-4
+
 
 python3 -m verl.experimental.fully_async_policy.fully_async_main \
     --config-path=config \
@@ -94,8 +103,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    actor_rollout_ref.actor.fsdp_config.strategy=fsdp2  \
-    critic.strategy=fsdp2 \
+    actor_rollout_ref.actor.fsdp_config.strategy=fsdp  \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.nccl_timeout=${nccl_timeout} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
@@ -121,12 +129,12 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_offload} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.grad_clip=1.0 \
-    actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.expert_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
+    +actor_rollout_ref.rollout.enable_sleep_mode=False \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.enforce_eager=${enforce_eager} \
     actor_rollout_ref.rollout.temperature=${temperature} \
@@ -151,24 +159,17 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.logger=['console'] \
     trainer.val_before_train=False \
     trainer.test_freq="${test_freq}" \
-    trainer.save_freq=-1 \
+    trainer.save_freq=50 \
     trainer.resume_mode=auto \
     trainer.nnodes="${n_nodes_train}" \
     trainer.n_gpus_per_node="${n_gpus_training}" \
     rollout.nnodes="${n_nodes_rollout}" \
     rollout.n_gpus_per_node="${n_gpus_rollout}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
-    rollout.test_freq=${test_freq} \
-    rollout.total_epochs=10 \
+    trainer.total_epochs=10 \
+    trainer.total_training_steps=100 \
+    trainer.default_local_dir="${CKPTS_DIR}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.partial_rollout="${partial_rollout}" \
-    algorithm.rollout_correction.rollout_is=${rollout_is} \
-    algorithm.rollout_correction.rollout_rs=${rollout_rs} \
-    algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold} \
-    actor_rollout_ref.actor.use_torch_compile=False \
-    algorithm.rollout_correction.bypass_mode=False \
-    actor_rollout_ref.rollout.checkpoint_engine.backend=hccl \
-    global_profiler.steps=[1] \
-    global_profiler.tool=npu \
     trainer.device=npu
