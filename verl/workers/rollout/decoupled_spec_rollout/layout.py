@@ -113,6 +113,8 @@ def compute_decoupled_spec_topology(
         )
 
     verify_gpu_count = world_size - draft_gpu_count
+    verify_gpu_count -= verify_gpu_count % verify_world_size # 保证 verify_gpu_count 是 verify_world_size 的倍数
+
     if verify_gpu_count % verify_world_size != 0:
         raise ValueError(
             "The remaining verify GPUs must be divisible by rollout tp*dp*pp "
