@@ -1,3 +1,10 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Hydra defaults: compose base rollout then apply overrides from this file
 defaults:
 
   - rollout
@@ -19,6 +26,7 @@ num_inference_steps: 10
 # Extra inference engine arguments: add vllm_omni for diffusion
 engine_kwargs:
 
+  # vLLM-Omni engine options for diffusion rollout (empty dict uses defaults)
   vllm_omni: {}
 
 # Sampling parameters used during validation (diffusion-specific).
