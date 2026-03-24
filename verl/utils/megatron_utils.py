@@ -39,6 +39,7 @@ from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
 
 import verl.utils.megatron.tensor_parallel as tp_utils
+from verl.models.mcore.config_converter import get_hf_rope_theta
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
@@ -188,6 +189,8 @@ def make_megatron_module(
     peft_cls: Any = None,
     peft_config: Any = None,
 ):
+    hf_config.rope_theta = get_hf_rope_theta(hf_config)
+
     if override_model_config is None:
         override_model_config = {}
 
