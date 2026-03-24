@@ -85,7 +85,13 @@ class SGLangHttpServer:
         server_role: Optional[str] = None,
         draft_actor_handles: Optional[list[Any]] = None,
     ):
-        print(f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, {nnodes=}, {cuda_visible_devices=}")
+        model_path = getattr(model_config, "local_path", None) or getattr(model_config, "path", None)
+        print(
+            "[decoupled_spec][sglang_server] init "
+            f"rollout_mode={rollout_mode} server_role={server_role} replica_rank={replica_rank} "
+            f"node_rank={node_rank} nnodes={nnodes} cuda_visible_devices={cuda_visible_devices} "
+            f"base_gpu_id={base_gpu_id} model_path={model_path} num_workers={len(workers)}"
+        )
         os.environ[visible_devices_keyword] = cuda_visible_devices
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
@@ -155,6 +161,7 @@ class SGLangHttpServer:
         return self._server_address, self._server_port
 
     async def launch_server(self, master_address: str = None, master_port: int = None):
+        launch_start = asyncio.get_running_loop().time()
         if self.nnodes > 1:
             if self.node_rank != 0:
                 assert master_address and master_port, "non-master node should provide master address and port"
@@ -268,6 +275,18 @@ class SGLangHttpServer:
             args["disable_overlap_schedule"] = True
             set_external_draft_verify_env()
 
+        print(
+            "[decoupled_spec][sglang_server] launch_server_config "
+            f"server_role={self.server_role} replica_rank={self.replica_rank} node_rank={self.node_rank} "
+            f"{visible_devices_keyword}={os.environ.get(visible_devices_keyword)} "
+            f"model_path={args.get('model_path')} tp_size={args.get('tp_size')} dp_size={args.get('dp_size')} "
+            f"pp_size={self.config.pipeline_model_parallel_size} ep_size={args.get('ep_size')} "
+            f"base_gpu_id={args.get('base_gpu_id')} gpu_id_step={args.get('gpu_id_step')} "
+            f"speculative_algorithm={args.get('speculative_algorithm')} "
+            f"speculative_draft_model_path={args.get('speculative_draft_model_path')} "
+            f"dist_init_addr={args.get('dist_init_addr')} disable_overlap_schedule={args.get('disable_overlap_schedule')}"
+        )
+
         # NOTE: We can't directly call SGLang's launch_server since it's not an async function.
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
@@ -320,6 +339,11 @@ class SGLangHttpServer:
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args
             )
+        print(
+            "[decoupled_spec][sglang_server] launch_server_subprocesses_done "
+            f"server_role={self.server_role} replica_rank={self.replica_rank} node_rank={self.node_rank} "
+            f"elapsed_s={asyncio.get_running_loop().time() - launch_start:.6f}"
+        )
 
         # In multi-node cases, non-zero rank nodes should not launch http server.
         if self.node_rank > 0:
@@ -348,6 +372,12 @@ class SGLangHttpServer:
 
         self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
         self.tokenizer_manager.server_status = ServerStatus.Up
+        print(
+            "[decoupled_spec][sglang_server] launch_server_done "
+            f"server_role={self.server_role} replica_rank={self.replica_rank} node_rank={self.node_rank} "
+            f"server_address={self._server_address} server_port={self._server_port} "
+            f"elapsed_s={asyncio.get_running_loop().time() - launch_start:.6f}"
+        )
 
     async def wake_up(self):
         if self.node_rank != 0:
