@@ -56,28 +56,26 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
         worker_infos = await asyncio.gather(
             *[
                 worker.__ray_call__.remote(
-                    lambda self: (ray.get_runtime_context().get_node_id(), os.environ[visible_devices_keyword])
+                    lambda self: (
+                        ray.get_runtime_context().get_node_id(),
+                        os.environ[visible_devices_keyword],
+                        int(os.environ.get("LOCAL_RANK", "0")),
+                    )
                 )
                 for worker in self.workers
             ]
         )
         worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
         worker_node_ids = [worker_info[0] for worker_info in worker_infos]
-        for worker_idx, (worker_node_id, worker_visible_devices) in enumerate(worker_infos):
+        worker_local_ranks = [worker_info[2] for worker_info in worker_infos]
+        for worker_idx, (worker_node_id, worker_visible_devices, worker_local_rank) in enumerate(worker_infos):
             print(
                 "[decoupled_spec][BaseDecoupledSGLangReplica] worker_assignment "
                 f"server_role={self.server_role} replica_rank={self.replica_rank} "
                 f"worker_idx={worker_idx} node_id={worker_node_id} "
-                f"worker_visible_devices={worker_visible_devices}"
+                f"worker_visible_devices={worker_visible_devices} worker_local_rank={worker_local_rank}"
             )
-        base_gpu_id = 0
-        if os.environ.get(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}", None):
-            base_gpu_id = self._base_gpu_id_override
-            print(
-                "[decoupled_spec][BaseDecoupledSGLangReplica] base_gpu_id_override "
-                f"server_role={self.server_role} replica_rank={self.replica_rank} "
-                f"base_gpu_id={base_gpu_id} gpus_per_node={self.gpus_per_node}"
-            )
+        is_noset_visible_devices = bool(os.environ.get(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}", None))
 
         for node_rank in range(self.nnodes):
             start_idx = node_rank * self.gpus_per_replica_node
@@ -88,25 +86,35 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
             node_cuda_visible_devices_set = worker_cuda_visible_devices[
                 start_idx:end_idx
             ]
-            node_cuda_visible_devices = ",".join(
-                map(
-                    str,
-                    sorted(
-                        set(
-                            int(device)
-                            for worker_devices_set in node_cuda_visible_devices_set
-                            for device in worker_devices_set.split(",")
-                            if device.strip()
-                        )
-                    ),
+            node_worker_local_ranks = worker_local_ranks[start_idx:end_idx]
+            if is_noset_visible_devices:
+                # In NOSET mode the worker env may expose the whole machine, so use
+                # the workers' actual local accelerator assignments as the server's
+                # visible device set and reset base_gpu_id to the local view.
+                node_cuda_visible_devices = ",".join(map(str, sorted(set(node_worker_local_ranks))))
+                base_gpu_id = 0
+            else:
+                node_cuda_visible_devices = ",".join(
+                    map(
+                        str,
+                        sorted(
+                            set(
+                                int(device)
+                                for worker_devices_set in node_cuda_visible_devices_set
+                                for device in worker_devices_set.split(",")
+                                if device.strip()
+                            )
+                        ),
+                    )
                 )
-            )
+                base_gpu_id = self._base_gpu_id_override
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
             print(
                 "[decoupled_spec][BaseDecoupledSGLangReplica] launch_server_actor "
                 f"server_role={self.server_role} replica_rank={self.replica_rank} "
                 f"node_rank={node_rank} node_id={node_id} worker_slice=[{start_idx}:{end_idx}] "
                 f"worker_visible_devices_set={node_cuda_visible_devices_set} "
+                f"worker_local_ranks={node_worker_local_ranks} "
                 f"cuda_visible_devices={node_cuda_visible_devices} base_gpu_id={base_gpu_id} "
                 f"model_path={model_path}"
             )
