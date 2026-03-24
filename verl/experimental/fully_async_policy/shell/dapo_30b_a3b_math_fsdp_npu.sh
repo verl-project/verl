@@ -10,7 +10,7 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
 TRAIN_FILE=dapo-math-17k.parquet
 TEST_FILE=aime-2024.parquet
 
-CKPTS_DIR=/mnt/share/w00914260/Qwen3_30B_A3B_async
+CKPTS_DIR=./ckpt
 
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B}
