@@ -108,6 +108,20 @@ class vLLMHttpServer:
         """
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
 
+        cache_env_keys = [
+            "VLLM_CACHE_ROOT",
+            "TORCHINDUCTOR_CACHE_DIR",
+            "TRITON_CACHE_DIR",
+            "XDG_CACHE_HOME",
+        ]
+        resolved_cache_env = {}
+        for cache_key in cache_env_keys:
+            cache_dir = os.environ.get(cache_key)
+            if not cache_dir:
+                continue
+            os.makedirs(cache_dir, exist_ok=True)
+            resolved_cache_env[cache_key] = cache_dir
+
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
@@ -169,6 +183,13 @@ class vLLMHttpServer:
             f"master_address: {self._master_address}, master_port: {self._master_port}, "
             f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
         )
+        if resolved_cache_env:
+            logger.warning(
+                "vLLM server cache isolation: replica_rank=%s node_rank=%s caches=%s",
+                self.replica_rank,
+                self.node_rank,
+                resolved_cache_env,
+            )
 
     def get_master_address(self):
         """Get master address and port for data parallel.
@@ -843,23 +864,36 @@ class vLLMReplica(RolloutReplica):
                 if not self.is_reward_model
                 else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
             )
+            server_seed = self.replica_rank * 1024 + node_rank
+            server_env_vars = {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                # To prevent hanging or crash during synchronization of weights between actor and rollout
+                # in disaggregated mode. See:
+                # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+                # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+                "NCCL_CUMEM_ENABLE": "0",
+            }
+            cache_env_keys = [
+                "VLLM_CACHE_ROOT",
+                "TORCHINDUCTOR_CACHE_DIR",
+                "TRITON_CACHE_DIR",
+                "XDG_CACHE_HOME",
+            ]
+            for cache_key in cache_env_keys:
+                base_cache_dir = os.environ.get(cache_key)
+                if not base_cache_dir:
+                    continue
+                server_cache_dir = os.path.join(base_cache_dir, "vllm_server", f"seed_{server_seed}")
+                os.makedirs(server_cache_dir, exist_ok=True)
+                server_env_vars[cache_key] = server_cache_dir
 
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                        # To prevent hanging or crash during synchronization of weights between actor and rollout
-                        # in disaggregated mode. See:
-                        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
-                        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
-                        "NCCL_CUMEM_ENABLE": "0",
-                    }
-                },
+                runtime_env={"env_vars": server_env_vars},
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(
