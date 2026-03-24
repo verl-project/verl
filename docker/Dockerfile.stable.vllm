@@ -51,8 +51,6 @@ RUN export NVTE_FRAMEWORK=pytorch && \
     NVTE_BUILD_THREADS_PER_JOB=4 \
     pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.12
 
-# RUN pip install --upgrade transformers tokenizers
-
 RUN pip install codetiming mathruler pylatexenc qwen_vl_utils cachetools pytest-asyncio
 
 RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=16 pip install --no-build-isolation flash_attn==2.8.3
@@ -97,6 +95,8 @@ RUN pip3 install nvtx matplotlib liger_kernel
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
+
+RUN pip install --upgrade transformers==5.3.0
 
 RUN pip install git+https://github.com/volcengine/verl.git@v0.7.0 && \
     pip uninstall -y verl

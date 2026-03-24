@@ -24,6 +24,8 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLForConditionalGeneration,
 )
 
+from verl.utils.transformers_compat import is_transformers_version_in_range
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -149,7 +151,16 @@ def _get_input_embeds(
         pixel_values = pixel_values.type(model.visual.dtype)
         image_embeds, deepstack_image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
-        n_image_features = image_embeds.shape[0]
+        if is_transformers_version_in_range(min_version="5.0.0"):
+            assert getattr(image_embeds, "pooler_output", None) is not None, (
+                "Expected image_embeds as BaseModelOutputWithPooling type in newer transformers versions"
+            )
+            n_image_features = image_embeds.pooler_output.shape[0]
+        else:
+            assert getattr(image_embeds, "shape", None) is not None, (
+                "Expected image_embeds to have shape attribute in transformers <= v4.57.6"
+            )
+            n_image_features = image_embeds.shape[0]
         if n_image_tokens != n_image_features:
             raise ValueError(
                 f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
