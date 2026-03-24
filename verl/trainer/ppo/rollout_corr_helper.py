@@ -598,9 +598,7 @@ def compute_rollout_correction_weights(
             raw_rollout_is_weights <= rollout_is_threshold_upper
         )
         rollout_is_weights = torch.where(
-            token_kept_mask,
-            raw_rollout_is_weights,
-            torch.zeros_like(raw_rollout_is_weights),
+            token_kept_mask, raw_rollout_is_weights, torch.zeros_like(raw_rollout_is_weights)
         )
 
     # Compute IS weight metrics.
