@@ -224,9 +224,14 @@ class FSDPEngine(BaseEngine):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
-        )
+        # FSDP2 handles tied weights + meta initialization correctly by design.
+        # use_meta_tensor=False leaves FSDP2 sharded-param references on the CPU after set_model_state_dict,
+        # causing gradient device mismatches during backward
+        if self.engine_config.strategy == "fsdp2":
+            use_meta = True
+        else:
+            use_meta = not self.model_config.hf_config.tie_word_embeddings
+        init_context = get_init_weight_context_manager(use_meta_tensor=use_meta, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
