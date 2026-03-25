@@ -26,6 +26,7 @@ from uuid import uuid4
 
 import pytest
 import ray
+import torch
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
@@ -179,7 +180,7 @@ def test_generate(init_server):
 
 
 def test_generate_with_logprobs(init_server):
-    """generate() with logprobs=True returns log_probs list."""
+    """generate() with logprobs=True returns non-empty log_probs (tensor or sequence)."""
     server = init_server
     prompt_ids = _tokenize_prompt(
         "a futuristic city at night with neon lights glowing on tall glass "
@@ -204,11 +205,18 @@ def test_generate_with_logprobs(init_server):
 
     assert isinstance(output, DiffusionOutput)
     assert len(output.diffusion_output) == 3
-    assert output.log_probs is not None, "log_probs should be present when logprobs=True"
-    assert isinstance(output.log_probs, list)
-    assert len(output.log_probs) > 0
+    lp = output.log_probs
+    assert lp is not None, "log_probs should be present when logprobs=True"
+    if isinstance(lp, torch.Tensor):
+        assert lp.numel() > 0
+        sample = lp.detach().cpu().flatten()[:3].tolist()
+        n = lp.numel()
+    else:
+        assert len(lp) > 0
+        sample = lp[:3]
+        n = len(lp)
 
-    print(f"log_probs: {len(output.log_probs)} values, sample: {output.log_probs[:3]}")
+    print(f"log_probs: {n} values, sample: {sample}")
 
 
 def test_generate_concurrent(init_server):
