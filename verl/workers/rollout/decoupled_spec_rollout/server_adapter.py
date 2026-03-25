@@ -78,7 +78,7 @@ class DecoupledSGLangServerAdapter(BaseRollout):
             #     "[decoupled_spec][server_adapter] inactive_rank "
             #     f"global_rank={rank} world_size={world_size} assigned_ranks_skipped=True"
             # )
-            # return
+            return
 
         self.decoupled_spec_role = adapter_layout.role
         self.replica_rank = adapter_layout.replica_rank if replica_rank == -1 else replica_rank
