@@ -65,6 +65,9 @@ class ExternalDraftVerifyWorker:
         self.speculative_num_draft_tokens = int(server_args.speculative_num_draft_tokens)
         self.enable_nan_detection = bool(server_args.enable_nan_detection)
         self.device = self.model_runner.device
+        # Reuse the target worker's KV cache pools so upstream EAGLE verify logic
+        # can update accepted tokens in-place on the verifier-side cache.
+        self.req_to_token_pool, self.token_to_kv_pool_allocator = target_worker.get_memory_pool()
 
     def clear_cache_pool(self):
         # No local draft-side KV/state exists for the external verify worker.
