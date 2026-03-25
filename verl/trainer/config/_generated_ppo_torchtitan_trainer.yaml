@@ -336,10 +336,14 @@ actor_rollout_ref:
           level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
           analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+          profile_token_start: null
+          profile_token_end: null
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+          profile_token_start: null
+          profile_token_end: null
         precision_debugger:
           _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
           config_path: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.config_path,${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}}

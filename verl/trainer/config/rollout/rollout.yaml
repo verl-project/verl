@@ -392,6 +392,14 @@ profiler:
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
 
+      # Start collecting profiler data from this response-token index.
+      # null means collect from the first response token (full collection start).
+      profile_token_start: null
+
+      # Stop collecting profiler data at this response-token index (exclusive).
+      # null means collect until the end (full collection).
+      profile_token_end: null
+
     # torch profiler config
     torch:
 
@@ -404,6 +412,15 @@ profiler:
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+
+      # Start collecting profiler data from this response-token index.
+      # null means collect from the first response token (full collection start).
+      profile_token_start: null
+
+      # Stop collecting profiler data at this response-token index (exclusive).
+      # null means collect until the end (full collection).
+      profile_token_end: null
+
 
     # msprobe precision debugger config
     precision_debugger:
