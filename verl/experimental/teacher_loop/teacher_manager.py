@@ -11,18 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
+import asyncio
 from typing import Any, Optional
 from uuid import uuid4
 
 import ray
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig
+from tensordict import TensorDict
 
-from verl.experimental.agent_loop import AsyncLLMServerManager
+from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 
@@ -60,6 +60,25 @@ def _pad_teacher_outputs(
         F.pad(teacher_ids, padding, value=pad_token_id).unsqueeze(0),
         F.pad(teacher_logprobs, padding, value=0.0).unsqueeze(0),
     )
+
+
+def _extract_valid_prompt_and_response_ids(data: DataProto) -> tuple[list[int], list[int]]:
+    """Extract valid prompt and response token ids from padded batch data.
+    TODO(wuxibin): remove padding and use tensordict.
+    """
+    assert len(data) == 1, "Teacher logprob computation expects a single sample"
+
+    prompts = data.batch["prompts"][0]
+    responses = data.batch["responses"][0]
+    attention_mask = data.batch["attention_mask"][0]
+    prompt_length = prompts.shape[0]
+
+    valid_prompt_length = int(attention_mask[:prompt_length].sum().item())
+    valid_response_length = int(attention_mask[prompt_length:].sum().item())
+
+    prompt_ids = normalize_token_ids(prompts[-valid_prompt_length:] if valid_prompt_length > 0 else [])
+    response_ids = normalize_token_ids(responses[:valid_response_length])
+    return prompt_ids, response_ids
 
 
 class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
@@ -103,3 +122,53 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
         teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
         assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(prompt_ids + response_ids)
         return teacher_ids, teacher_logprobs
+
+    async def compute_teacher_logprobs_batch(self, data: DataProto) -> DataProto:
+        """Compute teacher log probabilities for a batch of prompt-response pairs."""
+        multi_modal_data_batch = data.non_tensor_batch.get("teacher_multi_modal_data")
+        tasks = []
+        lengths = []
+        prompt_width = data.batch["prompts"].shape[1]
+        response_width = data.batch["responses"].shape[1]
+
+        # Compute logprobs for each sample in the batch
+        for i in range(len(data)):
+            item = data[i : i + 1]
+            prompt_ids, response_ids = _extract_valid_prompt_and_response_ids(item)
+            multi_modal_data = None if multi_modal_data_batch is None else multi_modal_data_batch[i]
+            lengths.append((len(prompt_ids), len(response_ids)))
+            tasks.append(
+                asyncio.create_task(
+                    self.compute_teacher_logprobs_single(
+                        prompt_ids=prompt_ids,
+                        response_ids=response_ids,
+                        multi_modal_data=multi_modal_data,
+                    )
+                )
+            )
+        outputs = await asyncio.gather(*tasks)
+
+        # Pad the teacher logprobs and ids
+        padded_teacher_ids = []
+        padded_teacher_logprobs = []
+        for (teacher_ids, teacher_logprobs), (prompt_length, response_length) in zip(outputs, lengths, strict=True):
+            padded_ids, padded_logprobs = _pad_teacher_outputs(
+                teacher_ids,
+                teacher_logprobs,
+                prompt_width=prompt_width,
+                response_width=response_width,
+                prompt_length=prompt_length,
+                response_length=response_length,
+                pad_token_id=self.pad_token_id,
+            )
+            padded_teacher_ids.append(padded_ids)
+            padded_teacher_logprobs.append(padded_logprobs)
+
+        batch = TensorDict(
+            {
+                "teacher_ids": torch.stack(padded_teacher_ids),
+                "teacher_logprobs": torch.stack(padded_teacher_logprobs),
+            },
+            batch_size=len(data),
+        )
+        return DataProto(batch=batch)
