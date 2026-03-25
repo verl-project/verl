@@ -97,17 +97,24 @@ async def get_named_tensor_buckets(
     current_bucket = []
     current_size = 0
     async for name, tensor in ensure_async_iterator(iterable):
-
-        print(f"Processing tensor '{name}' of size {tensor.element_size() * tensor.numel() / (1024 * 1024):.2f} MB")
         tensor_size = tensor.element_size() * tensor.numel()
+
+        print(f"Processing tensor '{name}' of size {tensor_size} bytes")
+
         if current_size + tensor_size > bucket_bytes:
             if current_bucket:
+                print(f"Yielding bucket of size {current_size} bytes with {len(current_bucket)} tensors")
                 yield current_bucket
+            print(f"Starting new bucket with tensor '{name}' of size {tensor_size} bytes")
             current_bucket = [(name, tensor.clone())]
+            print(f"Current bucket size is {tensor_size} bytes, starting with tensor '{name}'")
             current_size = tensor_size
         else:
+            print(f"Adding tensor '{name}' to current bucket. New bucket size will be {current_size + tensor_size} bytes")
             current_bucket.append((name, tensor.clone()))
             current_size += tensor_size
+            print(f"Current bucket size is {current_size} bytes after appending tensor '{name}'")
 
     if current_bucket:
+        print(f"Yielding final bucket of size {current_size} bytes with {len(current_bucket)} tensors")
         yield current_bucket
