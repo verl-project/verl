@@ -10,7 +10,7 @@ from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.speculative.eagle_info import EagleVerifyInput
+from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.eagle_utils import TreeMaskMode, build_tree_kernel_efficient
 from sglang.srt.speculative.eagle_worker import EAGLEWorker
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -34,6 +34,105 @@ def _get_req_tail_token_id(req) -> int:
     if req.origin_input_ids:
         return int(req.origin_input_ids[-1])
     raise RuntimeError(f"Request {req.rid} has no committed token to anchor external draft verification.")
+
+
+def _slice_tensor_head_or_empty(
+    value: torch.Tensor | None,
+    live_count: int,
+    *,
+    empty_shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    if value is None:
+        return torch.empty(empty_shape, dtype=dtype, device=device)
+    return value[:live_count]
+
+
+def normalize_external_draft_batch_spec_info(batch: ScheduleBatch) -> None:
+    spec_info = getattr(batch, "spec_info", None)
+    if not isinstance(spec_info, EagleDraftInput):
+        return
+
+    seq_lens = getattr(batch, "seq_lens", None)
+    seq_lens_cpu = getattr(batch, "seq_lens_cpu", None)
+    req_pool_indices = getattr(batch, "req_pool_indices", None)
+    seq_lens_dtype = seq_lens.dtype if isinstance(seq_lens, torch.Tensor) else torch.int32
+    seq_lens_cpu_dtype = (
+        seq_lens_cpu.dtype if isinstance(seq_lens_cpu, torch.Tensor) else torch.int32
+    )
+    req_pool_indices_dtype = (
+        req_pool_indices.dtype
+        if isinstance(req_pool_indices, torch.Tensor)
+        else torch.int32
+    )
+
+    live_count = sum(
+        1 for req in batch.reqs if not req.is_retracted and not req.finished()
+    )
+    if live_count == 0:
+        batch.spec_info = EagleDraftInput.create_idle_input(
+            device=batch.device,
+            hidden_size=batch.model_config.hidden_size,
+            dtype=batch.model_config.dtype,
+            topk=1,
+            capture_hidden_mode=CaptureHiddenMode.LAST,
+        )
+        return
+
+    hidden_states = _slice_tensor_head_or_empty(
+        spec_info.hidden_states,
+        live_count,
+        empty_shape=(live_count, batch.model_config.hidden_size),
+        dtype=batch.model_config.dtype,
+        device=batch.device,
+    )
+    verified_dtype = (
+        spec_info.verified_id.dtype
+        if isinstance(spec_info.verified_id, torch.Tensor)
+        else torch.int32
+    )
+    capture_hidden_mode = getattr(
+        spec_info, "capture_hidden_mode", CaptureHiddenMode.LAST
+    )
+
+    # External draft verification bypasses the local draft forward, so we keep a
+    # scheduler-safe placeholder instead of leaving draft decode fields as None.
+    batch.spec_info = EagleDraftInput(
+        hidden_states=hidden_states,
+        verified_id=_slice_tensor_head_or_empty(
+            spec_info.verified_id,
+            live_count,
+            empty_shape=(live_count,),
+            dtype=verified_dtype,
+            device=batch.device,
+        ),
+        topk_p=torch.empty((live_count, 1), dtype=torch.float32, device=batch.device),
+        topk_index=torch.empty((live_count, 1), dtype=torch.int64, device=batch.device),
+        capture_hidden_mode=capture_hidden_mode,
+        accept_length=torch.zeros((live_count,), dtype=torch.int32, device=batch.device),
+        accept_length_cpu=[0] * live_count,
+        seq_lens_for_draft_extend=_slice_tensor_head_or_empty(
+            getattr(spec_info, "seq_lens_for_draft_extend", seq_lens),
+            live_count,
+            empty_shape=(live_count,),
+            dtype=seq_lens_dtype,
+            device=batch.device,
+        ),
+        seq_lens_for_draft_extend_cpu=getattr(
+            spec_info, "seq_lens_for_draft_extend_cpu", seq_lens_cpu
+        )[:live_count]
+        if getattr(spec_info, "seq_lens_for_draft_extend_cpu", seq_lens_cpu)
+        is not None
+        else torch.empty((0,), dtype=seq_lens_cpu_dtype),
+        req_pool_indices_for_draft_extend=_slice_tensor_head_or_empty(
+            getattr(spec_info, "req_pool_indices_for_draft_extend", req_pool_indices),
+            live_count,
+            empty_shape=(live_count,),
+            dtype=req_pool_indices_dtype,
+            device=batch.device,
+        ),
+    )
 
 
 class ExternalDraftVerifyWorker:
@@ -256,6 +355,7 @@ class ExternalDraftVerifyWorker:
         can_use_full_graph_path = spec_info.draft_token_num == self.speculative_num_draft_tokens
         verify_start = time.perf_counter()
         logits_output, verify_output, _, can_run_cuda_graph = self.verify(batch, spec_info)
+        normalize_external_draft_batch_spec_info(batch)
         print(
             "[decoupled_spec][verify_worker] verify_done "
             f"batch_size={batch.batch_size()} accepted_tokens={sum(verify_output.accept_length_per_req_cpu)} "
