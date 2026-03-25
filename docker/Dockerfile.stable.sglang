@@ -32,7 +32,7 @@ RUN pip3 install --no-deps trl==0.27.0
 
 RUN pip3 install nvtx matplotlib liger_kernel
 
-RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
+RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@9ad77d7
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
 
