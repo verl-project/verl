@@ -15,6 +15,7 @@ from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.decoupled_spec_rollout.layout import DecoupledSpecRole, resolve_server_adapter_layout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -87,6 +88,35 @@ class DecoupledSGLangServerAdapter(BaseRollout):
         self.server_actor_name = adapter_layout.server_actor_name
         self.is_leader_rank = self.local_rank == 0 and self.decoupled_spec_role != DecoupledSpecRole.DRAFT
         self.server_actor = None
+
+    async def _drain_weights_for_collective_alignment(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        *,
+        role_label: str,
+        global_steps: int | None,
+    ) -> None:
+        drain_start = time.perf_counter()
+        print(
+            "[decoupled_spec][server_adapter] drain_weights_start "
+            f"role={role_label} replica_rank={self.replica_rank} "
+            f"node_rank={self.node_rank} local_rank={self.local_rank} global_steps={global_steps}"
+        )
+
+        drained_count = 0
+        sample_names: list[str] = []
+        async for name, _tensor in ensure_async_iterator(weights):
+            drained_count += 1
+            if len(sample_names) < 5:
+                sample_names.append(name)
+
+        print(
+            "[decoupled_spec][server_adapter] drain_weights_done "
+            f"role={role_label} replica_rank={self.replica_rank} "
+            f"node_rank={self.node_rank} local_rank={self.local_rank} global_steps={global_steps} "
+            f"drained_count={drained_count} sample_names={sample_names} "
+            f"elapsed_s={time.perf_counter() - drain_start:.6f}"
+        )
 
     def _ensure_device_mesh(self) -> None:
         if self.device_mesh is None:
@@ -182,33 +212,7 @@ class DecoupledSGLangServerAdapter(BaseRollout):
     async def update_weights(
         self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
     ):
-        if not self.active_in_decoupled_spec:
-            return
-        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
-            print(
-                "[decoupled_spec][server_adapter] skip_update_weights "
-                f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} global_steps={global_steps}"
-            )
-            return
-
         from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
-
-        total_start = time.perf_counter()
-        print(
-            "[decoupled_spec][server_adapter] update_weights-start_ensure_device_mesh"
-            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
-        )
-        self._ensure_device_mesh()
-        print(
-            "[decoupled_spec][server_adapter] update_weights-ensure_device_mesh_done"
-            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
-        )
-        await self._init_server_adapter()
-        print(
-            "[decoupled_spec][server_adapter] update_weights_start "
-            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
-            f"node_rank={self.node_rank} local_rank={self.local_rank} global_steps={global_steps}"
-        )
 
         update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
         if self.config.get("quantization", None) == "fp8":
@@ -228,6 +232,39 @@ class DecoupledSGLangServerAdapter(BaseRollout):
                 f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
                 f"elapsed_s={time.perf_counter() - quant_start:.6f}"
             )
+
+        if not self.active_in_decoupled_spec:
+            await self._drain_weights_for_collective_alignment(
+                weights,
+                role_label="inactive",
+                global_steps=global_steps,
+            )
+            return
+
+        if self.decoupled_spec_role == DecoupledSpecRole.DRAFT:
+            await self._drain_weights_for_collective_alignment(
+                weights,
+                role_label=DecoupledSpecRole.DRAFT.value,
+                global_steps=global_steps,
+            )
+            return
+
+        total_start = time.perf_counter()
+        print(
+            "[decoupled_spec][server_adapter] update_weights-start_ensure_device_mesh"
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+        )
+        self._ensure_device_mesh()
+        print(
+            "[decoupled_spec][server_adapter] update_weights-ensure_device_mesh_done"
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+        )
+        await self._init_server_adapter()
+        print(
+            "[decoupled_spec][server_adapter] update_weights_start "
+            f"role={self.decoupled_spec_role} replica_rank={self.replica_rank} "
+            f"node_rank={self.node_rank} local_rank={self.local_rank} global_steps={global_steps}"
+        )
 
 
         print(
