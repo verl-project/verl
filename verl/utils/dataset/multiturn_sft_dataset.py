@@ -295,6 +295,8 @@ class MultiTurnSFTDataset(Dataset):
         enable_thinking = (
             self.enable_thinking[item] if self.enable_thinking is not None else self.enable_thinking_default
         )
+        if enable_thinking is not None:
+            enable_thinking = bool(enable_thinking)
 
         # 1. tokenize each message
         input_ids, loss_mask, attention_mask, multi_modal_inputs = [], [], [], {}
