@@ -70,6 +70,13 @@ class ExternalDraftVerifyWorker:
         # No local draft-side KV/state exists for the external verify worker.
         return
 
+    def update_weights_from_tensor(self, recv_req):
+        print(
+            "[decoupled_spec][verify_worker] delegate_update_weights_from_tensor "
+            f"has_target_impl={hasattr(self.target_worker, 'update_weights_from_tensor')}"
+        )
+        return self.target_worker.update_weights_from_tensor(recv_req)
+
     def _get_verify_buffers(self, draft_token_num: int):
         if draft_token_num != self.speculative_num_draft_tokens:
             return None, None
