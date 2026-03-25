@@ -71,7 +71,7 @@ class TeacherModelManager:
         rollout_config = teacher_model_config.inference
         model_config = HFModelConfig(path=teacher_model_config.model_path)
         self.tokenizer = model_config.get_processor()
-        text_tokenizer = model_config.tokenizer 
+        text_tokenizer = model_config.tokenizer
         if model_config.tokenizer is None:
             raise ValueError(f"Tokenizer is required for teacher model {teacher_model_config.model_path}")
         self.pad_token_id = text_tokenizer.pad_token_id

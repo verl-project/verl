@@ -33,15 +33,14 @@ USE_DYNAMIC_BSZ=True
 
 STUDENT_WORLD_SIZE=2
 
-TEACHER_RESOURCE_POOL=True
-TEACHER_WORLD_SIZE=2
+TEACHER_RESOURCE_POOL=False
+TEACHER_WORLD_SIZE=4
 
 SP=1
 
 EXP_NAME="fsdp/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
 
-ENFORCE_EAGER=False # true for faster debugging
-RAY_INIT_ADDRESS=${RAY_INIT_ADDRESS:-local} # use auto or an explicit host:port to join an existing cluster
+ENFORCE_EAGER=True # true for faster debugging
 
 ############################ Paths ############################
 
@@ -125,10 +124,6 @@ ALGORITHM=(
     algorithm.use_kl_in_reward=False
 )
 
-RAY=(
-    +ray_kwargs.ray_init.address=$RAY_INIT_ADDRESS
-)
-
 TRAINER=(
     trainer.logger='["console","wandb"]'
     trainer.project_name=$PROJECT_NAME
@@ -153,7 +148,6 @@ python3 -m verl.trainer.main_ppo \
     --config-name='ppo_trainer.yaml' \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
-    "${RAY[@]}" \
     "${MODEL[@]}" \
     "${DISTILLATION[@]}" \
     "${ROLLOUT[@]}" \
