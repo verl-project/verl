@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+import torch
 from omegaconf import DictConfig, OmegaConf
+from torch.distributed.device_mesh import DeviceMesh
 
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import RolloutConfig
@@ -192,7 +194,7 @@ def compute_decoupled_spec_topology(
         raise ValueError("draft.tensor_model_parallel_size must be > 0")
     if draft_gpu_count % draft_world_size != 0:
         raise ValueError("draft.ngpus must be divisible by draft.tensor_model_parallel_size")
-    if world_size <= verify_world_size + draft_gpu_count:
+    if world_size < verify_world_size + draft_gpu_count:
         raise ValueError(
             "world_size must be greater than rollout tp*dp*pp plus draft.ngpus "
             f"(got world_size={world_size}, verify_world_size={verify_world_size}, draft_ngpus={draft_gpu_count})"
@@ -226,6 +228,29 @@ def compute_decoupled_spec_topology(
         num_verify_replicas=num_verify_replicas,
         num_draft_replicas=num_draft_replicas,
     )
+
+
+def build_rollout_device_mesh(
+    config: RolloutConfig | DictConfig | dict,
+    global_rank: int,
+    world_size: int,
+    device_type: str,
+) -> Optional[DeviceMesh]:
+    rollout_config = omega_conf_to_dataclass(config, dataclass_type=RolloutConfig)
+    infer_tp = rollout_config.tensor_model_parallel_size * rollout_config.data_parallel_size
+    infer_pp = rollout_config.pipeline_model_parallel_size
+
+    topo = compute_decoupled_spec_topology(rollout_config, world_size=world_size)
+
+    if global_rank < topo.draft_gpu_count:
+        # Draft workers do not participate in verifier-side weight sync today.
+        return None
+    elif global_rank < topo.assigned_gpu_count:
+        verify_ranks = torch.arange(topo.draft_gpu_count, topo.assigned_gpu_count, dtype=torch.int)
+        verify_mesh = verify_ranks.view(topo.num_verify_replicas, infer_tp, infer_pp)
+        return DeviceMesh(device_type, mesh=verify_mesh, mesh_dim_names=("dp", "infer_tp", "infer_pp"))
+    else:
+        return None
 
 
 def resolve_server_adapter_layout(

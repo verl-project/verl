@@ -41,6 +41,7 @@ from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.workers.config import ActorConfig, HFModelConfig, MtpConfig, RolloutConfig, TrainingWorkerConfig
 from verl.workers.rollout.base import BaseRollout, get_rollout_class_from_config
+from verl.workers.rollout.decoupled_spec_rollout.layout import build_rollout_device_mesh
 from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
@@ -550,13 +551,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             infer_tp = rollout_config.tensor_model_parallel_size * rollout_config.data_parallel_size
             infer_pp = rollout_config.pipeline_model_parallel_size
             infer_world_size = infer_tp * infer_pp
-            dp = self.world_size // infer_world_size
-            assert self.world_size % infer_world_size == 0, (
-                f"rollout world_size: {self.world_size} is not divisible by infer_world_size: {infer_world_size}"
-            )
-            rollout_device_mesh = init_device_mesh(
-                get_device_name(), mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
-            )
+
+            if rollout_config.enable_decoupled_spec:
+                rollout_device_mesh = build_rollout_device_mesh(
+                    config=rollout_config,
+                    global_rank=self.rank,
+                    world_size=self.world_size,
+                    device_type=get_device_name(),
+                )
+            else:
+                dp = self.world_size // infer_world_size
+                assert self.world_size % infer_world_size == 0, (
+                    f"rollout world_size: {self.world_size} is not divisible by infer_world_size: {infer_world_size}"
+                )
+                rollout_device_mesh = init_device_mesh(
+                    get_device_name(),
+                    mesh_shape=(dp, infer_tp, infer_pp),
+                    mesh_dim_names=["dp", "infer_tp", "infer_pp"],
+                )
 
             # 3.2 initialize rollout engine
             rollout_cls: type[BaseRollout] = get_rollout_class_from_config(rollout_config)
