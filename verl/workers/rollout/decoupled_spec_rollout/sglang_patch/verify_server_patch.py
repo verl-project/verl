@@ -288,11 +288,7 @@ def _recv_poll_response(
     recv_start = time.perf_counter()
     cached_response = self._decoupled_pending_poll_responses.pop(poll_id, None)
     if cached_response is not None:
-        print(
-            "[decoupled_spec][verify_scheduler] recv_poll_response_cache_hit "
-            f"dp_rank={_get_scheduler_dp_rank(self)} poll_id={poll_id} "
-            f"results={len(cached_response.results)} missing_keys={len(cached_response.missing_keys)}"
-        )
+        
         return cached_response
 
     while True:
@@ -316,11 +312,7 @@ def _recv_poll_response(
             )
             return poll_response
         self._decoupled_pending_poll_responses[poll_response.poll_id] = poll_response
-        print(
-            "[decoupled_spec][verify_scheduler] recv_poll_response_cached_other "
-            f"dp_rank={_get_scheduler_dp_rank(self)} wanted_poll_id={poll_id} "
-            f"cached_poll_id={poll_response.poll_id}"
-        )
+        
 
 
 def _sync_draft_results_across_schedulers(
@@ -361,11 +353,7 @@ def _bind_draft_results_to_reqs(self: Scheduler, live_reqs: list) -> None:
 
         _pop_waiting_draft_key(self, req.rid)
         setattr(req, "decoupled_spec_draft_result", draft_result)
-        print(
-            "[decoupled_spec][verify_scheduler] bind_draft_result_done "
-            f"dp_rank={_get_scheduler_dp_rank(self)} request_id={req.rid} "
-            f"draft_round_id={waiting_key.draft_round_id} draft_tokens={len(draft_result.draft_token_ids)}"
-        )
+        
 
 
 def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
@@ -398,21 +386,11 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
             timeout_ms=None,
             wait_mode=DraftPollWaitMode.ALL,
         )
-        print(
-            "[decoupled_spec][verify_scheduler] poll_draft_results_start "
-            f"dp_rank={_get_scheduler_dp_rank(self)} poll_id={poll_request.poll_id} "
-            f"num_live_reqs={len(live_reqs)} missing_keys={len(missing_keys)} "
-            f"missing={[f'{key.request_id}:{key.draft_round_id}' for key in missing_keys]}"
-        )
+        
         self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_poll_request(poll_request))
         poll_response = _recv_poll_response(self, poll_request.poll_id)
         leader_results = list(poll_response.results)
-        print(
-            "[decoupled_spec][verify_scheduler] poll_draft_results_done "
-            f"dp_rank={_get_scheduler_dp_rank(self)} poll_id={poll_request.poll_id} "
-            f"results={len(poll_response.results)} missing_after_poll={len(poll_response.missing_keys)} "
-            f"timed_out={poll_response.timed_out}"
-        )
+        
 
     synced_results = _sync_draft_results_across_schedulers(self, leader_results)
     for result in synced_results:
@@ -438,6 +416,10 @@ def _advance_decode_round_and_submit_drafts(self: Scheduler, batch) -> None:
     terminate_messages = []
     for req in batch.reqs:
         if req.is_retracted:
+            print(
+                "[decoupled_spec][verify_scheduler] request_terminated_by_retract "
+                f"dp_rank={_get_scheduler_dp_rank(self)} request_id={req.rid}"
+            )
             terminate_messages.append(
                 _build_request_terminate_message(req, RequestTerminateReason.ABORT)
             )
@@ -445,6 +427,38 @@ def _advance_decode_round_and_submit_drafts(self: Scheduler, batch) -> None:
             continue
 
         if req.finished():
+            finish_reason = (
+                getattr(req, "finished_reason", None)
+                or getattr(req, "finish_reason", None)
+                or getattr(req, "stop_reason", None)
+            )
+            finish_reason_type = (
+                finish_reason.get("type")
+                if isinstance(finish_reason, dict)
+                else getattr(finish_reason, "type", None)
+                or getattr(finish_reason, "value", None)
+                or getattr(finish_reason, "name", None)
+                or finish_reason
+            )
+            finish_reason_text = None if finish_reason_type is None else str(finish_reason_type).lower()
+            if finish_reason_text is not None and (
+                "max_model_len" in finish_reason_text
+                or "max_length" in finish_reason_text
+                or "length" in finish_reason_text
+            ):
+                print(
+                    "[decoupled_spec][verify_scheduler] request_terminated_by_max_model_len "
+                    f"dp_rank={_get_scheduler_dp_rank(self)} request_id={req.rid} "
+                    f"finish_reason={finish_reason_type}"
+                )
+            elif finish_reason_text is not None and (
+                "eos" in finish_reason_text or finish_reason_text == "stop"
+            ):
+                print(
+                    "[decoupled_spec][verify_scheduler] request_terminated_by_eos_token "
+                    f"dp_rank={_get_scheduler_dp_rank(self)} request_id={req.rid} "
+                    f"finish_reason={finish_reason_type}"
+                )
             terminate_messages.append(
                 _build_request_terminate_message(req, RequestTerminateReason.FINISHED)
             )
@@ -462,11 +476,7 @@ def _advance_decode_round_and_submit_drafts(self: Scheduler, batch) -> None:
         _submit_draft_request(self, req)
 
     for terminate_message in terminate_messages:
-        print(
-            "[decoupled_spec][verify_scheduler] request_terminate_send "
-            f"dp_rank={_get_scheduler_dp_rank(self)} request_id={terminate_message.request_id} "
-            f"reason={terminate_message.reason} upper_bound={terminate_message.draft_round_id_upper_bound}"
-        )
+        
         if _is_verify_scheduler_external_draft_leader(self):
             self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_request_terminate(terminate_message))
     print(
@@ -587,11 +597,7 @@ def _patch_verify_scheduler():
             )
         elif batch.forward_mode.is_decode():
             _advance_decode_round_and_submit_drafts(self, batch)
-        print(
-            "[decoupled_spec][verify_scheduler] process_batch_result_done "
-            f"dp_rank={_get_scheduler_dp_rank(self)} mode={batch.forward_mode} "
-            f"batch_size={batch.batch_size()} elapsed_s={time.perf_counter() - process_start:.6f}"
-        )
+        
 
     Scheduler.init_ipc_channels = patched_init_ipc_channels
     Scheduler.recv_requests = patched_recv_requests
@@ -697,11 +703,7 @@ def launch_subprocesses(
                 draft_actor_namespace,
             ),
         ).start()
-        print(
-            "[decoupled_spec][verify_server] draftproxy_process_started "
-            f"num_names={len(draft_actor_names)} namespace={draft_actor_namespace!r} "
-            f"elapsed_s={time.perf_counter() - draftproxy_launch_start:.6f}"
-        )
+        
 
     if server_args.tokenizer_worker_num == 1:
         tokenizer_manager, template_manager = init_tokenizer_manager_func(server_args, port_args)

@@ -173,10 +173,7 @@ class ExternalDraftVerifyWorker:
         return
 
     def update_weights_from_tensor(self, recv_req):
-        print(
-            "[decoupled_spec][verify_worker] delegate_update_weights_from_tensor "
-            f"has_target_impl={hasattr(self.target_worker, 'update_weights_from_tensor')}"
-        )
+        
         return self.target_worker.update_weights_from_tensor(recv_req)
 
     def _get_verify_buffers(self, draft_token_num: int):
@@ -246,12 +243,7 @@ class ExternalDraftVerifyWorker:
                 )
                 return draft_result.draft_token_ids + [pad_token_id] * (self.speculative_num_draft_tokens - draft_len)
 
-        print(
-            "[decoupled_spec][verify_worker] build_req_verify_tokens_mismatch "
-            f"request_id={req.rid} draft_round_id={draft_result.draft_round_id} "
-            f"tail_token={tail_token} first_draft_token={draft_result.draft_token_ids[0]} "
-            f"elapsed_s={time.perf_counter() - build_start:.6f}"
-        )
+        
         return [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1) # 比对不通过，则通过 pad_token_id 填充出 fake VerifyInput
 
 
@@ -328,11 +320,7 @@ class ExternalDraftVerifyWorker:
             seq_lens_sum=seq_lens_sum,
             seq_lens_cpu=batch.seq_lens_cpu,
         )
-        print(
-            "[decoupled_spec][verify_worker] build_verify_input_done "
-            f"batch_size={batch.batch_size()} draft_token_num={draft_token_num} "
-            f"elapsed_s={time.perf_counter() - build_start:.6f}"
-        )
+        
         return verify_input
 
     def forward_batch_generation(self, batch: ScheduleBatch) -> GenerationBatchResult:
@@ -348,19 +336,12 @@ class ExternalDraftVerifyWorker:
 
         verify_input_start = time.perf_counter()
         spec_info = self._build_verify_input(batch)
-        print(
-            "[decoupled_spec][verify_worker] build_verify_input_stage_done "
-            f"batch_size={batch.batch_size()} elapsed_s={time.perf_counter() - verify_input_start:.6f}"
-        )
+        
         can_use_full_graph_path = spec_info.draft_token_num == self.speculative_num_draft_tokens
         verify_start = time.perf_counter()
         logits_output, verify_output, _, can_run_cuda_graph = self.verify(batch, spec_info)
         normalize_external_draft_batch_spec_info(batch)
-        print(
-            "[decoupled_spec][verify_worker] verify_done "
-            f"batch_size={batch.batch_size()} accepted_tokens={sum(verify_output.accept_length_per_req_cpu)} "
-            f"elapsed_s={time.perf_counter() - verify_start:.6f}"
-        )
+        
         result = GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=verify_output.verified_id,
@@ -368,10 +349,7 @@ class ExternalDraftVerifyWorker:
             accept_length_per_req_cpu=verify_output.accept_length_per_req_cpu,
             can_run_cuda_graph=can_run_cuda_graph and can_use_full_graph_path,
         )
-        print(
-            "[decoupled_spec][verify_worker] forward_batch_generation_decode_done "
-            f"batch_size={batch.batch_size()} total_elapsed_s={time.perf_counter() - forward_start:.6f}"
-        )
+        
         return result
 
 

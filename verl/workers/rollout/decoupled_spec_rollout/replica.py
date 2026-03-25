@@ -70,12 +70,7 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
     async def launch_servers(self):
         launch_start = time.perf_counter()
         model_path = getattr(self.model_config, "local_path", None) or getattr(self.model_config, "path", None)
-        print(
-            "[decoupled_spec][BaseDecoupledSGLangReplica] launch_servers_start "
-            f"server_role={self.server_role} replica_rank={self.replica_rank} "
-            f"world_size={self.world_size} nnodes={self.nnodes} model_path={model_path} "
-            f"{self._format_startup_params()}"
-        )
+        
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
@@ -184,11 +179,7 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
             if is_valid_ipv6_address(server_address)
             else f"{server_address}:{server_port}"
         )
-        print(
-            "[decoupled_spec][BaseDecoupledSGLangReplica] launch_servers_done "
-            f"server_role={self.server_role} replica_rank={self.replica_rank} "
-            f"server_address={self._server_address} elapsed_s={time.perf_counter() - launch_start:.6f}"
-        )
+        
 
 
 class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
@@ -218,13 +209,7 @@ class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
         self._base_gpu_id_override = topo.get_replica_base_gpu_id(
             DecoupledSpecRole.DRAFT, self.replica_rank, self.gpus_per_node
         )
-        print(
-            "[decoupled_spec][DraftSGLangReplica] init_hybrid_decoupled "
-            f"server_role={self.server_role} replica_rank={self.replica_rank} "
-            f"start={start} end={end} draft_world_size={topo.draft_world_size} "
-            f"verify_gpu_count={topo.verify_gpu_count} base_gpu_id={self._base_gpu_id_override} "
-            f"{self._format_startup_params()}"
-        )
+        
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start:end]
         await self.launch_servers()
@@ -262,13 +247,7 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
         self._base_gpu_id_override = topo.get_replica_base_gpu_id(
             DecoupledSpecRole.VERIFY, self.replica_rank, self.gpus_per_node
         )
-        print(
-            "[decoupled_spec][VerifySGLangReplica] init_hybrid_decoupled "
-            f"server_role={self.server_role} replica_rank={self.replica_rank} "
-            f"start={start} end={end} verify_world_size={topo.verify_world_size} "
-            f"num_draft_names={len(self.draft_actor_names)} base_gpu_id={self._base_gpu_id_override} "
-            f"{self._format_startup_params()}"
-        )
+        
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start:end]
         await self.launch_servers()

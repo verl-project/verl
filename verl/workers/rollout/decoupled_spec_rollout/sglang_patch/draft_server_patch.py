@@ -42,12 +42,7 @@ async def handle_draft_request(self, draft_request):
     prompt_ids = draft_request.full_token_ids
     max_possible_tokens = self.config.max_model_len - len(prompt_ids)
     if max_possible_tokens <= 0:
-        print(
-            "[decoupled_spec][draft_server] handle_draft_request_skip "
-            f"request_id={draft_request.request_id} draft_round_id={draft_request.draft_round_id} "
-            f"reason=max_possible_tokens_non_positive max_possible_tokens={max_possible_tokens} "
-            f"elapsed_s={time.perf_counter() - handle_start:.6f}"
-        )
+        
         return DraftResult(
             request_id=draft_request.request_id,
             draft_round_id=draft_request.draft_round_id,
