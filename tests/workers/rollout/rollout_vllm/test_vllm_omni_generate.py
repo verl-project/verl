@@ -99,7 +99,7 @@ def init_server():
             "guidance_scale": 4.0,
             "engine_kwargs": {
                 "vllm_omni": {
-                    "custom_pipeline": "examples.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb",
+                    "custom_pipeline": "examples.flowgrpo_trainer.pipeline_qwenimage.QwenImagePipelineWithLogProb",
                 }
             },
         }
