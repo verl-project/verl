@@ -61,7 +61,7 @@ class SFTTensorCollator:
 
         final_batch = {}
 
-        tensor_keys = set().union(*(d.keys() for d in batch))
+        tensor_keys = set.intersection(*(set(d.keys()) for d in batch))
 
         # Handle tensor values by creating a NestedTensor.
         for key in tensor_keys:
