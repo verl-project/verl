@@ -9,6 +9,7 @@ import time
 import zmq
 from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.utils import broadcast_pyobj, get_zmq_socket
+from sglang.srt.managers.io_struct import BatchTokenizedGenerateReqInput, TokenizedGenerateReqInput
 
 from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     DraftPollWaitMode,
@@ -250,6 +251,7 @@ def _submit_draft_request(
     _append_waiting_draft_key(self, req.rid, draft_request.key)
     if needs_warmup_decode:
         self._decoupled_needs_warmup_decode_rids.add(req.rid)
+    setattr(req, "decoupled_spec_is_warmup_decode", bool(needs_warmup_decode))
     setattr(req, "decoupled_spec_draft_result", None)
     waiting_queue = _get_waiting_draft_queue(self, req.rid)
     print(
@@ -452,6 +454,7 @@ def _advance_decode_round_and_submit_drafts(self: Scheduler, batch) -> None:
         if req.rid in self._decoupled_needs_warmup_decode_rids:
             # warmup 集合内的 request，经过一次 decode 之后（也就是这里），就 warmup 完毕了
             self._decoupled_needs_warmup_decode_rids.discard(req.rid)
+            setattr(req, "decoupled_spec_is_warmup_decode", False)
 
         requests_to_send.append(req)
 
@@ -478,6 +481,7 @@ def _patch_verify_scheduler():
         return
 
     original_init_ipc_channels = Scheduler.init_ipc_channels
+    original_recv_requests = Scheduler.recv_requests
     original_run_batch = Scheduler.run_batch
     original_process_batch_result = Scheduler.process_batch_result
 
@@ -524,6 +528,29 @@ def _patch_verify_scheduler():
                 f"elapsed_s={time.perf_counter() - init_start:.6f}"
             )
 
+    def patched_recv_requests(self):
+        recv_reqs = original_recv_requests(self)
+        if not _is_verify_scheduler_entry_rank(self) or not recv_reqs:
+            return recv_reqs
+
+        for recv_req in recv_reqs:
+            if isinstance(recv_req, TokenizedGenerateReqInput):
+                print(
+                    "[decoupled_spec][verify_scheduler] recv_generate_request "
+                    f"dp_rank={_get_scheduler_dp_rank(self)} rid={recv_req.rid} "
+                    f"input_len={len(recv_req.input_ids) if recv_req.input_ids is not None else 0} "
+                    f"max_new_tokens={getattr(recv_req.sampling_params, 'max_new_tokens', None)} "
+                    f"stream={getattr(recv_req, 'stream', None)}"
+                )
+            elif isinstance(recv_req, BatchTokenizedGenerateReqInput):
+                batch_rids = [req.rid for req in recv_req.batch]
+                print(
+                    "[decoupled_spec][verify_scheduler] recv_batch_generate_request "
+                    f"dp_rank={_get_scheduler_dp_rank(self)} batch_size={len(recv_req.batch)} "
+                    f"rids={batch_rids}"
+                )
+        return recv_reqs
+
     def patched_run_batch(self, batch, pp_proxy_tensors=None):
         if batch is not None and batch.forward_mode.is_decode():
             run_batch_wait_start = time.perf_counter()
@@ -567,6 +594,7 @@ def _patch_verify_scheduler():
         )
 
     Scheduler.init_ipc_channels = patched_init_ipc_channels
+    Scheduler.recv_requests = patched_recv_requests
     Scheduler.run_batch = patched_run_batch
     Scheduler.process_batch_result = patched_process_batch_result
     Scheduler._verl_decoupled_spec_patched = True

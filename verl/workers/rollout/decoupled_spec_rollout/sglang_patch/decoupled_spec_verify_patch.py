@@ -108,8 +108,19 @@ class ExternalDraftVerifyWorker:
         build_start = time.perf_counter()
         tail_token = _get_req_tail_token_id(req) # 该 request 最后一个已经 commit 的 token
         draft_result = getattr(req, "decoupled_spec_draft_result", None)
+        is_warmup_decode = bool(getattr(req, "decoupled_spec_is_warmup_decode", False))
 
-        assert draft_result is not None, "draft_result is None"
+        if draft_result is None:
+            if is_warmup_decode:
+                print(
+                    "[decoupled_spec][verify_worker] build_req_verify_tokens_warmup_no_draft "
+                    f"request_id={req.rid} tail_token={tail_token} "
+                    f"target_len={self.speculative_num_draft_tokens} "
+                    f"elapsed_s={time.perf_counter() - build_start:.6f}"
+                )
+                return [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1)
+            raise AssertionError("draft_result is None")
+
         if not draft_result.draft_token_ids:
             print("receive empty draft result, for request may hit max_model_len in drafter")
             return [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1)
