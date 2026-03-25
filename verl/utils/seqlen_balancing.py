@@ -399,9 +399,13 @@ def rearrange_micro_batches(
     if min_num_micro_batch is not None:
         # used to support pp
         num_micro_batches = max(min_num_micro_batch, num_micro_batches)
-    if dist.is_initialized() and same_micro_num_in_dp and dp_group is not None:
+    if dist.is_initialized() and same_micro_num_in_dp:
+        if dp_group is not None:
+            _dp_group = dp_group
+        else:
+            _dp_group = dist.group.WORLD
         num_micro_batches = torch.tensor([num_micro_batches], device=get_device_name())
-        dist.all_reduce(num_micro_batches, op=dist.ReduceOp.MAX, group=dp_group)
+        dist.all_reduce(num_micro_batches, op=dist.ReduceOp.MAX, group=_dp_group)
         num_micro_batches = num_micro_batches.cpu().item()
     if num_batches_divided_by is not None:
         num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
