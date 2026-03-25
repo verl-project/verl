@@ -47,7 +47,6 @@ def _get_teacher_sampling_params(
 def _pad_teacher_outputs(
     teacher_ids: torch.Tensor,
     teacher_logprobs: torch.Tensor,
-    *,
     prompt_width: int,
     response_width: int,
     prompt_length: int,
@@ -64,23 +63,25 @@ def _pad_teacher_outputs(
     )
 
 
-def _extract_valid_prompt_and_response_ids(data: DataProto) -> tuple[list[int], list[int]]:
-    """Extract valid prompt and response token ids from padded batch data.
-    TODO(wuxibin): remove padding and use tensordict.
+def _unpad_teacher_inputs(data: DataProto) -> tuple[list[int], int, int]:
+    """Unpad valid sequence ids and prompt/response lengths from a single sample.
+    The sample is a left-padded prompt concatenated with a right-padded response.
     """
     assert len(data) == 1, "Teacher logprob computation expects a single sample"
 
-    prompts = data.batch["prompts"][0]
-    responses = data.batch["responses"][0]
+    input_ids = data.batch["input_ids"][0]
     attention_mask = data.batch["attention_mask"][0]
-    prompt_length = prompts.shape[0]
-
-    valid_prompt_length = int(attention_mask[:prompt_length].sum().item())
-    valid_response_length = int(attention_mask[prompt_length:].sum().item())
-
-    prompt_ids = normalize_token_ids(prompts[-valid_prompt_length:] if valid_prompt_length > 0 else [])
-    response_ids = normalize_token_ids(responses[:valid_response_length])
-    return prompt_ids, response_ids
+    prompt_width = data.batch["prompts"][0].shape[0]
+    response_width = data.batch["responses"][0].shape[0]
+    assert attention_mask.shape[0] == prompt_width + response_width, (
+        "attention_mask sequence length must match prompt and response widths"
+    )
+    valid_prompt_length = int(attention_mask[:prompt_width].sum().item())
+    valid_response_length = int(attention_mask[-response_width:].sum().item())
+    prompt_num_padding = prompt_width - valid_prompt_length
+    sequence_ids = input_ids[prompt_num_padding : prompt_width + valid_response_length]
+    sequence_ids = normalize_token_ids(sequence_ids)
+    return sequence_ids, valid_prompt_length, valid_response_length
 
 
 class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
@@ -104,16 +105,14 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
 
     async def compute_teacher_logprobs_single(
         self,
-        *,
-        prompt_ids: list[int],
-        response_ids: list[int],
+        sequence_ids: list[int],
         multi_modal_data: Optional[dict[str, Any]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute teacher log probabilities for a single prompt-response pair."""
+        """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
         teacher_output = await self.generate(
             request_id=uuid4().hex,
-            prompt_ids=prompt_ids + response_ids,
+            prompt_ids=sequence_ids,
             sampling_params=_get_teacher_sampling_params(self.distillation_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
@@ -122,7 +121,7 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
         # the distillation loss settings.
         teacher_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
         teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
-        assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(prompt_ids + response_ids)
+        assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(sequence_ids)
         return teacher_ids, teacher_logprobs
 
     async def compute_teacher_logprobs_batch(self, data: DataProto) -> DataProto:
@@ -136,14 +135,13 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
         # Compute logprobs for each sample in the batch
         for i in range(len(data)):
             item = data[i : i + 1]
-            prompt_ids, response_ids = _extract_valid_prompt_and_response_ids(item)
+            sequence_ids, prompt_length, response_length = _unpad_teacher_inputs(item)
             multi_modal_data = None if multi_modal_data_batch is None else multi_modal_data_batch[i]
-            lengths.append((len(prompt_ids), len(response_ids)))
+            lengths.append((prompt_length, response_length))
             tasks.append(
                 asyncio.create_task(
                     self.compute_teacher_logprobs_single(
-                        prompt_ids=prompt_ids,
-                        response_ids=response_ids,
+                        sequence_ids=sequence_ids,
                         multi_modal_data=multi_modal_data,
                     )
                 )

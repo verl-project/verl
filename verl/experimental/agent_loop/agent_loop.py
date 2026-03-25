@@ -854,8 +854,7 @@ class AgentLoopWorker:
         """Compute teacher logprobs for single sample."""
         if self.stream_teacher_with_rollout and not validate:
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                prompt_ids=prompt_ids,
-                response_ids=response_ids,
+                sequence_ids=prompt_ids + response_ids,
                 multi_modal_data=output.multi_modal_data,
             )
             output.extra_fields["teacher_ids"] = teacher_ids
