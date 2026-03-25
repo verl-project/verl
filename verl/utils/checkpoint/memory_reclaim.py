@@ -127,14 +127,9 @@ def _munmap_remap_new_regions(
                     if new_addr == start:
                         freed_mb += size_mb
 
-        logger.info(
-            "[rank %s] munmap_remap: freed=%.0fMB skipped_permanent=%.0fMB",
-            rank,
-            freed_mb,
-            skipped_mb,
-        )
+        print(f"[rank {rank}] munmap_remap: freed={freed_mb:.0f}MB skipped_permanent={skipped_mb:.0f}MB")
     except Exception as e:
-        logger.warning("[rank %s] munmap_remap error: %s", rank, e)
+        print(f"[rank {rank}] munmap_remap error: {e}")
 
     return freed_mb, skipped_mb
 
@@ -168,14 +163,12 @@ def reclaim_checkpoint_memory(rank: int | None = None) -> None:
     """
     global _permanent_regions, _save_count
 
+    print(f"[rank {rank}] reclaim_checkpoint_memory: save_count={_save_count}")
+
     if _save_count == 0:
         # First save — record permanent regions; do NOT reclaim.
         _permanent_regions = _get_anon_region_addrs(threshold_mb=50)
-        logger.info(
-            "[rank %s] Captured %d permanent anon regions (first checkpoint).",
-            rank,
-            len(_permanent_regions),
-        )
+        print(f"[rank {rank}] Captured {len(_permanent_regions)} permanent anon regions (first checkpoint).")
     else:
         permanent = _permanent_regions or set()
         freed_mb, _ = _munmap_remap_new_regions(
@@ -185,7 +178,6 @@ def reclaim_checkpoint_memory(rank: int | None = None) -> None:
         )
         gc.collect()
         _trim_memory()
-        if freed_mb > 0:
-            logger.info("[rank %s] Reclaimed %.0fMB after checkpoint %d.", rank, freed_mb, _save_count)
+        print(f"[rank {rank}] Reclaimed {freed_mb:.0f}MB after checkpoint {_save_count}.")
 
     _save_count += 1
