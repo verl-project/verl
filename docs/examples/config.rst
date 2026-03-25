@@ -131,7 +131,7 @@ Actor/Rollout/Reference Policy
       # Rollout Correction (corrects distribution mismatch between rollout and training)
       rollout_correction:
         rollout_is: token # IS weights
-        rollout_is_threshold: 2.0 # Upper threshold for IS weights
+        rollout_is_threshold: 2.0 # TIS upper bound, or "0.5_5.0" for IcePop
         rollout_rs: null # Rejection sampling
         rollout_rs_threshold: null # RS upper threshold
       use_torch_compile: True # False to disable torch compile

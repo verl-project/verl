@@ -188,6 +188,10 @@ def make_megatron_module(
     peft_cls: Any = None,
     peft_config: Any = None,
 ):
+    from verl.models.mcore.config_converter import get_hf_rope_theta
+
+    hf_config.rope_theta = get_hf_rope_theta(hf_config)
+
     if override_model_config is None:
         override_model_config = {}
 

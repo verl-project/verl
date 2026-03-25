@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec, get_gpt_mtp_block_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 
-from .config_converter import PretrainedConfig, TransformerConfig
+from .config_converter import PretrainedConfig, TransformerConfig, get_hf_rope_theta
 
 
 class BaseModelInitializer(ABC):
@@ -80,17 +80,17 @@ class BaseModelInitializer(ABC):
             post_process=post_process,
             share_embeddings_and_output_weights=share_embeddings_and_output_weights,
             position_embedding_type="rope",
-            rotary_base=self.hf_config.rope_theta,
+            rotary_base=get_hf_rope_theta(self.hf_config),
             **rope_scaling_args,
             mtp_block_spec=mtp_block_spec,
             **({} if not self.has_vp_stage else {"vp_stage": vp_stage}),
         )
 
         if post_process and value:
-            from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+            from verl.models.mcore.bridge import LinearForLastLayer
 
             model.output_layer = LinearForLastLayer(
-                input_size=self.tfconfig.hidden_size, output_size=1, config=self.tfconfig
+                input_size=self.tfconfig.hidden_size, output_size=1, sequence_parallel=self.tfconfig.sequence_parallel
             )
 
         return model
@@ -257,7 +257,7 @@ class Qwen25VLModel(BaseModelInitializer):
             vision_projection_config=vision_projection_config,
             vision_projection_layer_spec=vision_projection_layer_spec,
             vision_projection_type="mlp",
-            language_rotary_base=hf_config.rope_theta,
+            language_rotary_base=get_hf_rope_theta(hf_config),
             pre_process=pre_process,
             post_process=post_process,
             add_decoder=True,
@@ -267,10 +267,10 @@ class Qwen25VLModel(BaseModelInitializer):
         )
 
         if post_process and value:
-            from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+            from verl.models.mcore.bridge import LinearForLastLayer
 
             qwen25_vl_model.language_model.output_layer = LinearForLastLayer(
-                input_size=tfconfig.hidden_size, output_size=1, config=tfconfig
+                input_size=tfconfig.hidden_size, output_size=1, sequence_parallel=tfconfig.sequence_parallel
             )
 
         return qwen25_vl_model
