@@ -39,19 +39,13 @@ def set_pending_draft_actor_names(names: list[str] | None) -> None:
     """Pass drafter Ray actor names from the verify server process into launch_subprocesses."""
     global _pending_draft_actor_names
     _pending_draft_actor_names = list(names) if names else None
-    print(
-        "[decoupled_spec][verify_server] set_pending_draft_actor_names "
-        f"num_names={0 if _pending_draft_actor_names is None else len(_pending_draft_actor_names)}"
-    )
+    
 
 
 def set_pending_draft_actor_namespace(namespace: str | None) -> None:
     global _pending_draft_actor_namespace
     _pending_draft_actor_namespace = namespace
-    print(
-        "[decoupled_spec][verify_server] set_pending_draft_actor_namespace "
-        f"namespace={_pending_draft_actor_namespace!r}"
-    )
+    
 
 logger = logging.getLogger(__name__)
 
@@ -239,13 +233,7 @@ def _submit_draft_request(
     submit_start = time.perf_counter()
     draft_round_id = _next_draft_round_id(self, req.rid)
     draft_request = _build_draft_request_from_req(self, req, draft_round_id=draft_round_id)
-    print(
-        "[decoupled_spec][verify_scheduler] submit_draft_request_start "
-        f"dp_rank={_get_scheduler_dp_rank(self)} request_id={req.rid} "
-        f"draft_round_id={draft_round_id} needs_warmup_decode={needs_warmup_decode} "
-        f"prompt_len={len(draft_request.prompt_token_ids)} committed_len={len(draft_request.committed_token_ids)} "
-        f"num_speculative_steps={draft_request.num_speculative_steps}"
-    )
+    
     if _is_verify_scheduler_external_draft_leader(self):
         self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_submit_draft(draft_request))
     _append_waiting_draft_key(self, req.rid, draft_request.key)
@@ -254,12 +242,7 @@ def _submit_draft_request(
     setattr(req, "decoupled_spec_is_warmup_decode", bool(needs_warmup_decode))
     setattr(req, "decoupled_spec_draft_result", None)
     waiting_queue = _get_waiting_draft_queue(self, req.rid)
-    print(
-        "[decoupled_spec][verify_scheduler] submit_draft_request_done "
-        f"dp_rank={_get_scheduler_dp_rank(self)} request_id={req.rid} "
-        f"draft_round_id={draft_round_id} waiting_queue_len={0 if waiting_queue is None else len(waiting_queue)} "
-        f"elapsed_s={time.perf_counter() - submit_start:.6f}"
-    )
+    
 
 
 def _send_draft_requests(
@@ -304,12 +287,6 @@ def _recv_poll_response(
 
         poll_response = response.poll_response
         if poll_response.poll_id == poll_id:
-            print(
-                "[decoupled_spec][verify_scheduler] recv_poll_response_done "
-                f"dp_rank={_get_scheduler_dp_rank(self)} poll_id={poll_id} "
-                f"results={len(poll_response.results)} missing_keys={len(poll_response.missing_keys)} "
-                f"timed_out={poll_response.timed_out} elapsed_s={time.perf_counter() - recv_start:.6f}"
-            )
             return poll_response
         self._decoupled_pending_poll_responses[poll_response.poll_id] = poll_response
         
@@ -341,10 +318,6 @@ def _bind_draft_results_to_reqs(self: Scheduler, live_reqs: list) -> None:
         waiting_key = _peek_waiting_draft_key(self, req.rid)
         if waiting_key is None:
             setattr(req, "decoupled_spec_draft_result", None)
-            print(
-                "[decoupled_spec][verify_scheduler] bind_draft_result_none "
-                f"dp_rank={_get_scheduler_dp_rank(self)} request_id={req.rid}"
-            )
             continue
 
         draft_result = self._decoupled_pending_draft_results.pop(waiting_key, None)
@@ -397,11 +370,7 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
         self._decoupled_pending_draft_results[result.key] = result
 
     _bind_draft_results_to_reqs(self, live_reqs)
-    print(
-        "[decoupled_spec][verify_scheduler] wait_for_draft_results_done "
-        f"dp_rank={_get_scheduler_dp_rank(self)} num_live_reqs={len(live_reqs)} "
-        f"elapsed_s={time.perf_counter() - wait_start:.6f}"
-    )
+    
 
 
 def _build_request_terminate_message(req, reason: RequestTerminateReason) -> RequestTerminateMessage:
@@ -416,10 +385,6 @@ def _advance_decode_round_and_submit_drafts(self: Scheduler, batch) -> None:
     terminate_messages = []
     for req in batch.reqs:
         if req.is_retracted:
-            print(
-                "[decoupled_spec][verify_scheduler] request_terminated_by_retract "
-                f"dp_rank={_get_scheduler_dp_rank(self)} request_id={req.rid}"
-            )
             terminate_messages.append(
                 _build_request_terminate_message(req, RequestTerminateReason.ABORT)
             )
@@ -479,11 +444,7 @@ def _advance_decode_round_and_submit_drafts(self: Scheduler, batch) -> None:
         
         if _is_verify_scheduler_external_draft_leader(self):
             self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_request_terminate(terminate_message))
-    print(
-        "[decoupled_spec][verify_scheduler] advance_decode_round_done "
-        f"dp_rank={_get_scheduler_dp_rank(self)} requests_to_send={len(requests_to_send)} "
-        f"terminate_messages={len(terminate_messages)} elapsed_s={time.perf_counter() - advance_start:.6f}"
-    )
+    
 
 
 def _patch_verify_scheduler():
@@ -509,10 +470,6 @@ def _patch_verify_scheduler():
         ipc_config = DraftProxyIpcConfig.from_env()
         self._decoupled_draftproxy_expected = ipc_config is not None
         if ipc_config is None:
-            print(
-                "[decoupled_spec][verify_scheduler] init_ipc_channels_skip "
-                f"dp_rank={_get_scheduler_dp_rank(self)} reason=no_ipc_config"
-            )
             return
         if _is_verify_scheduler_entry_rank(self):
             endpoints = ipc_config.get_endpoints(_get_scheduler_dp_rank(self))
@@ -566,21 +523,12 @@ def _patch_verify_scheduler():
             run_batch_wait_start = time.perf_counter()
             target_reqs = _get_decode_reqs_for_poll(self, batch) # 这个 batch 中，需要 poll DraftResult 的 req 列表
             _wait_for_draft_results(self, batch, target_reqs=target_reqs)
-            print(
-                "[decoupled_spec][verify_scheduler] run_batch_decode_wait_done "
-                f"dp_rank={_get_scheduler_dp_rank(self)} target_reqs={len(target_reqs)} "
-                f"elapsed_s={time.perf_counter() - run_batch_wait_start:.6f}"
-            )
+
 
         # 注：original_run_batch 内部会调用 self.model_worker.forward_batch_generation，而 model_worker 的工厂方法已经被patch
         run_batch_start = time.perf_counter()
         result = original_run_batch(self, batch, pp_proxy_tensors)
-        if batch is not None:
-            print(
-                "[decoupled_spec][verify_scheduler] run_batch_done "
-                f"dp_rank={_get_scheduler_dp_rank(self)} mode={batch.forward_mode} "
-                f"batch_size={batch.batch_size()} elapsed_s={time.perf_counter() - run_batch_start:.6f}"
-            )
+        
         return result
 
     def patched_process_batch_result(self, batch, result):
@@ -609,7 +557,6 @@ def _patch_verify_scheduler():
 def run_scheduler_process(*args, **kwargs):
     from sglang.srt.entrypoints.engine import run_scheduler_process as upstream
 
-    print("[decoupled_spec][verify_server] run_scheduler_process_start")
     patch_speculative_worker_factory()
     _patch_verify_scheduler()
     return upstream(*args, **kwargs)
@@ -641,11 +588,7 @@ def launch_subprocesses(
     if port_args is None:
         port_args = PortArgs.init_new(server_args)
     logger.info(f"{server_args=}")
-    print(
-        "[decoupled_spec][verify_server] launch_subprocesses_start "
-        f"node_rank={server_args.node_rank} dp_size={getattr(server_args, 'dp_size', None)} "
-        f"tp_size={getattr(server_args, 'tp_size', None)}"
-    )
+    
 
     scheduler_launch_start = time.perf_counter()
     scheduler_procs, scheduler_pipe_readers = _launch_scheduler_processes(
@@ -653,10 +596,7 @@ def launch_subprocesses(
         port_args=port_args,
         run_scheduler_process_func=run_scheduler_process_func,
     )
-    print(
-        "[decoupled_spec][verify_server] scheduler_processes_launched "
-        f"count={len(scheduler_procs)} elapsed_s={time.perf_counter() - scheduler_launch_start:.6f}"
-    )
+    
 
     if server_args.node_rank >= 1:
         scheduler_infos = _wait_for_scheduler_ready(scheduler_pipe_readers, scheduler_procs)
@@ -682,14 +622,6 @@ def launch_subprocesses(
     _pending_draft_actor_names = None
     draft_actor_namespace = _pending_draft_actor_namespace
     _pending_draft_actor_namespace = None
-    print(
-        "[decoupled_spec][verify_server] consume_pending_draft_actor_names "
-        f"num_names={0 if draft_actor_names is None else len(draft_actor_names)}"
-    )
-    print(
-        "[decoupled_spec][verify_server] consume_pending_draft_actor_namespace "
-        f"namespace={draft_actor_namespace!r}"
-    )
 
     ipc_config = DraftProxyIpcConfig.from_env()
     if ipc_config is not None and draft_actor_names:
@@ -713,10 +645,6 @@ def launch_subprocesses(
 
     scheduler_infos = _wait_for_scheduler_ready(scheduler_pipe_readers, scheduler_procs)
     tokenizer_manager.max_req_input_len = scheduler_infos[0]["max_req_input_len"]
-    print(
-        "[decoupled_spec][verify_server] launch_subprocesses_done "
-        f"scheduler_infos={len(scheduler_infos)} elapsed_s={time.perf_counter() - launch_start:.6f}"
-    )
     return tokenizer_manager, template_manager, scheduler_infos, port_args
 
 

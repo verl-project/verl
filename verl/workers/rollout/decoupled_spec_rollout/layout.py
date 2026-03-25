@@ -211,13 +211,6 @@ def compute_decoupled_spec_topology(
 
     num_verify_replicas = verify_gpu_count // verify_world_size
     num_draft_replicas = draft_gpu_count // draft_world_size
-    print(
-        "[decoupled_spec][topology] compute_topology "
-        f"world_size={world_size} verify_world_size={verify_world_size} "
-        f"draft_world_size={draft_world_size} verify_gpu_count={verify_gpu_count} "
-        f"draft_gpu_count={draft_gpu_count} num_verify_replicas={num_verify_replicas} "
-        f"num_draft_replicas={num_draft_replicas}"
-    )
 
     return DecoupledSpecTopology(
         world_size=world_size,

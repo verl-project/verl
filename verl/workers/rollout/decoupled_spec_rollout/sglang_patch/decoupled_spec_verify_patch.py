@@ -211,12 +211,6 @@ class ExternalDraftVerifyWorker:
 
         if draft_result is None:
             if is_warmup_decode:
-                print(
-                    "[decoupled_spec][verify_worker] build_req_verify_tokens_warmup_no_draft "
-                    f"request_id={req.rid} tail_token={tail_token} "
-                    f"target_len={self.speculative_num_draft_tokens} "
-                    f"elapsed_s={time.perf_counter() - build_start:.6f}"
-                )
                 return [tail_token] + [pad_token_id] * (self.speculative_num_draft_tokens - 1)
             raise AssertionError("draft_result is None")
 
@@ -228,19 +222,8 @@ class ExternalDraftVerifyWorker:
             draft_len = len(draft_result.draft_token_ids)
             # 如果 drafter 返回的 draft token 数量与 num_speculative_steps 一致，则直接返回
             if draft_len == self.speculative_num_draft_tokens:
-                print(
-                    "[decoupled_spec][verify_worker] build_req_verify_tokens_match_full "
-                    f"request_id={req.rid} draft_round_id={draft_result.draft_round_id} "
-                    f"draft_len={draft_len} elapsed_s={time.perf_counter() - build_start:.6f}"
-                )
                 return draft_result.draft_token_ids
             else:
-                print(
-                    "[decoupled_spec][verify_worker] build_req_verify_tokens_match_pad "
-                    f"request_id={req.rid} draft_round_id={draft_result.draft_round_id} "
-                    f"draft_len={draft_len} target_len={self.speculative_num_draft_tokens} "
-                    f"elapsed_s={time.perf_counter() - build_start:.6f}"
-                )
                 return draft_result.draft_token_ids + [pad_token_id] * (self.speculative_num_draft_tokens - draft_len)
 
         
@@ -328,10 +311,6 @@ class ExternalDraftVerifyWorker:
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
             model_worker_batch = batch.get_model_worker_batch()
             result = self.target_worker.forward_batch_generation(model_worker_batch)
-            print(
-                "[decoupled_spec][verify_worker] forward_batch_generation_extend_done "
-                f"batch_size={batch.batch_size()} elapsed_s={time.perf_counter() - forward_start:.6f}"
-            )
             return result
 
         verify_input_start = time.perf_counter()

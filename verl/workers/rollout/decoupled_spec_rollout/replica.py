@@ -90,13 +90,6 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
         worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
         worker_node_ids = [worker_info[0] for worker_info in worker_infos]
         worker_local_ranks = [worker_info[2] for worker_info in worker_infos]
-        for worker_idx, (worker_node_id, worker_visible_devices, worker_local_rank) in enumerate(worker_infos):
-            print(
-                "[decoupled_spec][BaseDecoupledSGLangReplica] worker_assignment "
-                f"server_role={self.server_role} replica_rank={self.replica_rank} "
-                f"worker_idx={worker_idx} node_id={worker_node_id} "
-                f"worker_visible_devices={worker_visible_devices} worker_local_rank={worker_local_rank}"
-            )
         is_noset_visible_devices = bool(os.environ.get(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}", None))
 
         for node_rank in range(self.nnodes):
@@ -131,15 +124,6 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
                 )
                 base_gpu_id = self._base_gpu_id_override
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
-            print(
-                "[decoupled_spec][BaseDecoupledSGLangReplica] launch_server_actor "
-                f"server_role={self.server_role} replica_rank={self.replica_rank} "
-                f"node_rank={node_rank} node_id={node_id} worker_slice=[{start_idx}:{end_idx}] "
-                f"worker_visible_devices_set={node_cuda_visible_devices_set} "
-                f"worker_local_ranks={node_worker_local_ranks} "
-                f"cuda_visible_devices={node_cuda_visible_devices} base_gpu_id={base_gpu_id} "
-                f"model_path={model_path}"
-            )
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,

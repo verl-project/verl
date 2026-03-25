@@ -31,13 +31,6 @@ async def handle_draft_request(self, draft_request):
     handle_start = time.perf_counter()
     if self.server_role != "draft":
         raise ValueError("handle_draft_request is only supported on draft servers")
-    print(
-        "[decoupled_spec][draft_server] handle_draft_request_start "
-        f"request_id={draft_request.request_id} draft_round_id={draft_request.draft_round_id} "
-        f"verify_replica_rank={draft_request.verify_replica_rank} "
-        f"prompt_len={len(draft_request.prompt_token_ids)} committed_len={len(draft_request.committed_token_ids)} "
-        f"num_speculative_steps={draft_request.num_speculative_steps}"
-    )
 
     prompt_ids = draft_request.full_token_ids
     max_possible_tokens = self.config.max_model_len - len(prompt_ids)
@@ -60,11 +53,6 @@ async def handle_draft_request(self, draft_request):
         async for output in self.tokenizer_manager.generate_request(generate_request, None):
             final_output_ids = list(output.get("output_ids", []))
             if output.get("meta_info", {}).get("finish_reason") is not None:
-                print(
-                    "[decoupled_spec][draft_server] handle_draft_request_done "
-                    f"request_id={draft_request.request_id} draft_round_id={draft_request.draft_round_id} "
-                    f"generated_tokens={len(final_output_ids)} elapsed_s={time.perf_counter() - handle_start:.6f}"
-                )
                 return DraftResult(
                     request_id=draft_request.request_id,
                     draft_round_id=draft_request.draft_round_id,

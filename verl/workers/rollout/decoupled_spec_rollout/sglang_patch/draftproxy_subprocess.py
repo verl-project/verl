@@ -155,12 +155,6 @@ class DraftProxyManager:
                 logger.exception("DraftProxy failed to get draft result")
                 assert False
             self.proxy.complete_request(key, result)
-            print(
-                "[decoupled_spec][draftproxy] collect_completed_draft_done "
-                f"verify_replica_rank={self.proxy.verify_replica_rank} request_id={key.request_id} "
-                f"draft_round_id={key.draft_round_id} draft_tokens={len(result.draft_token_ids)} "
-                f"elapsed_s={time.perf_counter() - result_start:.6f}"
-            )
 
     def _send_poll_response(
         self,
@@ -228,12 +222,6 @@ class DraftProxyManager:
         _, missing_keys = self.proxy.peek_ready_results(poll_request.keys)
         if not missing_keys:
             self._send_poll_response(pending_poll, timed_out=False)
-            print(
-                "[decoupled_spec][draftproxy] handle_poll_request_immediate "
-                f"verify_replica_rank={self.proxy.verify_replica_rank} poll_id={poll_request.poll_id} "
-                f"source_dp_rank={source_dp_rank} keys={len(poll_request.keys)} "
-                f"elapsed_s={time.perf_counter() - handle_start:.6f}"
-            )
             return
 
         self.pending_polls[poll_request.poll_id] = pending_poll
