@@ -41,7 +41,6 @@ class ExternalDraftVerifyWorker:
 
     verify = EAGLEWorker.verify
     _mamba_verify_update = EAGLEWorker._mamba_verify_update
-    capture_for_decode = EAGLEWorker.capture_for_decode
 
     def __init__(
         self,
@@ -257,9 +256,6 @@ class ExternalDraftVerifyWorker:
         can_use_full_graph_path = spec_info.draft_token_num == self.speculative_num_draft_tokens
         verify_start = time.perf_counter()
         logits_output, verify_output, _, can_run_cuda_graph = self.verify(batch, spec_info)
-        # Upstream EAGLE always prepares topk/hidden-state buffers for the next
-        # speculative step; scheduler-side batch filtering assumes they exist.
-        self.capture_for_decode(logits_output, verify_output.draft_input)
         print(
             "[decoupled_spec][verify_worker] verify_done "
             f"batch_size={batch.batch_size()} accepted_tokens={sum(verify_output.accept_length_per_req_cpu)} "
