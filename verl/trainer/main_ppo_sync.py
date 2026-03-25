@@ -770,7 +770,7 @@ class PPOTrainer:
 
             # 4. collect necessary data for logging
             fields = ["uid", "prompts", "responses", "rm_scores", "num_turns", "reward_model", "data_source"]
-            data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+            data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
             data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
             data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
 
@@ -941,7 +941,9 @@ class PPOTrainer:
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
         if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-            data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["rollout_log_probs"])
+            data = tq.kv_batch_get(
+                keys=batch.keys, partition_id=batch.partition_id, select_fields=["rollout_log_probs"]
+            )
             data["old_log_probs"] = data.pop("rollout_log_probs")
             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
             return
@@ -955,7 +957,7 @@ class PPOTrainer:
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             fields.extend(["responses", "rollout_log_probs"])
         t_start = time.time()
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
         t_end = time.time()
         print(f"[DEBUG] _compute_old_log_prob time to get data: {t_end - t_start:.2f}", flush=True)
 
@@ -1006,7 +1008,9 @@ class PPOTrainer:
 
         # 2. write ref_log_prob and entropy back to TransferQueue
         t_start = time.time()
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["log_probs", "response_mask"])
+        data = tq.kv_batch_get(
+            keys=batch.keys, partition_id=batch.partition_id, select_fields=["log_probs", "response_mask"]
+        )
         t_end = time.time()
         print(f"[DEBUG] _compute_ref_log_prob time to get data: {t_end - t_start:.2f}", flush=True)
         data["ref_log_prob"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
@@ -1026,7 +1030,9 @@ class PPOTrainer:
 
         # 2. write value back to TransferQueue
         t_start = time.time()
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=["values", "response_mask"])
+        data = tq.kv_batch_get(
+            keys=batch.keys, partition_id=batch.partition_id, select_fields=["values", "response_mask"]
+        )
         t_end = time.time()
         print(f"[DEBUG] _compute_values time to get data: {t_end - t_start:.2f}", flush=True)
         data["values"] = response_from_nested(data.pop("values"), data["response_mask"])
@@ -1041,7 +1047,7 @@ class PPOTrainer:
         """Compute the advantage of the batch."""
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
         t_start = time.time()
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
         response_mask = data["response_mask"]
         t_end = time.time()
         print(f"[DEBUG] _compute_advantage time to get data: {t_end - t_start:.2f}", flush=True)
@@ -1160,7 +1166,7 @@ class PPOTrainer:
             "token_level_rewards",
             "num_turns",
         ]
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, fields=fields)
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
         global_token_num = (prompt_length + response_length).tolist()
