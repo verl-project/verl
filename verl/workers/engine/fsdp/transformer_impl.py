@@ -731,6 +731,9 @@ class FSDPEngine(BaseEngine):
         # lsy: for debug, delete later
         import time
 
+        dist_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
+        dist_world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else -1
+
         def _describe_tensor(tensor):
             if tensor is None:
                 return "tensor=None"
@@ -747,6 +750,7 @@ class FSDPEngine(BaseEngine):
 
         print(
             "[fsdp][get_per_tensor_param] start "
+            f"dist_rank={dist_rank}/{dist_world_size} "
             f"layered_summon={layered_summon} base_sync_done={base_sync_done} "
             f"offload_param={self._is_offload_param} qat_enabled={self._qat_enabled}"
         )
@@ -817,39 +821,65 @@ class FSDPEngine(BaseEngine):
             print(f"[fsdp][get_per_tensor_param] building_materialize_generator target_device={device}")
 
             def _iter_per_tensor_param():
-                for name, param in params.items():
+                for param_idx, (name, param) in enumerate(params.items(), start=1):
                     print(
                         "[fsdp][get_per_tensor_param] before_materialize "
+                        f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
                         f"name={name} {_describe_tensor(param)}"
                     )
                     tensor_start = time.perf_counter()
                     if isinstance(param, DTensor):
-                        local_tensor = param.to(device, non_blocking=True)
-                        print(
-                            "[fsdp][get_per_tensor_param] after_to_device "
-                            f"name={name} {_describe_tensor(local_tensor)}"
-                        )
-                        materialize_start = time.perf_counter()
-                        full_tensor = local_tensor.full_tensor()
-                        print(
-                            "[fsdp][get_per_tensor_param] after_full_tensor "
-                            f"name={name} {_describe_tensor(full_tensor)} "
-                            f"elapsed_s={time.perf_counter() - materialize_start:.6f}"
-                        )
-                        tensor = full_tensor.to(torch.bfloat16, non_blocking=True)
-                        print(
-                            "[fsdp][get_per_tensor_param] after_cast_bf16 "
-                            f"name={name} {_describe_tensor(tensor)}"
-                        )
+                        try:
+                            local_tensor = param.to(device, non_blocking=True)
+                            print(
+                                "[fsdp][get_per_tensor_param] after_to_device "
+                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
+                                f"name={name} {_describe_tensor(local_tensor)}"
+                            )
+                            materialize_start = time.perf_counter()
+                            print(
+                                "[fsdp][get_per_tensor_param] before_full_tensor "
+                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
+                                f"name={name}"
+                            )
+                            full_tensor = local_tensor.full_tensor()
+                            print(
+                                "[fsdp][get_per_tensor_param] after_full_tensor "
+                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
+                                f"name={name} {_describe_tensor(full_tensor)} "
+                                f"elapsed_s={time.perf_counter() - materialize_start:.6f}"
+                            )
+                            cast_start = time.perf_counter()
+                            print(
+                                "[fsdp][get_per_tensor_param] before_cast_bf16 "
+                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
+                                f"name={name}"
+                            )
+                            tensor = full_tensor.to(torch.bfloat16, non_blocking=True)
+                            print(
+                                "[fsdp][get_per_tensor_param] after_cast_bf16 "
+                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
+                                f"name={name} {_describe_tensor(tensor)} "
+                                f"elapsed_s={time.perf_counter() - cast_start:.6f}"
+                            )
+                        except Exception as e:
+                            print(
+                                "[fsdp][get_per_tensor_param] materialize_exception "
+                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
+                                f"name={name} error_type={type(e).__name__} error={e}"
+                            )
+                            raise
                     else:
                         tensor = param
                         print(
                             "[fsdp][get_per_tensor_param] non_dtensor_passthrough "
+                            f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
                             f"name={name} {_describe_tensor(tensor)}"
                         )
 
                     print(
                         "[fsdp][get_per_tensor_param] yield_tensor "
+                        f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
                         f"name={name} {_describe_tensor(tensor)} "
                         f"elapsed_s={time.perf_counter() - tensor_start:.6f}"
                     )
