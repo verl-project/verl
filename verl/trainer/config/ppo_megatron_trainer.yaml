@@ -166,6 +166,10 @@ trainer:
   device: cuda
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
+  # Whether to dump the current training payload when trainer-side exceptions happen
+  dump_on_exception: False
+  # Directory for exception payload dumps; if null, uses ${trainer.default_local_dir}/exception_dumps
+  dump_on_exception_dir: null
 
   # whether to use legacy worker implementation
   #  mode: "auto", "enable", or "disable"
