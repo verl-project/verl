@@ -8,7 +8,7 @@ import time
 
 import zmq
 from sglang.srt.managers.scheduler import Scheduler
-from sglang.srt.utils import get_zmq_socket
+from sglang.srt.utils import broadcast_pyobj, get_zmq_socket
 
 from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     DraftPollWaitMode,
@@ -17,6 +17,7 @@ from verl.workers.rollout.decoupled_spec_rollout.protocol import (
     DraftProxyMessage,
     DraftProxyMessageType,
     DraftRequest,
+    DraftResult,
     PollDraftResultsRequest,
     PollDraftResultsResponse,
     RequestTerminateMessage,
@@ -100,6 +101,22 @@ def _build_sampling_params_dict(sampling_params) -> dict:
 
 def _is_draftproxy_enabled(self: Scheduler) -> bool:
     return getattr(self, "_send_to_draftproxy", None) is not None and getattr(self, "_recv_from_draftproxy", None) is not None
+
+
+def _is_verify_scheduler_entry_rank(self: Scheduler) -> bool:
+    return self.pp_rank == 0 and self.attn_tp_rank == 0 and self.attn_cp_rank == 0
+
+
+def _is_verify_scheduler_external_draft_leader(self: Scheduler) -> bool:
+    return _is_verify_scheduler_entry_rank(self) and _is_draftproxy_enabled(self)
+
+
+def _require_draftproxy_on_entry_rank(self: Scheduler) -> None:
+    if _is_verify_scheduler_entry_rank(self) and getattr(self, "_decoupled_draftproxy_expected", False):
+        assert _is_draftproxy_enabled(self), (
+            "DraftProxy for VerifySGLangHttpServer is expected on entry scheduler "
+            f"dp_rank={_get_scheduler_dp_rank(self)}"
+        )
 
 
 def _iter_live_batch_reqs(batch) -> list:
@@ -228,7 +245,8 @@ def _submit_draft_request(
         f"prompt_len={len(draft_request.prompt_token_ids)} committed_len={len(draft_request.committed_token_ids)} "
         f"num_speculative_steps={draft_request.num_speculative_steps}"
     )
-    self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_submit_draft(draft_request))
+    if _is_verify_scheduler_external_draft_leader(self):
+        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_submit_draft(draft_request))
     _append_waiting_draft_key(self, req.rid, draft_request.key)
     if needs_warmup_decode:
         self._decoupled_needs_warmup_decode_rids.add(req.rid)
@@ -248,7 +266,7 @@ def _send_draft_requests(
     target_reqs=None,
     warmup_request_ids: set[str] | None = None,
 ) -> None:
-    assert _is_draftproxy_enabled(self), "DraftProxy for SGLangHttpServer dp_rank=%s is not enabled" % _get_scheduler_dp_rank(self)
+    _require_draftproxy_on_entry_rank(self)
 
     reqs = _iter_live_reqs(target_reqs) if target_reqs is not None else _iter_live_batch_reqs(batch)
     for req in reqs:
@@ -303,6 +321,27 @@ def _recv_poll_response(
         )
 
 
+def _sync_draft_results_across_schedulers(
+    self: Scheduler,
+    leader_results: list[DraftResult] | None,
+) -> list[DraftResult]:
+    # Mirror SGLang's control-plane fanout: only the entry scheduler receives
+    # external messages, then synchronizes small Python objects to peer TP/CP
+    # schedulers via torch.distributed on the CPU group.
+    source_payload = list(leader_results or []) if _is_verify_scheduler_entry_rank(self) else []
+
+    if self.tp_size == 1:
+        return source_payload
+
+    synced_results = broadcast_pyobj(
+        source_payload,
+        self.tp_group.rank,
+        self.tp_cpu_group,
+        src=self.tp_group.ranks[0],
+    )
+    return list(synced_results)
+
+
 def _bind_draft_results_to_reqs(self: Scheduler, live_reqs: list) -> None:
     for req in live_reqs:
         waiting_key = _peek_waiting_draft_key(self, req.rid)
@@ -328,7 +367,7 @@ def _bind_draft_results_to_reqs(self: Scheduler, live_reqs: list) -> None:
 
 
 def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
-    assert _is_draftproxy_enabled(self), "DraftProxy for VerifySGLangHttpServer dp_rank=%s is not enabled" % _get_scheduler_dp_rank(self)
+    _require_draftproxy_on_entry_rank(self)
 
     wait_start = time.perf_counter()
     live_reqs = _iter_live_reqs(target_reqs) if target_reqs is not None else _iter_live_batch_reqs(batch)
@@ -348,7 +387,8 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
             missing_keys.append(waiting_key)
             seen_missing_keys.add(waiting_key)
 
-    if missing_keys:
+    leader_results: list[DraftResult] | None = None
+    if _is_verify_scheduler_external_draft_leader(self) and missing_keys:
         poll_request = PollDraftResultsRequest(
             poll_id=_make_poll_id(self),
             scheduler_dp_rank=_get_scheduler_dp_rank(self),
@@ -364,14 +404,17 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
         )
         self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_poll_request(poll_request))
         poll_response = _recv_poll_response(self, poll_request.poll_id)
-        for result in poll_response.results:
-            self._decoupled_pending_draft_results[result.key] = result
+        leader_results = list(poll_response.results)
         print(
             "[decoupled_spec][verify_scheduler] poll_draft_results_done "
             f"dp_rank={_get_scheduler_dp_rank(self)} poll_id={poll_request.poll_id} "
             f"results={len(poll_response.results)} missing_after_poll={len(poll_response.missing_keys)} "
             f"timed_out={poll_response.timed_out}"
         )
+
+    synced_results = _sync_draft_results_across_schedulers(self, leader_results)
+    for result in synced_results:
+        self._decoupled_pending_draft_results[result.key] = result
 
     _bind_draft_results_to_reqs(self, live_reqs)
     print(
@@ -386,8 +429,7 @@ def _build_request_terminate_message(req, reason: RequestTerminateReason) -> Req
 
 
 def _advance_decode_round_and_submit_drafts(self: Scheduler, batch) -> None:
-    if not _is_draftproxy_enabled(self):
-        return
+    _require_draftproxy_on_entry_rank(self)
 
     advance_start = time.perf_counter()
     requests_to_send = []
@@ -422,7 +464,8 @@ def _advance_decode_round_and_submit_drafts(self: Scheduler, batch) -> None:
             f"dp_rank={_get_scheduler_dp_rank(self)} request_id={terminate_message.request_id} "
             f"reason={terminate_message.reason} upper_bound={terminate_message.draft_round_id_upper_bound}"
         )
-        self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_request_terminate(terminate_message))
+        if _is_verify_scheduler_external_draft_leader(self):
+            self._send_to_draftproxy.send_pyobj(DraftProxyMessage.from_request_terminate(terminate_message))
     print(
         "[decoupled_spec][verify_scheduler] advance_decode_round_done "
         f"dp_rank={_get_scheduler_dp_rank(self)} requests_to_send={len(requests_to_send)} "
@@ -450,13 +493,14 @@ def _patch_verify_scheduler():
         self._send_to_draftproxy = None
         self._recv_from_draftproxy = None
         ipc_config = DraftProxyIpcConfig.from_env()
+        self._decoupled_draftproxy_expected = ipc_config is not None
         if ipc_config is None:
             print(
                 "[decoupled_spec][verify_scheduler] init_ipc_channels_skip "
                 f"dp_rank={_get_scheduler_dp_rank(self)} reason=no_ipc_config"
             )
             return
-        if self.pp_rank == 0 and self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
+        if _is_verify_scheduler_entry_rank(self):
             endpoints = ipc_config.get_endpoints(_get_scheduler_dp_rank(self))
             draftproxy_context = zmq.Context(2)
             self._draftproxy_context = draftproxy_context
