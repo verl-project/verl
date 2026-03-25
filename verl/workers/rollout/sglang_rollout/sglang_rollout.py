@@ -129,7 +129,6 @@ class ServerAdapter(BaseRollout):
         self.node_rank = self.rollout_rank // local_world_size
         self.local_rank = self.rollout_rank % local_world_size
         self.server_actor_name = f"sglang_server_{self.replica_rank}_{self.node_rank}"
-        self.is_leader_rank = self.local_rank == 0
 
     async def _init_server_adapter(self):
         if self._engine is not None:

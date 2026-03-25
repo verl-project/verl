@@ -933,59 +933,6 @@ class AgentLoopManager:
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
-    def _is_decoupled_spec_enabled(self) -> bool:
-        return self.rollout_config.name == "sglang" and bool(self.rollout_config.get("enable_decoupled_spec", False))
-
-    async def _initialize_decoupled_spec_llm_servers(self, world_size: int):
-        from verl.workers.rollout.decoupled_spec_rollout.layout import (
-            build_draft_model_config,
-            build_draft_rollout_config,
-            compute_decoupled_spec_topology,
-        )
-        from verl.workers.rollout.decoupled_spec_rollout.replica import DraftSGLangReplica, VerifySGLangReplica
-
-        if self.worker_group is None:
-            raise NotImplementedError("decoupled speculation currently only supports hybrid_engine rollout")
-
-        topo = compute_decoupled_spec_topology(self.rollout_config, world_size=world_size)
-        draft_rollout_config = build_draft_rollout_config(self.rollout_config)
-        draft_model_config = build_draft_model_config(self.model_config, self.rollout_config.draft.model_path)
-
-        self.rollout_replicas = []
-
-        for replica_rank in range(topo.num_draft_replicas):
-            self.rollout_replicas.append(
-                DraftSGLangReplica(
-                    replica_rank=replica_rank,
-                    config=draft_rollout_config,
-                    model_config=draft_model_config,
-                    gpus_per_node=self.rollout_config.n_gpus_per_node,
-                    topology_rollout_config=self.rollout_config,
-                )
-            )
-
-        draft_replicas = self.rollout_replicas[: topo.num_draft_replicas]
-        await asyncio.gather(*[r.init_hybrid_decoupled(self.worker_group) for r in draft_replicas])
-        draft_actor_names = [r.draft_actor_name for r in draft_replicas]
-
-        for verify_replica_rank in range(topo.num_verify_replicas):
-            replica_rank = topo.get_shared_replica_rank("verify", verify_replica_rank)
-            self.rollout_replicas.append(
-                VerifySGLangReplica(
-                    replica_rank=replica_rank,
-                    config=self.rollout_config,
-                    model_config=self.model_config,
-                    gpus_per_node=self.rollout_config.n_gpus_per_node,
-                    draft_actor_names=draft_actor_names,
-                )
-            )
-
-        verify_replicas = self.rollout_replicas[topo.num_draft_replicas :]
-        await asyncio.gather(*[r.init_hybrid_decoupled(self.worker_group) for r in verify_replicas])
-
-        self.server_handles = [r._server_handle for r in verify_replicas]
-        self.server_addresses = [r._server_address for r in verify_replicas]
-
     @classmethod
     @auto_await
     async def create(
@@ -1008,15 +955,25 @@ class AgentLoopManager:
             * self.rollout_config.data_parallel_size
             * self.rollout_config.pipeline_model_parallel_size
         )
-        
         world_size = (
-            self.worker_group.world_size if self.worker_group else 
-            self.rollout_config.n_gpus_per_node 
-            * self.rollout_config.nnodes
+            self.worker_group.world_size
+            if self.worker_group
+            else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
         )
 
-        if self._is_decoupled_spec_enabled():
-            await self._initialize_decoupled_spec_llm_servers(world_size)
+        if self.rollout_config.name == "sglang" and bool(self.rollout_config.get("enable_decoupled_spec", False)):
+            from verl.workers.rollout.decoupled_spec_rollout.initializer import (
+                initialize_decoupled_spec_llm_servers,
+            )
+
+            result = await initialize_decoupled_spec_llm_servers(
+                rollout_config=self.rollout_config,
+                model_config=self.model_config,
+                worker_group=self.worker_group,
+            )
+            self.rollout_replicas = result.rollout_replicas
+            self.server_handles = result.server_handles
+            self.server_addresses = result.server_addresses
             print(f"AgentLoopManager: {self.server_addresses}")
             if self.rollout_config.prometheus.enable:
                 if self.rollout_config.disable_log_stats:
