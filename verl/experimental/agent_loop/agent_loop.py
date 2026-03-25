@@ -431,26 +431,29 @@ class AgentLoopWorker:
         self.distillation_config = config.get("distillation", None)
         self.distillation_enabled = is_distillation_enabled(self.distillation_config)
         if self.distillation_enabled:
-            if teacher_servers is None:
-                raise ValueError("Distillation is enabled but no teacher servers provided.")
-            if teacher_load_balancer_handle is None:
-                raise ValueError("Distillation is enabled but no teacher load balancer provided.")
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.distillation_config)
             self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+            self.stream_teacher_with_rollout = self.distillation_config.teacher_model.enable_resource_pool
 
-            # for recipe to change
-            if not hasattr(self, "teacher_server_manager"):
-                from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
+            if self.stream_teacher_with_rollout:
+                if teacher_servers is None:
+                    raise ValueError("Distillation streaming is enabled but no teacher servers were provided.")
+                if teacher_load_balancer_handle is None:
+                    raise ValueError("Distillation streaming is enabled but no teacher load balancer was provided.")
+                if not hasattr(self, "teacher_server_manager"):
+                    from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
-                self.teacher_server_manager = AsyncTeacherLLMServerManager(
-                    config,
-                    teacher_servers,
-                    load_balancer_handle=teacher_load_balancer_handle,
-                    distillation_config=self.distillation_config,
-                    pad_token_id=self.model_config.tokenizer.pad_token_id,
-                )
+                    self.teacher_server_manager = AsyncTeacherLLMServerManager(
+                        config,
+                        teacher_servers,
+                        load_balancer_handle=teacher_load_balancer_handle,
+                        distillation_config=self.distillation_config,
+                        pad_token_id=self.model_config.tokenizer.pad_token_id,
+                    )
+            else:
+                self.teacher_server_manager = None
         else:
-            self.teacher_server_manager = None
+            self.stream_teacher_with_rollout = False
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
@@ -849,7 +852,7 @@ class AgentLoopWorker:
 
     async def _compute_teacher_logprobs(self, output: AgentLoopOutput, prompt_ids, response_ids, validate):
         """Compute teacher logprobs for single sample."""
-        if self.distillation_enabled and not validate:
+        if self.stream_teacher_with_rollout and not validate:
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
                 prompt_ids=prompt_ids,
                 response_ids=response_ids,
@@ -918,6 +921,12 @@ class AgentLoopWorker:
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
         if any(mmi is not None for mmi in multi_modal_inputs_list):
             non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
+
+        # if distillation is enabled but not streaming teacher with rollout, store teacher multi-modal data for
+        # batched logprob computation.
+        if self.distillation_enabled and not self.stream_teacher_with_rollout:
+            teacher_multi_modal_data = [input.multi_modal_data for input in inputs]
+            non_tensor_batch["teacher_multi_modal_data"] = np.array(teacher_multi_modal_data, dtype=object)
 
         metrics = [input.metrics.model_dump() for input in inputs]
         # Collect extra fields from all inputs and convert them to np.ndarray
@@ -1004,6 +1013,9 @@ class AgentLoopManager:
 
         self.teacher_model_manager = teacher_model_manager
         self.distillation_enabled = is_distillation_enabled(self.config.get("distillation", None))
+        self.stream_teacher_with_rollout = (
+            self.distillation_enabled and self.config.distillation.teacher_model.enable_resource_pool
+        )
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -1083,7 +1095,7 @@ class AgentLoopManager:
         load_balancer_handle = self.global_load_balancer
         servers = list(zip(self.server_addresses, self.server_handles, strict=True))
 
-        if self.distillation_enabled:
+        if self.stream_teacher_with_rollout:
             teacher_server_handles = self.teacher_model_manager.server_handles
             teacher_server_addresses = self.teacher_model_manager.server_addresses
             teacher_servers = list(zip(teacher_server_addresses, teacher_server_handles, strict=True))
@@ -1128,7 +1140,7 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
-        if self.distillation_enabled:
+        if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.wake_up()
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
@@ -1137,7 +1149,7 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        if self.distillation_enabled:
+        if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.sleep()
         output = DataProto.concat(outputs)
 
