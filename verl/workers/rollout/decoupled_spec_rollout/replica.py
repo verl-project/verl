@@ -28,6 +28,13 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
         is_reward_model: bool = False,
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        if self.server_role == "draft":
+            from verl.workers.rollout.decoupled_spec_rollout.sglang_patch.draft_server_patch import (
+                install_draft_server_patches,
+            )
+            install_draft_server_patches(SGLangHttpServer)
+
+
         self.server_class = ray.remote(SGLangHttpServer)
         self._base_gpu_id_override = 0
 
