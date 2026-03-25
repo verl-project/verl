@@ -7,6 +7,7 @@ set -xeuo pipefail
 
 NUM_GPUS=${NUM_GPUS:-8}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
+ROLLOUT_NAME=${ROLLOUT_NAME:-"vllm"}       # vllm, sglang, or trtllm
 
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
@@ -15,10 +16,10 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 
 
 rollout_mode="async"
-rollout_name="vllm" # sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
+rollout_name="${ROLLOUT_NAME}"
+return_raw_chat="True"
+if [ "$rollout_name" = "vllm" ]; then
     export VLLM_USE_V1=1
-    return_raw_chat="True"
 fi
 
 # Algorithm parameters
@@ -49,8 +50,9 @@ top_k=-1
 val_top_p=0.7
 
 # Fully async specific parameters
-n_gpus_rollout=4
-n_gpus_training=4
+# Split GPUs evenly between rollout and training.
+n_gpus_rollout=${N_GPUS_ROLLOUT:-$((NUM_GPUS / 2))}
+n_gpus_training=${N_GPUS_TRAINING:-$((NUM_GPUS / 2))}
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
@@ -63,7 +65,7 @@ trigger_parameter_sync_step=4
 partial_rollout=True
 use_trainer_do_validate=False
 
-exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${ACTOR_STRATEGY}-minimal"
+exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${rollout_name}-${ACTOR_STRATEGY}-minimal"
 
 echo "Running fully_async_policy with ${ACTOR_STRATEGY} strategy"
 echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
@@ -139,6 +141,14 @@ common_params=(
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )
 
+# TRT-LLM specific perf flags
+if [ "${rollout_name}" = "trtllm" ]; then
+    common_params+=(
+        +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32
+        +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5
+    )
+fi
+
     # Detect device
     device_name=$(python3 - <<'EOF'
 from verl.utils.device import get_device_name
@@ -149,7 +159,13 @@ EOF
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     echo "Running fully async training with FSDP2 strategy..."
     # FSDP2 specific parameters
-    gen_tp=1
+    # trtllm: one replica uses all rollout GPUs as a single TP group.
+    # vllm/sglang: TP=1, rely on data parallelism across replicas.
+    if [ "${rollout_name}" = "trtllm" ]; then
+        gen_tp=${n_gpus_rollout}
+    else
+        gen_tp=1
+    fi
     sp_size=1
     fsdp_size=1
     ref_offload=True
@@ -184,9 +200,13 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running fully async training with Megatron strategy..."
     # Megatron specific parameters
-    gen_tp=2
+    if [ "${rollout_name}" = "trtllm" ]; then
+        gen_tp=${n_gpus_rollout}
+    else
+        gen_tp=2
+    fi
     train_tp=2
-    train_pp=2
+    train_pp=${n_gpus_training}
     ref_offload=True
     actor_offload=True
     common_params+=(

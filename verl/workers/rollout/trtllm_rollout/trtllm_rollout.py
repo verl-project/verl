@@ -22,7 +22,7 @@ import os
 import pickle
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Generator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import aiohttp
 import pynvml
@@ -322,6 +322,9 @@ class ServerAdapter(BaseRollout):
             rank = int(os.environ["RANK"])
             self.replica_rank = replica_rank
             self.is_leader_rank = rank == 0
+            # Required for CUDA IPC handle creation during weight sync for Async RL.
+            # Reward/ref models skip weight sync so this can be None.
+            self.gpu_id = ray.get_gpu_ids()[0]
 
         # Below is required for all modes.
         assert self.replica_rank >= 0, "replica_rank is not set"
@@ -373,7 +376,8 @@ class ServerAdapter(BaseRollout):
         # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
         # have completed actor offloading to CPU, preventing OOM issue.
         if "kv_cache" in tags and self.config.free_cache_engine:
-            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+            group = self.hybrid_device_mesh["exclude_dp"].get_group() if self.hybrid_device_mesh is not None else None
+            await asyncio.to_thread(dist.barrier, group=group)
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
@@ -392,11 +396,18 @@ class ServerAdapter(BaseRollout):
             await self._adapter.release_memory_occupation(tags=tags)
 
     async def update_weights_from_ipc_handles(self, device_handles):
-        assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
-
         """Update weights from IPC handles."""
+        if self.hybrid_device_mesh is not None:
+            # Hybrid mode: coordinate via device mesh exclude_dp group
+            world_size = self.hybrid_device_mesh["exclude_dp"].size()
+            group = self.hybrid_device_mesh["exclude_dp"].get_group()
+        else:
+            # Standalone mode: coordinate via default gloo group (from initialize_global_process_group_ray)
+            world_size = dist.get_world_size()
+            group = None
+
         if self.is_leader_rank:
-            gathered_handles = [None for _ in range(self.hybrid_device_mesh["exclude_dp"].size())]
+            gathered_handles = [None for _ in range(world_size)]
         else:
             gathered_handles = None
 
@@ -405,23 +416,18 @@ class ServerAdapter(BaseRollout):
             obj=device_handles,
             object_gather_list=gathered_handles,
             group_dst=0,
-            group=self.hybrid_device_mesh["exclude_dp"].get_group(),
+            group=group,
         )
 
         if self.is_leader_rank:
             all_handles = {k: v for d in gathered_handles for k, v in d.items()}
             await self._adapter.update_weights(all_handles)
 
-        await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+        await asyncio.to_thread(dist.barrier, group=group)
 
     async def update_weights(
-        self,
-        weights: Generator[tuple[str, torch.Tensor], None, None] | AsyncGenerator[tuple[str, torch.Tensor], None],
-        global_steps: int = None,
-        **kwargs,
+        self, weights: AsyncGenerator[tuple[str, torch.Tensor], None], global_steps: int = None, **kwargs
     ):
-        assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
-
         """Update the weights of the rollout model.
 
         Args:
@@ -475,7 +481,7 @@ class ServerAdapter(BaseRollout):
             await asyncio.to_thread(dist.broadcast, spl_tensor, src=leader_global_rank, group=exclude_dp_group)
             supports_partial_loading = bool(spl_tensor.item())
 
-        async for name, param in ensure_async_iterator(weights):
+        async for name, param in weights:
             if supports_partial_loading:
                 size_in_bytes = param.element_size() * param.numel()
                 if size_in_bytes > cur_available_bytes:
@@ -496,7 +502,8 @@ class ServerAdapter(BaseRollout):
             await self._adapter.update_weights(None)
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
-        await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+        group = self.hybrid_device_mesh["exclude_dp"].get_group() if self.hybrid_device_mesh is not None else None
+        await asyncio.to_thread(dist.barrier, group=group)
 
         del weights
         gc.collect()

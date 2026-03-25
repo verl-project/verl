@@ -253,28 +253,38 @@ class TRTLLMHttpServer:
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
-        if self.is_vlm_model and (image_data or video_data):
-            deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
-            org_prompt = self.llm.tokenizer.decode(deduped_ids)
-            input_dict = {
-                "prompt": org_prompt,
-                "multi_modal_data": {},
-                "mm_processor_kwargs": {},
-            }
-            if image_data:
-                input_dict["multi_modal_data"]["image"] = image_data
-            if video_data:
-                input_dict["multi_modal_data"]["video"] = video_data
+        try:
+            if self.is_vlm_model and (image_data or video_data):
+                deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+                org_prompt = self.llm.tokenizer.decode(deduped_ids)
+                input_dict = {
+                    "prompt": org_prompt,
+                    "multi_modal_data": {},
+                    "mm_processor_kwargs": {},
+                }
+                if image_data:
+                    input_dict["multi_modal_data"]["image"] = image_data
+                if video_data:
+                    input_dict["multi_modal_data"]["video"] = video_data
 
-            outputs = await self.llm.generate_async(
-                inputs=input_dict,
-                sampling_params=trt_llm_sampling_params,
-            )
-        else:
-            outputs = await self.llm.generate_async(
-                inputs=prompt_ids,
-                sampling_params=trt_llm_sampling_params,
-            )
+                outputs = await self.llm.generate_async(
+                    inputs=input_dict,
+                    sampling_params=trt_llm_sampling_params,
+                )
+            else:
+                outputs = await self.llm.generate_async(
+                    inputs=prompt_ids,
+                    sampling_params=trt_llm_sampling_params,
+                )
+        except RuntimeError as e:
+            if "AsyncLLM is paused" in str(e):
+                await asyncio.sleep(0.1)
+                return TokenOutput(
+                    token_ids=[],
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
+            raise
         token_ids = outputs.outputs[0].token_ids
         if outputs.outputs[0].finish_reason == "cancelled":
             return TokenOutput(
@@ -350,6 +360,14 @@ class TRTLLMReplica(RolloutReplica):
 
     def rollout_worker_use_gpu(self) -> bool:
         return False
+
+    def _standalone_use_gpu(self) -> bool:
+        # CheckpointEngineWorkers need CUDA access to create IPC handles for TRT-LLM engine workers.
+        return True
+
+    def _standalone_max_colocate_count(self) -> int:
+        # one for TRT-LLM engine worker (0.5 GPU), one for CheckpointEngineWorker (0.5 GPU).
+        return 2
 
     def get_pgs_and_bundle_indices(self) -> tuple[list[PlacementGroup], list[list[int]]]:
         """Get placement groups and bundle indices for the replica."""

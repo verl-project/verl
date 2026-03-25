@@ -23,7 +23,7 @@ from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorHandle
 
-from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
+from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, check_resource_available
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import is_torch_npu_available
 from verl.workers.config import DiffusionRolloutConfig, HFModelConfig, RolloutConfig
@@ -199,6 +199,14 @@ class RolloutReplica(ABC):
         self.workers = worker_group.workers
         await self.launch_servers()
 
+    def _standalone_use_gpu(self) -> bool:
+        """Whether CheckpointEngineWorkers need GPU access in standalone mode."""
+        return self.rollout_worker_use_gpu()
+
+    def _standalone_max_colocate_count(self) -> int:
+        """Max colocate count for the standalone resource pool."""
+        return 3
+
     async def init_standalone(self):
         """Init standalone rollout server, create new resource pool for this rollout."""
         # create resource pool for this rollout
@@ -209,15 +217,18 @@ class RolloutReplica(ABC):
             resource_pool_name = f"rollout_pool_teacher_{self.replica_rank}"
         else:
             resource_pool_name = f"rollout_pool_{self.replica_rank}"
-        resource_pool_spec = {
-            resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
-        }
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=None)
-        resource_pool_manager.create_resource_pool()
-        self.resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
+
+        self.resource_pool = RayResourcePool(
+            process_on_nodes=[self.gpus_per_replica_node] * self.nnodes,
+            use_gpu=True,
+            max_colocate_count=self._standalone_max_colocate_count(),
+            name_prefix=resource_pool_name,
+        )
+
+        check_resource_available({resource_pool_name: [self.gpus_per_replica_node] * self.nnodes})
 
         # create worker group for this rollout
-        use_gpu = self.rollout_worker_use_gpu()
+        use_gpu = self._standalone_use_gpu()
         if self.is_reward_model:
             name_prefix = f"rollout_reward_standalone_{self.replica_rank}"
         elif self.is_teacher_model:
