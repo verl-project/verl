@@ -90,6 +90,45 @@ SUPPORTED_ROLLOUT_RS_OPTIONS: set[str] = {
 TOKEN_LEVEL_ROLLOUT_RS_OPTIONS: set[str] = {"token_k1", "token_k2", "token_k3"}
 
 
+def _parse_rollout_is_threshold(threshold_spec: str | float) -> tuple[float, Optional[float]]:
+    if isinstance(threshold_spec, bool):
+        raise TypeError(
+            "rollout_is_threshold must be specified as a float or a string threshold specification, not a boolean."
+        )
+    if isinstance(threshold_spec, int | float):
+        upper = float(threshold_spec)
+        lower = None
+    elif isinstance(threshold_spec, str):
+        spec = threshold_spec.strip()
+        if not spec:
+            raise ValueError("rollout_is_threshold must not be an empty string.")
+        if "_" in spec:
+            lower_str, upper_str = spec.split("_", 1)
+            try:
+                lower = float(lower_str)
+                upper = float(upper_str)
+            except ValueError as exc:
+                raise ValueError(f"Invalid rollout_is_threshold '{threshold_spec}'.") from exc
+        else:
+            try:
+                upper = float(spec)
+            except ValueError as exc:
+                raise ValueError(f"Invalid rollout_is_threshold '{threshold_spec}'.") from exc
+            lower = None
+    else:
+        raise TypeError("rollout_is_threshold must be a float or a string threshold specification.")
+
+    if upper <= 0:
+        raise ValueError(f"rollout_is_threshold upper bound must be positive, got {upper}.")
+    if lower is not None:
+        if lower <= 0:
+            raise ValueError(f"rollout_is_threshold lower bound must be positive, got {lower}.")
+        if lower > upper:
+            raise ValueError("rollout_is_threshold lower bound must be <= upper bound.")
+
+    return upper, lower
+
+
 def _parse_rollout_rs_thresholds(
     options: list[str], threshold_spec: Optional[str | float]
 ) -> dict[str, dict[str, Optional[float]]]:
@@ -482,7 +521,7 @@ def compute_rollout_correction_weights(
     log_ratio: torch.Tensor,
     response_mask: torch.Tensor,
     rollout_is: str = "token",
-    rollout_is_threshold: float = 2.0,
+    rollout_is_threshold: str | float = 2.0,
     rollout_is_batch_normalize: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute importance sampling weights to correct for off-policy distribution shifts.
@@ -504,8 +543,9 @@ def compute_rollout_correction_weights(
         rollout_is: IS weight aggregation level, must be one of:
             - "token": Per-token weights (biased, low variance)
             - "sequence": Per-sequence weight (product of tokens; unbiased, high variance)
-        rollout_is_threshold: Upper threshold for truncating extreme weights (e.g., 2.0),
-            default 2.0.
+        rollout_is_threshold: Threshold specification for IS weights.
+            - Single float or float-like string: TIS, clamp weights to the upper bound
+            - "lower_upper" string: IcePop, zero weights outside [lower, upper]
         rollout_is_batch_normalize: Whether to normalize IS weights to have mean=1.0 per batch,
             default False.
 
@@ -523,15 +563,15 @@ def compute_rollout_correction_weights(
     valid_is_levels = {"token", "sequence"}
     if rollout_is not in valid_is_levels:
         raise ValueError(f"Invalid rollout_is: {rollout_is}. Must be one of {valid_is_levels}.")
-    if rollout_is_threshold <= 0:
-        raise ValueError(f"rollout_is_threshold must be positive, got {rollout_is_threshold}.")
+    rollout_is_threshold_upper, rollout_is_threshold_lower = _parse_rollout_is_threshold(rollout_is_threshold)
+    use_icepop = rollout_is_threshold_lower is not None
 
     # Compute IS weights from log ratio (handles different aggregation levels)
     if rollout_is == "token":
         # Per-token IS weight: exp(log(π_train/π_rollout)) with safety clamp
         log_ratio_for_metrics: torch.Tensor = log_ratio
         log_ratio_safe: torch.Tensor = torch.clamp(log_ratio, min=-SAFETY_BOUND, max=SAFETY_BOUND)
-        rollout_is_weights: torch.Tensor = torch.exp(log_ratio_safe)
+        raw_rollout_is_weights: torch.Tensor = torch.exp(log_ratio_safe)
 
     elif rollout_is == "sequence":
         # Sequence-level IS weight: product of token ratios (exp(sum(log ratios)))
@@ -541,25 +581,42 @@ def compute_rollout_correction_weights(
         log_ratio_for_metrics = log_ratio_sum
 
         log_ratio_sum_safe: torch.Tensor = torch.clamp(log_ratio_sum, min=-SAFETY_BOUND, max=SAFETY_BOUND)
-        rollout_is_weights = torch.exp(log_ratio_sum_safe).expand_as(log_ratio)  # Broadcast to sequence length
+        raw_rollout_is_weights = torch.exp(log_ratio_sum_safe).expand_as(log_ratio)  # Broadcast to sequence length
 
     else:
         raise ValueError(f"Unsupported rollout_is: {rollout_is}")
 
     # Zero out weights for padding tokens using response mask
-    rollout_is_weights = rollout_is_weights * response_mask
+    raw_rollout_is_weights = raw_rollout_is_weights * response_mask
 
-    # Compute IS weight metrics (BEFORE truncation to get accurate fraction_high/low)
+    # Apply TIS for a single upper bound and IcePop for a lower_upper string.
+    if not use_icepop:
+        rollout_is_weights = raw_rollout_is_weights.clamp(max=rollout_is_threshold_upper)
+    else:
+        assert rollout_is_threshold_lower is not None
+        token_kept_mask = (raw_rollout_is_weights >= rollout_is_threshold_lower) & (
+            raw_rollout_is_weights <= rollout_is_threshold_upper
+        )
+        rollout_is_weights = torch.where(
+            token_kept_mask, raw_rollout_is_weights, torch.zeros_like(raw_rollout_is_weights)
+        )
+
+    # Compute IS weight metrics.
     metrics: dict[str, float] = compute_is_metrics(
         rollout_is_weights=rollout_is_weights,
+        raw_rollout_is_weights=raw_rollout_is_weights,
         log_ratio_for_metrics=log_ratio_for_metrics,
         response_mask=response_mask,
         rollout_is=rollout_is,
-        rollout_is_threshold=rollout_is_threshold,
+        rollout_is_threshold=rollout_is_threshold_upper,
+        rollout_is_threshold_lower=rollout_is_threshold_lower,
     )
-
-    # Truncate extreme weights (TIS: Truncated Importance Sampling)
-    rollout_is_weights = rollout_is_weights.clamp(max=rollout_is_threshold)
+    if use_icepop:
+        assert rollout_is_threshold_lower is not None
+        oob_mask = (raw_rollout_is_weights < rollout_is_threshold_lower) | (
+            raw_rollout_is_weights > rollout_is_threshold_upper
+        )
+        metrics["rollout_is_oob_ratio"] = verl_F.masked_mean(oob_mask.float(), response_mask).item()
 
     # Detach weights to prevent gradient flow (mathematically required by IS theory)
     # IS weights change the measure, not the objective. See §3.2.2 in docs/algo/rollout_corr_math.md
@@ -600,18 +657,22 @@ def compute_rollout_correction_weights(
 
 def compute_is_metrics(
     rollout_is_weights: torch.Tensor,
+    raw_rollout_is_weights: torch.Tensor,
     log_ratio_for_metrics: torch.Tensor,
     response_mask: torch.Tensor,
     rollout_is: str,
     rollout_is_threshold: float,
+    rollout_is_threshold_lower: Optional[float] = None,
 ) -> dict[str, float]:
     """Compute comprehensive metrics for truncated importance sampling weights.
 
-    This function calculates statistics for truncated IS weights (TIS), using log-space
-    for accurate threshold checks and clamped weights for stable mean/std calculations.
+    This function calculates statistics for the applied IS weights while using the
+    raw pre-processing weights to diagnose how often ratios exceed the configured bounds.
 
     Args:
         rollout_is_weights: Truncated IS weights (π_train / π_rollout),
+            shape (batch_size, seq_length).
+        raw_rollout_is_weights: Raw masked IS weights before TIS / IcePop processing,
             shape (batch_size, seq_length).
         log_ratio_for_metrics: Log ratio of training to rollout probabilities (unclamped),
             shape varies by aggregation level.
@@ -629,7 +690,9 @@ def compute_is_metrics(
     metrics: dict[str, float] = {}
     device: torch.device = rollout_is_weights.device
     # Default lower threshold (reciprocal of upper threshold)
-    rollout_is_threshold_lower: float = 1.0 / rollout_is_threshold
+    rollout_is_threshold_lower = (
+        1.0 / rollout_is_threshold if rollout_is_threshold_lower is None else rollout_is_threshold_lower
+    )
 
     # Precompute log thresholds for accurate checks
     log_threshold_upper: torch.Tensor = torch.log(torch.tensor(rollout_is_threshold, device=device))
@@ -653,12 +716,13 @@ def compute_is_metrics(
         metrics["rollout_is_ratio_fraction_low"] = below_lower.float().mean().item()
 
     else:  # token-level
-        # Token-level aggregation: compute directly from truncated weights
+        # Token-level aggregation: the applied weights drive loss, std, and ESS,
+        # while high/low fractions are measured from the raw pre-processing weights.
         metrics["rollout_is_mean"] = verl_F.masked_mean(rollout_is_weights, response_mask).item()
 
         # Fraction of tokens exceeding thresholds
-        rollout_is_above_threshold: torch.Tensor = rollout_is_weights > rollout_is_threshold
-        rollout_is_below_threshold: torch.Tensor = rollout_is_weights < rollout_is_threshold_lower
+        rollout_is_above_threshold: torch.Tensor = raw_rollout_is_weights > rollout_is_threshold
+        rollout_is_below_threshold: torch.Tensor = raw_rollout_is_weights < rollout_is_threshold_lower
         metrics["rollout_is_ratio_fraction_high"] = verl_F.masked_mean(
             rollout_is_above_threshold.float(), response_mask
         ).item()
@@ -671,12 +735,11 @@ def compute_is_metrics(
         metrics["rollout_is_max"] = rollout_is_weights.masked_fill(~mask_bool, float("-inf")).max().item()
         metrics["rollout_is_min"] = rollout_is_weights.masked_fill(~mask_bool, float("inf")).min().item()
 
-    # Compute standard deviation (using clamped weights for stability)
+    # Compute standard deviation / ESS from the actual applied weights so exact
+    # IcePop diagnostics preserve zeroed-out coefficients.
     mask_count: torch.Tensor = response_mask.sum()
     if mask_count > 1:
-        weights_for_std: torch.Tensor = rollout_is_weights.clamp(
-            min=rollout_is_threshold_lower, max=rollout_is_threshold
-        )
+        weights_for_std: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
         mean_clamped: torch.Tensor = verl_F.masked_mean(weights_for_std, response_mask)
         rollout_is_var: torch.Tensor = (
             verl_F.masked_mean(weights_for_std.square(), response_mask) - mean_clamped.square()
@@ -686,7 +749,7 @@ def compute_is_metrics(
         metrics["rollout_is_std"] = 0.0
 
     # Compute Effective Sample Size (ESS) for truncated weights
-    weights_for_ess: torch.Tensor = rollout_is_weights.clamp(min=rollout_is_threshold_lower, max=rollout_is_threshold)
+    weights_for_ess: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
     mean_for_ess: torch.Tensor = verl_F.masked_mean(weights_for_ess, response_mask)
     is_weights_normalized: torch.Tensor = weights_for_ess / (mean_for_ess + 1e-8)  # Avoid division by zero
     metrics["rollout_is_eff_sample_size"] = (
@@ -718,7 +781,7 @@ def compute_rollout_correction_and_rejection_mask(
     rollout_log_prob: torch.Tensor,
     response_mask: torch.Tensor,
     rollout_is: Optional[str] = None,
-    rollout_is_threshold: Optional[float] = 2.0,
+    rollout_is_threshold: Optional[str | float] = 2.0,
     rollout_is_batch_normalize: bool = False,
     rollout_rs: Optional[str] = None,
     rollout_rs_threshold: Optional[str | float] = None,
@@ -741,8 +804,8 @@ def compute_rollout_correction_and_rejection_mask(
             shape (batch_size, seq_length).
         rollout_is: IS weight aggregation level (see compute_rollout_correction_weights for options).
             Set to None to disable IS weight computation.
-        rollout_is_threshold: Upper threshold for truncated IS weights (used if rollout_is is set),
-            default 2.0.
+        rollout_is_threshold: Threshold specification for IS weights.
+            Single float implies TIS; "lower_upper" implies IcePop.
         rollout_rs: Rejection sampling aggregation modes as a comma separated string
             (see compute_rollout_rejection_mask for the full list). Set to None to disable
             rejection sampling.

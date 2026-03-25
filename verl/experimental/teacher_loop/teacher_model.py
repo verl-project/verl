@@ -48,6 +48,7 @@ class TeacherModelManager:
         self.config: DistillationConfig = omega_conf_to_dataclass(config)
         self.resource_pool = resource_pool
         self._initialize_llm_servers()
+        self._initialize_async_server_manager()
         self._initialize_router()
 
         self.sleep()
@@ -93,6 +94,13 @@ class TeacherModelManager:
             self._run_all([server.init_standalone() for server in self.rollout_replicas])
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
+
+    def _initialize_async_server_manager(self):
+        from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer
+
+        self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=self.server_addresses,
+        )
 
     def _initialize_router(self):
         worker_urls = [f"http://{server_address}" for server_address in self.server_addresses]

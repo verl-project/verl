@@ -365,6 +365,53 @@ def test_mask_mode():
     print("   ✓ Mask mode correctly separates IS weights from rejection")
 
 
+def test_exact_icepop_zeroes_weights_without_changing_mask():
+    """IcePop should zero OOB IS weights while preserving response_mask."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    raw_is_weights = torch.tensor([[0.4, 0.8, 6.0]], device=device)
+    old_log_prob = torch.zeros_like(raw_is_weights)
+    rollout_log_prob = -torch.log(raw_is_weights)
+    response_mask = torch.ones_like(raw_is_weights)
+
+    weights_proto, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is="token",
+        rollout_is_threshold="0.5_5.0",
+        rollout_rs=None,
+    )
+
+    weights = weights_proto.batch["rollout_is_weights"]
+    expected_weights = torch.tensor([[0.0, 0.8, 0.0]], device=device)
+
+    torch.testing.assert_close(weights, expected_weights, atol=1e-6, rtol=1e-6)
+    assert torch.equal(modified_response_mask, response_mask)
+    assert metrics["rollout_corr/rollout_is_oob_ratio"] == pytest.approx(2.0 / 3.0, abs=1e-6)
+    assert metrics["rollout_corr/rollout_is_std"] == pytest.approx(0.3771236, abs=1e-6)
+    assert metrics["rollout_corr/rollout_is_eff_sample_size"] == pytest.approx(1.0 / 3.0, abs=1e-6)
+
+
+def test_bool_rollout_is_threshold_is_rejected():
+    """Boolean thresholds should not be silently accepted via bool <: int."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    old_log_prob = torch.zeros(1, 2, device=device)
+    rollout_log_prob = torch.zeros(1, 2, device=device)
+    response_mask = torch.ones(1, 2, device=device)
+
+    with pytest.raises(TypeError, match="not a boolean"):
+        compute_rollout_correction_and_rejection_mask(
+            old_log_prob=old_log_prob,
+            rollout_log_prob=rollout_log_prob,
+            response_mask=response_mask,
+            rollout_is="token",
+            rollout_is_threshold=True,
+            rollout_rs=None,
+        )
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Rollout Correction Test Suite")
