@@ -121,7 +121,7 @@ python3 -m verl.trainer.main_ppo --config-path=config  --config-name='ppo_megatr
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
-    +actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
+    actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
     actor_rollout_ref.rollout.enforce_eager=False \
     trainer.device=npu \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[8, 16, 32, 64, 128]" \
