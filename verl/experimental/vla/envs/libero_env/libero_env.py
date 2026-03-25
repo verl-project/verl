@@ -53,17 +53,19 @@ Benchmark.get_task_init_states = patched_get_task_init_states
 
 
 class LiberoEnv(gym.Env):
-    def __init__(self, cfg, rank, world_size):
+    def __init__(self, cfg, rank, world_size, stage_id: int = 0):
         self.rank = rank
+        self.stage_id = stage_id
         self.cfg = cfg
         self.world_size = world_size
-        self.seed = self.cfg.seed + rank
+        self.seed = int(self.cfg.seed)
+        self.rollout_id = 0
         self.num_envs = self.cfg.num_envs
 
         self.ignore_terminations = False
 
-        self._generator = np.random.default_rng(seed=self.seed)
-        self._generator_ordered = np.random.default_rng(seed=0)
+        self._generator = np.random.default_rng(seed=self._compose_seed(env_id=0, rollout_id=0, stream_id=0))
+        self._generator_ordered = np.random.default_rng(seed=self._compose_seed(env_id=0, rollout_id=0, stream_id=1))
         self.start_idx = 0
 
         self.task_suite: Benchmark = get_benchmark(cfg.task_suite_name)()
@@ -83,6 +85,19 @@ class LiberoEnv(gym.Env):
         self.video_cfg = cfg.video_cfg
         self.video_cnt = 0
         self.render_images = []
+
+    def _compose_seed(self, env_id: int, rollout_id: Optional[int] = None, stream_id: int = 0) -> int:
+        if rollout_id is None:
+            rollout_id = self.rollout_id
+        mixed_seed = (
+            self.seed * 1000003
+            + self.rank * 10007
+            + self.stage_id * 1009
+            + int(rollout_id) * 97
+            + int(env_id)
+            + int(stream_id) * 53
+        )
+        return int(mixed_seed % (2**31 - 1))
 
     @property
     def elapsed_steps(self):
@@ -112,7 +127,13 @@ class LiberoEnv(gym.Env):
 
     def get_env_fn_params(self, env_idx=None):
         env_fn_params = []
-        base_env_args = OmegaConf.to_container(self.cfg.init_params, resolve=True)
+        raw_base_env_args = OmegaConf.to_container(self.cfg.init_params, resolve=True)
+        if raw_base_env_args is None:
+            base_env_args = {}
+        elif isinstance(raw_base_env_args, dict):
+            base_env_args = raw_base_env_args
+        else:
+            raise TypeError(f"Expected init_params to be a mapping, got {type(raw_base_env_args)}")
 
         task_descriptions = []
         if env_idx is None:
@@ -127,7 +148,7 @@ class LiberoEnv(gym.Env):
                 {
                     **base_env_args,
                     "bddl_file_name": task_bddl_file,
-                    "seed": self.seed,
+                    "seed": self._compose_seed(env_id=env_id),
                 }
             )
             task_descriptions.append(task.language)
@@ -267,7 +288,8 @@ class LiberoEnv(gym.Env):
             env_fn_params = self.get_env_fn_params(reconfig_env_idx)
             self.env.reconfigure_env_fns(env_fn_params, reconfig_env_idx)
 
-        self.env.seed([0] * len(env_idx))
+        seed_list = [self._compose_seed(env_id=int(env_id)) for env_id in env_idx]
+        self.env.seed(seed_list)
         self.env.reset(id=env_idx)
         init_state = self._get_reset_states(env_idx=env_idx)
         self.env.set_init_state(init_state=init_state, id=env_idx)
@@ -278,6 +300,7 @@ class LiberoEnv(gym.Env):
         reset_state_ids=None,
         options: Optional[dict] = None,
     ):
+        self.rollout_id += 1
         if env_idx is None:
             env_idx = np.arange(self.num_envs)
 
@@ -299,7 +322,7 @@ class LiberoEnv(gym.Env):
         infos = {}
         return obs, infos
 
-    def step(self, actions=None):
+    def step(self, actions=None, critic_values=None):
         if actions is None:
             obs, infos = self.reset(reset_state_ids=self.reset_state_ids)
             terminations = np.zeros(self.num_envs, dtype=bool)
@@ -322,8 +345,9 @@ class LiberoEnv(gym.Env):
             plot_infos = {
                 "rewards": step_reward,
                 "terminations": terminations,
-                "task": self.task_descriptions,
+                "critic_value": np.asarray(critic_values, dtype=np.float32),
             }
+            plot_infos["task"] = self.task_descriptions
             self.add_new_frames(raw_obs, plot_infos)
 
         infos = self._record_metrics(step_reward, terminations, infos)
@@ -336,7 +360,7 @@ class LiberoEnv(gym.Env):
             infos,
         )
 
-    def chunk_step(self, chunk_actions):
+    def chunk_step(self, chunk_actions, chunk_values=None):
         # chunk_actions: [num_envs, chunk_step, action_dim]
         chunk_size = chunk_actions.shape[1]
 
@@ -346,7 +370,12 @@ class LiberoEnv(gym.Env):
         raw_chunk_truncations = []
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
-            extracted_obs, step_reward, terminations, truncations, infos = self.step(actions)
+            if len(chunk_values.shape) == 1:
+                step_values = chunk_values
+            elif len(chunk_values.shape) == 2:
+                step_values = chunk_values[:, i]
+
+            extracted_obs, step_reward, terminations, truncations, infos = self.step(actions, critic_values=step_values)
 
             chunk_rewards.append(step_reward)
             raw_chunk_terminations.append(terminations)

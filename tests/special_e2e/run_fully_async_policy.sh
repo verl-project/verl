@@ -139,6 +139,13 @@ common_params=(
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )
 
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     echo "Running fully async training with FSDP2 strategy..."
     # FSDP2 specific parameters
@@ -148,6 +155,14 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
+    if [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+        )
+        actor_offload=True
+    fi
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         "${common_params[@]}" \
         actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -175,6 +190,15 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
+    if [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
+        train_tp=2
+        actor_offload=True
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.60
+        )
+    fi
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         --config-path=config \
         --config-name='fully_async_ppo_megatron_trainer.yaml' \

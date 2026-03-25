@@ -160,7 +160,7 @@ class IsaacEnv(gym.Env):
 
         return obs, infos
 
-    def step(self, actions=None):
+    def step(self, actions=None, critic_values=None):
         if actions is None:
             # isaac should start with reset_envs_to_initial_state
             # do nothing for None
@@ -187,6 +187,8 @@ class IsaacEnv(gym.Env):
                 "terminations": terminations,
                 "task": self.task_descriptions,
             }
+            if critic_values is not None:
+                plot_infos["critic_value"] = np.asarray(critic_values, dtype=np.float32)
             self.add_new_frames(obs, plot_infos)
 
         infos = self._record_metrics(step_reward, terminations, infos)
@@ -199,7 +201,7 @@ class IsaacEnv(gym.Env):
             infos,
         )
 
-    def chunk_step(self, chunk_actions):
+    def chunk_step(self, chunk_actions, chunk_values=None):
         # chunk_actions: [num_envs, chunk_step, action_dim]
         chunk_size = chunk_actions.shape[1]
 
@@ -209,7 +211,14 @@ class IsaacEnv(gym.Env):
         raw_chunk_truncations = []
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
-            extracted_obs, step_reward, terminations, truncations, infos = self.step(actions)
+            step_values = None
+            if chunk_values is not None:
+                if len(chunk_values.shape) == 1:
+                    step_values = chunk_values
+                elif len(chunk_values.shape) == 2:
+                    step_values = chunk_values[:, i]
+
+            extracted_obs, step_reward, terminations, truncations, infos = self.step(actions, critic_values=step_values)
 
             chunk_rewards.append(step_reward)
             raw_chunk_terminations.append(terminations)

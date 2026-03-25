@@ -614,7 +614,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # 3. The current step number is a multiple of the save frequency.
         # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
         if self.config.trainer.save_freq > 0 and (
-            force and self.current_param_version % self.config.trainer.save_freq == 0 or esi_close_to_expiration
+            force or self.current_param_version % self.config.trainer.save_freq == 0 or esi_close_to_expiration
         ):
             if esi_close_to_expiration:
                 print("Force saving checkpoint: ESI instance expiration approaching.")

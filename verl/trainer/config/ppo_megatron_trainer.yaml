@@ -21,6 +21,8 @@ defaults:
   - reward@reward: reward
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
+  # distillation config
+  - distillation@distillation: distillation
   - _self_
 
 actor_rollout_ref:

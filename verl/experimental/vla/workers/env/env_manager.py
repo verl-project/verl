@@ -145,10 +145,11 @@ def recursive_to_own(obj):
 
 
 class EnvManager:
-    def __init__(self, cfg, rank, world_size, env_cls):
+    def __init__(self, cfg, rank, world_size, env_cls, stage_id: int = 0):
         self.cfg = cfg
         self.rank = rank
         self.world_size = world_size
+        self.stage_id = stage_id
         self.process: Optional[mp.Process] = None
         self.command_queue: Optional[mp.Queue] = None
         self.result_queue: Optional[mp.Queue] = None
@@ -174,6 +175,7 @@ class EnvManager:
                 self.cfg,
                 self.rank,
                 self.world_size,
+                self.stage_id,
                 self.env_cls,
                 self.command_queue,
                 self.result_queue,
@@ -220,6 +222,7 @@ class EnvManager:
             "cfg",
             "rank",
             "world_size",
+            "stage_id",
             "process",
             "command_queue",
             "result_queue",
@@ -285,6 +288,7 @@ class EnvManager:
             "cfg",
             "rank",
             "world_size",
+            "stage_id",
             "process",
             "command_queue",
             "result_queue",
@@ -317,6 +321,7 @@ def _simulator_worker(
     cfg,
     rank,
     world_size,
+    stage_id,
     env_cls,
     command_queue,
     result_queue,
@@ -334,7 +339,10 @@ def _simulator_worker(
     if bind_numa:
         set_process_numa_affinity(rank)
     try:
-        env = env_cls(cfg, rank, world_size)
+        try:
+            env = env_cls(cfg, rank, world_size, stage_id=stage_id)
+        except TypeError:
+            env = env_cls(cfg, rank, world_size)
 
         if state_buffer:
             env.load_state(state_buffer)

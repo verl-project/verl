@@ -1,6 +1,6 @@
 set -x
-libero_train_path=$HOME/data/libero_rl/train.parquet
-libero_test_path=$HOME/data/libero_rl/test.parquet
+libero_train_path=$HOME/data/libero_rl/libero_spatial/train.parquet
+libero_test_path=$HOME/data/libero_rl/libero_spatial/test.parquet
 
 train_files=$libero_train_path
 test_files=$libero_test_path
@@ -10,9 +10,11 @@ VIDEO_OUTPUT=${MLP_MODEL_OUTPUT:-"$HOME"}/video
 SFT_MODEL_PATH=${SFT_MODEL_PATH:-"$HOME/data/pi05_libero_torch"}
 TOKENIZER_PATH="$SFT_MODEL_PATH"
 
+# Physical Node Config
+NUM_GPUS=8                                     # total number of gpus per node
+
 # Role Config
 NUM_NODES=1                                    # number of nodes for rollout
-NUM_GPUS=8                                     # number of gpus for rollout workers per node
 SIM_NODES=1                                    # number of nodes for sim                
 NUM_ENV_GPUS=4                                 # number of gpus for env workers per node
 NUM_ROLLOUT_GPUS=8                             # number of gpus for rollout workers per node
@@ -25,14 +27,12 @@ NUM_STAGE=2                                    # number of pipeline stages
 NUM_ENV=8                                      # number of envs per env worker
 
 NUM_ACTION_CHUNKS=10                           # number of action chunks
-MAX_EPISODE_STEPS=512                          # max episode steps for each env
+MAX_EPISODE_STEPS=220                          # max episode steps for each env
                                                # max_interactions = MAX_EPISODE_STEPS / num_action_chunks
 
 # Training Config
-MINI_BATCH_SIZE=2048                           # mini batch size (batch size per GPU, automatically multiplied by ROLLOUT_N)
-                                               # invalid in SAC, currently
-                                               # In SAC, it equal to (max_interactions - 1) * TRAIN_BATCH_SIZE * ROLLOUT_N / NUM_ROLLOUT_GPUS
-MICRO_BATCH_SIZE=32                            # micro batch size (per GPU, for gradient accumulation, should divide MINI_BATCH_SIZE)
+MINI_BATCH_SIZE=1024                           # mini batch size (batch size per GPU, automatically multiplied by ROLLOUT_N)
+MICRO_BATCH_SIZE=16                            # micro batch size (per GPU, for gradient accumulation, should divide MINI_BATCH_SIZE)
 
 
 
@@ -61,12 +61,11 @@ fi
 
 export VERL_LOGGING_LEVEL=INFO
 
-
 $PYTHON -m verl.experimental.vla.main_sac \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.train_batch_size=$TRAIN_BATCH_SIZE \
-    data.val_batch_size=4 \
+    data.val_batch_size=$TRAIN_BATCH_SIZE \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     env.train.num_envs=$NUM_ENV \
     data.max_prompt_length=256 \
@@ -121,9 +120,11 @@ $PYTHON -m verl.experimental.vla.main_sac \
     trainer.n_gpus_per_node=$NUM_GPUS \
     +trainer.n_env_gpus_per_node=$NUM_ENV_GPUS \
     +trainer.n_rollout_gpus_per_node=$NUM_ROLLOUT_GPUS \
+    +trainer.rollout_interval=20 \
     trainer.nnodes=$NUM_NODES \
-    trainer.save_freq=30 \
-    trainer.test_freq=-1 \
+    trainer.save_freq=500 \
+    trainer.test_freq=10 \
     trainer.total_epochs=1000 \
     trainer.val_only=False \
+    algorithm.adv_estimator=reinforce_plus_plus \
     trainer.val_before_train=False
