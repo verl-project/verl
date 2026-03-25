@@ -283,7 +283,11 @@ class SGLangHttpServer:
             f"pp_size={self.config.pipeline_model_parallel_size} ep_size={args.get('ep_size')} "
             f"base_gpu_id={args.get('base_gpu_id')} gpu_id_step={args.get('gpu_id_step')} "
             f"speculative_algorithm={args.get('speculative_algorithm')} "
+            f"speculative_num_steps={args.get('speculative_num_steps')} "
+            f"speculative_num_draft_tokens={args.get('speculative_num_draft_tokens')} "
             f"speculative_draft_model_path={args.get('speculative_draft_model_path')} "
+            f"num_speculative_steps_cfg={getattr(self.config, 'num_speculative_steps', None)} "
+            f"num_draft_actor_names={len(self.draft_actor_names)} "
             f"dist_init_addr={args.get('dist_init_addr')} disable_overlap_schedule={args.get('disable_overlap_schedule')}"
         )
 

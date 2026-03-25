@@ -725,62 +725,9 @@ class FSDPEngine(BaseEngine):
             offload_fsdp_optimizer(self.optimizer)
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
-        
-        
-        
-        # lsy: for debug, delete later
-        import time
-
-        dist_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
-        dist_world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else -1
-
-        def _describe_tensor(tensor):
-            if tensor is None:
-                return "tensor=None"
-            shape = tuple(tensor.shape) if hasattr(tensor, "shape") else "unknown"
-            dtype = getattr(tensor, "dtype", "unknown")
-            device = getattr(tensor, "device", "unknown")
-            is_dtensor = isinstance(tensor, DTensor)
-            placements = getattr(tensor, "placements", None) if is_dtensor else None
-            device_mesh = getattr(tensor, "device_mesh", None) if is_dtensor else None
-            mesh_shape = None
-            mesh_values = None
-            mesh_device_type = None
-            mesh_ndim = None
-            local_shape = None
-            if is_dtensor and device_mesh is not None:
-                mesh_shape = tuple(device_mesh.mesh.shape)
-                mesh_values = device_mesh.mesh.cpu().tolist()
-                mesh_device_type = device_mesh.device_type
-                mesh_ndim = device_mesh.mesh.ndim
-                local_tensor = getattr(tensor, "_local_tensor", None)
-                if local_tensor is not None and hasattr(local_tensor, "shape"):
-                    local_shape = tuple(local_tensor.shape)
-            return (
-                f"type={type(tensor).__name__} shape={shape} dtype={dtype} device={device} "
-                f"is_dtensor={is_dtensor} placements={placements} device_mesh={device_mesh} "
-                f"mesh_shape={mesh_shape} mesh_values={mesh_values} mesh_device_type={mesh_device_type} "
-                f"mesh_ndim={mesh_ndim} local_shape={local_shape}"
-            )
-
-        print(
-            "[fsdp][get_per_tensor_param] start "
-            f"dist_rank={dist_rank}/{dist_world_size} "
-            f"layered_summon={layered_summon} base_sync_done={base_sync_done} "
-            f"offload_param={self._is_offload_param} qat_enabled={self._qat_enabled}"
-        )
-
-        # lsy: for debug, delete later
-
-
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
-        load_start = time.perf_counter()
         load_fsdp_model_to_gpu(self.module)
-        print(
-            "[fsdp][get_per_tensor_param] load_fsdp_model_to_gpu_done "
-            f"elapsed_s={time.perf_counter() - load_start:.6f}"
-        )
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
@@ -790,7 +737,6 @@ class FSDPEngine(BaseEngine):
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
             if not merge_lora:
-                print("[fsdp][get_per_tensor_param] entering_lora_unmerged_branch")
                 peft_config = peft_model.peft_config.get("default", None)
                 params = collect_lora_params(
                     module=self.module,
@@ -800,126 +746,33 @@ class FSDPEngine(BaseEngine):
                 if not base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
             else:  # merge lora
-                print("[fsdp][get_per_tensor_param] entering_lora_merged_branch")
                 with merged_lora_context(self.module, backup_adapters=True):
                     params = self.module.state_dict()
                     params = normalize_peft_param_name(params)
         else:
-            print("[fsdp][get_per_tensor_param] entering_plain_state_dict_branch")
             params = self.module.state_dict()
 
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-        try:
-            print(
-                "[fsdp][get_per_tensor_param] params_ready "
-                f"container_type={type(params).__name__} num_params={len(params)}"
-            )
-        except TypeError:
-            print(f"[fsdp][get_per_tensor_param] params_ready container_type={type(params).__name__}")
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param:
-            offload_start = time.perf_counter()
             offload_fsdp_model_to_cpu(self.module)
-            print(
-                "[fsdp][get_per_tensor_param] offload_fsdp_model_to_cpu_done "
-                f"elapsed_s={time.perf_counter() - offload_start:.6f}"
-            )
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
         if peft_config is not None and base_sync_done:
             per_tensor_param = params.items()
-            print("[fsdp][get_per_tensor_param] using_direct_items_iterator_for_peft")
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
             # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-            print(f"[fsdp][get_per_tensor_param] building_materialize_generator target_device={device}")
-
-            def _iter_per_tensor_param():
-                for param_idx, (name, param) in enumerate(params.items(), start=1):
-                    default_group = None
-                    default_group_size = -1
-                    default_group_rank = -1
-                    if torch.distributed.is_initialized():
-                        try:
-                            default_group = torch.distributed.distributed_c10d._get_default_group()
-                            default_group_size = torch.distributed.get_world_size(group=default_group)
-                            default_group_rank = torch.distributed.get_rank(group=default_group)
-                        except Exception:
-                            pass
-                    print(
-                        "[fsdp][get_per_tensor_param] before_materialize "
-                        f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                        f"default_group_rank={default_group_rank}/{default_group_size} "
-                        f"name={name} {_describe_tensor(param)}"
-                    )
-                    tensor_start = time.perf_counter()
-                    if isinstance(param, DTensor):
-                        try:
-                            local_tensor = param.to(device, non_blocking=True)
-                            print(
-                                "[fsdp][get_per_tensor_param] after_to_device "
-                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                                f"default_group_rank={default_group_rank}/{default_group_size} "
-                                f"name={name} {_describe_tensor(local_tensor)}"
-                            )
-                            materialize_start = time.perf_counter()
-                            print(
-                                "[fsdp][get_per_tensor_param] before_full_tensor "
-                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                                f"default_group_rank={default_group_rank}/{default_group_size} "
-                                f"name={name}"
-                            )
-                            full_tensor = local_tensor.full_tensor()
-                            print(
-                                "[fsdp][get_per_tensor_param] after_full_tensor "
-                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                                f"default_group_rank={default_group_rank}/{default_group_size} "
-                                f"name={name} {_describe_tensor(full_tensor)} "
-                                f"elapsed_s={time.perf_counter() - materialize_start:.6f}"
-                            )
-                            cast_start = time.perf_counter()
-                            print(
-                                "[fsdp][get_per_tensor_param] before_cast_bf16 "
-                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                                f"default_group_rank={default_group_rank}/{default_group_size} "
-                                f"name={name}"
-                            )
-                            tensor = full_tensor.to(torch.bfloat16, non_blocking=True)
-                            print(
-                                "[fsdp][get_per_tensor_param] after_cast_bf16 "
-                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                                f"default_group_rank={default_group_rank}/{default_group_size} "
-                                f"name={name} {_describe_tensor(tensor)} "
-                                f"elapsed_s={time.perf_counter() - cast_start:.6f}"
-                            )
-                        except Exception as e:
-                            print(
-                                "[fsdp][get_per_tensor_param] materialize_exception "
-                                f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                                f"default_group_rank={default_group_rank}/{default_group_size} "
-                                f"name={name} error_type={type(e).__name__} error={e}"
-                            )
-                            raise
-                    else:
-                        tensor = param
-                        print(
-                            "[fsdp][get_per_tensor_param] non_dtensor_passthrough "
-                            f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                            f"default_group_rank={default_group_rank}/{default_group_size} "
-                            f"name={name} {_describe_tensor(tensor)}"
-                        )
-
-                    print(
-                        "[fsdp][get_per_tensor_param] yield_tensor "
-                        f"dist_rank={dist_rank}/{dist_world_size} param_idx={param_idx} "
-                        f"default_group_rank={default_group_rank}/{default_group_size} "
-                        f"name={name} {_describe_tensor(tensor)} "
-                        f"elapsed_s={time.perf_counter() - tensor_start:.6f}"
-                    )
-                    yield name, tensor
-
-            per_tensor_param = _iter_per_tensor_param()
+            per_tensor_param = (
+                (
+                    name,
+                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    if isinstance(param, DTensor)
+                    else param,
+                )
+                for name, param in params.items()
+            )
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer
@@ -942,13 +795,8 @@ class FSDPEngine(BaseEngine):
                 per_tensor_param,
                 target_device=torch.device("cpu"),
             )
-            print("[fsdp][get_per_tensor_param] qat_quantizer_wrapped_iterator_ready")
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
-        print(
-            "[fsdp][get_per_tensor_param] return "
-            f"peft_config_present={peft_config_dict is not None} iterator_type={type(per_tensor_param).__name__}"
-        )
         return per_tensor_param, peft_config_dict
 
     def disable_adapter(self) -> ContextManager:

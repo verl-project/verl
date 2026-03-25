@@ -38,6 +38,25 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
         self.server_class = ray.remote(SGLangHttpServer)
         self._base_gpu_id_override = 0
 
+    def _format_startup_params(self) -> str:
+        draft_cfg = getattr(self.config, "draft", None)
+        param_items = {
+            "rollout_n": getattr(self.config, "n", None),
+            "temperature": getattr(self.config, "temperature", None),
+            "top_p": getattr(self.config, "top_p", None),
+            "top_k": getattr(self.config, "top_k", None),
+            "verify_tp": getattr(self.config, "tensor_model_parallel_size", None),
+            "verify_dp": getattr(self.config, "data_parallel_size", None),
+            "verify_pp": getattr(self.config, "pipeline_model_parallel_size", None),
+            "gpu_memory_utilization": getattr(self.config, "gpu_memory_utilization", None),
+            "enable_decoupled_spec": getattr(self.config, "enable_decoupled_spec", None),
+            "num_speculative_steps": getattr(self.config, "num_speculative_steps", None),
+            "draft_tp": getattr(draft_cfg, "tensor_model_parallel_size", None) if draft_cfg is not None else None,
+            "draft_ngpus": getattr(draft_cfg, "ngpus", None) if draft_cfg is not None else None,
+            "draft_model_path": getattr(draft_cfg, "model_path", None) if draft_cfg is not None else None,
+        }
+        return " ".join(f"{key}={value}" for key, value in param_items.items() if value is not None)
+
     async def init_hybrid_decoupled(self, worker_group: RayWorkerGroup):
         """Bind this replica to the correct worker slice using decoupled-spec topology (subclass implements slice)."""
         raise NotImplementedError
@@ -54,7 +73,8 @@ class _BaseDecoupledSGLangReplica(RolloutReplica):
         print(
             "[decoupled_spec][BaseDecoupledSGLangReplica] launch_servers_start "
             f"server_role={self.server_role} replica_rank={self.replica_rank} "
-            f"world_size={self.world_size} nnodes={self.nnodes} model_path={model_path}"
+            f"world_size={self.world_size} nnodes={self.nnodes} model_path={model_path} "
+            f"{self._format_startup_params()}"
         )
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
@@ -202,7 +222,8 @@ class DraftSGLangReplica(_BaseDecoupledSGLangReplica):
             "[decoupled_spec][DraftSGLangReplica] init_hybrid_decoupled "
             f"server_role={self.server_role} replica_rank={self.replica_rank} "
             f"start={start} end={end} draft_world_size={topo.draft_world_size} "
-            f"verify_gpu_count={topo.verify_gpu_count} base_gpu_id={self._base_gpu_id_override}"
+            f"verify_gpu_count={topo.verify_gpu_count} base_gpu_id={self._base_gpu_id_override} "
+            f"{self._format_startup_params()}"
         )
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start:end]
@@ -245,7 +266,8 @@ class VerifySGLangReplica(_BaseDecoupledSGLangReplica):
             "[decoupled_spec][VerifySGLangReplica] init_hybrid_decoupled "
             f"server_role={self.server_role} replica_rank={self.replica_rank} "
             f"start={start} end={end} verify_world_size={topo.verify_world_size} "
-            f"num_draft_names={len(self.draft_actor_names)} base_gpu_id={self._base_gpu_id_override}"
+            f"num_draft_names={len(self.draft_actor_names)} base_gpu_id={self._base_gpu_id_override} "
+            f"{self._format_startup_params()}"
         )
         self.rollout_mode = RolloutMode.HYBRID
         self.workers = worker_group.workers[start:end]
