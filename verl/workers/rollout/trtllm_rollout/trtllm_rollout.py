@@ -22,7 +22,7 @@ import os
 import pickle
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Generator, Optional, Union
+from typing import Any, AsyncGenerator, Generator, Optional
 
 import aiohttp
 import pynvml
@@ -413,7 +413,7 @@ class ServerAdapter(BaseRollout):
 
     async def update_weights(
         self,
-        weights: Union[Generator[tuple[str, torch.Tensor], None, None], AsyncGenerator[tuple[str, torch.Tensor], None]],
+        weights: Generator[tuple[str, torch.Tensor], None, None] | AsyncGenerator[tuple[str, torch.Tensor], None],
         global_steps: int = None,
         **kwargs,
     ):
