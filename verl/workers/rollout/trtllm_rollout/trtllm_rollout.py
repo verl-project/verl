@@ -22,7 +22,7 @@ import os
 import pickle
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, Generator, Optional
+from typing import Any, AsyncGenerator, Generator, Optional, Union
 
 import aiohttp
 import pynvml
@@ -36,6 +36,7 @@ from verl.utils.device import get_torch_device
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -411,7 +412,10 @@ class ServerAdapter(BaseRollout):
         await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
 
     async def update_weights(
-        self, weights: AsyncGenerator[tuple[str, torch.Tensor], None], global_steps: int = None, **kwargs
+        self,
+        weights: Union[Generator[tuple[str, torch.Tensor], None, None], AsyncGenerator[tuple[str, torch.Tensor], None]],
+        global_steps: int = None,
+        **kwargs,
     ):
         assert self.hybrid_device_mesh is not None, "hybrid_device_mesh is not set"
 
@@ -468,7 +472,7 @@ class ServerAdapter(BaseRollout):
             await asyncio.to_thread(dist.broadcast, spl_tensor, src=leader_global_rank, group=exclude_dp_group)
             supports_partial_loading = bool(spl_tensor.item())
 
-        async for name, param in weights:
+        async for name, param in ensure_async_iterator(weights):
             if supports_partial_loading:
                 size_in_bytes = param.element_size() * param.numel()
                 if size_in_bytes > cur_available_bytes:
