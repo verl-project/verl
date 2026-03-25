@@ -1359,8 +1359,11 @@ class RayPPOTrainer:
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
+                import sys as _sys
+                print(f"RAY_EXECUTOR_DEBUG: step {self.global_steps} starting", file=_sys.stderr, flush=True)
                 with marked_timer("step", timing_raw):
                     # generate a batch
+                    print(f"RAY_EXECUTOR_DEBUG: step {self.global_steps} rollout_start", file=_sys.stderr, flush=True)
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.async_rollout_manager.start_profile()
@@ -1371,6 +1374,7 @@ class RayPPOTrainer:
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+                    print(f"RAY_EXECUTOR_DEBUG: step {self.global_steps} rollout_end", file=_sys.stderr, flush=True)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
@@ -1549,8 +1553,10 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
+                        print(f"RAY_EXECUTOR_DEBUG: step {self.global_steps} actor_training_start", file=_sys.stderr, flush=True)
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
+                        print(f"RAY_EXECUTOR_DEBUG: step {self.global_steps} actor_training_end", file=_sys.stderr, flush=True)
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(
@@ -1575,8 +1581,10 @@ class RayPPOTrainer:
                                 self._save_checkpoint()
 
                         # update weights from trainer to rollout
+                        print(f"RAY_EXECUTOR_DEBUG: step {self.global_steps} weight_sync_start", file=_sys.stderr, flush=True)
                         with marked_timer("update_weights", timing_raw, color="red"):
                             self.checkpoint_manager.update_weights(self.global_steps)
+                        print(f"RAY_EXECUTOR_DEBUG: step {self.global_steps} weight_sync_end", file=_sys.stderr, flush=True)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
@@ -1648,6 +1656,7 @@ class RayPPOTrainer:
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                print(f"RAY_EXECUTOR_DEBUG: step {self.global_steps} completed", file=_sys.stderr, flush=True)
                 progress_bar.update(1)
                 self.global_steps += 1
 
