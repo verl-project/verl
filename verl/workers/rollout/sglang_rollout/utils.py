@@ -92,9 +92,13 @@ async def get_named_tensor_buckets(
     if bucket_bytes <= 0:
         raise ValueError(f"bucket_bytes must be greater than 0, got {bucket_bytes}")
 
+    print("Grouping tensors into buckets...")
+
     current_bucket = []
     current_size = 0
     async for name, tensor in ensure_async_iterator(iterable):
+
+        print(f"Processing tensor '{name}' of size {tensor.element_size() * tensor.numel() / (1024 * 1024):.2f} MB")
         tensor_size = tensor.element_size() * tensor.numel()
         if current_size + tensor_size > bucket_bytes:
             if current_bucket:
