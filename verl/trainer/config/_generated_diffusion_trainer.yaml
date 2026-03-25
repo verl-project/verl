@@ -663,35 +663,6 @@ trainer:
   ray_wait_register_center_timeout: 300
   device: cuda
   use_legacy_worker_impl: auto
-global_profiler:
-  _target_: verl.utils.profiler.ProfilerConfig
-  tool: null
-  steps: null
-  profile_continuous_steps: false
-  save_path: outputs/profile
-  global_tool_config:
-    nsys:
-      _target_: verl.utils.profiler.config.NsightToolConfig
-      discrete: false
-      controller_nsight_options:
-        trace: cuda,nvtx,cublas,ucx
-        cuda-memory-usage: 'true'
-        cuda-graph-trace: graph
-      worker_nsight_options:
-        trace: cuda,nvtx,cublas,ucx
-        cuda-memory-usage: 'true'
-        cuda-graph-trace: graph
-        capture-range: cudaProfilerApi
-        capture-range-end: null
-        kill: none
-    torch_memory:
-      trace_alloc_max_entries: 100000
-      stack_depth: 32
-      context: all
-      stacks: all
-      kw_args: {}
-transfer_queue:
-  enable: false
 ray_kwargs:
   ray_init:
     num_cpus: null
