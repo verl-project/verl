@@ -150,7 +150,6 @@ async def compute_score_ocr(
     scores = []
     for image in solution_image:
         # preprocess image to base64
-        image = solution_image
         if isinstance(image, torch.Tensor):
             image = image.float().permute(1, 2, 0).cpu().numpy()
         if isinstance(image, np.ndarray):

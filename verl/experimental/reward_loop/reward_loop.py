@@ -339,8 +339,8 @@ class RewardLoopManager:
 
         # compute rm score
         scores = [item["reward_score"] for item in outputs_flat]
-        if self.config.reward.reward_manager.name == "image":
-            # image reward only has one score for the whole response
+        if self.config.reward.reward_manager.name == "visual":
+            # visual reward only has one score for the whole response
             rm_scores = torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
         else:
             prompt_length = data.batch["prompts"].size(1)
