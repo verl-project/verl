@@ -104,9 +104,6 @@ jobs:
           mode: "create"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
-      - name: Show transformers version for debugging
-        run: |
-          pip3 show transformers
 
   e2e_ppo_trainer_megatron-deepseek:
     needs: setup
