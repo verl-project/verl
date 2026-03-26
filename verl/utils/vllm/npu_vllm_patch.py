@@ -169,7 +169,7 @@ def patch_vllm013_rotary_emb():
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
-        super(ApplyRotaryEmb, self).__init__(enforce_enable)
+        super(ApplyRotaryEmb, self).__init__()
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
         self.apply_rotary_emb_flash_attn = None
