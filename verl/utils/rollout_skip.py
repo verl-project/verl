@@ -16,6 +16,7 @@ import pickle
 import time
 from enum import Enum
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 
@@ -93,7 +94,7 @@ class RolloutSkip:
 
     print_mark = "[RolloutSkip()] "
 
-    def __init__(self, config, rollout_wg):
+    def __init__(self, config, rollout_wg) -> None:
         self.rollout_config: RolloutConfig = config.actor_rollout_ref.rollout
         self.skip_config = self.rollout_config.skip
         self.is_enable = _get_skip_attr(self.skip_config, "enable", False)
@@ -145,16 +146,16 @@ class RolloutSkip:
     def num_dumped_step(self) -> int:
         return len(self.list_dumped_steps)
 
-    def _get_path_dump(self, gen_step: int = None) -> Path:
+    def _get_path_dump(self, gen_step: int | None = None) -> Path:
         """Return the directory path for a given gen_step (one dir per step, no .pkl)."""
         if gen_step is None:
             gen_step = self.curr_gen_step
         return self.specify_dumped_dir.joinpath(f"genstep_{gen_step:06d}").absolute()
 
-    def get_step_describe(self):
+    def _get_path_step_record(self) -> Path:
         return self.specify_dumped_dir.joinpath("train_step__gen_step.txt").absolute()
 
-    def step(self):
+    def step(self) -> None:
         if self.record_global_steps is None:
             self.curr_train_step += 1
         else:
@@ -165,7 +166,7 @@ class RolloutSkip:
         else:
             self.curr_gen_step = self.record_gen_steps
 
-    def _create_dump_path(self):
+    def _create_dump_path(self) -> None:
         """
         Create the directory for dumping rollout data if it doesn't exist.
         Warn if the directory is within Ray's temporary session directory.
@@ -198,7 +199,14 @@ class RolloutSkip:
             flush=True,
         )
 
-    def record(self, new_batch: DataProto, global_steps=None, gen_steps=None, *args, **kwargs):
+    def record(
+        self,
+        new_batch: DataProto,
+        global_steps: int | None = None,
+        gen_steps: int | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         """Record the current training step based on the new batch.
 
         Args:
@@ -228,7 +236,7 @@ class RolloutSkip:
                 last_gen_step = 0
                 try:
                     found = _find_last_gen_step_for_train_step(
-                        self.get_step_describe(),
+                        self._get_path_step_record(),
                         target_train_step=global_steps - 1,
                     )
                     if found is not None:
@@ -253,7 +261,7 @@ class RolloutSkip:
             #! it is not right since dapo_trainer reset `gen_steps` when resume
             self.record_gen_steps = gen_steps + self.__gen_offset_step
 
-    def wrap_generate_sequences(self):
+    def wrap_generate_sequences(self) -> None:
         # if self.is_enable:
         #     self._rollout_wg = rollout_wg
 
@@ -269,7 +277,7 @@ class RolloutSkip:
                 flush=True,
             ) from e
 
-    def try_load(self, step=None):
+    def try_load(self, step: int | None = None) -> tuple[DataProto | None, DataProto | None]:
         dumped_gen_batch = None
         dumped_new_batch = None
         if step is None:
@@ -311,7 +319,7 @@ class RolloutSkip:
 
         return dumped_new_batch, dumped_gen_batch
 
-    def dump(self, outputs: DataProto):
+    def dump(self, outputs: DataProto) -> None:
         if self._flag_record is False or self._new_batch is None:
             raise AssertionError(
                 f"{self.print_mark}\033[33mError: \n"
@@ -331,7 +339,7 @@ class RolloutSkip:
             meta_path = step_dir / "meta.json"
             meta_path.write_text(json.dumps({"global_steps": train_step, "gen_steps": gen_step}))
 
-            with open(str(self.get_step_describe()), "a") as f:
+            with open(str(self._get_path_step_record()), "a") as f:
                 f.write(f"{train_step} {gen_step}\n")
 
             print(
@@ -347,7 +355,7 @@ class RolloutSkip:
                 flush=True,
             )
 
-    def replace_curr_new_batch(self, dumped_new_batch: DataProto):
+    def replace_curr_new_batch(self, dumped_new_batch: DataProto) -> None:
         """Replace the current new_batch's content with that from the dumped_new_batch.
         In case of [Answer] mismatch.
         """
@@ -365,10 +373,10 @@ class RolloutSkip:
         self._new_batch.meta_info = dumped_new_batch.meta_info
 
 
-def wrap_generate_sequences(rolloutskip: RolloutSkip, rollout_wg):
+def wrap_generate_sequences(rolloutskip: RolloutSkip, rollout_wg: Any) -> Callable[..., DataProto]:
     generate_sequences = rollout_wg.generate_sequences
 
-    def rollout_skip_wrap_fn(batch, **kwargs) -> DataProto:
+    def rollout_skip_wrap_fn(batch: DataProto, **kwargs: Any) -> DataProto:
         rolloutskip.step()
         # Record input batch as new_batch so dump() / replace_curr_new_batch() have it
         rolloutskip.record(batch)
@@ -419,7 +427,7 @@ def wrap_generate_sequences(rolloutskip: RolloutSkip, rollout_wg):
     return rollout_skip_wrap_fn
 
 
-def read_dumped_data(path_dump: Path) -> dict[str, DataProto]:
+def read_dumped_data(path_dump: Path | str) -> dict[str, DataProto]:
     """
     Read dumped rollout data from a step directory (DataProto.save_to_disk format).
 

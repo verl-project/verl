@@ -157,7 +157,7 @@ class TestRolloutSkip:
 
 
 class TestAction:
-    @pytest.mark.parametrize("step", [4]) #【】4，16】
+    @pytest.mark.parametrize("step", [4])
     def test_rollout_with_REPEAT(self, mock_rollout_wg, step, capsys):
         config, rollout_wg, new_batch_generator = mock_rollout_wg
         config.actor_rollout_ref.rollout.skip.action = "repeat"
