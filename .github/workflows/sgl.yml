@@ -122,7 +122,7 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Test the latest SGLang Rollout async with agent loop
         run: |
-          ROLLOUT_NAME=sglang pytest -svvv tests/experimental/agent_loop  --ignore=tests/experimental/agent_loop/test_diffusion_agent_loop.py
+          ROLLOUT_NAME=sglang pytest -svvv tests/experimental/agent_loop
 
   sgl_checkpoint_engine:
     needs: setup

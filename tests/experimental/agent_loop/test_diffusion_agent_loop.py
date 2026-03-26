@@ -21,6 +21,8 @@ from omegaconf import DictConfig, open_dict
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 
+pytestmark = pytest.mark.vllm_omni
+
 
 @pytest.fixture
 def init_config() -> DictConfig:
