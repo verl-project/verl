@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
+from parameterized import parameterized
 
 from verl.trainer.ppo.metric_utils import (
     bootstrap_metric,
@@ -540,6 +541,45 @@ class TestProcessValidationMetrics(unittest.TestCase):
 
         # For bootstrap with n=2, the majority vote could be either A or B
         # depending on the random sampling, so we don't check the exact value
+
+
+class TestZeroAdvMetrics(unittest.TestCase):
+    """Tests for zero-advantage metrics in compute_data_metrics."""
+
+    def _make_batch(self, advantages):
+        batch = MagicMock()
+        bs, seq = advantages.shape
+        batch.batch = {
+            "advantages": advantages,
+            "attention_mask": torch.ones((bs, seq * 2)),
+            "response_mask": torch.ones((bs, seq)),
+            "responses": torch.zeros((bs, seq)),
+            "returns": torch.ones((bs, seq)),
+            "token_level_rewards": torch.ones((bs, seq)),
+            "token_level_scores": torch.ones((bs, seq)),
+        }
+        return batch
+
+    @parameterized.expand(
+        (
+            # (name, advantages, expected_count, expected_ratio)
+            ("all_nonzero_2", ((0.1, 0.2), (0.3, 0.4)), 0, 0.0),
+            ("some_zero_2", ((0.0, 0.0), (0.3, 0.4)), 1, 0.5),
+            ("all_zero_2", ((0.0, 0.0), (0.0, 0.0)), 2, 1.0),
+            ("all_zero_1", ((0.0, 0.0),), 1, 1.0),
+            ("some_zero_3", ((0.0, 0.0), (0.3, 0.4), (0.5, 0.6)), 1, 1.0 / 3),
+            ("some_zero_4", ((0.0, 0.0), (0.0, 0.0), (0.3, 0.4), (0.5, 0.6)), 2, 0.5),
+            ("below_eps", ((1e-9, 1e-10), (0.3, 0.4)), 1, 0.5),
+            ("at_eps", ((1e-8, 0.0), (0.3, 0.4)), 0, 0.0),
+            ("above_eps", ((1e-7, 0.0), (0.3, 0.4)), 0, 0.0),
+        )
+    )
+    def test_zero_adv_count_and_ratio(self, _name, advantages, expected_count, expected_ratio):
+        batch = self._make_batch(torch.tensor(advantages))
+        metrics = compute_data_metrics(batch, use_critic=False)
+
+        self.assertEqual(metrics["critic/advantages/zero_adv_count"], expected_count)
+        self.assertAlmostEqual(metrics["critic/advantages/zero_adv_ratio"], expected_ratio)
 
 
 if __name__ == "__main__":
