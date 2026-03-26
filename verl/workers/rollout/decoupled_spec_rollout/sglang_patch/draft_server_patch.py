@@ -51,8 +51,18 @@ async def handle_draft_request(self, draft_request):
         final_output_ids = []
         async for output in self.tokenizer_manager.generate_request(generate_request, None):
             final_output_ids = list(output.get("output_ids", []))
-            print(f"from drafter: Draft request {draft_request.request_id} in round {draft_request.draft_round_id} got output ids: {final_output_ids}")
-            if output.get("meta_info", {}).get("finish_reason") is not None:
+            finish_reason = output.get("meta_info", {}).get("finish_reason")
+            print(
+                "from drafter: "
+                f"Draft request {draft_request.request_id} in round {draft_request.draft_round_id} "
+                f"got output ids: {final_output_ids}, finish_reason: {finish_reason}"
+            )
+            if finish_reason is not None:
+                print(
+                    "from drafter return: "
+                    f"Draft request {draft_request.request_id} in round {draft_request.draft_round_id} "
+                    f"returns final output ids: {final_output_ids}"
+                )
                 return DraftResult(
                     request_id=draft_request.request_id,
                     draft_round_id=draft_request.draft_round_id,
