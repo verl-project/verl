@@ -39,8 +39,20 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         log_prob_flatten = log_prob.values()
         loss_mask_flatten = loss_mask.values()
 
-        # left-shift the loss mask by one token to align with log_prob
+        # Left-shift the loss mask by one token to align with log_prob.
+        # log_prob[i] predicts token at position i+1, so loss_mask[i] should
+        # indicate whether we care about the prediction at position i+1.
+        # Use per-sequence shift: a global torch.roll on the flattened buffer
+        # wraps the last element of one sequence into the next, causing
+        # cross-sequence mask contamination.  Instead, shift globally and then
+        # fix up the boundary positions using the nested tensor offsets.
+        offsets = loss_mask.offsets()
         loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)
+        # Zero out the last position of each sequence: there is no valid
+        # next-token prediction there (the model output at that position
+        # corresponds to a cross-sequence label due to the global roll in
+        # input_ids_rmpad_rolled).
+        loss_mask_flatten[offsets[1:] - 1] = 0
 
         # NOTE: loss is averaged over all tokens in the batch across all data parallel groups,
         # For FSDP backend, the loss is directly used for backward; while for Megatron backend,
