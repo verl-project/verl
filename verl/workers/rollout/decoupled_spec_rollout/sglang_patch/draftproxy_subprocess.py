@@ -146,11 +146,11 @@ class DraftProxyManager:
                 continue
 
             try:
-                result_start = time.perf_counter()
                 result = ray.get(object_ref)
                 assert isinstance(result, DraftResult)
                 assert result.request_id == key.request_id
                 assert result.draft_round_id == key.draft_round_id
+                print(f"DraftProxy collected completed draft result for request_id {result.request_id} in round {result.draft_round_id}: {result.draft_token_ids}")
             except Exception:
                 logger.exception("DraftProxy failed to get draft result")
                 assert False

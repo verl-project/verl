@@ -369,6 +369,11 @@ def _wait_for_draft_results(self: Scheduler, batch, target_reqs=None) -> None:
     for result in synced_results:
         self._decoupled_pending_draft_results[result.key] = result
 
+    print("verifier: received draft results for request_id {}: {}".format(
+        live_reqs[0].rid if live_reqs else None,
+        [result.draft_token_ids for result in synced_results],)
+    )
+    
     _bind_draft_results_to_reqs(self, live_reqs)
     
 

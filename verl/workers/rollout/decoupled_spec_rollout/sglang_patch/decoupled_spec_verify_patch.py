@@ -206,8 +206,8 @@ class ExternalDraftVerifyWorker:
     def _build_req_verify_tokens(self, req, pad_token_id: int) -> list[int]: # 返回内容：last verified token + num_speculative_steps * draft token
         build_start = time.perf_counter()
         tail_token = _get_req_tail_token_id(req) # 该 request 最后一个已经 commit 的 token
-        print("for request_id {} tail token id is {}, draft tokens collected are: {}".format(req.rid, tail_token, getattr(req, "decoupled_spec_draft_tokens", None)))
         draft_result = getattr(req, "decoupled_spec_draft_result", None)
+        print("for Request {}, got draft result: {}".format(req.rid, draft_result))
         is_warmup_decode = bool(getattr(req, "decoupled_spec_is_warmup_decode", False))
 
         if draft_result is None:
