@@ -89,11 +89,6 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
-      - name: config mirrors
-        run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@192.168.9.104:32685@g' /etc/apt/sources.list
-          pip config set global.index-url http://192.168.9.104:32303/pypi/simple
-          pip config set global.trusted-host 192.168.9.104:32303
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
@@ -149,11 +144,6 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
-      - name: config mirrors
-        run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@192.168.9.104:32685@g' /etc/apt/sources.list
-          pip config set global.index-url http://192.168.9.104:32303/pypi/simple
-          pip config set global.trusted-host 192.168.9.104:32303
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
