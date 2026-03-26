@@ -105,6 +105,9 @@ jobs:
           mode: "create"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
+      - name: Show transformers version for debugging
+        run: |
+          pip3 show transformers
 
   # deepseek-ai/deepseek-coder-1.3b-instruct: dense, tie_word_embeddings=False
   e2e_ppo_trainer_megatron-deepseek:

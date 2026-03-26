@@ -86,7 +86,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl059.dev3"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl059.dev2"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -104,6 +104,9 @@ jobs:
           mode: "create"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
+      - name: Show transformers version for debugging
+        run: |
+          pip3 show transformers
 
   e2e_ppo_trainer_fsdp_sglang:
     needs: setup
