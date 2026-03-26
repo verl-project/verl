@@ -30,6 +30,44 @@ def _get_skip_attr(skip_config, key: str, default):
     return getattr(skip_config, key, default)
 
 
+def _find_last_gen_step_for_train_step(step_file: Path, target_train_step: int) -> tuple[int, int] | None:
+    """
+    Find the last `(train_step, gen_step)` pair for a given train_step without loading the
+    entire file into memory.
+
+    This scans the file line-by-line (O(n) time, O(1) memory) and keeps the last match.
+    It also stops early once `train_step` exceeds `target_train_step` (assuming chronological logs).
+    """
+    step_file = Path(step_file)
+    if not step_file.is_file():
+        return None
+
+    last_match: tuple[int, int] | None = None
+    with step_file.open("r", encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            try:
+                train_step = int(parts[0])
+                gen_step = int(parts[1])
+            except Exception:
+                continue
+
+            if train_step < target_train_step:
+                continue
+            if train_step == target_train_step:
+                last_match = (train_step, gen_step)
+                continue
+            # train_step > target_train_step: no more matches expected
+            break
+
+    return last_match
+
+
 class SkipAction(Enum):
     CACHE = "cache"  # cache the sample. If dump_date is found, use it. If not found, dump it.
     REPEAT = "repeat"  # Repeat the sample when gen_step reach skip.max_dump_step
@@ -189,13 +227,15 @@ class RolloutSkip:
                 last_train_step = global_steps - 1  # default when step file missing
                 last_gen_step = 0
                 try:
-                    list_step = np.loadtxt(self.get_step_describe()).astype(int)
-                    idx = np.where(list_step[:, 0] == (global_steps - 1))[0][-1]  # last gen_step from resume step
-                    last_train_step = list_step[idx][0]
-                    last_gen_step = list_step[idx][1]
-                    if last_train_step + 1 != global_steps:
-                        print(f"{self.print_mark}\033[31mWarning: Train step not contioues.\033[0m")
-                    self.__gen_offset_step = last_gen_step
+                    found = _find_last_gen_step_for_train_step(
+                        self.get_step_describe(),
+                        target_train_step=global_steps - 1,
+                    )
+                    if found is not None:
+                        last_train_step, last_gen_step = found
+                        if last_train_step + 1 != global_steps:
+                            print(f"{self.print_mark}\033[31mWarning: Train step not contioues.\033[0m")
+                        self.__gen_offset_step = last_gen_step
                 except Exception as e:
                     print(
                         f"{self.print_mark}\033[31mFailed to read step describe file. {e.__repr__()}\033[0m",

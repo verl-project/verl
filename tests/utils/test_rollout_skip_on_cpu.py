@@ -272,13 +272,14 @@ class TestActionWithResume:
         for i in range(saved_step, step):
             num_rerollout = i % 3  # max rerollout 2 times
             print("train_step:", i)
-            for ii in range(saved_step):  # resume from step - 2
+            # After resume, DAPO may reset the local gen_steps counter; however, the
+            # per-train_step rerollout pattern should remain consistent.
+            for ii in range(num_rerollout + 1):
                 count_gen_step += 1
                 real_gen_step += 1
-                # new_batch = new_batch_generator()
-                skip.record(MagicMock(), i + 1, count_gen_step)  # train_step start from 1
+                new_batch = new_batch_generator()
+                skip.record(new_batch, i + 1, count_gen_step)  # train_step start from 1
                 assert skip.record_global_steps == i + 1
-                assert skip.record_gen_steps >= count_gen_step
                 assert skip.record_gen_steps == real_gen_step
                 list_new_batch.append(new_batch)
                 list_gen_batch.append(rollout_wg.generate_sequences(MagicMock()))
