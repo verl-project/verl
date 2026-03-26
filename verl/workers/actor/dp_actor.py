@@ -431,10 +431,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
-        metrics = {
-            "actor/pg_loss": 0.0,
-            "actor/kl_loss": 0.0,
-        }
+        metrics = {}
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
@@ -447,6 +444,8 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
                 self.actor_optimizer.zero_grad()
+                mini_batch_pg_loss = 0.0
+                mini_batch_kl_loss = 0.0
 
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
@@ -533,7 +532,7 @@ class DataParallelPPOActor(BasePPOActor):
                         kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
+                        mini_batch_kl_loss += kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     if self.config.use_dynamic_bsz:
@@ -546,11 +545,15 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss.backward()
 
-                    metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
+                    mini_batch_pg_loss += pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
-                mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                mini_batch_metrics = {
+                    "actor/pg_loss": mini_batch_pg_loss,
+                    "actor/kl_loss": mini_batch_kl_loss,
+                    "actor/grad_norm": grad_norm.detach().item(),
+                }
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics
