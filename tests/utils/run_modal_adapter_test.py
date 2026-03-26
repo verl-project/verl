@@ -11,7 +11,11 @@ Usage:
     modal run tests/utils/run_modal_adapter_test.py
 """
 
+from pathlib import Path
+
 import modal
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11")
@@ -33,13 +37,13 @@ image = (
         "pip install 'sglang>=0.5.9' --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python",
     )
     .add_local_dir(
-        "/Users/ellenma/mercor-rl/verl/verl",
+        str(_PROJECT_ROOT / "verl"),
         remote_path="/root/verl_src/verl",
         copy=True,
         ignore=["__pycache__", "*.pyc", "*.egg-info", "sglang"],
     )
     .add_local_file(
-        "/Users/ellenma/mercor-rl/verl/tests/utils/test_adapter_path_integration.py",
+        str(_PROJECT_ROOT / "tests" / "utils" / "test_adapter_path_integration.py"),
         remote_path="/root/test_adapter_path_integration.py",
         copy=True,
     )
