@@ -991,7 +991,7 @@ class RayPPOTrainer:
         # save KL controller state so that the adaptive coefficient survives resume
         if self.config.algorithm.use_kl_in_reward:
             kl_ctrl_path = os.path.join(local_global_step_folder, "kl_ctrl.pt")
-            torch.save({"value": self.kl_ctrl_in_reward.value}, kl_ctrl_path)
+            torch.save({"value": torch.tensor(self.kl_ctrl_in_reward.value)}, kl_ctrl_path)
 
         # latest checkpointed iteration tracker (for atomic usage)
         if (
@@ -1070,8 +1070,8 @@ class RayPPOTrainer:
         if self.config.algorithm.use_kl_in_reward:
             kl_ctrl_path = os.path.join(global_step_folder, "kl_ctrl.pt")
             if os.path.exists(kl_ctrl_path):
-                kl_state = torch.load(kl_ctrl_path, weights_only=False)
-                self.kl_ctrl_in_reward.value = kl_state["value"]
+                kl_state = torch.load(kl_ctrl_path, weights_only=True)
+                self.kl_ctrl_in_reward.value = kl_state["value"].item()
                 print(f"Restored KL controller value: {self.kl_ctrl_in_reward.value}")
             else:
                 print(

@@ -98,15 +98,15 @@ class TestKLControllerCheckpointRoundTrip:
         # Save (matching the fix in ray_trainer.py _save_checkpoint)
         with tempfile.TemporaryDirectory() as tmpdir:
             kl_ctrl_path = os.path.join(tmpdir, "kl_ctrl.pt")
-            torch.save({"value": ctrl.value}, kl_ctrl_path)
+            torch.save({"value": torch.tensor(ctrl.value)}, kl_ctrl_path)
 
             # Simulate resume: create a fresh controller (as __init__ would)
             new_ctrl = AdaptiveKLController(init_kl_coef=init_coef, target_kl=1.0, horizon=10000)
             assert new_ctrl.value == init_coef, "Fresh controller should have init value"
 
             # Load (matching the fix in ray_trainer.py _load_checkpoint)
-            kl_state = torch.load(kl_ctrl_path, weights_only=False)
-            new_ctrl.value = kl_state["value"]
+            kl_state = torch.load(kl_ctrl_path, weights_only=True)
+            new_ctrl.value = kl_state["value"].item()
 
             assert new_ctrl.value == evolved_value, (
                 f"After load, value should be {evolved_value}, got {new_ctrl.value}"
