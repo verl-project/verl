@@ -127,13 +127,13 @@ class TestRolloutSkip:
         assert skip.is_enable
         assert str(skip.specify_dumped_dir).startswith(config.actor_rollout_ref.rollout.skip.dump_dir)
 
-        # rollout_wg is passed in __init__, so is_activate and is_dump_step are True after init
-        assert skip.is_activate
+        # rollout_wg is passed in __init__, so is_active and is_dump_step are True after init
+        assert skip.is_active
         assert skip.is_dump_step
         skip.wrap_generate_sequences()
 
         assert skip.is_dump_step
-        assert skip.is_activate
+        assert skip.is_active
 
         assert skip._rollout_wg == rollout_wg
 

@@ -297,6 +297,7 @@ trace:
   # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
   max_samples_per_step_per_worker: null
 
+# rollout skip config (load/dump rollout data)
 skip:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
@@ -306,6 +307,7 @@ skip:
   # If no cached data is found or loading fails, new rollouts will be generated and automatically saved.
   # This feature is useful for debugging or when you want to reuse computation results across multiple runs.
   enable: False
+
   # Default ~/.verl/rollout_dump (expanduser+resolve at runtime). Ray/multi-node: prefer absolute dump_dir (relative paths follow each process cwd).
   # Avoid /tmp/ray/session* (ephemeral).
   dump_dir: "~/.verl/rollout_dump"

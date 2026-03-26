@@ -91,10 +91,8 @@ class RolloutSkip:
         self.list_dumped_steps = []
 
     @property
-    def is_activate(self) -> bool:
-        """
-        If RolloutSkip is enabled and the rollout worker group is set, it is considered active.
-        """
+    def is_active(self) -> bool:
+        """Whether RolloutSkip is enabled and has a rollout worker group."""
         return self.is_enable and self._rollout_wg is not None
 
     @property
@@ -103,13 +101,13 @@ class RolloutSkip:
         Determine if the current step is a dump step based on the configured dump interval.
         If train_step is given, it follows the train_step, otherwise it follows the gen_step.
         """
-        return self.is_activate and self.curr_train_step <= self.max_dump_step
+        return self.is_active and self.curr_train_step <= self.max_dump_step
 
     @property
     def num_dumped_step(self) -> int:
         return len(self.list_dumped_steps)
 
-    def get_path_dump(self, gen_step: int = None) -> Path:
+    def _get_path_dump(self, gen_step: int = None) -> Path:
         """Return the directory path for a given gen_step (one dir per step, no .pkl)."""
         if gen_step is None:
             gen_step = self.curr_gen_step
@@ -237,7 +235,7 @@ class RolloutSkip:
         if step is None:
             step = self.curr_gen_step
 
-        step_dir = self.get_path_dump(step)
+        step_dir = self._get_path_dump(step)
         if not step_dir.exists() or not step_dir.is_dir():
             print(
                 f"{self.print_mark}\033[33mNo dumped data found at gen_step {step} "
@@ -284,7 +282,7 @@ class RolloutSkip:
 
         train_step = self.record_global_steps if self.record_global_steps is not None else self.curr_train_step
         gen_step = self.record_gen_steps if self.record_gen_steps is not None else self.curr_gen_step
-        step_dir = self.get_path_dump(gen_step)
+        step_dir = self._get_path_dump(gen_step)
         step_dir.mkdir(parents=True, exist_ok=True)
 
         try:

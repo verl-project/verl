@@ -1,73 +1,73 @@
 RolloutSkip Function Usage Documentation
 ========================================
 
-Last updated: 2026-03-18.
+Last updated: 2026-03-25
 
 Applicable Scenarios
 --------------------
+The RolloutSkip utility accelerates RL training by caching and reusing pre-generated rollout data,
+avoiding redundant sequence generation during debugging, replay, or fixed-experiment runs.
 
-The RolloutSkip functionality is designed to accelerate the rollout process in reinforcement learning training by caching and reusing previously generated sequences. This feature is particularly useful when:
+It is suitable for:
 
-1. You need to repeatedly run experiments with the same configuration
-
-2. You want to save time by avoiding redundant sequence generation to come close to the optimal policy
+1. Re-running experiments with the same configuration
+2. Speeding up training by skipping repeated generation
+3. Reproducing rollout results in debugging
 
 
 API and Usage Example
 ----------------------
 
-2.1 Trainer Adaptation
-~~~~~~~~~~~~~~~~~~~~~~
+Trainer Adaptation
+~~~~~~~~~~~~~~~~~~
+RolloutSkip is already supported in ``RayDAPOTrainer`` and ``RayPPOTrainer``.
 
-Both`RayDAPOTrainer()` (in `verl/recipe/dapo/dapo_ray_trainer.py`) and `RayPPOTrainer()`(in `verl/trainer/ppo/ray_trainer.py``) have already been adapted.
-
-This is an example of how to patch rollout_skip in RayPPOTrainer.
+Example integration:
 
 .. code-block:: python
 
-    #* Import the RolloutSkip class
     from verl.utils.rollout_skip import RolloutSkip
 
-    ...
-    class RayPPOTrainer:
-        ...
-        def fit(self):
-            ...
+    # Inside trainer.fit()
+    rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
+    rollout_skip.wrap_generate_sequences()
 
-            #* Add code as follow:
-            rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
-            rollout_skip.wrap_generate_sequences()
 
-            ...
-
-            for epoch in range(self.config.trainer.total_epochs):
-                for batch_dict in self.train_dataloader:
-                    ...
-
-2.2 Basic Configuration
-~~~~~~~~~~~~~~~~~~~~~~~
-
-Then, you should add the following parameters to your config to enable the RolloutSkip feature:
+Basic Configuration
+~~~~~~~~~~~~~~~~~~~
+Add these parameters to enable RolloutSkip:
 
 .. code-block:: bash
 
-    actor_rollout_ref.rollout.skip.enable=True \
-    actor_rollout_ref.rollout.skip.dump_dir=/path/to/skip_rollout/rollout_dump \
-    actor_rollout_ref.rollout.skip.max_dump_step=10 \
+    actor_rollout_ref.rollout.skip.enable=True
+    actor_rollout_ref.rollout.skip.dump_dir=/path/to/rollout_dump
+    actor_rollout_ref.rollout.skip.max_dump_step=10
 
 
-Notes
------
+Configuration Parameters
+------------------------
+- **skip.enable**: Enable or disable RolloutSkip.
+- **skip.dump_dir**: Root directory to save cached rollout data.
+- **skip.max_dump_step**: Maximum number of steps to cache.
 
-These follow the behavior in ``verl/utils/rollout_skip.py``:
-1. **``skip.enable``** — If ``False``, ``RolloutSkip`` returns early from ``__init__`` and does not patch ``generate_sequences``; the trainer must still gate construction on ``enable`` (as in RayPPOTrainer).
 
-2. **``skip.dump_dir``** — Root for dumps (default ``~/.verl/rollout_dump``, expanded at runtime). Must be writable. **Prefer an absolute path** in Ray or multi-process setups: relative paths are resolved against each process's cwd and can point to different locations. Avoid ``/tmp/ray/session*`` (ephemeral); the code warns if the final path lies there.
+Cached Directory Structure
+--------------------------
+The directory structure is automatically generated to isolate different experiments:
 
-3. **Subdirectory layout** — Actual cache root is:
+.. code-block:: text
 
-       {dump_dir}/{trainer.experiment_name}_{trainer.project_name}/GBS{data.gen_batch_size}_N{rollout.n}_in{max_prompt_length}_out{max_response_length}/
+    {dump_dir}/{exp_name}_{project_name}/
+    └── GBS{gbs}_N{n}_in{prompt_len}_out{response_len}/
+        ├── train_step__gen_step.txt
+        ├── genstep_000001/
+        │   ├── new_batch.dp
+        │   ├── gen_batch.dp
+        │   └── meta.json
+        └── genstep_000002/
 
-   Each rollout index is a folder ``genstep_000001/``, ``genstep_000002``, … containing ``new_batch.dp``, ``gen_batch.dp``, and ``meta.json``. Changing experiment name, project name, ``data.gen_batch_size`` (GBS), ``rollout.n``, or ``data.max_prompt_length`` / ``max_response_length`` selects a **new** subdirectory, so old caches are not reused.
 
-4. **``skip.max_dump_step``** — Only the first *N* training steps run try-load-then-dump per step; after step *N*, ``action`` decides how rollouts are reused.
+Each ``genstep_*`` folder contains:
+- ``new_batch.dp``: Input prompt batch
+- ``gen_batch.dp``: Generated response batch
+- ``meta.json``: Step metadata
