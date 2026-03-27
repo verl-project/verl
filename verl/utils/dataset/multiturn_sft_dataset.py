@@ -395,7 +395,7 @@ class MultiTurnSFTDataset(Dataset):
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
             }
-            if len(multi_modal_inputs) > 0:
+            if self.processor is not None and len(multi_modal_inputs) > 0:
                 res["multi_modal_inputs"] = multi_modal_inputs
             return res
         elif self.pad_mode == DatasetPadMode.NO_PADDING:
@@ -413,7 +413,7 @@ class MultiTurnSFTDataset(Dataset):
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
             }
-            if len(multi_modal_inputs) > 0:
+            if self.processor is not None and len(multi_modal_inputs) > 0:
                 res["multi_modal_inputs"] = multi_modal_inputs
             return res
         else:
