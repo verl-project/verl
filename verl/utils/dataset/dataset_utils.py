@@ -62,7 +62,7 @@ class SFTTensorCollator:
         final_batch = {}
 
         union_keys = set().union(*(d.keys() for d in batch))
-        tensor_keys = set.intersection(*(set(d.keys()) for d in batch)) if batch else set()
+        tensor_keys = set(batch[0].keys()).intersection(*(d.keys() for d in batch[1:])) if batch else set()
         missing_keys = union_keys - tensor_keys
         if missing_keys:
             raise ValueError(
