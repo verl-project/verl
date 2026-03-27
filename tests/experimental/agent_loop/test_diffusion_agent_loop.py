@@ -39,7 +39,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.enforce_eager = True
     config.actor_rollout_ref.rollout.n = 4
     config.actor_rollout_ref.rollout.num_inference_steps = 10
-
+    config.actor_rollout_ref.rollout.calculate_log_probs = True
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
     tokenizer_max_length = 1024
@@ -127,6 +127,7 @@ def test_single_turn(init_config):
             "prompt_embeds_mask",
             "input_ids",
             "attention_mask",
+            "rollout_log_probs",
         ]
         for key in expected_batch_keys:
             assert key in result.batch, f"Key {key} not found in result batch with keys {list(result.batch.keys())}."
