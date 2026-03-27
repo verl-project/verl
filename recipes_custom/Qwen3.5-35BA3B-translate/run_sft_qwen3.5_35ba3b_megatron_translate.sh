@@ -14,7 +14,7 @@ TRAIN_FILES=${TRAIN_FILES:-"[/llm-align/liuchonghan/ins_dataset/ins_dataset/dayu
 MODEL_PATH=${MODEL_PATH:-/llm-align/open_models/Qwen3.5/Qwen3.5-35B-A3B}
 
 TP_SIZE=${TP_SIZE:-2}
-PP_SIZE=${PP_SIZE:-1}
+PP_SIZE=${PP_SIZE:-2}
 VPP_SIZE=${VPP_SIZE:-null}
 CP_SIZE=${CP_SIZE:-1}
 EP_SIZE=${EP_SIZE:-8}
