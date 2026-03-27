@@ -100,8 +100,7 @@ def init_server():
             "engine_kwargs": {
                 "vllm_omni": {
                     "custom_pipeline": (
-                        "examples.flowgrpo_trainer.vllm_omni.pipeline_qwenimage."
-                        "QwenImagePipelineWithLogProb"
+                        "examples.flowgrpo_trainer.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb"
                     ),
                 }
             },
