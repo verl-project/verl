@@ -31,9 +31,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
-import pickle
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -285,10 +285,14 @@ async def maybe_store_media_to_tq(
 
 
 def serialize_tq_info(obj: Any) -> str:
-    """Pickle *obj* and return a base64-encoded string (safe for env vars)."""
-    return base64.b64encode(pickle.dumps(obj)).decode("ascii")
+    """JSON-serialize *obj* and return a base64-encoded string (safe for env vars).
+
+    Uses JSON instead of pickle for security — avoids arbitrary code execution
+    risk when the env var crosses process boundaries.
+    """
+    return base64.b64encode(json.dumps(obj).encode("utf-8")).decode("ascii")
 
 
 def deserialize_tq_info(b64_str: str) -> Any:
     """Reverse of :func:`serialize_tq_info`."""
-    return pickle.loads(base64.b64decode(b64_str))
+    return json.loads(base64.b64decode(b64_str))
