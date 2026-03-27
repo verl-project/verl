@@ -1347,6 +1347,12 @@ def get_megatron_module_device(models: list[Any]) -> str:
             return "cpu"
 
     buffer = model_chunk.buffers[0]
+    if buffer.param_data is None:
+        # use_distributed_optimizer=False: no flat param buffer, check module params directly
+        try:
+            return next(model_chunk.module.parameters()).device.type
+        except StopIteration:
+            return "cpu"
     if buffer.param_data.storage().size() == 0:
         return "cpu"
     else:
