@@ -12,13 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import pickle
-import time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
-
-import numpy as np
 
 from verl.protocol import DataProto
 from verl.workers.config.rollout import RolloutConfig
@@ -242,7 +238,7 @@ class RolloutSkip:
                     if found is not None:
                         last_train_step, last_gen_step = found
                         if last_train_step + 1 != global_steps:
-                            print(f"{self.print_mark}\033[31mWarning: Train step not contioues.\033[0m")
+                            print(f"{self.print_mark}\033[31mWarning: Train step not continues.\033[0m")
                         self.__gen_offset_step = last_gen_step
                 except Exception as e:
                     print(
@@ -449,9 +445,7 @@ def read_dumped_data(path_dump: Path | str) -> dict[str, DataProto]:
     new_batch_path = path_dump / "new_batch.dp"
     gen_batch_path = path_dump / "gen_batch.dp"
     if not (new_batch_path.is_file() and gen_batch_path.is_file()):
-        raise FileNotFoundError(
-            f"Missing new_batch.dp or gen_batch.dp under {path_dump}."
-        )
+        raise FileNotFoundError(f"Missing new_batch.dp or gen_batch.dp under {path_dump}.")
 
     return {
         "new_batch": DataProto.load_from_disk(new_batch_path),
