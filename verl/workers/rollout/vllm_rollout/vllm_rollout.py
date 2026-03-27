@@ -97,7 +97,7 @@ class ServerAdapter(BaseRollout):
         self.device_uuid = get_device_uuid(get_device_id())
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
-        self.use_shm = not is_support_ipc()
+        self.use_shm = not is_support_ipc() or model_config.use_shm
         if self.use_shm:
             logger.warning(
                 "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
