@@ -805,7 +805,7 @@ class vLLMHttpServer:
             hf_overrides["quantization_config"] = quantization_config_dict
         elif quantization is not None:
             # Handle other quantization methods (fp8, torchao)
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]
+            _SUPPORTED_QUANTIZATION = ["fp8", "torchao", "ascend"]
             if quantization not in _SUPPORTED_QUANTIZATION:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 

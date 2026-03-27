@@ -1,61 +1,73 @@
 RolloutSkip Function Usage Documentation
 ========================================
 
-Last updated: 08/01/2025.
+Last updated: 2026-03-25
 
 Applicable Scenarios
 --------------------
+The RolloutSkip utility accelerates RL training by caching and reusing pre-generated rollout data,
+avoiding redundant sequence generation during debugging, replay, or fixed-experiment runs.
 
-The RolloutSkip functionality is designed to accelerate the rollout process in reinforcement learning training by caching and reusing previously generated sequences. This feature is particularly useful when:
+It is suitable for:
 
-1. You need to repeatedly run experiments with the same configuration
-
-2. You want to save time by avoiding redundant sequence generation to come close to the optimal policy
+1. Re-running experiments with the same configuration
+2. Speeding up training by skipping repeated generation
+3. Reproducing rollout results in debugging
 
 
 API and Usage Example
 ----------------------
 
-2.1 Trainer Adaptation
-~~~~~~~~~~~~~~~~~~~~~~
+Trainer Adaptation
+~~~~~~~~~~~~~~~~~~
+RolloutSkip is already supported in ``RayDAPOTrainer`` and ``RayPPOTrainer``.
 
-Both`RayDAPOTrainer()` (in `verl/recipe/dapo/dapo_ray_trainer.py`) and `RayPPOTrainer()`(in `verl/trainer/ppo/ray_trainer.py``) have already been adapted.
-
-This is an example of how to patch rollout_skip in RayPPOTrainer.
+Example integration:
 
 .. code-block:: python
 
-    #* Import the RolloutSkip class
     from verl.utils.rollout_skip import RolloutSkip
 
-    ...
-    class RayPPOTrainer:
-        ...
-        def fit(self):
-            ...
+    # Inside trainer.fit()
+    rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
+    rollout_skip.wrap_generate_sequences()
 
-            #* Add code as follow:
-            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
-            rollout_skip.wrap_generate_sequences()
 
-            ...
-
-            for epoch in range(self.config.trainer.total_epochs):
-                for batch_dict in self.train_dataloader:
-                    ...
-
-2.2 Basic Configuration
-~~~~~~~~~~~~~~~~~~~~~~~
-
-Then, you should add the following parameters to your config to enable the RolloutSkip feature:
+Basic Configuration
+~~~~~~~~~~~~~~~~~~~
+Add these parameters to enable RolloutSkip:
 
 .. code-block:: bash
 
-    actor_rollout_ref.rollout.skip_rollout=True \
-    actor_rollout_ref.rollout.skip_dump_dir="/tmp/rollout_dump" \
+    actor_rollout_ref.rollout.skip.enable=True
+    actor_rollout_ref.rollout.skip.dump_dir=/path/to/rollout_dump
+    actor_rollout_ref.rollout.skip.max_dump_step=10
 
 
-Note:
+Configuration Parameters
+------------------------
+- **skip.enable**: Enable or disable RolloutSkip.
+- **skip.dump_dir**: Root directory to save cached rollout data.
+- **skip.max_dump_step**: Maximum number of steps to cache.
 
-1. The `skip_dump_dir` is the directory where the cached sequences will be stored. Ensure that this directory is writable and accessible by your training process. And make sure that `skip_dump_dir` is not relative path because ray will store the data in `/tmp/ray/session_<session_id>/` and the relative path will not be found in the worker.
-2. The dumped data path follows this naming pattern `{experiment_name}_{project_name}_TrainGBS{train_gbs}__InferGBS{gen_gbs}__N{n}`, once you change the `experiment_name`, `project_name`, `train_gbs`, `gen_gbs`, or `n`, the cached data will be stored in a new directory.
+
+Cached Directory Structure
+--------------------------
+The directory structure is automatically generated to isolate different experiments:
+
+.. code-block:: text
+
+    {dump_dir}/{exp_name}_{project_name}/
+    └── GBS{gbs}_N{n}_in{prompt_len}_out{response_len}/
+        ├── train_step__gen_step.txt
+        ├── genstep_000001/
+        │   ├── new_batch.dp
+        │   ├── gen_batch.dp
+        │   └── meta.json
+        └── genstep_000002/
+
+
+Each ``genstep_*`` folder contains:
+- ``new_batch.dp``: Input prompt batch
+- ``gen_batch.dp``: Generated response batch
+- ``meta.json``: Step metadata
