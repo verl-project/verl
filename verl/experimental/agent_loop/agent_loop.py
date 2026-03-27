@@ -16,6 +16,7 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -89,6 +90,36 @@ class GlobalRequestLoadBalancer:
             raise ValueError(f"Release called with no inflight requests on server {server_id}")
         self._inflight_requests[server_id] -= 1
 
+    def acquire_servers_batch(self, request_ids: list[str]) -> list[str]:
+        """Acquire servers for a batch of requests in a single call.
+
+        This amortizes the Ray RPC overhead: one cross-process call for N requests
+        instead of N separate calls. The routing logic (sticky session + least-loaded)
+        is identical to the single-request version.
+
+        Args:
+            request_ids: List of request IDs to acquire servers for.
+
+        Returns:
+            List of server IDs in the same order as the input request_ids.
+        """
+        result = []
+        for request_id in request_ids:
+            # Reuse the single-request logic to keep behavior identical
+            server_id = self.acquire_server(request_id)
+            result.append(server_id)
+        return result
+
+    def release_servers_batch(self, server_ids: list[str]) -> None:
+        """Release multiple servers in a single call.
+
+        Args:
+            server_ids: List of server IDs to release. Duplicates are allowed
+                (e.g., 3 requests on the same server → 3 entries).
+        """
+        for server_id in server_ids:
+            self.release_server(server_id)
+
 
 def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictConfig]:
     # TODO: backward compatibility, remove this once we switch to new trainer.
@@ -98,11 +129,134 @@ def _get_rollout_and_model_config(config: DictConfig) -> tuple[DictConfig, DictC
         return config.rollout, config.model
 
 
+class _AcquireCoalescer:
+    """Batches concurrent acquire_server requests into a single RPC call.
+
+    When many asyncio tasks call `acquire()` concurrently (e.g., all samples in a
+    batch start their agent loop at the same time), they all arrive within the same
+    event-loop tick. The first caller becomes the *leader*; subsequent callers within
+    the same coalescing window simply append to the pending list. The leader waits one
+    tick (`await asyncio.sleep(0)`) to collect stragglers, then fires a single
+    `acquire_servers_batch` RPC. All waiters are resolved from the batch result.
+
+    This turns N Ray RPCs into 1, saving ~(N-1) × RPC_LATENCY per coalescing window.
+
+    Note:
+        This class is **not thread-safe**. It is designed for use within a single
+        asyncio event loop. Do not share instances across threads.
+    """
+
+    def __init__(self, load_balancer: ray.actor.ActorHandle):
+        self._load_balancer = load_balancer
+        self._pending: list[tuple[str, asyncio.Future]] = []  # (request_id, future)
+        self._flush_scheduled: bool = False
+
+    async def acquire(self, request_id: str) -> str:
+        """Submit an acquire request. Returns the assigned server_id.
+
+        If a batch flush is already scheduled (by a prior concurrent caller), this
+        request piggybacks on it. Otherwise, this caller becomes the leader and
+        schedules the flush.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._pending.append((request_id, future))
+
+        if not self._flush_scheduled:
+            self._flush_scheduled = True
+            # Yield control so other concurrent tasks can enqueue their requests
+            # in the same event-loop iteration before we flush.
+            asyncio.ensure_future(self._flush())
+
+        return await future
+
+    async def _flush(self) -> None:
+        """Collect all pending requests and issue one batch RPC."""
+        # Yield once to let other coroutines that are ready to run enqueue
+        await asyncio.sleep(0)
+
+        # Snapshot and reset
+        batch = self._pending
+        self._pending = []
+        self._flush_scheduled = False
+
+        if not batch:
+            return
+
+        request_ids = [rid for rid, _ in batch]
+        futures = [fut for _, fut in batch]
+
+        try:
+            server_ids: list[str] = await self._load_balancer.acquire_servers_batch.remote(
+                request_ids=request_ids
+            )
+            for fut, sid in zip(futures, server_ids):
+                if not fut.done():
+                    fut.set_result(sid)
+        except Exception as exc:
+            for fut in futures:
+                if not fut.done():
+                    fut.set_exception(exc)
+
+
+class _ReleaseCoalescer:
+    """Batches concurrent release_server calls into a single RPC.
+
+    Release calls are typically fire-and-forget from `finally` blocks. This coalescer
+    collects them within one event-loop tick and issues a single batch release RPC,
+    reducing the number of Ray actor calls.
+
+    Note:
+        This class is **not thread-safe**. It is designed for use within a single
+        asyncio event loop. Do not share instances across threads.
+    """
+
+    def __init__(self, load_balancer: ray.actor.ActorHandle):
+        self._load_balancer = load_balancer
+        self._pending: list[str] = []
+        self._flush_scheduled: bool = False
+
+    def release(self, server_id: str) -> None:
+        """Enqueue a release. The actual RPC is batched and fire-and-forget."""
+        self._pending.append(server_id)
+
+        if not self._flush_scheduled:
+            self._flush_scheduled = True
+            asyncio.ensure_future(self._flush())
+
+    async def _flush(self) -> None:
+        await asyncio.sleep(0)
+
+        batch = self._pending
+        self._pending = []
+        self._flush_scheduled = False
+
+        if not batch:
+            return
+
+        # Fire-and-forget: schedule the RPC but log errors asynchronously
+        ref = self._load_balancer.release_servers_batch.remote(server_ids=batch)
+        asyncio.ensure_future(self._handle_release_error(ref, batch))
+
+    @staticmethod
+    async def _handle_release_error(ref, batch: list[str]) -> None:
+        """Await the release RPC and log any errors (don't re-raise)."""
+        try:
+            await ref
+        except Exception:
+            logger.warning(
+                f"Failed to release servers batch ({len(batch)} server(s))",
+                exc_info=True,
+            )
+
+
 class AsyncLLMServerManager:
     """
     A class to manage multiple OpenAI compatible LLM servers. This class provides
     - Load balance: least in-flight requests load balancing via global coordination
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
+    - Request coalescing: concurrent acquire/release calls are automatically batched
+      into single RPCs to reduce Ray actor call overhead
     """
 
     def __init__(
@@ -121,18 +275,19 @@ class AsyncLLMServerManager:
         self.config = config
         self._load_balancer = load_balancer_handle
         self._server_id_to_handle: dict[str, ray.actor.ActorHandle] = dict(servers)
+        self._acquire_coalescer = _AcquireCoalescer(load_balancer_handle)
+        self._release_coalescer = _ReleaseCoalescer(load_balancer_handle)
 
     async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
-        server_id = await self._load_balancer.acquire_server.remote(request_id=request_id)
+        server_id = await self._acquire_coalescer.acquire(request_id)
         handle = self._server_id_to_handle.get(server_id)
         if handle is None:
             raise RuntimeError(f"Unknown server_id returned by load balancer: {server_id}")
         return server_id, handle
 
     def _release_server(self, server_id: str) -> None:
-        # Fire-and-forget: release is just a counter decrement, no need to await.
-        # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
-        self._load_balancer.release_server.remote(server_id=server_id)
+        # Fire-and-forget via coalescer: batches multiple releases into one RPC.
+        self._release_coalescer.release(server_id)
 
     @rollout_trace_op
     async def generate(
@@ -571,6 +726,18 @@ class AgentLoopWorker:
         )
         return output
 
+    async def generate_batch(self, batch: DataProto) -> DataProto:
+        """Generate sequences for a small batch of samples (used by work-stealing scheduler).
+
+        This is functionally identical to generate_sequences but designed for small
+        micro-batches (e.g., prefetch_size=4) rather than the full per-worker chunk.
+        It enables the Manager to dynamically assign work units to workers.
+
+        The method signature and return type are identical to generate_sequences,
+        making it a drop-in replacement for the work-stealing scheduling strategy.
+        """
+        return await self.generate_sequences(batch)
+
     async def _run_agent_loop(
         self,
         sampling_params: dict[str, Any],
@@ -982,6 +1149,112 @@ async def get_trajectory_info(step, index, validate):
     return trajectory_info
 
 
+async def work_stealing_schedule(
+    workers: list,
+    prompts: "DataProto",
+    prefetch_size: int = 4,
+) -> list["DataProto"]:
+    """Standalone work-stealing dynamic scheduler.
+
+    Workers pull micro-batches from a shared pool. Fast workers automatically
+    pick up more work, eliminating straggler-induced tail latency.
+
+    This function is intentionally kept outside ``AgentLoopManager`` so that
+    it can be unit-tested with lightweight mock workers without constructing
+    a full manager instance.
+
+    Algorithm:
+        1. Split the input batch into micro-batches of size *prefetch_size*.
+        2. Assign one micro-batch to each idle worker (initial seeding).
+        3. Wait for any worker to finish (``asyncio.wait FIRST_COMPLETED``).
+        4. Collect the result, then assign the next micro-batch to the freed worker.
+        5. Repeat until all micro-batches are processed.
+
+    Args:
+        workers: List of worker handles. Each worker must expose a
+            ``generate_batch.remote(batch)`` method that returns a ``DataProto``.
+        prompts: Input batch to be split and distributed.
+        prefetch_size: Maximum number of samples per micro-batch.
+
+    Returns:
+        List of ``DataProto`` outputs in the original sample order.
+
+    Raises:
+        RuntimeError: If any worker fails during execution.
+    """
+    from verl.protocol import DataProto  # avoid circular import at module level
+
+    num_workers = len(workers)
+    total_samples = len(prompts)
+
+    # Split into micro-batches using DataProto.split (returns list of DataProto)
+    micro_batches: list[DataProto] = prompts.split(prefetch_size)
+    micro_batch_queue: deque[DataProto] = deque(micro_batches)  # O(1) popleft
+
+    # Track: {future -> worker_index} for pending work
+    pending: dict[asyncio.Future, int] = {}
+    idle_workers: list[int] = list(range(num_workers))
+    all_outputs: list[tuple[int, DataProto]] = []  # (original_order_key, output)
+
+    # Each micro-batch gets a sequence number for output ordering
+    next_micro_batch_id = 0
+    future_to_micro_id: dict[asyncio.Future, int] = {}
+
+    def _submit_to_worker(worker_idx: int) -> asyncio.Future | None:
+        """Submit the next micro-batch to a worker, or return None if queue is empty."""
+        nonlocal next_micro_batch_id
+        if not micro_batch_queue:
+            return None
+        mb = micro_batch_queue.popleft()
+        worker = workers[worker_idx]
+        future = asyncio.ensure_future(worker.generate_batch.remote(mb))
+        pending[future] = worker_idx
+        future_to_micro_id[future] = next_micro_batch_id
+        next_micro_batch_id += 1
+        return future
+
+    # Phase 1: Seed each worker with one micro-batch
+    for worker_idx in idle_workers[:]:
+        fut = _submit_to_worker(worker_idx)
+        if fut is not None:
+            idle_workers.remove(worker_idx)
+        else:
+            break  # no more micro-batches
+
+    # Phase 2: Wait for completions and re-assign work
+    while pending:
+        done, _ = await asyncio.wait(pending.keys(), return_when=asyncio.FIRST_COMPLETED)
+        for fut in done:
+            worker_idx = pending.pop(fut)
+            micro_id = future_to_micro_id.pop(fut)
+            try:
+                result = fut.result()  # DataProto
+            except Exception as e:
+                # Cancel all remaining pending futures to avoid resource leaks
+                for pending_fut in pending:
+                    pending_fut.cancel()
+                raise RuntimeError(
+                    f"Worker {worker_idx} failed on micro-batch {micro_id}: {e}"
+                ) from e
+            all_outputs.append((micro_id, result))
+
+            # Re-assign this worker to the next available micro-batch
+            new_fut = _submit_to_worker(worker_idx)
+            if new_fut is None:
+                idle_workers.append(worker_idx)
+
+    # Phase 3: Sort by micro-batch id to preserve original sample order
+    all_outputs.sort(key=lambda x: x[0])
+    ordered_outputs = [output for _, output in all_outputs]
+
+    logger.info(
+        f"Work-stealing scheduling completed: {total_samples} samples across "
+        f"{num_workers} workers, {len(micro_batches)} micro-batches of size {prefetch_size}"
+    )
+
+    return ordered_outputs
+
+
 class AgentLoopManager:
     """Agent loop manager that manages a group of agent loop workers.
 
@@ -1133,6 +1406,13 @@ class AgentLoopManager:
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 
+        Supports two scheduling strategies (configured via ``rollout.agent.scheduling_strategy``):
+
+        - **static** (default): equal-chunk split identical to the original behavior.
+        - **work_stealing**: dynamic pull-based scheduling where workers pull micro-batches
+          from a shared task pool. Fast workers automatically pick up more work, eliminating
+          straggler-induced tail latency.
+
         Args:
             prompts (DataProto): Input batch.
 
@@ -1141,13 +1421,14 @@ class AgentLoopManager:
         """
         if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.wake_up()
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
-        outputs = await asyncio.gather(
-            *[
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
-            ]
-        )
+
+        strategy = OmegaConf.select(self.rollout_config, "agent.scheduling_strategy", default="static")
+
+        if strategy == "work_stealing":
+            outputs = await self._generate_sequences_work_stealing(prompts)
+        else:
+            outputs = await self._generate_sequences_static(prompts)
+
         if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.sleep()
         output = DataProto.concat(outputs)
@@ -1158,6 +1439,31 @@ class AgentLoopManager:
 
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
         return output
+
+    async def _generate_sequences_static(self, prompts: DataProto) -> list[DataProto]:
+        """Original static chunk scheduling: evenly split batch across workers."""
+        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        outputs = await asyncio.gather(
+            *[
+                worker.generate_sequences.remote(chunk)
+                for worker, chunk in zip(self.agent_loop_workers, chunkes)
+            ]
+        )
+        return list(outputs)
+
+    async def _generate_sequences_work_stealing(self, prompts: DataProto) -> list[DataProto]:
+        """Work-stealing dynamic scheduling: workers pull micro-batches from a shared pool.
+
+        Delegates to the standalone :func:`work_stealing_schedule` function so that
+        the scheduling algorithm can be tested in isolation without full
+        ``AgentLoopManager`` setup.
+        """
+        prefetch_size = OmegaConf.select(self.rollout_config, "agent.prefetch_size", default=4)
+        return await work_stealing_schedule(
+            workers=self.agent_loop_workers,
+            prompts=prompts,
+            prefetch_size=prefetch_size,
+        )
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
         timing = {}

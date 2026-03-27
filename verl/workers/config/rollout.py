@@ -105,6 +105,14 @@ class AgentLoopConfig(BaseConfig):
     # Fully qualified class name for custom AgentLoopManager (e.g., "mypackage.module.MyManager").
     # Security: This class will be dynamically imported via importlib. Only use trusted class paths.
     agent_loop_manager_class: Optional[str] = None
+    # Scheduling strategy for distributing samples to workers.
+    #   - "static": original behavior — even chunk split across workers (default)
+    #   - "work_stealing": dynamic pull-based scheduling — workers pull tasks from a shared pool
+    scheduling_strategy: str = "static"
+    # Number of samples each worker prefetches at a time in work_stealing mode.
+    # Larger values amortize RPC overhead but reduce scheduling granularity.
+    # Ignored when scheduling_strategy is "static".
+    prefetch_size: int = 4
 
 
 @dataclass
