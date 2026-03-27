@@ -52,14 +52,15 @@ class SingleTurnAgentLoop(AgentLoopBase):
         # 3. generate sequences — when TransferQueue is enabled, store images
         #    into TQ and pass tq:// URLs instead of raw PIL Images to avoid
         #    serialising large image blobs over Ray RPC.
+        request_id = uuid4().hex
         image_data_for_generate, video_data_for_generate = await maybe_store_media_to_tq(
-            images, videos, request_id=uuid4().hex
+            images, videos, request_id=request_id
         )
 
         metrics = {}
         with simple_timer("generate_sequences", metrics):
             output: TokenOutput = await self.server_manager.generate(
-                request_id=uuid4().hex,
+                request_id=request_id,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data_for_generate,
