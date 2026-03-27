@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import copy
 import random
 from typing import Any, Optional
 
@@ -203,8 +202,7 @@ class DiffusionAgentLoopWorker:
             config=agent_loop_config,
             trainer_config=DictConfigWrap(config=self.config),
             server_manager=self.server_manager,
-            # TODO (andy): deepcopy is a workaround for transformers>=5.0.0, resource intensive & slow start, fix later
-            tokenizer=copy.deepcopy(self.tokenizer),
+            tokenizer=self.tokenizer,
             processor=self.processor,
             dataset_cls=self.dataset_cls,
             data_config=DictConfigWrap(self.config.data),
