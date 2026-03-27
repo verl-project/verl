@@ -80,7 +80,7 @@ from verl.utils.fsdp_utils import (
     replace_lora_wrapper,
 )
 from verl.utils.import_utils import import_external_libs
-from verl.utils.memory_utils import aggressive_empty_cache
+from verl.utils.memory_utils import aggressive_empty_cache, empty_cache_context
 from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
@@ -1088,17 +1088,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         prompts.meta_info.update(meta_info)
 
         timing_generate = {}
-        if self._is_actor:  # For rollout only, we do not switch context.
-            loop = get_event_loop()
-            loop.run_until_complete(self.rollout_mode())
-            log_gpu_memory_usage("After switch to rollout mode", logger=logger)
+        # Use empty_cache_context to merge multiple aggressive_empty_cache calls
+        # inside rollout_mode() (up to 3 calls) into a single effective cleanup.
+        with empty_cache_context(force_sync=True):
+            if self._is_actor:  # For rollout only, we do not switch context.
+                loop = get_event_loop()
+                loop.run_until_complete(self.rollout_mode())
+                log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
-        with simple_timer("generate_sequences", timing_generate):
-            output = self.rollout.generate_sequences(prompts=prompts)
+            with simple_timer("generate_sequences", timing_generate):
+                output = self.rollout.generate_sequences(prompts=prompts)
 
-        if self._is_actor:
-            loop.run_until_complete(self.trainer_mode())
-            log_gpu_memory_usage("After switch to trainer mode", logger=logger)
+            if self._is_actor:
+                loop.run_until_complete(self.trainer_mode())
+                log_gpu_memory_usage("After switch to trainer mode", logger=logger)
 
         # We calculate the average timing across all ranks
         # to make sure meta_info["timing"] is the same
@@ -1116,8 +1119,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output.meta_info["timing"] = timing_generate
         output = output.to("cpu")
 
-        # clear kv cache
-        get_torch_device().empty_cache()
+        # clear kv cache — use aggressive_empty_cache so cooldown can protect
+        # against redundancy with the empty_cache_context cleanup above.
+        aggressive_empty_cache(force_sync=False)
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

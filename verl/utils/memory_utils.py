@@ -17,6 +17,9 @@ import gc
 import inspect
 import logging
 import os
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -27,16 +30,68 @@ from verl.utils.device import get_torch_device, is_cuda_available
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+# ──────────────────────────────────────────────────────────────────────
+# Empty cache deduplication & suppression state (per-process global)
+# ──────────────────────────────────────────────────────────────────────
 
-def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3) -> None:
+# Cooldown: minimum interval between two effective aggressive_empty_cache calls.
+# Calls arriving within the cooldown window are skipped (no gc, no sync).
+# Configurable via VERL_EMPTY_CACHE_COOLDOWN_MS env var (default: 100 ms).
+try:
+    _COOLDOWN_SECONDS: float = int(os.getenv("VERL_EMPTY_CACHE_COOLDOWN_MS", "100")) / 1000.0
+except (ValueError, TypeError):
+    _COOLDOWN_SECONDS: float = 0.1  # fallback to 100ms
+_last_call_time: float = 0.0
+
+# Suppression: when > 0, aggressive_empty_cache becomes a no-op.
+# Incremented/decremented by empty_cache_context() to allow nesting.
+_suppress_depth: int = 0
+_suppressed_calls: int = 0  # how many calls were suppressed in the current context
+_lock = threading.Lock()  # guards the global state above
+
+
+def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3, bypass_cooldown: bool = False) -> None:
     """
     More aggressive GPU memory cleanup function, tries to release PyTorch reserved
     but unallocated memory.
 
+    Includes two deduplication mechanisms:
+
+    1. **Cooldown** (default 100 ms): If less than ``VERL_EMPTY_CACHE_COOLDOWN_MS``
+       milliseconds have elapsed since the last *effective* call, the current call
+       is skipped entirely.  Set ``bypass_cooldown=True`` to force execution.
+    2. **Suppression context**: When running inside :func:`empty_cache_context`,
+       all calls are suppressed and a single cleanup runs on context exit.
+
     Args:
         force_sync: Whether to force device synchronization
         max_retries: Maximum number of retries
+        bypass_cooldown: If True, ignore the cooldown window (used by context exit)
     """
+    global _last_call_time, _suppress_depth, _suppressed_calls
+
+    # --- Suppression check ---
+    with _lock:
+        if _suppress_depth > 0:
+            _suppressed_calls += 1
+            logger.debug(
+                f"aggressive_empty_cache suppressed (depth={_suppress_depth}, "
+                f"suppressed_count={_suppressed_calls})"
+            )
+            return
+
+    # --- Cooldown check ---
+    if not bypass_cooldown:
+        now = time.monotonic()
+        with _lock:
+            if now - _last_call_time < _COOLDOWN_SECONDS:
+                logger.debug(
+                    f"aggressive_empty_cache skipped (cooldown): "
+                    f"{(now - _last_call_time)*1000:.1f}ms since last call, "
+                    f"cooldown={_COOLDOWN_SECONDS*1000:.0f}ms"
+                )
+                return
+
     device = get_torch_device()
     if not device.is_available():
         return
@@ -72,6 +127,64 @@ def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3) -> Non
         # Stop retrying if little memory was freed
         if reserved_freed < 1024**3:  # less than 1GB
             break
+
+    # Update last call time AFTER successful execution
+    with _lock:
+        _last_call_time = time.monotonic()
+
+
+@contextmanager
+def empty_cache_context(force_sync: bool = True, max_retries: int = 3):
+    """Context manager that suppresses ``aggressive_empty_cache`` inside its body
+    and performs a single cleanup on exit.
+
+    This is the primary API for **merging** multiple consecutive empty_cache calls
+    into one.  Wrapping a code block that internally calls ``aggressive_empty_cache``
+    N times will reduce those N calls to a single effective call at the end.
+
+    Supports **nesting**: only the outermost context triggers the actual cleanup.
+
+    Example::
+
+        with empty_cache_context():
+            rollout_mode()          # internally calls aggressive_empty_cache — suppressed
+            generate_sequences()    # internally calls aggressive_empty_cache — suppressed
+        # ← single aggressive_empty_cache(force_sync=True) runs here
+
+    Args:
+        force_sync: Passed to the final ``aggressive_empty_cache`` call.
+        max_retries: Passed to the final ``aggressive_empty_cache`` call.
+    """
+    global _suppress_depth, _suppressed_calls
+
+    with _lock:
+        _suppress_depth += 1
+        entering_depth = _suppress_depth
+        if entering_depth == 1:
+            _suppressed_calls = 0  # reset counter at outermost entry
+
+    try:
+        yield
+    finally:
+        with _lock:
+            _suppress_depth -= 1
+            is_outermost = _suppress_depth == 0
+            suppressed = _suppressed_calls
+            if is_outermost:
+                _suppressed_calls = 0
+
+        if is_outermost and suppressed > 0:
+            logger.info(
+                f"empty_cache_context exit: running deferred cleanup "
+                f"(suppressed {suppressed} calls)"
+            )
+            aggressive_empty_cache(
+                force_sync=force_sync,
+                max_retries=max_retries,
+                bypass_cooldown=True,  # always execute on context exit
+            )
+        elif is_outermost:
+            logger.debug("empty_cache_context exit: no suppressed calls, skipping cleanup")
 
 
 def reset_memory_stats() -> None:
