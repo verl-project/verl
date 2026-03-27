@@ -109,6 +109,7 @@ ENGINE_CONFIG="\
     engine.context_parallel_size=${CP_SIZE} \
     engine.expert_model_parallel_size=${EP_SIZE} \
     engine.expert_tensor_parallel_size=${ETP_SIZE} \
+    engine.use_distributed_optimizer=False \
     engine.use_mbridge=True \
     engine.vanilla_mbridge=True \
     engine.dtype=${DTYPE} \
