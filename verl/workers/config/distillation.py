@@ -130,10 +130,13 @@ class DistillationTeacherModelConfig(BaseConfig):
     model_path: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
 
-    def is_configured(self) -> bool:
-        if self.task is not None and self.model_path is None:
-            raise ValueError("DistillationTeacherModelConfig is misconfigured with task but no model_path.")
-        return self.model_path is not None
+    def is_configured(self, is_multi: bool) -> bool:
+        configured = self.model_path is not None
+        if self.task is not None and not configured:
+            raise ValueError(f"{self.task=} is set but model_path is not set for this teacher model config.")
+        if is_multi and configured and self.task is None:
+            raise ValueError("task must be specified for multi-teacher setups.")
+        return configured
 
     def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
         # Prompt + Response from student are fed into teacher as context
@@ -220,13 +223,13 @@ class DistillationConfig(BaseConfig):
             return
 
         self.teacher_models = self._resolve_teacher_models()
-        if len(self.teacher_models) != 1:
-            raise NotImplementedError("`teacher_models` are not supported yet in the runtime path.")
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
                 topk=self.distillation_loss.topk,
             )
+        if len(self.teacher_models) != 1:
+            raise NotImplementedError("Multiple teacher models are not supported yet in the runtime path.")
 
     def get_single_teacher_model(self) -> DistillationTeacherModelConfig:
         if len(self.teacher_models) != 1:
@@ -236,19 +239,23 @@ class DistillationConfig(BaseConfig):
         return next(iter(self.teacher_models.values()))
 
     def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
-        if self.teacher_model.is_configured() and self.teacher_models:
+        if self.teacher_model.is_configured(is_multi=False) and self.teacher_models:
             raise ValueError("Specify either distillation.teacher_model or distillation.teacher_models, not both.")
 
-        if self.teacher_models:
-            teacher_models = {}
-            for model_name, teacher_model in self.teacher_models.items():
-                teacher_model = omega_conf_to_dataclass(teacher_model, dataclass_type=DistillationTeacherModelConfig)
-                if teacher_model.task is None:
-                    raise ValueError(f"distillation.teacher_models.{model_name}.task must be non-null.")
+        teacher_models = {}
+        for model_name, teacher_model in self.teacher_models.items():
+            teacher_model = omega_conf_to_dataclass(teacher_model, dataclass_type=DistillationTeacherModelConfig)
+            if teacher_model.is_configured(is_multi=True):
                 teacher_models[model_name] = teacher_model
+        if teacher_models:
+            if self.teacher_model.is_configured(is_multi=False):
+                raise ValueError(
+                    "Multiple teacher models are configured in distillation.teacher_models, "
+                    "but distillation.teacher_model is also configured."
+                )
             return teacher_models
 
-        if not self.teacher_model.is_configured():
+        if not self.teacher_model.is_configured(is_multi=False):
             raise ValueError(
                 "Distillation is enabled but no teacher model is configured. "
                 "Please configure distillation.teacher_model or distillation.teacher_models."
