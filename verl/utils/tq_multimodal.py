@@ -15,15 +15,16 @@
 
 The key design goal is **minimal copy**:
 
-*  ``PIL.Image`` → ``np.asarray`` (zero-copy, shares PIL buffer)
-   → ``torch.from_numpy`` (zero-copy, shares numpy buffer)
-   → TQ ``async_put`` which internally uses msgpack ``memoryview`` zero-copy
+*  Store path: ``PIL.Image`` → ``np.asarray`` (zero-copy view of PIL buffer)
+   → pre-allocated contiguous buffer ``copy_`` (single memcpy, no intermediate
+   allocation) → TQ ``async_kv_put`` with msgpack ``memoryview`` zero-copy
    serialisation and ZMQ ``send(copy=False)``.
 
-*  On the consumer side the reverse path is equally lean: TQ delivers a
-   ``uint8`` tensor whose underlying buffer is turned back into a
-   ``PIL.Image`` via ``Image.fromarray`` (one unavoidable copy since PIL
-   needs to own its buffer).
+*  Resolve path: TQ delivers a flat ``uint8`` tensor → slice + reshape to
+   ``(C, H, W)`` numpy arrays (channels-first, the format vLLM expects for
+   ``multi_modal_data["image"]``).  **No PIL round-trip** — the numpy arrays
+   are passed directly to the vLLM engine, avoiding two unnecessary copies
+   (``Image.fromarray`` + HF processor's internal ``np→tensor``).
 """
 
 from __future__ import annotations
@@ -39,7 +40,6 @@ from uuid import uuid4
 
 import numpy as np
 import torch
-from PIL import Image
 from tensordict import TensorDict
 
 if TYPE_CHECKING:
@@ -105,14 +105,15 @@ def is_tq_url(url: str) -> bool:
 
 async def store_images_to_tq(
     tq_client: AsyncTransferQueueClient,
-    images: list[Image.Image],
+    images: list,
     partition_id: str = TQ_MM_IMAGE_PARTITION,
 ) -> list[str]:
     """Store a list of PIL images into TransferQueue and return ``tq://`` URLs.
 
     All images from a single call are batched into **one** TQ entry: pixel data
-    is flattened and concatenated into a single contiguous tensor, alongside
-    shape and offset metadata.  This avoids N separate TQ round-trips.
+    is flattened and written into a single pre-allocated contiguous buffer,
+    alongside shape and offset metadata.  This avoids N separate TQ
+    round-trips and eliminates intermediate tensor allocations.
 
     The entry is stored under an explicit KV key (``uuid4().hex``) so that
     consumers can retrieve it deterministically.
@@ -131,25 +132,29 @@ async def store_images_to_tq(
 
     batch_key = uuid4().hex
 
-    # Convert all PIL images to flat uint8 tensors and record shapes/offsets.
-    flat_parts: list[torch.Tensor] = []
+    # First pass: compute shapes, offsets, and total buffer size.
+    np_views: list[np.ndarray] = []
     shapes: list[list[int]] = []
     offsets: list[int] = []
-    current_offset = 0
+    total_elements = 0
 
     for img in images:
         pixel_np = np.asarray(img)  # zero-copy view of PIL buffer
         if pixel_np.ndim == 2:
             pixel_np = pixel_np[:, :, np.newaxis]  # (H, W) -> (H, W, 1) for grayscale
-        pixel_tensor = torch.from_numpy(pixel_np.copy())  # copy once: PIL buffer is read-only
-        flat = pixel_tensor.reshape(-1)
-        flat_parts.append(flat)
-        shapes.append(list(pixel_np.shape))  # always [H, W, C]
-        offsets.append(current_offset)
-        current_offset += flat.numel()
+        np_views.append(pixel_np)
+        shapes.append(list(pixel_np.shape))  # [H, W, C]
+        offsets.append(total_elements)
+        total_elements += pixel_np.size
 
-    # Single contiguous tensor for all pixel data.
-    pixel_flat = torch.cat(flat_parts)  # [total_elements]
+    # Second pass: pre-allocate one contiguous buffer and copy directly into it.
+    pixel_flat = torch.empty(total_elements, dtype=torch.uint8)
+    for np_view, offset in zip(np_views, offsets, strict=False):
+        n = np_view.size
+        # Direct copy from PIL's numpy view into the pre-allocated buffer.
+        # This is the single unavoidable memcpy (PIL buffer is read-only).
+        pixel_flat[offset : offset + n].copy_(torch.from_numpy(np_view.reshape(-1)))
+
     shapes_tensor = torch.tensor(shapes, dtype=torch.int64)  # [N, 3]
     offsets_tensor = torch.tensor(offsets, dtype=torch.int64)  # [N]
 
@@ -171,26 +176,31 @@ async def store_images_to_tq(
 
 
 # ---------------------------------------------------------------------------
-# Resolve tq:// URLs back to PIL Images
+# Resolve tq:// URLs back to numpy arrays (channels-first for vLLM)
 # ---------------------------------------------------------------------------
 
 
 async def resolve_tq_images(
     tq_client: AsyncTransferQueueClient,
     urls: list[str],
-) -> list[Image.Image]:
+) -> list[np.ndarray]:
     """Fetch images from TransferQueue given a list of ``tq://`` URLs.
 
     URLs sharing the same batch key are fetched in a single TQ call, so a
     batch of N images stored by :func:`store_images_to_tq` costs only one
     round-trip regardless of N.
 
+    Returns numpy arrays in **channels-first** ``(C, H, W)`` format, which
+    vLLM's ``multi_modal_data["image"]`` accepts directly — no PIL
+    round-trip needed.
+
     Args:
         tq_client: An initialised ``AsyncTransferQueueClient``.
         urls: ``tq://`` URL strings to resolve.
 
     Returns:
-        A list of PIL images in the same order as *urls*.
+        A list of ``numpy.ndarray`` in ``(C, H, W)`` uint8 format, in the
+        same order as *urls*.
     """
     # Group by (partition, batch_key) to fetch each batch only once.
     batch_groups: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
@@ -198,7 +208,7 @@ async def resolve_tq_images(
         partition_id, batch_key, img_index = parse_tq_url(url)
         batch_groups[(partition_id, batch_key)].append((url_idx, img_index))
 
-    results: list[Image.Image | None] = [None] * len(urls)
+    results: list[np.ndarray | None] = [None] * len(urls)
 
     async def _fetch_batch(
         partition_id: str,
@@ -220,12 +230,12 @@ async def resolve_tq_images(
             h, w, c = (int(v) for v in shapes[img_index].tolist())
             offset = int(offsets_t[img_index].item())
             num_elements = h * w * c
-            pixel_data = pixel_flat[offset : offset + num_elements].reshape(h, w, c)
-            pixel_np = pixel_data.numpy()
-            if c == 1:
-                pixel_np = pixel_np.squeeze(2)  # restore (H, W) for grayscale
-            mode = "RGB" if c == 3 else ("RGBA" if c == 4 else "L")
-            results[url_idx] = Image.fromarray(pixel_np, mode=mode)
+            # Slice → reshape to (H, W, C) → transpose to (C, H, W) channels-first.
+            # vLLM expects (C, H, W) for numpy/tensor image inputs and uses
+            # ``_, h, w = image.shape`` to detect image size.
+            pixel_hwc = pixel_flat[offset : offset + num_elements].reshape(h, w, c)
+            pixel_chw = pixel_hwc.numpy().transpose(2, 0, 1)  # (H,W,C) → (C,H,W)
+            results[url_idx] = pixel_chw
 
     await asyncio.gather(*[_fetch_batch(pid, bkey, idxs) for (pid, bkey), idxs in batch_groups.items()])
 

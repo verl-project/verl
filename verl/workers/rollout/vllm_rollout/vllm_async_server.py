@@ -1075,7 +1075,10 @@ def _build_tq_env_vars() -> dict[str, str]:
 
 
 async def _maybe_resolve_tq_media(media_data: Optional[list[Any]]) -> Optional[list[Any]]:
-    """If *media_data* is a list of ``tq://`` URL strings, resolve them to PIL Images via TransferQueue.
+    """If *media_data* contains ``tq://`` URL strings, resolve them via TransferQueue.
+
+    Returns ``numpy.ndarray`` in channels-first ``(C, H, W)`` format that
+    vLLM's ``multi_modal_data`` accepts directly — no PIL round-trip needed.
 
     When TQ is not in use (i.e. *media_data* already contains PIL Images or
     is ``None``), this function is a no-op and returns the input unchanged.
