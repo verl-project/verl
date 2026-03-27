@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.utils.profiler import simple_timer
+from verl.utils.tq_multimodal import maybe_store_media_to_tq
 from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
@@ -51,8 +52,6 @@ class SingleTurnAgentLoop(AgentLoopBase):
         # 3. generate sequences — when TransferQueue is enabled, store images
         #    into TQ and pass tq:// URLs instead of raw PIL Images to avoid
         #    serialising large image blobs over Ray RPC.
-        from verl.utils.tq_multimodal import maybe_store_media_to_tq
-
         image_data_for_generate, video_data_for_generate = await maybe_store_media_to_tq(
             images, videos, request_id=uuid4().hex
         )

@@ -35,6 +35,7 @@ from verl.tools.schemas import ToolResponse
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.tq_multimodal import maybe_store_media_to_tq
 from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
@@ -220,8 +221,6 @@ class ToolAgentLoop(AgentLoopBase):
         with simple_timer("generate_sequences", agent_data.metrics):
             # When TQ is enabled, convert PIL images to tq:// URLs to avoid
             # serialising large image data over Ray RPC.
-            from verl.utils.tq_multimodal import maybe_store_media_to_tq
-
             _image_data, _video_data = await maybe_store_media_to_tq(
                 agent_data.image_data, agent_data.video_data, agent_data.request_id
             )

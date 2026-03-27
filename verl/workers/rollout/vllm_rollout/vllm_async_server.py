@@ -39,6 +39,7 @@ from verl.utils.device import get_resource_name, get_visible_devices_keyword, is
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.tq_multimodal import get_tq_client, is_tq_url, resolve_tq_images
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -1082,14 +1083,10 @@ async def _maybe_resolve_tq_media(media_data: Optional[list[Any]]) -> Optional[l
     if media_data is None or len(media_data) == 0:
         return media_data
 
-    from verl.utils.tq_multimodal import is_tq_url
-
-    if not all(is_tq_url(item) for item in media_data):
+    if not is_tq_url(media_data[0]):
         return media_data
 
     try:
-        from verl.utils.tq_multimodal import get_tq_client, resolve_tq_images
-
         tq_client = get_tq_client()
         if tq_client is None:
             logger.warning("Received tq:// URLs but no TQ client is available; returning raw URLs.")

@@ -28,11 +28,14 @@ The key design goal is **minimal copy**:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
 import pickle
-from typing import TYPE_CHECKING, Any, Optional
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -52,70 +55,42 @@ TQ_MM_IMAGE_PARTITION = "mm_images"
 _tq_client = None
 
 
-def set_tq_client(client: "AsyncTransferQueueClient") -> None:
+def set_tq_client(client: AsyncTransferQueueClient) -> None:
     """Set the module-level TQ client (called during worker/trainer init)."""
     global _tq_client
     _tq_client = client
 
 
-def get_tq_client() -> "AsyncTransferQueueClient | None":
+def get_tq_client() -> AsyncTransferQueueClient | None:
     """Get the module-level TQ client, or ``None`` if not initialised."""
     return _tq_client
 
 
 # ---------------------------------------------------------------------------
-# Store images into TQ
+# tq:// URL helpers
 # ---------------------------------------------------------------------------
 
 
-async def store_images_to_tq(
-    tq_client: "AsyncTransferQueueClient",
-    images: list[Image.Image],
-    partition_id: str = TQ_MM_IMAGE_PARTITION,
-    base_global_index: int = 0,
-) -> list[str]:
-    """Store a list of PIL images into TransferQueue and return ``tq://`` URLs.
+def make_tq_image_url(partition_id: str, batch_key: str, index: int) -> str:
+    """Build a ``tq://`` URL for a stored image sample.
 
-    Each image is converted to a uint8 tensor (zero-copy via numpy) and
-    written as a separate sample in a dedicated TQ partition.
-
-    Args:
-        tq_client: An initialised ``AsyncTransferQueueClient``.
-        images: PIL images to store.
-        partition_id: TQ partition that holds the image data.
-        base_global_index: Starting global index for the stored samples.
-            The caller must ensure uniqueness across concurrent writers.
-
-    Returns:
-        A list of ``tq://<partition_id>/<global_index>`` URL strings, one
-        per input image, suitable for passing as ``image_data`` items.
+    Format: ``tq://<partition_id>/<batch_key>/<index>``
     """
-    if not images:
-        return []
-
-    urls: list[str] = []
-    for i, img in enumerate(images):
-        global_index = base_global_index + i
-        pixel_np = np.asarray(img)  # zero-copy view of PIL buffer
-        pixel_tensor = torch.from_numpy(pixel_np.copy())  # copy once: PIL buffer is read-only
-
-        td = TensorDict(
-            {"pixel_data": pixel_tensor.unsqueeze(0)},  # [1, H, W, C]
-            batch_size=(1,),
-        )
-        await tq_client.async_put(
-            data=td,
-            partition_id=partition_id,
-        )
-
-        urls.append(make_tq_image_url(partition_id, global_index))
-
-    return urls
+    return f"tq://{partition_id}/{batch_key}/{index}"
 
 
-def make_tq_image_url(partition_id: str, global_index: int) -> str:
-    """Build a ``tq://`` URL for a stored image sample."""
-    return f"tq://{partition_id}/{global_index}"
+def parse_tq_url(url: str) -> tuple[str, str, int]:
+    """Parse a ``tq://`` URL into ``(partition_id, batch_key, index)``.
+
+    Raises:
+        ValueError: If the URL is not a valid ``tq://`` URL.
+    """
+    if not url.startswith("tq://"):
+        raise ValueError(f"Not a tq:// URL: {url}")
+    parts = url[len("tq://") :].split("/")
+    if len(parts) != 3:
+        raise ValueError(f"Invalid tq:// URL format (expected 3 path segments): {url}")
+    return parts[0], parts[1], int(parts[2])
 
 
 def is_tq_url(url: str) -> bool:
@@ -124,17 +99,91 @@ def is_tq_url(url: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Resolve tq:// URLs back to PIL Images (for the RPC path in vLLMHttpServer)
+# Store images into TQ (batched, single round-trip per call)
+# ---------------------------------------------------------------------------
+
+
+async def store_images_to_tq(
+    tq_client: AsyncTransferQueueClient,
+    images: list[Image.Image],
+    partition_id: str = TQ_MM_IMAGE_PARTITION,
+) -> list[str]:
+    """Store a list of PIL images into TransferQueue and return ``tq://`` URLs.
+
+    All images from a single call are batched into **one** TQ entry: pixel data
+    is flattened and concatenated into a single contiguous tensor, alongside
+    shape and offset metadata.  This avoids N separate TQ round-trips.
+
+    The entry is stored under an explicit KV key (``uuid4().hex``) so that
+    consumers can retrieve it deterministically.
+
+    Args:
+        tq_client: An initialised ``AsyncTransferQueueClient``.
+        images: PIL images to store.
+        partition_id: TQ partition that holds the image data.
+
+    Returns:
+        A list of ``tq://<partition_id>/<batch_key>/<index>`` URL strings,
+        one per input image, suitable for passing as ``image_data`` items.
+    """
+    if not images:
+        return []
+
+    batch_key = uuid4().hex
+
+    # Convert all PIL images to flat uint8 tensors and record shapes/offsets.
+    flat_parts: list[torch.Tensor] = []
+    shapes: list[list[int]] = []
+    offsets: list[int] = []
+    current_offset = 0
+
+    for img in images:
+        pixel_np = np.asarray(img)  # zero-copy view of PIL buffer
+        if pixel_np.ndim == 2:
+            pixel_np = pixel_np[:, :, np.newaxis]  # (H, W) -> (H, W, 1) for grayscale
+        pixel_tensor = torch.from_numpy(pixel_np.copy())  # copy once: PIL buffer is read-only
+        flat = pixel_tensor.reshape(-1)
+        flat_parts.append(flat)
+        shapes.append(list(pixel_np.shape))  # always [H, W, C]
+        offsets.append(current_offset)
+        current_offset += flat.numel()
+
+    # Single contiguous tensor for all pixel data.
+    pixel_flat = torch.cat(flat_parts)  # [total_elements]
+    shapes_tensor = torch.tensor(shapes, dtype=torch.int64)  # [N, 3]
+    offsets_tensor = torch.tensor(offsets, dtype=torch.int64)  # [N]
+
+    td = TensorDict(
+        {
+            "pixel_flat": pixel_flat.unsqueeze(0),  # [1, total_elements]
+            "shapes": shapes_tensor.unsqueeze(0),  # [1, N, 3]
+            "offsets": offsets_tensor.unsqueeze(0),  # [1, N]
+        },
+        batch_size=(1,),
+    )
+    await tq_client.async_kv_put(
+        data=td,
+        keys=[batch_key],
+        partition_id=partition_id,
+    )
+
+    return [make_tq_image_url(partition_id, batch_key, i) for i in range(len(images))]
+
+
+# ---------------------------------------------------------------------------
+# Resolve tq:// URLs back to PIL Images
 # ---------------------------------------------------------------------------
 
 
 async def resolve_tq_images(
-    tq_client: "AsyncTransferQueueClient",
+    tq_client: AsyncTransferQueueClient,
     urls: list[str],
 ) -> list[Image.Image]:
     """Fetch images from TransferQueue given a list of ``tq://`` URLs.
 
-    This is the consumer counterpart of :func:`store_images_to_tq`.
+    URLs sharing the same batch key are fetched in a single TQ call, so a
+    batch of N images stored by :func:`store_images_to_tq` costs only one
+    round-trip regardless of N.
 
     Args:
         tq_client: An initialised ``AsyncTransferQueueClient``.
@@ -143,25 +192,44 @@ async def resolve_tq_images(
     Returns:
         A list of PIL images in the same order as *urls*.
     """
-    import asyncio
+    # Group by (partition, batch_key) to fetch each batch only once.
+    batch_groups: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    for url_idx, url in enumerate(urls):
+        partition_id, batch_key, img_index = parse_tq_url(url)
+        batch_groups[(partition_id, batch_key)].append((url_idx, img_index))
 
-    async def _resolve_one(url: str) -> Image.Image:
-        from vllm.multimodal.media.tq_connector import _parse_tq_url
+    results: list[Image.Image | None] = [None] * len(urls)
 
-        partition_id, global_index = _parse_tq_url(url)
+    async def _fetch_batch(
+        partition_id: str,
+        batch_key: str,
+        indices: list[tuple[int, int]],
+    ) -> None:
         metadata = await tq_client.async_kv_retrieve_meta(
-            keys=[str(global_index)],
+            keys=[batch_key],
             partition_id=partition_id,
             create=False,
         )
         td = await tq_client.async_get_data(metadata)
-        pixel_tensor = td["pixel_data"][0]
-        pixel_np = pixel_tensor.numpy()
-        channels = pixel_np.shape[2] if pixel_np.ndim == 3 else 1
-        mode = "RGB" if channels == 3 else ("RGBA" if channels == 4 else "L")
-        return Image.fromarray(pixel_np, mode=mode)
 
-    return list(await asyncio.gather(*[_resolve_one(u) for u in urls]))
+        pixel_flat = td["pixel_flat"][0]  # [total_elements]
+        shapes = td["shapes"][0]  # [N, 3]
+        offsets_t = td["offsets"][0]  # [N]
+
+        for url_idx, img_index in indices:
+            h, w, c = (int(v) for v in shapes[img_index].tolist())
+            offset = int(offsets_t[img_index].item())
+            num_elements = h * w * c
+            pixel_data = pixel_flat[offset : offset + num_elements].reshape(h, w, c)
+            pixel_np = pixel_data.numpy()
+            if c == 1:
+                pixel_np = pixel_np.squeeze(2)  # restore (H, W) for grayscale
+            mode = "RGB" if c == 3 else ("RGBA" if c == 4 else "L")
+            results[url_idx] = Image.fromarray(pixel_np, mode=mode)
+
+    await asyncio.gather(*[_fetch_batch(pid, bkey, idxs) for (pid, bkey), idxs in batch_groups.items()])
+
+    return results  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -183,21 +251,17 @@ async def maybe_store_media_to_tq(
         ``(image_data, video_data)`` — either ``tq://`` URL lists or the
         original PIL Image lists.
     """
-    try:
-        tq_enabled = os.environ.get("TRANSFER_QUEUE_ENABLE", False)
-        if not tq_enabled:
-            return images, videos
+    tq_enabled = os.environ.get("TRANSFER_QUEUE_ENABLE", False)
+    if not tq_enabled:
+        return images, videos
 
-        tq_client = get_tq_client()
-        if tq_client is None:
-            return images, videos
-    except ImportError:
+    tq_client = get_tq_client()
+    if tq_client is None:
         return images, videos
 
     image_data = images
     if images:
-        base_idx = abs(hash(request_id + "_img")) % (2**31)
-        image_data = await store_images_to_tq(tq_client, images, base_global_index=base_idx)
+        image_data = await store_images_to_tq(tq_client, images)
 
     video_data = videos
     # Video TQ storage can be added here following the same pattern.
