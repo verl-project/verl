@@ -511,7 +511,7 @@ class RayPPOTrainer:
         return batch_reward
 
     def _should_compute_teacher_colocate(self, batch: DataProto) -> bool:
-        return self.use_teacher_policy and not self.distillation_config.teacher_model.enable_resource_pool
+        return self.use_teacher_policy and not self.distillation_config.enable_resource_pool
 
     def _compute_teacher_colocate(self, batch: DataProto) -> DataProto:
         """Compute teacher logprobs after rollout when teacher and student are colocated."""

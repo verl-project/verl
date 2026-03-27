@@ -13,9 +13,6 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
-# we launch num_workers teacher managers to parallelize the teacher logprob computation
-num_workers: 8
-
 # distillation loss config
 distillation_loss:
 
@@ -58,21 +55,23 @@ distillation_loss:
   clip_ratio_high: 0.2
 
 
-# teacher model config
+# Whether to enable a separate resource pool for distillation teacher model(s)
+enable_resource_pool: false
+
+# Number of GPUs per node in the distillation teacher resource pool
+n_gpus_per_node: 8
+
+# Number of nodes in the distillation teacher resource pool
+nnodes: 0
+
+# multi-teacher configs
+teacher_models: {}
+
+# single-teacher config
 teacher_model:
   _target_: verl.workers.config.DistillationTeacherModelConfig
-
-  # Whether to enable separate resource pool for teacher model(s)
-  enable_resource_pool: false
-
-  # Number of GPUs per node to use for distillation teacher model(s)
-  n_gpus_per_node: 8
-
-  # Number of nodes to use for distillation teacher model(s)
-  nnodes: 0
-
+  task: null
   model_path: null
-
   inference:
     _target_: verl.workers.config.RolloutConfig
     name: ${oc.select:actor_rollout_ref.rollout.name}
@@ -94,7 +93,6 @@ teacher_model:
     enable_prefix_caching: true
     disable_log_stats: true
     skip_tokenizer_init: false
-
     prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
     response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
     temperature: ${oc.select:actor_rollout_ref.rollout.temperature}

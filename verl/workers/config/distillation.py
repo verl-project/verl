@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from verl.base_config import BaseConfig
+from verl.utils.config import omega_conf_to_dataclass
 
 from .rollout import RolloutConfig
 
@@ -115,12 +116,8 @@ class DistillationLossConfig(BaseConfig):
 class DistillationTeacherModelConfig(BaseConfig):
     """Configuration for on-policy distillation teacher.
 
-    enable_resource_pool (bool):
-        Whether to enable separate resource pool for teacher model(s).
-    n_gpus_per_node (int):
-        Number of GPUs per node to use for distillation teacher model(s).
-    nnodes (int):
-        Number of nodes to use for distillation teacher model(s).
+    task (str, optional):
+        Task identifier to route examples to the teacher model in future multi-teacher support.
     model_path (str, optional):
         Model path for the teacher model. Can be a local path or a Hugging Face model
     inference (RolloutConfig):
@@ -129,11 +126,63 @@ class DistillationTeacherModelConfig(BaseConfig):
 
     _mutable_fields = BaseConfig._mutable_fields
 
-    enable_resource_pool: bool = False
-    n_gpus_per_node: int = 0
-    nnodes: int = 0
+    task: Optional[str] = None
     model_path: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
+
+    def is_configured(self) -> bool:
+        if self.task is not None and self.model_path is None:
+            raise ValueError("DistillationTeacherModelConfig is misconfigured with task but no model_path.")
+        return self.model_path is not None
+
+    def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+        # Prompt + Response from student are fed into teacher as context
+        max_model_len = self.inference.max_model_len
+        max_num_batched_tokens = self.inference.max_num_batched_tokens
+        student_prompt_length = self.inference.prompt_length
+        student_response_length = self.inference.response_length
+        required_context_len = student_prompt_length + student_response_length + 1
+        if max_model_len is not None and required_context_len > max_model_len:
+            raise ValueError(
+                "Distillation teacher inference requires room for the student prompt, the full student "
+                f"response, and one generated token, but got {student_prompt_length=}, "
+                f"{student_response_length=}, {required_context_len=}, {max_model_len=}."
+            )
+        if max_num_batched_tokens is not None and required_context_len > max_num_batched_tokens:
+            raise ValueError(
+                "Distillation teacher inference requires room for the student prompt, the full student "
+                f"response, and one generated token within the engine batching budget, but got "
+                f"{student_prompt_length=}, {student_response_length=}, {required_context_len=}, "
+                f"{max_num_batched_tokens=}."
+            )
+
+        self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
+        self.inference.response_length = 1
+        self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
+
+    def _validate_topk_logprobs(self, use_topk: bool, topk: Optional[int]) -> None:
+        if not use_topk or topk is None:
+            return
+
+        engine_name = self.inference.name
+        engine_kwargs = self.inference.engine_kwargs
+        match engine_name:
+            case "vllm":
+                vllm_engine_kwargs = dict(engine_kwargs.get("vllm", {}))
+                max_logprobs = vllm_engine_kwargs.get("max_logprobs")
+                if max_logprobs is None:
+                    vllm_engine_kwargs["max_logprobs"] = topk
+                    max_logprobs = topk
+                if max_logprobs < topk:
+                    raise ValueError(
+                        f"VLLM max_logprobs ({max_logprobs}) must be >= distillation_loss topk "
+                        f"({topk}) to enable distillation loss computation."
+                    )
+                engine_kwargs["vllm"] = vllm_engine_kwargs
+            case _:
+                raise NotImplementedError(
+                    f"DistillationTeacherModelConfig does not support inference engine {engine_name}"
+                )
 
 
 @dataclass
@@ -142,67 +191,67 @@ class DistillationConfig(BaseConfig):
 
     enabled (bool):
         Whether on-policy distillation is enabled.
-    num_workers (int):
-        Number of teacher model replicas.
+    enable_resource_pool (bool):
+        Whether to enable a separate resource pool for distillation teacher model(s).
+    n_gpus_per_node (int):
+        Number of GPUs per node in the teacher resource pool.
+    nnodes (int):
+        Number of nodes in the teacher resource pool.
     teacher_model (TeacherModelConfig):
-        Configuration for the teacher model used for distillation.
+         Configuration for the single teacher model used for distillation.
+    teacher_models (dict[str, TeacherModelConfig]):
+        Configurations for teacher models used for multi-teacher distillation.
     distillation_loss (DistillationLossConfig):
         Configuration for distillation loss settings.
     """
 
-    _mutable_fields = BaseConfig._mutable_fields
+    _mutable_fields = BaseConfig._mutable_fields | {"teacher_models"}
 
     enabled: bool = False
-    num_workers: int = 8
+    enable_resource_pool: bool = False
+    n_gpus_per_node: int = 0
+    nnodes: int = 0
     teacher_model: DistillationTeacherModelConfig = field(default_factory=DistillationTeacherModelConfig)
+    teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
-        # Prompt + Response from student are fed into teacher as context
-        max_model_len = self.teacher_model.inference.max_model_len
-        max_num_batched_tokens = self.teacher_model.inference.max_num_batched_tokens
-        student_prompt_length = self.teacher_model.inference.prompt_length
-        student_response_length = self.teacher_model.inference.response_length
-        if self.enabled:
-            required_context_len = student_prompt_length + student_response_length + 1
-            if max_model_len is not None and required_context_len > max_model_len:
-                raise ValueError(
-                    "Distillation teacher inference requires room for the student prompt, the full student "
-                    f"response, and one generated token, but got {student_prompt_length=}, "
-                    f"{student_response_length=}, {required_context_len=}, {max_model_len=}."
-                )
-            if max_num_batched_tokens is not None and required_context_len > max_num_batched_tokens:
-                raise ValueError(
-                    "Distillation teacher inference requires room for the student prompt, the full student "
-                    f"response, and one generated token within the engine batching budget, but got "
-                    f"{student_prompt_length=}, {student_response_length=}, {required_context_len=}, "
-                    f"{max_num_batched_tokens=}."
-                )
-
-        self.teacher_model.inference.prompt_length = (
-            self.teacher_model.inference.prompt_length + self.teacher_model.inference.response_length
-        )
-        self.teacher_model.inference.response_length = 1
-
-        # Ensure max log probs is aligned with top-k
-        engine_name = self.teacher_model.inference.name
-        engine_kwargs = self.teacher_model.inference.engine_kwargs
-        if not self.distillation_loss.loss_settings.use_topk or self.distillation_loss.topk is None or not self.enabled:
+        if not self.enabled:
             return
-        match engine_name:
-            case "vllm":
-                vllm_engine_kwargs = dict(engine_kwargs.get("vllm", {}))
-                max_logprobs = vllm_engine_kwargs.get("max_logprobs")
-                if max_logprobs is None:
-                    vllm_engine_kwargs["max_logprobs"] = self.distillation_loss.topk
-                    max_logprobs = self.distillation_loss.topk
-                if max_logprobs < self.distillation_loss.topk:
-                    raise ValueError(
-                        f"VLLM max_logprobs ({max_logprobs}) must be >= distillation_loss topk "
-                        f"({self.distillation_loss.topk}) to enable distillation loss computation."
-                    )
-                engine_kwargs["vllm"] = vllm_engine_kwargs
-            case _:
-                raise NotImplementedError(
-                    f"DistillationTeacherModelConfig does not support inference engine {engine_name}"
-                )
+
+        self.teacher_models = self._resolve_teacher_models()
+        if len(self.teacher_models) != 1:
+            raise NotImplementedError("`teacher_models` are not supported yet in the runtime path.")
+        for teacher_model in self.teacher_models.values():
+            teacher_model.validate_and_prepare_for_distillation(
+                use_topk=self.distillation_loss.loss_settings.use_topk,
+                topk=self.distillation_loss.topk,
+            )
+
+    def get_single_teacher_model(self) -> DistillationTeacherModelConfig:
+        if len(self.teacher_models) != 1:
+            raise ValueError(
+                f"Expected exactly one active distillation teacher config, but got {len(self.teacher_models)}."
+            )
+        return next(iter(self.teacher_models.values()))
+
+    def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
+        if self.teacher_model.is_configured() and self.teacher_models:
+            raise ValueError("Specify either distillation.teacher_model or distillation.teacher_models, not both.")
+
+        if self.teacher_models:
+            teacher_models = {}
+            for model_name, teacher_model in self.teacher_models.items():
+                teacher_model = omega_conf_to_dataclass(teacher_model, dataclass_type=DistillationTeacherModelConfig)
+                if teacher_model.task is None:
+                    raise ValueError(f"distillation.teacher_models.{model_name}.task must be non-null.")
+                teacher_models[model_name] = teacher_model
+            return teacher_models
+
+        if not self.teacher_model.is_configured():
+            raise ValueError(
+                "Distillation is enabled but no teacher model is configured. "
+                "Please configure distillation.teacher_model or distillation.teacher_models."
+            )
+
+        return {"teacher": self.teacher_model}

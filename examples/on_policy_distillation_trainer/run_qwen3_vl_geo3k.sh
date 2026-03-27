@@ -75,10 +75,9 @@ MODEL=(
 
 DISTILLATION=(
     distillation.enabled=True
-    distillation.num_workers=8
-    distillation.teacher_model.enable_resource_pool=$TEACHER_RESOURCE_POOL
-    distillation.teacher_model.n_gpus_per_node=$TEACHER_WORLD_SIZE
-    distillation.teacher_model.nnodes=1
+    distillation.enable_resource_pool=$TEACHER_RESOURCE_POOL
+    distillation.n_gpus_per_node=$TEACHER_WORLD_SIZE
+    distillation.nnodes=1
     distillation.teacher_model.model_path="${FAMILY}/${TEACHER_MODEL}"
     distillation.teacher_model.inference.tensor_model_parallel_size=1
     distillation.teacher_model.inference.name=$ROLLOUT_NAME
