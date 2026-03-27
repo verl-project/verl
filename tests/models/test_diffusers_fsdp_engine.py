@@ -21,14 +21,15 @@ import ray
 import torch
 
 from verl import DataProto
-from verl.models.diffusers_model import set_timesteps
-from verl.models.diffusers_model.schedulers import FlowMatchSDEDiscreteScheduler
+from verl.models.diffusers_model import build_scheduler
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import DiffusionModelConfig, FSDPActorConfig, TrainingWorkerConfig
 from verl.workers.engine_workers import TrainingWorker
 from verl.workers.utils.losses import diffusion_loss
 from verl.workers.utils.padding import embeds_padding_2_no_padding
+
+EXTERNAL_LIB = "examples.flowgrpo_trainer.qwen_image"
 
 
 def create_training_config(model_type, strategy, device_count, model):
@@ -39,7 +40,7 @@ def create_training_config(model_type, strategy, device_count, model):
         fsdp_size = 4
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
-    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path)
+    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path, external_lib=EXTERNAL_LIB)
 
     if strategy in ["fsdp", "fsdp2"]:
         from hydra import compose, initialize_config_dir
@@ -52,6 +53,7 @@ def create_training_config(model_type, strategy, device_count, model):
                 overrides=[
                     "path=" + path,
                     "tokenizer_path=" + tokenizer_path,
+                    "external_lib=" + EXTERNAL_LIB,
                     "lora_rank=8",
                     "lora_alpha=16",
                     "+extra_configs.sde_type=sde",
@@ -103,10 +105,7 @@ def create_training_config(model_type, strategy, device_count, model):
 def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> DataProto:
     from tensordict import TensorDict
 
-    scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
-        pretrained_model_name_or_path=model_config.local_path, subfolder="scheduler"
-    )
-    set_timesteps(scheduler, model_config)
+    scheduler = build_scheduler(model_config)
 
     batch_size = 8 * num_device
     seq_len = 64

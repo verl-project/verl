@@ -31,7 +31,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
 
-from verl.models.diffusers_model import forward_and_sample_previous_step, set_timesteps
+from verl.models.diffusers_model import build_scheduler, forward_and_sample_previous_step
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -327,14 +327,7 @@ class DiffusersFSDPEngine(BaseEngine):
         return module
 
     def _build_scheduler(self):
-        from verl.models.diffusers_model.schedulers import FlowMatchSDEDiscreteScheduler
-
-        # now we only support flow-match scheduler
-        scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
-            pretrained_model_name_or_path=self.model_config.local_path, subfolder="scheduler"
-        )
-        set_timesteps(scheduler, self.model_config)
-        return scheduler
+        return build_scheduler(self.model_config)
 
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer

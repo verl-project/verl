@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Qwen-Image diffusion model implementation for FlowGRPO training.
+"""
 
 from typing import Optional
 
@@ -20,14 +23,23 @@ from diffusers.models.transformers.transformer_qwenimage import QwenImageTransfo
 from diffusers.pipelines.qwenimage.pipeline_qwenimage import calculate_shift
 from tensordict import TensorDict
 
+from verl.models.diffusers_model import DiffusionModelBase
+from verl.utils.device import get_device_name
 from verl.workers.config import DiffusionModelConfig
 
-from .base import DiffusionModelBase
 from .schedulers import FlowMatchSDEDiscreteScheduler
 
 
 @DiffusionModelBase.register("QwenImagePipeline")
 class QwenImage(DiffusionModelBase):
+    @classmethod
+    def build_scheduler(cls, model_config: DiffusionModelConfig):
+        scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
+            pretrained_model_name_or_path=model_config.local_path, subfolder="scheduler"
+        )
+        cls.set_timesteps(scheduler, model_config, get_device_name())
+        return scheduler
+
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
         vae_scale_factor = 8

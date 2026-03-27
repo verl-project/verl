@@ -23,30 +23,43 @@ from verl.workers.config import DiffusionModelConfig
 
 
 class DiffusionModelBase(ABC):
-    """
-    Helper class to define the commonly used methods for diffusion model training.
+    """Abstract base class for diffusion model training helpers.
 
-    Since the forward and sampling process of different diffusion models can be quite different,
-    we define an abstract base class for diffusion models to implement their own forward and sampling process.
-    Users can check the implementation of QwenImage for reference.
+    Different diffusion models have very different forward / sampling logic.
+    Subclass this ABC and implement the three abstract methods to plug your
+    model into the verl training loop.
 
-    To register a new model, decorate the subclass with ``@DiffusionModelBase.register("your-model-name")``.
-    The name must match the pipeline ``_class_name`` from ``model_index.json`` (i.e.
-    the ``architecture`` field of ``DiffusionModelConfig``, which is auto-detected by default).
+    Registration
+    ------------
+    Decorate your subclass with ``@DiffusionModelBase.register("name")``.
+    The *name* must match the ``_class_name`` value in the pipeline's
+    ``model_index.json`` (which is auto-detected into
+    ``DiffusionModelConfig.architecture``).
+
+    Example::
+
+        @DiffusionModelBase.register("QwenImagePipeline")
+        class QwenImage(DiffusionModelBase):
+            ...
+
+    Loading external implementations
+    ---------------------------------
+    Implementations live outside the core verl package (e.g. under
+    ``examples/``).  Set ``external_lib`` on ``DiffusionModelConfig``
+    to the module that contains your subclass so it is imported (and
+    thus registered) before the registry is queried::
+
+        DiffusionModelConfig(
+            ...,
+            external_lib="examples.flowgrpo_trainer.qwen_image",
+        )
     """
 
     _registry: dict[str, type["DiffusionModelBase"]] = {}
 
     @classmethod
     def register(cls, name: str):
-        """Class decorator that registers a subclass under *name*.
-
-        Example::
-
-            @DiffusionModelBase.register("MyModel")
-            class MyModel(DiffusionModelBase):
-                ...
-        """
+        """Class decorator that registers a subclass under *name*."""
 
         def decorator(subclass: type["DiffusionModelBase"]) -> type["DiffusionModelBase"]:
             cls._registry[name] = subclass
@@ -56,26 +69,37 @@ class DiffusionModelBase(ABC):
 
     @classmethod
     def get_class(cls, model_config: DiffusionModelConfig) -> type["DiffusionModelBase"]:
-        """Return the registered subclass for *model_config.architecture*.
+        """Return the registered subclass for ``model_config.architecture``."""
+        if model_config.architecture not in cls._registry and model_config.external_lib is not None:
+            from verl.utils.import_utils import import_external_libs
 
-        Raises:
-            NotImplementedError: if ``model_config.architecture`` is not in the registry.
-        """
+            import_external_libs(model_config.external_lib)
+
         try:
             return cls._registry[model_config.architecture]
         except KeyError:
             registered = list(cls._registry)
             raise NotImplementedError(
                 f"No diffusion model registered for architecture={model_config.architecture!r}. "
-                f"Registered: {registered}"
+                f"Registered: {registered}. "
+                f"Set ``external_lib`` in DiffusionModelConfig to load your implementation."
             ) from None
 
     @classmethod
     @abstractmethod
-    def set_timesteps(cls, scheduler: SchedulerMixin, model_config: DiffusionModelConfig, device: str):
+    def build_scheduler(cls, model_config: DiffusionModelConfig) -> SchedulerMixin:
+        """Build and configure the diffusion scheduler for this model.
+        The returned scheduler should have timesteps and sigmas already set.
+
+        Args:
+            model_config (DiffusionModelConfig): the configuration of the diffusion model.
         """
-        Abstract method for setting timesteps and sigmas for diffusion model schedulers during model init,
-        and move the timesteps and sigmas to the correct device.
+        pass
+
+    @classmethod
+    @abstractmethod
+    def set_timesteps(cls, scheduler: SchedulerMixin, model_config: DiffusionModelConfig, device: str):
+        """Set timesteps and sigmas on the scheduler and move them to *device*.
 
         Args:
             scheduler (SchedulerMixin): the scheduler used for the diffusion process.
@@ -96,8 +120,8 @@ class DiffusionModelBase(ABC):
         scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
         step: int,
     ):
-        """Abstract method for forwarding the model and sampling previous step.
-        It is usually used for RL-algorithms based on reversed-sampling process.
+        """Forward the model and sample the previous step.
+        Used for RL-algorithms based on reversed-sampling (FlowGRPO, DanceGRPO, etc.).
 
         Args:
             module (ModelMixin): the diffusion model to be forwarded.

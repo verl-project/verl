@@ -24,13 +24,22 @@ from verl.workers.config import DiffusionModelConfig
 from .base import DiffusionModelBase
 
 
+def build_scheduler(model_config: DiffusionModelConfig) -> SchedulerMixin:
+    """Build and configure the scheduler for the diffusion model.
+    The returned scheduler has timesteps and sigmas already set.
+
+    Args:
+        model_config (DiffusionModelConfig): the configuration of the diffusion model.
+    """
+    return DiffusionModelBase.get_class(model_config).build_scheduler(model_config)
+
+
 def set_timesteps(scheduler: SchedulerMixin, model_config: DiffusionModelConfig):
     """Set correct timesteps and sigmas for diffusion model schedulers.
 
     Args:
         scheduler (SchedulerMixin): the scheduler used for the diffusion process.
         model_config (DiffusionModelConfig): the configuration of the diffusion model.
-        device (str): the device to move the timesteps and sigmas to.
     """
     DiffusionModelBase.get_class(model_config).set_timesteps(scheduler, model_config, get_device_name())
 

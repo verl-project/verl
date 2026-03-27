@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Import model subclasses so they self-register via @DiffusionModelBase.register.
-from . import qwen_image  # noqa: F401
-from .utils import forward_and_sample_previous_step, set_timesteps
+from .base import DiffusionModelBase
+from .utils import build_scheduler, forward_and_sample_previous_step, set_timesteps
 
-__all__ = ["set_timesteps", "forward_and_sample_previous_step"]
+__all__ = ["DiffusionModelBase", "build_scheduler", "set_timesteps", "forward_and_sample_previous_step"]
