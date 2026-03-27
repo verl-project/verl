@@ -1353,7 +1353,7 @@ def get_megatron_module_device(models: list[Any]) -> str:
             return "cpu"
 
     buffer = model_chunk.buffers[0]
-    if buffer.param_data.storage().size() == 0:
+    if buffer.param_data is None or buffer.param_data.storage().size() == 0:
         return "cpu"
     else:
         return get_device_name()
