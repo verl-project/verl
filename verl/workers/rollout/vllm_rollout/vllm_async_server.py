@@ -367,13 +367,8 @@ class vLLMHttpServer:
 
         # 3. launch server
         if self.node_rank == 0:
-            self._master_sock.close()
-            self._dp_rpc_sock.close()
-            self._dp_master_sock.close()
             await self.run_server(server_args)
         else:
-            # TODO: avoid connect before master_sock close
-            await asyncio.sleep(3)
             await self.run_headless(server_args)
 
     async def run_server(self, args: argparse.Namespace):
@@ -810,7 +805,7 @@ class vLLMHttpServer:
             hf_overrides["quantization_config"] = quantization_config_dict
         elif quantization is not None:
             # Handle other quantization methods (fp8, torchao)
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]
+            _SUPPORTED_QUANTIZATION = ["fp8", "torchao", "ascend"]
             if quantization not in _SUPPORTED_QUANTIZATION:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 

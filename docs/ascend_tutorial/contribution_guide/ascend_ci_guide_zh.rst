@@ -120,8 +120,7 @@ NPU 相关的工作流主要包括：
              clean: true 
          - name: Install dependencies
            run: |
-             pip install -r requirements-npu.txt
-             pip install -e .
+             pip install --no-deps -e .
          - name: Verify environment
            run: pip list
          # 以下为具体测试步骤（根据需求定制）

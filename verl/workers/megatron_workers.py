@@ -52,6 +52,7 @@ from verl.utils.device import (
 from verl.utils.distributed import set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
+from verl.utils.import_utils import deprecated
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
@@ -103,6 +104,7 @@ def set_random_seed(seed, only_rollout=False):
     # os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
+@deprecated("legacy worker implementation is deprecated and will be removed in v0.8.0")
 class MegatronWorker(Worker):
     def _init_hf_config_and_tf_config(
         self,
@@ -261,6 +263,7 @@ class MegatronWorker(Worker):
         )
 
 
+@deprecated("legacy worker implementation is deprecated and will be removed in v0.8.0")
 class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy

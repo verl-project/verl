@@ -35,7 +35,7 @@ try:
     from verl.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
 
     _VLLM_OMNI_AVAILABLE = True
-except ImportError:  # vllm_omni and related utilities are optional
+except (ImportError, RuntimeError):  # optional stack; ImportError if missing, RuntimeError e.g. diffusers/transformers
     CustomPipelineWorkerExtension = None  # type: ignore[assignment]
     OmniTensorLoRARequest = None  # type: ignore[assignment]
     VLLMOmniHijack = None  # type: ignore[assignment]

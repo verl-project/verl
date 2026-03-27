@@ -70,7 +70,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.config import DistillationConfig, FSDPEngineConfig
+from verl.workers.config import DistillationConfig, FSDPEngineConfig, McoreEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -510,6 +510,17 @@ class RayPPOTrainer:
         batch_reward = self.reward_loop_manager.compute_rm_score(batch)
         return batch_reward
 
+    def _should_compute_teacher_colocate(self, batch: DataProto) -> bool:
+        return self.use_teacher_policy and not self.distillation_config.teacher_model.enable_resource_pool
+
+    def _compute_teacher_colocate(self, batch: DataProto) -> DataProto:
+        """Compute teacher logprobs after rollout when teacher and student are colocated."""
+        assert self.teacher_model_manager is not None, "TeacherModelManager is None"
+        teacher_batch = self.teacher_model_manager.compute_logprobs(batch)
+        if "teacher_multi_modal_data" in batch.non_tensor_batch:
+            batch.pop(non_tensor_batch_keys=["teacher_multi_modal_data"])
+        return teacher_batch
+
     def _validate(self, merged: bool = False):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
@@ -726,10 +737,10 @@ class RayPPOTrainer:
                 orig_critic_cfg = critic_cfg
                 if orig_critic_cfg.strategy == "fsdp":
                     engine_config: FSDPEngineConfig = orig_critic_cfg.model.fsdp_config
-                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
-                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
                 else:
-                    raise NotImplementedError(f"Unknown strategy {orig_critic_cfg.strategy=}")
+                    engine_config: McoreEngineConfig = orig_critic_cfg.megatron
+                engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+                engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
 
                 critic_cfg = TrainingWorkerConfig(
                     model_type="value_model",
@@ -1001,8 +1012,18 @@ class RayPPOTrainer:
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
         if os.path.exists(dataloader_local_path):
-            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
-            self.train_dataloader.load_state_dict(dataloader_state_dict)
+            steps_per_epoch = len(self.train_dataloader)
+            at_epoch_boundary = steps_per_epoch > 0 and self.global_steps % steps_per_epoch == 0
+            if at_epoch_boundary:
+                print(
+                    f"Skipping dataloader state restore: global_steps={self.global_steps} "
+                    f"is at an epoch boundary (steps_per_epoch={steps_per_epoch}). "
+                    f"The saved state marks the dataloader as exhausted. "
+                    f"Next epoch will iterate from scratch."
+                )
+            else:
+                dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+                self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
@@ -1299,7 +1320,7 @@ class RayPPOTrainer:
             if self.config.trainer.get("val_only", False):
                 return
 
-        if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
+        if self.config.actor_rollout_ref.rollout.skip.get("enable", False):
             rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
             rollout_skip.wrap_generate_sequences()
 
@@ -1393,6 +1414,10 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    if self._should_compute_teacher_colocate(batch):
+                        with marked_timer("teacher", timing_raw, color="cyan"):
+                            batch_teacher = self._compute_teacher_colocate(batch)
+                            batch = batch.union(batch_teacher)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)

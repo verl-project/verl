@@ -72,6 +72,7 @@ class MtpConfig(BaseConfig):
 class HFModelConfig(BaseConfig):
     # note that we separate model_path, model_config_path and tokenizer_path in case they are different
     _mutable_fields = {
+        "model_type",
         "hf_config_path",
         "tokenizer_path",
         "hf_config",
@@ -91,6 +92,9 @@ class HFModelConfig(BaseConfig):
     local_hf_config_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
+
+    # model type, e.g., "language_model", "value_model", "diffusion_model"
+    model_type: str = "language_model"
 
     # whether to load tokenizer. This is useful when we only want to load model config
     load_tokenizer: bool = True
