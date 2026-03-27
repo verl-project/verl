@@ -113,6 +113,7 @@ verl is fast with:
    :maxdepth: 1
    :caption: Adding new models
 
+   models/model_support
    advance/fsdp_extension
    advance/megatron_extension
 
