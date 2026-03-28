@@ -41,6 +41,7 @@ from transformers import PretrainedConfig
 import verl.utils.megatron.tensor_parallel as tp_utils
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
+from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing
 from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, McoreEngineConfig
@@ -224,7 +225,12 @@ def make_megatron_module(
             # Register PEFT transformation as pre-wrap hook if peft_cls is specified
             # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
             if peft_cls is not None:
-                from verl.utils.megatron_peft_utils import load_adapter_checkpoint, print_adapter_info
+                from megatron.bridge.training.checkpointing import (
+                    _generate_model_state_dict,
+                    apply_peft_adapter_filter_to_state_dict,
+                )
+
+                from verl.utils.megatron_peft_utils import print_adapter_info
 
                 def peft_pre_wrap_hook(model):
                     """Pre-wrap hook that applies PEFT transformation."""
@@ -239,7 +245,13 @@ def make_megatron_module(
                     adapter_path = getattr(peft_config, "adapter_path", None)
                     if adapter_path is not None and adapter_path:
                         print(f"Loading adapter weights from: {adapter_path}")
-                        load_adapter_checkpoint(transformed_model, adapter_path)
+                        model_chunks = transformed_model if isinstance(transformed_model, list) else [transformed_model]
+                        sharded_state_dict = _generate_model_state_dict(model_chunks, {})
+                        sharded_state_dict = apply_peft_adapter_filter_to_state_dict(sharded_state_dict, peft_cls)
+                        loaded_state_dict = load_dist_checkpointing(sharded_state_dict, str(adapter_path))
+                        for vpp_rank, model_chunk in enumerate(model_chunks):
+                            model_key = "model" if len(model_chunks) == 1 else f"model{vpp_rank}"
+                            model_chunk.load_state_dict(loaded_state_dict[model_key], strict=False)
 
                     # Print PEFT statistics
                     if torch.distributed.get_rank() == 0:

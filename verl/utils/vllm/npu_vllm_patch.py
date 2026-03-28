@@ -160,6 +160,18 @@ def vllm_ascend_v013_matmul_and_reduce_wrapper(fn):
     return wrapper
 
 
+def vllm_v013_weight_loader_method_wrapper(fn):
+    @wraps(fn)
+    def wrapper(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
+        if (shard_id in ("w1", "w3") and param.shape[1] == self.hidden_size) or (
+            shard_id == "w2" and param.shape[2] == self.hidden_size
+        ):
+            param.data = param.data.transpose(1, 2)
+        return fn(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success)
+
+    return wrapper
+
+
 def patch_vllm013_rotary_emb():
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
@@ -169,7 +181,7 @@ def patch_vllm013_rotary_emb():
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
-        super(ApplyRotaryEmb, self).__init__(enforce_enable)
+        super(ApplyRotaryEmb, self).__init__()
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
         self.apply_rotary_emb_flash_attn = None
@@ -184,7 +196,10 @@ if is_torch_npu_available(check_device=False):
     _VLLM_VERSION = version.parse(vllm.__version__)
     if _VLLM_VERSION >= version.parse("0.13.0"):
         # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.13
+        from vllm.model_executor.layers.fused_moe import FusedMoE
+
         patch_vllm013_rotary_emb()
+        FusedMoE.weight_loader = vllm_v013_weight_loader_method_wrapper(FusedMoE.weight_loader)
 
     VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2 = bool(int(os.getenv("VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2", "1")))
     if VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2:
@@ -199,6 +214,7 @@ if is_torch_npu_available(check_device=False):
             SequenceRowParallelOp.matmul_and_reduce = vllm_ascend_v013_matmul_and_reduce_wrapper(
                 SequenceRowParallelOp.matmul_and_reduce
             )
+
         elif _VLLM_VERSION >= version.parse("0.11.0"):
             from vllm_ascend.ops.linear_op import SequenceRowParallelOp
             from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
