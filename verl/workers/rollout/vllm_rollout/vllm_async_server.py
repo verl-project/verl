@@ -397,6 +397,19 @@ class vLLMHttpServer:
             method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
         )
 
+        # Load custom tool parser plugin before build_app so it's registered before any requests arrive
+        _tool_parser_plugin = getattr(args, "tool_parser_plugin", None)
+        if _tool_parser_plugin:
+            try:
+                try:
+                    from vllm.tool_parsers import ToolParserManager
+                except ImportError:
+                    from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+                ToolParserManager.import_tool_parser(_tool_parser_plugin)
+                logger.info(f"Loaded tool parser plugin: {_tool_parser_plugin}")
+            except Exception as e:
+                logger.warning(f"Failed to load tool parser plugin {_tool_parser_plugin}: {e}")
+
         build_app_sig = inspect.signature(build_app)
         supported_tasks: tuple[Any, ...] = ()
         if "supported_tasks" in build_app_sig.parameters:

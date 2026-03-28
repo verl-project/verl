@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from omegaconf import MISSING
 
@@ -87,6 +87,8 @@ class AgentLoopConfig(BaseConfig):
     # Fully qualified class name for custom AgentLoopManager (e.g., "mypackage.module.MyManager").
     # Security: This class will be dynamically imported via importlib. Only use trusted class paths.
     agent_loop_manager_class: Optional[str] = None
+    # nemo-gym config (nemo_gym_root, initial_global_config_dict, uses_reasoning_parser, etc.)
+    nemo_gym: Optional[Any] = None
 
 
 @dataclass

@@ -129,4 +129,6 @@ ENV/
 logs
 log
 outputs
-.history
+.history/
+logs/
+config.env
