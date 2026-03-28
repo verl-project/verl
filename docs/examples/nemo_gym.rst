@@ -1,28 +1,25 @@
 Multi-Turn Tool Use with NeMo Gym
 ==================================
 
-`NeMo Gym <https://github.com/NVIDIA-NeMo/Gym>`_ is an environment framework for
-multi-turn RL rollouts with tool-calling agents. The verl integration lets you
-replace verl's standard single-turn rollout with NeMo Gym's ``simple_agent``,
-which runs full multi-turn conversations through an OpenAI-compatible HTTP
-endpoint and returns token IDs and log-probs for training.
+`NVIDIA NeMo Gym <https://github.com/NVIDIA-NeMo/Gym>`_ is an RL environment framework for
+scalable, multi-environment, agentic RL. This integration enables running NeMo Gym environments with 
+verl using a custom agent loop manager.
 
 Overview
 --------
 
 The integration adds two components to ``verl/experimental/nemo_gym/``:
 
-- ``agent_loop.py`` — ``NemoGymAgentLoopManager``: drives multi-turn rollouts
-  via NeMo Gym, handles token ID reconciliation across turns, and returns a
-  ``DataProto`` compatible with verl's Megatron actor update.
-- ``dataset.py`` — ``NemoGymJSONLDataset``: loads NeMo Gym JSONL files
-  (including tool definitions, agent refs, and ground-truth answers) into
-  verl's data pipeline.
+- ``agent_loop.py`` — ``NemoGymAgentLoopManager``: offloads multi-turn rollouts
+  to NeMo Gym, handles retokenization correction across turns, and formats output.
+  The retokenization logic may change shortly to follow verl approach.
+- ``dataset.py`` — ``NemoGymJSONLDataset``: loads NeMo Gym datasets
+  including messages, tools, agent refs, and metadata into verl format.
 
 Requirements
 ------------
 
-- A NeMo Gym checkout (``gym-ref``) with the environment you want to train on.
+- A NeMo Gym local clone (``gym-ref``) with the environment you want to train on. TODO finalize submodule decision
 - ``pip install -e /path/to/gym-ref`` installed into the container at job start.
 
 Quick Start
@@ -32,7 +29,7 @@ Quick Start
 
     pip install -e /path/to/gym-ref
 
-2. **Prepare your dataset** in NeMo Gym JSONL format. Each line should be a
+2. **Prepare training datasets** in NeMo Gym JSONL format. Each line should be a
    JSON object with a ``responses_create_params`` field containing the initial
    messages and any tools, plus an ``agent_ref`` pointing at your environment's
    agent server.
@@ -45,7 +42,7 @@ Quick Start
     "+actor_rollout_ref.rollout.agent.nemo_gym.initial_global_config_dict.config_paths=[/path/to/env.yaml]"
     +actor_rollout_ref.rollout.agent.nemo_gym.nemo_gym_root=/path/to/gym-ref
 
-See ``submit_workplace.sh`` and ``submit_math.sh`` for complete working examples.
+See ``submit_workplace.sh`` and ``submit_math.sh`` for working examples.
 
 Configuration
 -------------
@@ -67,8 +64,7 @@ The ``nemo_gym`` block in ``AgentLoopConfig`` accepts:
 Tool Calling
 ------------
 
-For environments that use tool calling (e.g. workplace assistant), pass the
-vLLM engine kwargs to enable the hermes tool parser::
+For environments that use tool calling (e.g. workplace assistant), use a tool parser, for example::
 
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.enable-auto-tool-choice=true'
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.tool-call-parser=hermes'
