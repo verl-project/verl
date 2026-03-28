@@ -98,7 +98,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             --config-name=dapo_megatron_trainer.yaml \
             data.train_files="${TRAIN_FILE}" \
             data.val_files="${TEST_FILE}" \
-            +data.custom_cls.path="${VERL_ROOT}/verl/experimental/nemo_gym_dataset.py" \
+            +data.custom_cls.path="${VERL_ROOT}/verl/experimental/nemo_gym/dataset.py" \
             +data.custom_cls.name=NemoGymJSONLDataset \
             data.truncation=left \
             data.max_prompt_length=2048 \
