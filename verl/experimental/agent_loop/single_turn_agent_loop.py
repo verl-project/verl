@@ -16,9 +16,14 @@ import os
 from typing import Any
 from uuid import uuid4
 
+import torch
+from PIL import Image
+
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
+from verl.utils.chat_template import apply_chat_template
 from verl.utils.profiler import simple_timer
+from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
@@ -101,6 +106,50 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
             "index",
         }
     )
+
+    async def apply_chat_template(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        images: list[Image.Image] | None = None,
+        videos: list[tuple[torch.Tensor, dict]] | None = None,
+        remove_system_prompt: bool = False,
+    ) -> list[int]:
+        """Tokenize on the asyncio thread for fast tokenizers when no processor is used.
+
+        Rust-backed fast tokenizers are not reliably safe across ``run_in_executor`` thread
+        boundaries with recent transformers (``RuntimeError: Already borrowed``). The diffusion
+        path is tokenizer-only for Qwen-Image-style models; keep tokenization on the event-loop
+        thread in that case.
+        """
+        if self.processor is not None:
+            return await super().apply_chat_template(
+                messages,
+                tools=tools,
+                images=images,
+                videos=videos,
+                remove_system_prompt=remove_system_prompt,
+            )
+        if getattr(self.tokenizer, "is_fast", False):
+            tokenized_prompt = apply_chat_template(
+                self.tokenizer,
+                messages,
+                tools=tools,
+                add_generation_prompt=True,
+                tokenize=True,
+                **self.apply_chat_template_kwargs,
+            )
+            prompt_ids = normalize_token_ids(tokenized_prompt)
+            if remove_system_prompt:
+                prompt_ids = prompt_ids[len(self.system_prompt) :]
+            return prompt_ids
+        return await super().apply_chat_template(
+            messages,
+            tools=tools,
+            images=images,
+            videos=videos,
+            remove_system_prompt=remove_system_prompt,
+        )
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> DiffusionAgentLoopOutput:
         raw_prompt = kwargs.pop("raw_prompt")
