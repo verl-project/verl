@@ -61,9 +61,9 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         return instance
 
     async def _init_nemo_gym(self) -> None:
-        nemo_gym_cfg = self.rollout_config.agent.get("nemo_gym", {})
+        nemo_gym_cfg = self.rollout_config.agent.nemo_gym
 
-        nemo_gym_root = nemo_gym_cfg.get("nemo_gym_root", None)
+        nemo_gym_root = nemo_gym_cfg.nemo_gym_root if nemo_gym_cfg else None
 
         try:
             from nemo_gym.cli import GlobalConfigDictParserConfig, RunHelper
@@ -78,9 +78,9 @@ class NemoGymAgentLoopManager(AgentLoopManager):
                 ) from e
             raise
 
-        initial_global_cfg = dict(nemo_gym_cfg.get("initial_global_config_dict", {}))
+        initial_global_cfg = dict(nemo_gym_cfg.initial_global_config_dict or {}) if nemo_gym_cfg else {}
 
-        uses_reasoning_parser = bool(nemo_gym_cfg.get("uses_reasoning_parser", False))
+        uses_reasoning_parser = nemo_gym_cfg.uses_reasoning_parser if nemo_gym_cfg else False
         vllm_model_cfg = (
             initial_global_cfg.setdefault("policy_model", {})
             .setdefault("responses_api_models", {})

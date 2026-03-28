@@ -79,6 +79,14 @@ class CustomAsyncServerConfig(BaseConfig):
 
 
 @dataclass
+class NemoGymConfig(BaseConfig):
+    nemo_gym_root: Optional[str] = None
+    uses_reasoning_parser: bool = False
+    # Passthrough to nemo-gym's GlobalConfigDictParserConfig — verl does not own this schema.
+    initial_global_config_dict: Optional[Any] = None
+
+
+@dataclass
 class AgentLoopConfig(BaseConfig):
     num_workers: int = 8
     default_agent_loop: str = "single_turn_agent"
@@ -87,8 +95,7 @@ class AgentLoopConfig(BaseConfig):
     # Fully qualified class name for custom AgentLoopManager (e.g., "mypackage.module.MyManager").
     # Security: This class will be dynamically imported via importlib. Only use trusted class paths.
     agent_loop_manager_class: Optional[str] = None
-    # nemo-gym config (nemo_gym_root, initial_global_config_dict, uses_reasoning_parser, etc.)
-    nemo_gym: Optional[Any] = None
+    nemo_gym: Optional[NemoGymConfig] = None
 
 
 @dataclass

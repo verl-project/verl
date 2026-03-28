@@ -164,7 +164,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             trainer.default_local_dir="${CKPTS_DIR}" \
             trainer.resume_mode=auto \
             trainer.log_val_generations=10 \
-            +actor_rollout_ref.rollout.agent.agent_loop_manager_class='verl.experimental.nemo_gym_agent_loop.NemoGymAgentLoopManager' \
+            +actor_rollout_ref.rollout.agent.agent_loop_manager_class='verl.experimental.nemo_gym.agent_loop.NemoGymAgentLoopManager' \
             "+actor_rollout_ref.rollout.agent.nemo_gym.initial_global_config_dict.config_paths=[${NEMO_GYM_ROOT}/responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,${NEMO_GYM_ROOT}/resources_servers/workplace_assistant/configs/workplace_assistant.yaml]" \
             +actor_rollout_ref.rollout.agent.nemo_gym.uses_reasoning_parser=False \
             +actor_rollout_ref.rollout.agent.nemo_gym.nemo_gym_root="${NEMO_GYM_ROOT}" \
