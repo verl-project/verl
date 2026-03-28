@@ -39,7 +39,7 @@ Quick Start
     +data.custom_cls.path=verl/experimental/nemo_gym/dataset.py
     +data.custom_cls.name=NemoGymJSONLDataset
     +actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl.experimental.nemo_gym.agent_loop.NemoGymAgentLoopManager
-    "+actor_rollout_ref.rollout.agent.nemo_gym.initial_global_config_dict.config_paths=[/path/to/env.yaml]"
+    "+actor_rollout_ref.rollout.agent.nemo_gym.config_paths=[/path/to/env.yaml]"
     +actor_rollout_ref.rollout.agent.nemo_gym.nemo_gym_root=/path/to/gym-ref
 
 See ``submit_workplace.sh`` and ``submit_math.sh`` for working examples.

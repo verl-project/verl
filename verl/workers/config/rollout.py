@@ -82,8 +82,7 @@ class CustomAsyncServerConfig(BaseConfig):
 class NemoGymConfig(BaseConfig):
     nemo_gym_root: Optional[str] = None
     uses_reasoning_parser: bool = False
-    # uses NeMo Gym's GlobalConfigDictParserConfig
-    initial_global_config_dict: Optional[Any] = None
+    config_paths: Optional[list] = None
 
 
 @dataclass

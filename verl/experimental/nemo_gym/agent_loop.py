@@ -76,7 +76,8 @@ class NemoGymAgentLoopManager(AgentLoopManager):
                 "nemo-gym not found. Install it with: pip install -e /path/to/gym-ref"
             ) from e
 
-        initial_global_cfg = dict(nemo_gym_cfg.initial_global_config_dict or {}) if nemo_gym_cfg else {}
+        config_paths = list(nemo_gym_cfg.config_paths or []) if nemo_gym_cfg else []
+        initial_global_cfg = {"config_paths": config_paths} if config_paths else {}
 
         uses_reasoning_parser = nemo_gym_cfg.uses_reasoning_parser if nemo_gym_cfg else False
         vllm_model_cfg = (
