@@ -2,6 +2,8 @@
 #SBATCH --job-name=verl-nemogym-dapo-7b-math
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
+#SBATCH --partition=your_partition
+#SBATCH --account=your_account
 #SBATCH --time=4:00:00
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
