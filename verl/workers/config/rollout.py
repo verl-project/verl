@@ -82,7 +82,7 @@ class CustomAsyncServerConfig(BaseConfig):
 class NemoGymConfig(BaseConfig):
     nemo_gym_root: Optional[str] = None
     uses_reasoning_parser: bool = False
-    # Passthrough to nemo-gym's GlobalConfigDictParserConfig — verl does not own this schema.
+    # uses NeMo Gym's GlobalConfigDictParserConfig
     initial_global_config_dict: Optional[Any] = None
 
 

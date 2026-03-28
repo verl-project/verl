@@ -65,18 +65,16 @@ class NemoGymAgentLoopManager(AgentLoopManager):
 
         nemo_gym_root = nemo_gym_cfg.nemo_gym_root if nemo_gym_cfg else None
 
+        from omegaconf import DictConfig
+
         try:
             from nemo_gym.cli import GlobalConfigDictParserConfig, RunHelper
             from nemo_gym.rollout_collection import RolloutCollectionHelper
             from nemo_gym.server_utils import HEAD_SERVER_KEY_NAME, BaseServerConfig
-            from omegaconf import DictConfig
         except ModuleNotFoundError as e:
-            if "nemo_gym" in str(e):
-                raise ImportError(
-                    "nemo-gym not found. Set nemo_gym_root in config: "
-                    "+actor_rollout_ref.rollout.agent.nemo_gym.nemo_gym_root=/path/to/gym-ref"
-                ) from e
-            raise
+            raise ImportError(
+                "nemo-gym not found. Install it with: pip install -e /path/to/gym-ref"
+            ) from e
 
         initial_global_cfg = dict(nemo_gym_cfg.initial_global_config_dict or {}) if nemo_gym_cfg else {}
 
