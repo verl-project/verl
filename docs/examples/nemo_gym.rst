@@ -1,9 +1,9 @@
 Multi-Turn Tool Use with NeMo Gym
 ==================================
 
-`NVIDIA NeMo Gym <https://github.com/NVIDIA-NeMo/Gym>`_ is an RL environment framework for
-scalable, multi-environment, agentic RL. This integration enables running NeMo Gym environments with 
-verl using a custom agent loop manager.
+`NVIDIA NeMo Gym <https://github.com/NVIDIA-NeMo/Gym>`_ (`docs <https://docs.nvidia.com/nemo/gym/latest/index.html>`_)
+is an RL environment framework for scalable, multi-environment, agentic RL. This integration enables
+running NeMo Gym environments with verl using a custom agent loop manager.
 
 Overview
 --------
