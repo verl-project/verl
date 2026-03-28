@@ -1,9 +1,13 @@
-# vllm017
+# vllm018
 
-FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_NO_CACHE_DIR=1
+# PEP 668: Ubuntu 24.04 blocks system-wide pip installs; override for Docker
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+RUN sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list.d/ubuntu.sources
 
 RUN apt-get update && apt-get install -y \
     git \
@@ -16,7 +20,6 @@ RUN apt-get update && apt-get install -y \
     numactl \
     software-properties-common \
     vim && \
-    add-apt-repository ppa:deadsnakes/ppa -y && \
     apt-get update && \
     apt-get install -y \
     python3.12 \
@@ -32,9 +35,7 @@ RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
 
 RUN pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu129
 
-RUN pip install vllm==0.17.0
-
-RUN pip install pybind11
+RUN pip install pybind11 wheel
 
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
@@ -87,6 +88,8 @@ RUN git clone -b hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
     cd /home/dpsk_a2a/DeepEP && \
     export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:$CPATH && \
     python setup.py install
+
+RUN pip install vllm==0.18.0
 
 RUN pip3 install --no-deps trl==0.27.0
 
