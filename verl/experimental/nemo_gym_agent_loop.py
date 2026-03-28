@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
-import sys
 import threading
 from typing import Optional
 
@@ -64,12 +63,7 @@ class NemoGymAgentLoopManager(AgentLoopManager):
     async def _init_nemo_gym(self) -> None:
         nemo_gym_cfg = self.rollout_config.agent.get("nemo_gym", {})
 
-        # PYTHONPATH env var isn't reliable inside Ray actor processes (already running
-        # when env var is set); sys.path injection works instead.
-        # TODO: seems hacky. proper method maybe is pip install? but thats a bit broken
         nemo_gym_root = nemo_gym_cfg.get("nemo_gym_root", None)
-        if nemo_gym_root and str(nemo_gym_root) not in sys.path:
-            sys.path.insert(0, str(nemo_gym_root))
 
         try:
             from nemo_gym.cli import GlobalConfigDictParserConfig, RunHelper
@@ -123,10 +117,6 @@ class NemoGymAgentLoopManager(AgentLoopManager):
             head_port = s.getsockname()[1]
         initial_global_cfg[HEAD_SERVER_KEY_NAME] = {"host": "0.0.0.0", "port": head_port}
         self._head_server_config = BaseServerConfig(host=node_ip, port=head_port)
-
-        if nemo_gym_root:
-            existing = os.environ.get("PYTHONPATH", "")
-            os.environ["PYTHONPATH"] = f"{nemo_gym_root}:{existing}" if existing else str(nemo_gym_root)
 
         # Auto-detect agent ref. maybe dangerous for multi-environment
         # TODO test multienv
