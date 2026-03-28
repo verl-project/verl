@@ -17,8 +17,8 @@ GPUS_PER_NODE=8
 source "${SLURM_SUBMIT_DIR}/config.env"
 
 MODEL_PATH="${DATA_ROOT}/models/Qwen2.5-Math-7B"
-TRAIN_FILE="${NEMO_GYM_ROOT}/resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train_nrl.jsonl"
-TEST_FILE="${NEMO_GYM_ROOT}/resources_servers/math_with_judge/data/aime24_bytedtsinghua_validation_nrl.jsonl"
+TRAIN_FILE="${DATA_ROOT}/math_with_judge/dapo17k_bytedtsinghua_train_nrl.jsonl"
+TEST_FILE="${DATA_ROOT}/math_with_judge/aime24_bytedtsinghua_validation_nrl.jsonl"
 CKPTS_DIR="${RESULTS_ROOT}/DAPO-Qwen2.5-7b-MATH-megatron"
 
 CONTAINER="verlai/verl:vllm017.latest"
@@ -89,6 +89,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
         RAY_ADDRESS="auto" \
         VLLM_USE_V1=1 \
         TORCH_NCCL_AVOID_RECORD_STREAMS=1 \
+        PYTHONPATH="${NEMO_GYM_ROOT}" \
         RAY_grpc_keepalive_time_ms=60000 \
         RAY_grpc_keepalive_timeout_ms=600000 \
         RAY_grpc_client_keepalive_time_ms=60000 \

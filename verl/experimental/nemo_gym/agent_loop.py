@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import sys
 import threading
 from typing import Optional
 
@@ -64,6 +65,11 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         nemo_gym_cfg = self.rollout_config.agent.nemo_gym
 
         nemo_gym_root = nemo_gym_cfg.nemo_gym_root if nemo_gym_cfg else None
+
+        # Insert nemo_gym_root into sys.path so Ray remote actors (which don't
+        # inherit PYTHONPATH from the driver) can import nemo-gym from the shared fs.
+        if nemo_gym_root and str(nemo_gym_root) not in sys.path:
+            sys.path.insert(0, str(nemo_gym_root))
 
         from omegaconf import DictConfig
 

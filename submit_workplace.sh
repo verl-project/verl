@@ -89,6 +89,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
         RAY_ADDRESS="auto" \
         VLLM_USE_V1=1 \
         TORCH_NCCL_AVOID_RECORD_STREAMS=1 \
+        PYTHONPATH="${NEMO_GYM_ROOT}" \
         VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
         RAY_grpc_keepalive_time_ms=60000 \
         RAY_grpc_keepalive_timeout_ms=600000 \
