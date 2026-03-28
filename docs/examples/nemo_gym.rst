@@ -1,4 +1,4 @@
-Multi-Turn Tool Use with NeMo Gym
+NVIDIA NeMo Gym Integration
 ==================================
 
 `NVIDIA NeMo Gym <https://github.com/NVIDIA-NeMo/Gym>`_ (`docs <https://docs.nvidia.com/nemo/gym/latest/index.html>`_)

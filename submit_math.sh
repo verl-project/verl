@@ -14,7 +14,7 @@ set -euo pipefail
 
 GPUS_PER_NODE=8
 
-source "$(dirname "$0")/config.env"
+source "${SLURM_SUBMIT_DIR}/config.env"
 
 MODEL_PATH="${DATA_ROOT}/models/Qwen2.5-Math-7B"
 TRAIN_FILE="${NEMO_GYM_ROOT}/resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train_nrl.jsonl"

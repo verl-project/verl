@@ -14,7 +14,7 @@ set -euo pipefail
 
 GPUS_PER_NODE=8
 
-source "$(dirname "$0")/config.env"
+source "${SLURM_SUBMIT_DIR}/config.env"
 
 MODEL_PATH="${HF_HOME}/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554"
 TRAIN_FILE="${DATA_ROOT}/workplace_assistant/train.jsonl"
