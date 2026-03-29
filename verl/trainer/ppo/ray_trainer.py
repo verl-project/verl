@@ -1514,7 +1514,16 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-
+                            # add extra reward info metrics for analysis.
+                            for k, v in reward_extra_infos_dict.items():
+                                try:
+                                    arr = np.asarray(v, dtype=np.float32)
+                                    if arr.size > 0:
+                                        metrics[f"reward_extra/{k}/mean"] = float(arr.mean())
+                                        metrics[f"reward_extra/{k}/max"] = float(arr.max())
+                                        metrics[f"reward_extra/{k}/min"] = float(arr.min())
+                                except Exception:
+                                    pass
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(
