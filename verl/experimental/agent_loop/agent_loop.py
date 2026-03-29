@@ -477,6 +477,7 @@ class AgentLoopWorker:
             top_k=config.top_k,
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
+            max_tokens=self.config.data.max_response_length,
         )
 
         # override sampling params for validation
