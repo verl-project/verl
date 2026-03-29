@@ -35,4 +35,5 @@ bash examples/sglang_multiturn/run_qwen2.5-3b_gsm8k_multiturn_4xgpu.sh
 
 - The rollout supports multi-turn conversations with tool-calling capabilities.
 - Current tools are used for GSM8K answer evaluation.
-- Future versions may extend to search and code interpreter tools.
+- For remote Python code execution, export your `DAYTONA_*` credentials and use `examples/sglang_multiturn/config/tool_config/daytona_tool_config.yaml`. `examples/sglang_multiturn/config/retool_multiturn_daytona_grpo.yaml` shows the full GRPO wiring.
+- To benchmark Daytona against Sandbox Fusion through the real veRL tool lifecycle, run `python3 scripts/benchmark_daytona_tool.py --backend daytona` or `--backend both` after setting `SANDBOX_FUSION_URL` for the Sandbox Fusion comparison.

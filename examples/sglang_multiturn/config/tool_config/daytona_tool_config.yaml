@@ -1,0 +1,25 @@
+tools:
+  - class_name: "verl.tools.daytona_sandbox_tool.DaytonaSandboxTool"
+    config:
+      rate_limit: 32
+      enable_global_rate_limit: true
+      create_timeout: 60
+      default_timeout: 30
+      delete_timeout: 60
+      auto_stop_interval: 15
+      auto_delete_interval: 30
+      name_prefix: "verl-daytona"
+      language: "python"
+      type: native
+    tool_schema:
+      type: "function"
+      function:
+        name: "code_interpreter"
+        description: "A tool for executing Python code in a Daytona sandbox."
+        parameters:
+          type: "object"
+          properties:
+            code:
+              type: "string"
+              description: "The Python code to execute."
+          required: ["code"]

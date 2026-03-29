@@ -31,15 +31,16 @@ For custom environment interaction tools, you can implement your own tools based
         tool_schema:
 
 You may refer to GSM8KTool_example_configuration_, which is one example of the tool configurations. Its implementation can be found in gsm8k_tool.py_.
+For a remote Python code execution backend, refer to ``examples/sglang_multiturn/config/tool_config/daytona_tool_config.yaml``.
 
-Finally, set the ``tools_config_file`` in your rollout config:
+Finally, set the ``tool_config_path`` in your rollout config:
 
 .. code-block:: yaml
 
     actor_rollout_ref:
         rollout:
-            tool_kwargs:
-                tools_config_file: <path_to_tool_yaml_file>
+            multi_turn:
+                tool_config_path: <path_to_tool_yaml_file>
 
 This allows integration of customized tool behaviors during actor rollout steps.
 

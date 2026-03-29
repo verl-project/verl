@@ -95,6 +95,7 @@ After pulling the desired Docker image and installing desired inference and trai
     git clone https://github.com/volcengine/verl && cd verl
     pip3 install -e ".[vllm]"
     pip3 install -e ".[sglang]"
+    pip3 install -e ".[daytona]"
 
 
 Install from custom environment
