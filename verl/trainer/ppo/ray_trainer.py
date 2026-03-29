@@ -1522,7 +1522,7 @@ class RayPPOTrainer:
                                         metrics[f"reward_extra/{k}/mean"] = float(arr.mean())
                                         metrics[f"reward_extra/{k}/max"] = float(arr.max())
                                         metrics[f"reward_extra/{k}/min"] = float(arr.min())
-                                except Exception:
+                                except (ValueError, TypeError):
                                     pass
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
