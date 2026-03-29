@@ -58,8 +58,13 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         )
         await instance._initialize_llm_servers()
         await instance._init_global_load_balancer()
+        await instance._apply_server_patch()
         await instance._init_nemo_gym()
         return instance
+
+    async def _apply_server_patch(self) -> None:
+        futs = [handle.apply_nemo_gym_server_patch.remote() for handle in self.server_handles]
+        await asyncio.get_event_loop().run_in_executor(None, ray.get, futs)
 
     async def _init_nemo_gym(self) -> None:
         nemo_gym_cfg = self.rollout_config.agent.nemo_gym

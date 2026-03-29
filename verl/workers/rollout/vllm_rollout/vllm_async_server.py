@@ -170,6 +170,11 @@ class vLLMHttpServer:
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
 
+    def apply_nemo_gym_server_patch(self):
+        # called by NemoGymAgentLoopManager to apply retokenization fix only for nemo-gym runs
+        from verl.experimental.nemo_gym.server_patch import patch_serving_chat_for_nemo_gym
+        patch_serving_chat_for_nemo_gym()
+
     @property
     def lora_as_adapter(self) -> bool:
         return (
