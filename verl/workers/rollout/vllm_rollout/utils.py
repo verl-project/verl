@@ -28,6 +28,7 @@ from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
+from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
 
 try:
     from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
@@ -252,16 +253,26 @@ class vLLMColocateWorkerExtension:
             self.add_lora(lora_request)
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
+            param_updates, buffer_updates = split_buffer_updates(self.model_runner.model, weights)
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_fp8_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
-                loaded_params = load_quanted_weights(weights, self.model_runner)
-                logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
+                loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
+                loaded_buffers = apply_buffer_updates(self.model_runner.model, buffer_updates)
+                logger.info(
+                    f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, "
+                    f"loaded_buffers: {loaded_buffers}"
+                )
             else:
-                logger.info("Loading standard weights (non-FP8, async)")
-                self.model_runner.model.load_weights(weights)
+                if param_updates:
+                    self.model_runner.model.load_weights(param_updates)
+                loaded_buffers = apply_buffer_updates(self.model_runner.model, buffer_updates)
+                logger.info(
+                    f"Loading standard weights (non-FP8, async), "
+                    f"loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}"
+                )
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""
@@ -326,8 +337,14 @@ class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
             self.add_lora(lora_request)
             logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
         else:
-            logger.info("Loading standard weights (async)")
-            self.load_weights(weights)
+            param_updates, buffer_updates = split_buffer_updates(self.model_runner.model, weights)
+            if param_updates:
+                self.load_weights(param_updates)
+            loaded_buffers = apply_buffer_updates(self.model_runner.model, buffer_updates)
+            logger.info(
+                f"Loading standard weights (async), loaded_params: {len(param_updates)}, "
+                f"loaded_buffers: {loaded_buffers}"
+            )
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""
