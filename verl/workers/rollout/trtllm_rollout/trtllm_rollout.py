@@ -494,7 +494,7 @@ class ServerAdapter(BaseRollout):
             await asyncio.to_thread(dist.broadcast, spl_tensor, src=leader_global_rank, group=exclude_dp_group)
             supports_partial_loading = bool(spl_tensor.item())
 
-        async for name, param in weights:
+        async for name, param in ensure_async_iterator(weights):
             if supports_partial_loading:
                 size_in_bytes = param.element_size() * param.numel()
                 if size_in_bytes > cur_available_bytes:

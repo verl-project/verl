@@ -206,7 +206,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         gen_tp=2
     fi
     train_tp=2
-    train_pp=${n_gpus_training}
+    train_pp=$((n_gpus_training / train_tp))
     ref_offload=True
     actor_offload=True
     common_params+=(
