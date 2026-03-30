@@ -15,15 +15,10 @@ import os
 from typing import Any, Literal
 
 import torch
-from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
-from transformers import Qwen2_5_VLForConditionalGeneration
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
-from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
-from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import QwenImageTransformer2DModel
 from vllm_omni.diffusion.request import OmniDiffusionRequest
-from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
 
 from ..scheduler.scheduling_flow_match_sde_discrete import FlowMatchSDEDiscreteScheduler
 
@@ -38,19 +33,7 @@ def _maybe_to_cpu(v):
 # This is compatible with API of vllm-omni custom pipeline
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
-        super(QwenImagePipeline, self).__init__()
-        self.od_config = od_config
-        self.parallel_config = od_config.parallel_config
-        self.weights_sources = [
-            DiffusersPipelineLoader.ComponentSource(
-                model_or_path=od_config.model,
-                subfolder="transformer",
-                revision=None,
-                prefix="transformer.",
-                fall_back_to_pt=True,
-            )
-        ]
-
+        super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()
         model = od_config.model
         # Check if model is a local path
@@ -59,27 +42,6 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         self.scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
             model, subfolder="scheduler", local_files_only=local_files_only
         )
-        self.text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model, subfolder="text_encoder", local_files_only=local_files_only
-        )
-        self.vae = AutoencoderKLQwenImage.from_pretrained(model, subfolder="vae", local_files_only=local_files_only).to(
-            self.device
-        )
-        transformer_kwargs = get_transformer_config_kwargs(od_config.tf_model_config, QwenImageTransformer2DModel)
-
-        self.transformer = QwenImageTransformer2DModel(od_config=od_config, **transformer_kwargs)
-
-        self.stage = None
-
-        self.vae_scale_factor = 2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
-        # QwenImage latents are turned into 2x2 patches and packed.
-        # This means the latent width and height has to be divisible
-        # by the patch size. So the vae scale factor is multiplied by the patch size to account for this
-        # self.image_processor = VaeImageProcessor(
-        #     vae_scale_factor=self.vae_scale_factor * 2
-        # )
-        self.prompt_template_encode_start_idx = 34
-        self.default_sample_size = 128
 
     def _get_qwen_prompt_embeds(
         self,
