@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import math
 import os
 import uuid
 from collections import defaultdict
@@ -72,6 +73,43 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, FSDPEngineConfig, McoreEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+
+def _compute_effective_total_epochs(
+    configured_total_epochs: int, total_training_steps: int, steps_per_epoch: int
+) -> int:
+    """Expand the epoch budget so step-based training can always reach its target."""
+    if steps_per_epoch <= 0:
+        raise ValueError(f"steps_per_epoch must be positive, got {steps_per_epoch}")
+
+    needed_epochs = math.ceil(total_training_steps / steps_per_epoch)
+    return max(configured_total_epochs, needed_epochs)
+
+
+def _compute_training_epoch_bounds(
+    resumed_global_steps: int, configured_total_epochs: int, total_training_steps: int, steps_per_epoch: int
+) -> tuple[int, int]:
+    """Compute the [start, end) epoch bounds for a resumed step-based run."""
+    current_epoch = resumed_global_steps // steps_per_epoch
+    effective_total_epochs = _compute_effective_total_epochs(
+        configured_total_epochs=configured_total_epochs,
+        total_training_steps=total_training_steps,
+        steps_per_epoch=steps_per_epoch,
+    )
+    return current_epoch, effective_total_epochs
+
+
+def _completed_training_steps(next_global_step: int) -> int:
+    """Convert the next-step cursor back to the last completed training step."""
+    return max(next_global_step - 1, 0)
+
+
+def _format_early_stop_warning(completed_steps: int, total_training_steps: int) -> str:
+    return (
+        f"Warning: Training stopped at step {completed_steps} before reaching "
+        f"total_training_steps={total_training_steps}. "
+        "Consider increasing trainer.total_epochs or checking the dataloader resume state."
+    )
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -1308,7 +1346,13 @@ class RayPPOTrainer:
         self._load_checkpoint()
         self.checkpoint_manager.update_weights(self.global_steps)
 
-        current_epoch = self.global_steps // len(self.train_dataloader)
+        steps_per_epoch = len(self.train_dataloader)
+        current_epoch, effective_total_epochs = _compute_training_epoch_bounds(
+            resumed_global_steps=self.global_steps,
+            configured_total_epochs=self.config.trainer.total_epochs,
+            total_training_steps=self.total_training_steps,
+            steps_per_epoch=steps_per_epoch,
+        )
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -1340,7 +1384,7 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
-        for epoch in range(current_epoch, self.config.trainer.total_epochs):
+        for epoch in range(current_epoch, effective_total_epochs):
             for batch_dict in self.train_dataloader:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
@@ -1686,3 +1730,8 @@ class RayPPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+
+        progress_bar.close()
+        completed_steps = _completed_training_steps(self.global_steps)
+        if completed_steps < self.total_training_steps:
+            print(_format_early_stop_warning(completed_steps, self.total_training_steps))
