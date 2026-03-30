@@ -162,7 +162,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     # trtllm: one replica uses all rollout GPUs as a single TP group.
     # vllm/sglang: TP=1, rely on data parallelism across replicas.
     if [ "${rollout_name}" = "trtllm" ]; then
-        gen_tp=${n_gpus_rollout}
+        gen_tp=${GEN_TP:-${n_gpus_rollout}}
     else
         gen_tp=1
     fi
@@ -201,7 +201,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running fully async training with Megatron strategy..."
     # Megatron specific parameters
     if [ "${rollout_name}" = "trtllm" ]; then
-        gen_tp=${n_gpus_rollout}
+        gen_tp=${GEN_TP:-${n_gpus_rollout}}
     else
         gen_tp=2
     fi

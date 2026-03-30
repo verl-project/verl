@@ -400,7 +400,13 @@ class TRTLLMReplica(RolloutReplica):
         # For RayResourcePool, the replica is assigned to entire resource pool.
         # We need to find start pg index and local bundle index based on replica rank.
         else:
-            local_bundle_index = self.world_size * self.replica_rank
+            # In standalone mode, init_standalone() creates a per-replica RayResourcePool
+            # that contains only world_size bundles for this replica. Start at bundle 0.
+            # In colocated/hybrid mode, the shared pool spans all replicas, so offset by rank.
+            if self.rollout_mode == RolloutMode.STANDALONE:
+                local_bundle_index = 0
+            else:
+                local_bundle_index = self.world_size * self.replica_rank
 
         while (
             start_pg_index < len(self.resource_pool.pgs)

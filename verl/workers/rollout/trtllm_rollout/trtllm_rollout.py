@@ -361,6 +361,21 @@ class ServerAdapter(BaseRollout):
         if self._adapter is not None:
             return
 
+        # Standalone mode: lazily build the CPU device mesh from the gloo process group
+        # (initialized by initialize_global_process_group_ray before ServerAdapter construction).
+        # Reward/ref models that never call resume(), release(), or update_weights() will never build the mesh.
+        if self.hybrid_device_mesh is None and self.device_mesh is None:
+            assert dist.is_initialized(), "gloo process group must be initialized before building device mesh"
+            infer_tp = self.config.tensor_model_parallel_size
+            infer_pp = getattr(self.config, "pipeline_model_parallel_size", 1)
+            world_size = dist.get_world_size()
+            dp = world_size // (infer_tp * infer_pp)
+            self.hybrid_device_mesh = init_device_mesh(
+                "cpu", mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+            )
+            self.hybrid_device_mesh[self.hybrid_device_mesh.mesh_dim_names[1:]]._flatten(mesh_dim_name="exclude_dp")
+            self.is_leader_rank = self.hybrid_device_mesh["exclude_dp"].get_local_rank() == 0
+
         # Lazy init http server adapter because http server is launched after hybrid engine.
         self.server_actor = ray.get_actor(f"trtllm_server_{self.replica_rank}")
         server_address, server_port = await self.server_actor.get_server_address.remote()
@@ -408,11 +423,9 @@ class ServerAdapter(BaseRollout):
     async def update_weights_from_ipc_handles(self, device_handles):
         """Update weights from IPC handles."""
         if self.hybrid_device_mesh is not None:
-            # Hybrid mode: coordinate via device mesh exclude_dp group
             world_size = self.hybrid_device_mesh["exclude_dp"].size()
             group = self.hybrid_device_mesh["exclude_dp"].get_group()
         else:
-            # Standalone mode: coordinate via default gloo group (from initialize_global_process_group_ray)
             world_size = dist.get_world_size()
             group = None
 
