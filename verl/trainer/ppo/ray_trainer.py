@@ -74,6 +74,20 @@ from verl.workers.config import DistillationConfig, FSDPEngineConfig, McoreEngin
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
+def _jsonify_rollout_value(value):
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {k: _jsonify_rollout_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonify_rollout_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_jsonify_rollout_value(v) for v in value]
+    return value
+
+
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -422,7 +436,7 @@ class RayPPOTrainer:
 
         lines = []
         for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
+            entry = {k: _jsonify_rollout_value(v[i]) for k, v in base_data.items()}
             lines.append(json.dumps(entry, ensure_ascii=False))
 
         with open(filename, "w") as f:
