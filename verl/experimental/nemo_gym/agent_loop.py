@@ -81,9 +81,7 @@ class NemoGymAgentLoopManager(AgentLoopManager):
             from nemo_gym.rollout_collection import RolloutCollectionHelper
             from nemo_gym.server_utils import HEAD_SERVER_KEY_NAME, BaseServerConfig
         except ModuleNotFoundError as e:
-            raise ImportError(
-                "nemo-gym not found. Install it with: pip install -e /path/to/gym-ref"
-            ) from e
+            raise ImportError("nemo-gym not found. Install it with: pip install -e /path/to/gym-ref") from e
 
         config_paths = list(nemo_gym_cfg.config_paths or []) if nemo_gym_cfg else []
         initial_global_cfg = {"config_paths": config_paths} if config_paths else {}
@@ -225,6 +223,7 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         if env_metrics:
             try:
                 import wandb
+
                 if wandb.run is not None:
                     wandb.log({**env_metrics, "train/global_step": global_steps}, step=global_steps)
             except Exception:
@@ -283,9 +282,9 @@ def _postprocess_nemo_gym_result(nemo_gym_result: dict, tokenizer) -> dict:
 
         prompt_ids = item["prompt_token_ids"]
 
-        assert (
-            seen_token_ids == prompt_ids[: len(seen_token_ids)]
-        ), f"Non-contiguous token IDs (server_patch active?). seen={len(seen_token_ids)} prompt={len(prompt_ids)}"
+        assert seen_token_ids == prompt_ids[: len(seen_token_ids)], (
+            f"Non-contiguous token IDs (server_patch active?). seen={len(seen_token_ids)} prompt={len(prompt_ids)}"
+        )
 
         message_log.append(
             {
@@ -313,8 +312,7 @@ def _postprocess_nemo_gym_result(nemo_gym_result: dict, tokenizer) -> dict:
 
     if not message_log:
         raise ValueError(
-            "nemo-gym returned a result with no generation data. "
-            "The prompt may exceed vLLM's max_model_len."
+            "nemo-gym returned a result with no generation data. The prompt may exceed vLLM's max_model_len."
         )
 
     return {
@@ -480,8 +478,7 @@ def _compute_rollout_metrics(results: list[dict], max_model_len: Optional[int] =
     env_rewards: dict = defaultdict(list)
     for r, s in zip(results, stats, strict=True):
         env_rewards[r.get("env", "unknown")].append(s["reward"])
-    if len(env_rewards) > 1:
-        for env, rewards in env_rewards.items():
-            metrics[f"env/{env}/reward_mean"] = _mean(rewards)
+    for env, rewards in env_rewards.items():
+        metrics[f"env/{env}/reward_mean"] = _mean(rewards)
 
     return metrics

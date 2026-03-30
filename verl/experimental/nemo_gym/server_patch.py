@@ -41,9 +41,14 @@ def _replace_prefix_tokens(model_prefix, template_prefix, template_ids, tok):
 
 def _make_patched_preprocess_chat(original):
     async def _patched(
-        self, request, messages,
-        default_template, default_template_content_format, default_template_kwargs,
-        tool_dicts=None, tool_parser=None,
+        self,
+        request,
+        messages,
+        default_template,
+        default_template_content_format,
+        default_template_kwargs,
+        tool_dicts=None,
+        tool_parser=None,
     ):
         required_prefix = getattr(request, "required_prefix_token_ids", None)
         if required_prefix is None:
@@ -56,9 +61,14 @@ def _make_patched_preprocess_chat(original):
                     break
 
         res = await original(
-            self, request, messages,
-            default_template, default_template_content_format, default_template_kwargs,
-            tool_dicts=tool_dicts, tool_parser=tool_parser,
+            self,
+            request,
+            messages,
+            default_template,
+            default_template_content_format,
+            default_template_kwargs,
+            tool_dicts=tool_dicts,
+            tool_parser=tool_parser,
         )
 
         if required_prefix is None:
@@ -68,25 +78,36 @@ def _make_patched_preprocess_chat(original):
             # call _preprocess_chat on messages up to last assistant turn (no gen prompt)
             # to get template_prefix_ids for _replace_prefix_tokens
             last_asst = next(
-                (i for i in reversed(range(len(messages)))
-                 if (messages[i].get("role") if isinstance(messages[i], dict)
-                     else getattr(messages[i], "role", None)) == "assistant"),
+                (
+                    i
+                    for i in reversed(range(len(messages)))
+                    if (
+                        messages[i].get("role") if isinstance(messages[i], dict) else getattr(messages[i], "role", None)
+                    )
+                    == "assistant"
+                ),
                 None,
             )
-            prefix_msgs = messages[:last_asst + 1] if last_asst is not None else messages
+            prefix_msgs = messages[: last_asst + 1] if last_asst is not None else messages
             prefix_res = await original(
-                self, request, prefix_msgs,
-                default_template, default_template_content_format,
+                self,
+                request,
+                prefix_msgs,
+                default_template,
+                default_template_content_format,
                 {**(default_template_kwargs or {}), "add_generation_prompt": False},
-                tool_dicts=tool_dicts, tool_parser=tool_parser,
+                tool_dicts=tool_dicts,
+                tool_parser=tool_parser,
             )
             template_prefix_ids = prefix_res[1][0]["prompt_token_ids"]
 
             tok = self.renderer.get_tokenizer()
             engine_prompt = res[1][0]
             engine_prompt["prompt_token_ids"] = _replace_prefix_tokens(
-                required_prefix, template_prefix_ids,
-                engine_prompt["prompt_token_ids"], tok,
+                required_prefix,
+                template_prefix_ids,
+                engine_prompt["prompt_token_ids"],
+                tok,
             )
         except Exception as e:
             logger.warning(f"[nemo-gym] retokenization patch failed, skipping: {e}")
