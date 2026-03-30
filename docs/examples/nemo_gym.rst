@@ -8,18 +8,20 @@ running NeMo Gym environments with verl using a custom agent loop manager.
 Overview
 --------
 
-The integration adds two components to ``verl/experimental/nemo_gym/``:
+The integration adds three components to ``verl/experimental/nemo_gym/``:
 
-- ``agent_loop.py`` — ``NemoGymAgentLoopManager``: offloads multi-turn rollouts
-  to NeMo Gym, handles retokenization correction across turns, and formats output.
-  The retokenization logic may change shortly to follow verl approach.
-- ``dataset.py`` — ``NemoGymJSONLDataset``: loads NeMo Gym datasets
+- ``agent_loop.py`` — ``NemoGymAgentLoopManager``: drives multi-turn rollouts
+  via NeMo Gym and formats results into verl's DataProto format.
+- ``dataset.py`` — ``NemoGymJSONLDataset``: loads NeMo Gym JSONL datasets
   including messages, tools, agent refs, and metadata into verl format.
+- ``server_patch.py`` — patches vLLM's ``OpenAIServingChat`` and
+  ``OpenAIServingTokenization`` to fix retokenization across multi-turn calls,
+  matching NeMo RL's approach.
 
 Requirements
 ------------
 
-- A NeMo Gym local clone (``gym-ref``) with the environment you want to train on. TODO finalize submodule decision
+- A NeMo Gym clone with the environment you want to train on.
 - ``pip install -e /path/to/gym-ref`` installed into the container at job start.
 
 Quick Start
@@ -57,15 +59,7 @@ The ``nemo_gym`` block in ``AgentLoopConfig`` accepts:
           nemo_gym:
             nemo_gym_root: /path/to/gym-ref
             uses_reasoning_parser: false
-            initial_global_config_dict:
-              config_paths:
-                - /path/to/env.yaml
+            config_paths:
+              - /path/to/env.yaml
 
-Tool Calling
-------------
-
-For environments that use tool calling (e.g. workplace assistant), use a tool parser, for example::
-
-    '+actor_rollout_ref.rollout.engine_kwargs.vllm.enable-auto-tool-choice=true'
-    '+actor_rollout_ref.rollout.engine_kwargs.vllm.tool-call-parser=hermes'
-    '+actor_rollout_ref.rollout.engine_kwargs.vllm.max-model-len=32768'
+For environments that use tool calling (e.g. workplace assistant), use a tool parser. For reasoning models, use a reasoning parser.
