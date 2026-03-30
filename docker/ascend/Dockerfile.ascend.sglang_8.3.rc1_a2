@@ -72,7 +72,7 @@ RUN pip install -e MindSpeed && \
 # Prepare and install verl (update frequently)
 RUN git clone --recursive https://github.com/volcengine/verl.git && \
     cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
-    pip install ray==2.46.0 click==8.2.1 cachetools && \
+    pip install ray==2.46.0 click==8.2.1 cachetools setuptools==80.10.2 nvtx && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
