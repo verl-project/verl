@@ -27,7 +27,7 @@ from verl.models.diffusers_model import DiffusionModelBase
 from verl.utils.device import get_device_name
 from verl.workers.config import DiffusionModelConfig
 
-from .schedulers import FlowMatchSDEDiscreteScheduler
+from ..scheduler import FlowMatchSDEDiscreteScheduler
 
 
 @DiffusionModelBase.register("QwenImagePipeline")
@@ -74,10 +74,11 @@ class QwenImage(DiffusionModelBase):
         timesteps = scheduler_inputs["all_timesteps"]
 
         noise_pred = module(**model_inputs)[0]
-        if model_config.guidance_scale > 1.0:
+        true_cfg_scale = model_config.extra_configs.get("true_cfg_scale", 1.0)
+        if true_cfg_scale > 1.0:
             assert negative_model_inputs is not None
             neg_noise_pred = module(**negative_model_inputs)[0]
-            comb_pred = neg_noise_pred + model_config.guidance_scale * (noise_pred - neg_noise_pred)
+            comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
             cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
             noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
             noise_pred = comb_pred * (cond_norm / noise_norm)

@@ -51,7 +51,7 @@ class DiffusionModelBase(ABC):
 
         DiffusionModelConfig(
             ...,
-            external_lib="examples.flowgrpo_trainer.qwen_image",
+            external_lib="examples.flowgrpo_trainer.diffusers.qwen_image",
         )
     """
 

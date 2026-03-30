@@ -29,7 +29,7 @@ from verl.workers.engine_workers import TrainingWorker
 from verl.workers.utils.losses import diffusion_loss
 from verl.workers.utils.padding import embeds_padding_2_no_padding
 
-EXTERNAL_LIB = "examples.flowgrpo_trainer.qwen_image"
+EXTERNAL_LIB = "examples.flowgrpo_trainer.diffusers.qwen_image"
 
 
 def create_training_config(model_type, strategy, device_count, model):
@@ -49,13 +49,14 @@ def create_training_config(model_type, strategy, device_count, model):
 
         with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/model")):
             cfg = compose(
-                config_name="diffusers_model",
+                config_name="diffusion_model",
                 overrides=[
                     "path=" + path,
                     "tokenizer_path=" + tokenizer_path,
                     "external_lib=" + EXTERNAL_LIB,
                     "lora_rank=8",
                     "lora_alpha=16",
+                    "+extra_configs.true_cfg_scale=4.0",
                     "+extra_configs.sde_type=sde",
                     "+extra_configs.noise_level=1.2",
                 ],
