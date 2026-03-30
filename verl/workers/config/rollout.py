@@ -47,6 +47,10 @@ class SkipConfig(BaseConfig):
     enable: bool = False
     dump_dir: str = "~/.verl/rollout_dump"
     max_dump_step: int = 1
+    # If set (non-empty), dump/load only on these 1-based steps.
+    # If null or empty, fall back to the max_dump_step window.
+    dump_steps: Optional[list[int]] = None
+    # When not a dump step: cache=always generate; repeat=round-robin from dumped gen_steps; repeat_last=last dump only.
     action: str = "cache"  # cache | repeat | repeat_last
 
     def get(self, key: str, default=None):

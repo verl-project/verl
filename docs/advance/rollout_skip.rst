@@ -43,12 +43,17 @@ Add these parameters to enable RolloutSkip:
     actor_rollout_ref.rollout.skip.dump_dir=/path/to/rollout_dump
     actor_rollout_ref.rollout.skip.max_dump_step=10
 
+    # Optional: dump only on selected training steps (1-based), e.g. steps 1, 2, and 5:
+    # actor_rollout_ref.rollout.skip.dump_steps='[1,2,5]'
+
 
 Configuration Parameters
 ------------------------
 - **skip.enable**: Enable or disable RolloutSkip.
 - **skip.dump_dir**: Root directory to save cached rollout data.
-- **skip.max_dump_step**: Maximum number of steps to cache.
+- **skip.max_dump_step**: When ``dump_steps`` is unset or empty, dump/load while ``train_step <= max_dump_step``.
+- **skip.dump_steps**: Optional explicit list of 1-based steps to dump/load. If non-empty, only those steps match; otherwise the ``max_dump_step`` window applies. Use null or ``[]`` for default behavior.
+- **skip.action**: Applies on **non-dump** steps only. ``cache`` — always generate. ``repeat`` — reuse rollout files in round-robin over ``genstep_*`` dirs that were saved on earlier dump steps. ``repeat_last`` — reuse only the latest such dir. On dump steps, RolloutSkip always tries disk load first, then generate+dump if needed.
 
 
 Cached Directory Structure
