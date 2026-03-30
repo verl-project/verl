@@ -30,12 +30,12 @@ from omegaconf import DictConfig, ListConfig
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from verl.models.transformers.qwen2_vl import get_rope_index
 from verl.utils import hf_tokenizer
 from verl.utils.chat_template import apply_chat_template, extract_system_prompt_and_generation
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
+from verl.utils.model import build_qwen_vl_position_ids, is_qwen_vl_processor
 from verl.utils.py_functional import convert_nested_value_to_list_recursive
 
 logger = logging.getLogger(__file__)
@@ -338,21 +338,13 @@ class MultiTurnSFTDataset(Dataset):
             multi_modal_inputs[k] = torch.concat(v, dim=0)
 
         # 2. handle position_ids for Qwen-VL series models
-        if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
-            image_grid_thw = multi_modal_inputs.get("image_grid_thw", None)
-            video_grid_thw = multi_modal_inputs.get("video_grid_thw", None)
-            second_per_grid_ts = multi_modal_inputs.get("second_per_grid_ts", None)
-
-            vision_position_ids = get_rope_index(
+        if self.processor is not None and is_qwen_vl_processor(self.processor):
+            position_ids = build_qwen_vl_position_ids(
                 self.processor,
                 input_ids=input_ids,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
                 attention_mask=attention_mask,
-            )  # (3, seq_len)
-            text_position_ids = torch.arange(input_ids.shape[0], dtype=torch.long).unsqueeze(0)  # (1, seq_len)
-            position_ids = torch.cat((text_position_ids, vision_position_ids), dim=0)  # (4, seq_length)
+                multi_modal_inputs=multi_modal_inputs,
+            )  # (4, seq_length)
         else:
             position_ids = torch.arange(input_ids.shape[0], dtype=torch.long)  # (seq_len,)
 
