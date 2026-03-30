@@ -120,7 +120,7 @@ class VLLMServerManager:
         self.gpu_num = gpu_num
         self.trust_remote_code = trust_remote_code
         self.process: Optional[subprocess.Popen] = None
-        self._健康检查_count = 0
+        self._health_check_count = 0
 
     @property
     def endpoint(self) -> str:
@@ -236,7 +236,7 @@ class VLLMServerManager:
         """
         Restart the vLLM server.
 
-        Useful for权重 updates that require server restart.
+        Useful for weight updates that require server restart.
 
         Returns:
             True if restart successful

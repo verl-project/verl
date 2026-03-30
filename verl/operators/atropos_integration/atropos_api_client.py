@@ -30,6 +30,7 @@ class AtroposAPIClient:
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.trainer_uuid = trainer_uuid
+        self._vllm_port = None
         self._session = requests.Session()
 
     def check_server(self) -> bool:

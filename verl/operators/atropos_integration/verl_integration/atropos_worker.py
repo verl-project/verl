@@ -121,7 +121,7 @@ class AtroposWorker(RayWorker):
                 resp = requests.get(f"http://localhost:{self.vllm_port}/health", timeout=2)
                 if resp.status_code == 200:
                     break
-            except:
+            except (requests.RequestException, OSError):
                 pass
             time.sleep(2)
         else:

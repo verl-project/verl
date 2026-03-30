@@ -175,12 +175,12 @@ class AtroposGRPO_trainer:
 
     def setup_rollout_worker(self):
         """Set up the Atropos rollout worker."""
-        from atropos_verl_integration.atropos_rollout import AtroposRolloutWorker
+        from verl.operators.atropos_integration.verl_integration.atropos_worker import AtroposWorker
 
         rollout_config = self.config.get("rollout", {})
         model_config = self.config.get("model", {})
 
-        self.atropos_worker = AtroposRolloutWorker(
+        self.atropos_worker = AtroposWorker(
             atropos_url=rollout_config.get("atropos_url", "http://localhost:8000"),
             vllm_model_path=model_config.get("path", "Qwen/Qwen2.5-3B-Instruct"),
             vllm_port=rollout_config.get("vllm_port", 8100),
@@ -286,8 +286,8 @@ class AtroposGRPO_trainer:
                     tokens=response_ids_list,
                     masks=response_masks,
                     scores=rewards,
-                    logprobs=logprobs,
                     advantages=advantages,
+                    inference_logprobs=logprobs,
                     ref_logprobs=ref_logprobs,
                 )
 

@@ -15,6 +15,12 @@ setup(
         "transformers>=4.30.0",
         "vllm>=0.3.0",
         "ray>=2.0.0",
+        "hydra-core>=1.3.0",
+        "omegaconf>=2.3.0",
+        "protobuf>=3.20.0",
+        "pydantic>=2.0.0",
+        "wandb>=0.15.0",
+        "tqdm>=4.65.0",
     ],
     extras_require={
         "dev": [

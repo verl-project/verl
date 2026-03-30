@@ -2,7 +2,7 @@
 # Example script for running Atropos GRPO integration
 # This shows how to run GRPO training with Atropos for external rollouts
 
-set -x
+set -xeuo pipefail
 
 # Ensure Atropos API server is running before starting
 # See: https://github.com/NousResearch/atropos

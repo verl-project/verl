@@ -21,7 +21,7 @@ from verl.utils.torch_functional import masked_mean
 
 if TYPE_CHECKING:
     from transformers import AutoTokenizer
-    from vllm_vllm_rollout import VLLMRollout
+    from verl.workers.rollout.vllm_rollout import VLLMRollout
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ class AtroposRolloutActor:
                 if resp.status_code == 200:
                     vllm_ready = True
                     break
-            except:
+            except (requests.RequestException, OSError):
                 pass
             time.sleep(2)
 
@@ -302,7 +302,7 @@ class AtroposRolloutManager:
 
     def create_actors(self, num_gpus: int):
         """Create AtroposRolloutActor workers on GPUs."""
-        from vllm_vllm_rollout import VLLMRollout
+        from verl.workers.rollout.vllm_rollout import VLLMRollout
 
         for gpu_id in range(num_gpus):
             actor = AtroposRolloutActor.options(
