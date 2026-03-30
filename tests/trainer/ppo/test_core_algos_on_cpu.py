@@ -327,7 +327,7 @@ def test_compute_policy_loss_flow_grpo() -> None:
 
     from hydra import compose, initialize_config_dir
 
-    from verl.trainer.ppo.core_algos import compute_policy_loss_flow_grpo
+    from verl.trainer.ppo.diffusion_algos import compute_policy_loss_flow_grpo
     from verl.utils.config import omega_conf_to_dataclass
     from verl.workers.config.actor import FSDPActorConfig
 
