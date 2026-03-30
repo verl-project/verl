@@ -50,6 +50,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
     compute_variance_proxy_metrics,
     filter_zero_adv_batch,
+    maybe_add_corrected_mfu,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
@@ -1616,6 +1617,7 @@ class RayPPOTrainer:
                             self.checkpoint_manager.update_weights(self.global_steps)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                        maybe_add_corrected_mfu(actor_output_metrics, actor_batch.meta_info)
                         metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled

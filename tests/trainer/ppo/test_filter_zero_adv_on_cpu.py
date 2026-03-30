@@ -26,6 +26,7 @@ from verl.trainer.ppo.metric_utils import (
     ZERO_ADV_EPS,
     ceildiv,
     filter_zero_adv_batch,
+    maybe_add_corrected_mfu,
 )
 
 EXPECTED_METRIC_KEYS = (
@@ -88,6 +89,55 @@ class TestCeildiv(unittest.TestCase):
     )
     def test_ceildiv(self, a, b, expected):
         self.assertEqual(ceildiv(a, b), expected)
+
+
+class TestMaybeAddCorrectedMfu(unittest.TestCase):
+    """Tests for maybe_add_corrected_mfu in metric_utils.py."""
+
+    @parameterized.expand(
+        (
+            ("absent", {}),
+            ("explicit_none", {KEY_NUM_TOKENS_CORRECTION_FACTOR: None}),
+        )
+    )
+    def test_no_correction(self, _name, meta_info):
+        """When correction factor is absent or None, no corrected metric is added."""
+        metrics = {"perf/mfu/actor": 0.25, "perf/mfu/critic": 0.10}
+        maybe_add_corrected_mfu(metrics, meta_info)
+        self.assertEqual(sorted(metrics.keys()), ["perf/mfu/actor", "perf/mfu/critic"])
+        self.assertAlmostEqual(metrics["perf/mfu/actor"], 0.25)
+        self.assertAlmostEqual(metrics["perf/mfu/critic"], 0.10)
+
+    @parameterized.expand(
+        (
+            ("full_batch", 1.0, 0.25, 0.25),
+            ("half_filtered", 0.5, 0.30, 0.15),
+            ("quarter_filtered", 0.25, 0.40, 0.10),
+            ("slight_filter", 0.8, 0.20, 0.16),
+            ("zero_mfu", 0.5, 0.0, 0.0),
+        )
+    )
+    def test_correction_applied(self, _name, token_correction, mfu, expected_corrected):
+        """Corrected MFU = original MFU * token_correction_factor; other keys unchanged."""
+        metrics = {"perf/mfu/actor": mfu, "perf/mfu/critic": 0.10, "loss": 1.5}
+        meta_info = {KEY_NUM_TOKENS_CORRECTION_FACTOR: token_correction}
+        maybe_add_corrected_mfu(metrics, meta_info)
+        self.assertEqual(
+            sorted(metrics.keys()), ["loss", "perf/mfu/actor", "perf/mfu/actor_corrected", "perf/mfu/critic"]
+        )
+        self.assertAlmostEqual(metrics["perf/mfu/actor_corrected"], expected_corrected, places=6)
+        self.assertAlmostEqual(metrics["perf/mfu/actor"], mfu)
+        self.assertAlmostEqual(metrics["perf/mfu/critic"], 0.10)
+        self.assertAlmostEqual(metrics["loss"], 1.5)
+
+    def test_correction_overwrites_existing(self):
+        """When perf/mfu/actor_corrected already exists, it is overwritten."""
+        metrics = {"perf/mfu/actor": 0.30, "perf/mfu/actor_corrected": 999.0}
+        meta_info = {KEY_NUM_TOKENS_CORRECTION_FACTOR: 0.5}
+        maybe_add_corrected_mfu(metrics, meta_info)
+        self.assertEqual(sorted(metrics.keys()), ["perf/mfu/actor", "perf/mfu/actor_corrected"])
+        self.assertAlmostEqual(metrics["perf/mfu/actor_corrected"], 0.15, places=6)
+        self.assertAlmostEqual(metrics["perf/mfu/actor"], 0.30)
 
 
 class TestFilterZeroAdvBatch(unittest.TestCase):

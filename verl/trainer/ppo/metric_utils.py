@@ -42,6 +42,21 @@ def ceildiv(a: int, b: int) -> int:
     return -(-a // b)
 
 
+def maybe_add_corrected_mfu(metrics: dict, meta_info: dict) -> None:
+    """Add corrected MFU metric when filter_zero_adv is active.
+
+    When filter_zero_adv is active, perf/mfu/actor is inflated: the FLOPS
+    numerator still reflects the original (unfiltered) token count while
+    time is reduced from processing fewer samples.  This adds
+    perf/mfu/actor_corrected, which scales MFU by
+    (filtered_tokens / original_tokens) to match the actual tokens
+    processed, roughly matching baseline MFU.
+    """
+    token_correction = meta_info.get(KEY_NUM_TOKENS_CORRECTION_FACTOR, None)
+    if token_correction is not None:
+        metrics["perf/mfu/actor_corrected"] = metrics["perf/mfu/actor"] * token_correction
+
+
 def _select_shortest(batch: DataProto, indices: torch.Tensor, k: int) -> list[int]:
     """Select the k shortest samples by attention_mask length from the given indices."""
     seq_lens = batch.batch[KEY_ATTENTION_MASK][indices].sum(dim=-1)
