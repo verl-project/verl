@@ -272,6 +272,7 @@ actor_rollout_ref:
       enable: false
       dump_dir: ~/.verl/rollout_dump
       max_dump_step: 1
+      dump_steps: null
       action: cache
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false

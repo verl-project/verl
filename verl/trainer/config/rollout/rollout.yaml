@@ -315,10 +315,14 @@ skip:
   # Number of training steps (from start) for which dump/load is active. Steps with train_step <= max_dump_step are "dump steps" (try load first, then generate and dump if missing).
   max_dump_step: 1
 
-  # Action when beyond dump steps (gen_step > max_dump_step):
-  # - "cache": If dumped data exists for current step, use it; otherwise generate and dump.
-  # - "repeat": Reuse dumped data in a round-robin over the first max_dump_step steps.
-  # - "repeat_last": Reuse the last dumped step's data.
+  # Optional: only dump/load on these 1-based steps, e.g. [1, 2, 5]. If null or [], use max_dump_step above.
+  dump_steps: null
+
+  # When the current training step is NOT a dump step (see dump_steps / max_dump_step and ``is_dump_step``):
+  # - "cache": Always run real generation (no reuse of rollout dumps on these steps).
+  # - "repeat": Round-robin load from genstep_* dirs that were written on earlier dump steps (``list_dumped_steps``).
+  # - "repeat_last": Load only from the most recently dumped genstep_*.
+  # On dump steps, behavior is always: try load existing dump for this gen_step, else generate and save.
   action: "cache"
 
 # Whether to skip tokenizer initialization for rollout engine

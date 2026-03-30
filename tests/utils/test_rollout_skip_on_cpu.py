@@ -302,3 +302,26 @@ class TestActionWithResume:
         # * Final
         skip.record(new_batch, step + resume_more_step + 1, None)  # train_step start from 1
         rollout_wg.generate_sequences(MagicMock())
+
+
+class TestDumpAtTrainSteps:
+    """rollout.skip.dump_steps overrides the max_dump_step window when non-empty."""
+
+    def test_custom_steps_only(self, mock_rollout_wg):
+        config, rollout_wg, _ = mock_rollout_wg
+        config.actor_rollout_ref.rollout.skip.dump_steps = [1, 2, 5]
+        config.actor_rollout_ref.rollout.skip.max_dump_step = 100
+        skip = RolloutSkip(config, rollout_wg)
+        for t, expected in [(1, True), (2, True), (3, False), (5, True), (6, False)]:
+            skip.curr_train_step = t
+            assert skip.is_dump_step is expected, t
+
+    def test_empty_list_uses_max_dump_step(self, mock_rollout_wg):
+        config, rollout_wg, _ = mock_rollout_wg
+        config.actor_rollout_ref.rollout.skip.dump_steps = []
+        config.actor_rollout_ref.rollout.skip.max_dump_step = 3
+        skip = RolloutSkip(config, rollout_wg)
+        skip.curr_train_step = 2
+        assert skip.is_dump_step
+        skip.curr_train_step = 4
+        assert not skip.is_dump_step
