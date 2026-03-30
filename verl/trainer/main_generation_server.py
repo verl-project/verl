@@ -31,7 +31,6 @@ from pprint import pprint
 
 import pandas as pd
 from omegaconf import OmegaConf
-from openai.types.chat import ChatCompletion
 
 from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
@@ -64,6 +63,8 @@ async def start_server(config):
 
 
 async def submit_request(server_address, **chat_complete_request):
+    from openai.types.chat import ChatCompletion
+
     try:
         extra_headers = chat_complete_request.pop("extra_headers", {})
         timeout = aiohttp.ClientTimeout(total=None)
