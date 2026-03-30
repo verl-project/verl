@@ -14,10 +14,10 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import socket
 import sys
 import threading
+from collections import defaultdict
 from typing import Optional
 
 import ray
@@ -71,8 +71,6 @@ class NemoGymAgentLoopManager(AgentLoopManager):
 
         nemo_gym_root = nemo_gym_cfg.nemo_gym_root if nemo_gym_cfg else None
 
-        # Insert nemo_gym_root into sys.path so Ray remote actors (which don't
-        # inherit PYTHONPATH from the driver) can import nemo-gym from the shared fs.
         if nemo_gym_root and str(nemo_gym_root) not in sys.path:
             sys.path.insert(0, str(nemo_gym_root))
 
@@ -98,7 +96,6 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         )
         vllm_model_cfg["uses_reasoning_parser"] = uses_reasoning_parser
 
-        # Disable thinking if no reasoning parser
         if not uses_reasoning_parser:
             vllm_model_cfg.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})["enable_thinking"] = (
                 False
@@ -128,27 +125,6 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         initial_global_cfg[HEAD_SERVER_KEY_NAME] = {"host": "0.0.0.0", "port": head_port}
         self._head_server_config = BaseServerConfig(host=node_ip, port=head_port)
 
-        # Auto-detect agent ref. maybe dangerous for multi-environment
-        # TODO test multienv
-        self._default_agent_ref = None
-        config_paths = initial_global_cfg.get("config_paths", [])
-        for config_path in config_paths if isinstance(config_paths, list) else []:
-            try:
-                from omegaconf import OmegaConf
-
-                yaml_cfg = OmegaConf.load(config_path)
-                for key in yaml_cfg:
-                    entry = yaml_cfg[key]
-                    if isinstance(entry, dict) and "responses_api_agents" in entry:
-                        self._default_agent_ref = {"type": "responses_api_agents", "name": key}
-                        print(f"[NemoGymAgentLoopManager] Detected agent: {key}")
-                        break
-            except Exception:
-                pass
-            if self._default_agent_ref:
-                break
-
-        # start nemo gym servers
         self._rh = RunHelper()
         self._rh.start(
             global_config_dict_parser_config=GlobalConfigDictParserConfig(
@@ -160,13 +136,10 @@ class NemoGymAgentLoopManager(AgentLoopManager):
 
         self._rch = RolloutCollectionHelper()
 
-        # AgentLoopManager stores model_config as raw DictConfig; convert here
-        # since AgentLoopWorker which normally does this isn't used.
         from verl.utils.config import omega_conf_to_dataclass
 
         self._tokenizer = omega_conf_to_dataclass(self.model_config).tokenizer
 
-        # asyncio.run() was recreating loop on each step and erroring.. so make a single persistent loop
         self._rollout_loop = asyncio.new_event_loop()
         self._rollout_thread = threading.Thread(
             target=self._rollout_loop.run_forever,
@@ -189,25 +162,21 @@ class NemoGymAgentLoopManager(AgentLoopManager):
             prompts,
             self.rollout_config,
             validate=validate,
-            default_agent_ref=self._default_agent_ref,
         )
 
-        # run rollout collection
         nemo_gym_result_iterator = self._rch.run_examples(
             examples=nemo_gym_examples,
             head_server_config=self._head_server_config,
         )
 
-        # collect results
         rowidxs, raw_results = [], []
         for task in nemo_gym_result_iterator:
             nemo_gym_row, nemo_gym_result = await task
             try:
                 result = _postprocess_nemo_gym_result(nemo_gym_result, self._tokenizer)
             except ValueError:
-                # Context length exceeded. return a dummy result (1 token, 0 reward, 0 logprob)
-                # TODO: should we fail here instead or what? i dont like dummy result. what does nemo rl do?
                 result = _empty_result(nemo_gym_row, self._tokenizer)
+            result["env"] = nemo_gym_row["agent_ref"]["name"]
             rowidxs.append(nemo_gym_row["_rowidx"])
             raw_results.append(result)
 
@@ -215,14 +184,21 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         for rowidx, result in zip(rowidxs, raw_results, strict=False):
             results[rowidx] = result
 
-        # pad to batch max instead of setting data.max_prompt_length
-        # TODO: review what we are padding here, is this dangerous or wasteful?
         prompt_lens = [sum(len(m["token_ids"]) for m in r["input_message_log"]) for r in results]
         response_lens = [
             sum(len(m["token_ids"]) for m in r["message_log"][len(r["input_message_log"]) :]) for r in results
         ]
         prompt_length = max(prompt_lens) if prompt_lens else self.rollout_config.prompt_length
+        _vllm_kwargs = (getattr(self.rollout_config, "engine_kwargs", {}) or {}).get("vllm", {}) or {}
+        max_model_len = (
+            getattr(self.rollout_config, "max_model_len", None)
+            or _vllm_kwargs.get("max-model-len")
+            or _vllm_kwargs.get("max_model_len")
+        )
+        response_budget = (int(max_model_len) - prompt_length) if max_model_len else None
         response_length = max(response_lens) if response_lens else self.rollout_config.response_length
+        if response_budget:
+            response_length = min(response_length, response_budget)
 
         internal_outputs = [
             _nemo_gym_result_to_verl(
@@ -241,11 +217,19 @@ class NemoGymAgentLoopManager(AgentLoopManager):
             validate=validate,
         )
         output.meta_info["global_steps"] = global_steps
-        # ray_trainer.py merges this into its own timing_raw at line ~1362; empty is fine
+        rollout_metrics = _compute_rollout_metrics(results, getattr(self.rollout_config, "max_model_len", None))
         output.meta_info["timing"] = {}
-        output.meta_info["rollout_metrics"] = _compute_rollout_metrics(
-            results, getattr(self.rollout_config, "max_model_len", None)
-        )
+        output.meta_info["rollout_metrics"] = rollout_metrics
+
+        env_metrics = {k: v for k, v in rollout_metrics.items() if k.startswith("env/")}
+        if env_metrics:
+            try:
+                import wandb
+                if wandb.run is not None:
+                    wandb.log({**env_metrics, "train/global_step": global_steps}, step=global_steps)
+            except Exception:
+                pass
+
         return output
 
 
@@ -253,7 +237,6 @@ def _build_nemo_gym_examples(
     prompts: DataProto,
     rollout_config,
     validate: bool = False,
-    default_agent_ref=None,
 ) -> list[dict]:
     cfg = rollout_config
     temperature = cfg.val_kwargs.temperature if validate else cfg.temperature
@@ -264,14 +247,10 @@ def _build_nemo_gym_examples(
     for i in range(len(prompts)):
         messages = list(non_tensor["raw_prompt"][i])
 
-        if "agent_ref" in non_tensor:
-            agent_ref = non_tensor["agent_ref"][i]
-        elif default_agent_ref is not None:
-            agent_ref = default_agent_ref
-        else:
-            agent_ref = {"type": "responses_api_agents", "name": "math_with_judge_simple_agent"}
+        if "agent_ref" not in non_tensor:
+            raise ValueError(f"dataset row {i} is missing agent_ref")
+        agent_ref = non_tensor["agent_ref"][i]
 
-        # Build responses_create_params
         rcp = {}
         if "extra_env_info" in non_tensor and "_rcp_extra" in (non_tensor["extra_env_info"][i] or {}):
             rcp.update(non_tensor["extra_env_info"][i]["_rcp_extra"])
@@ -294,61 +273,6 @@ def _build_nemo_gym_examples(
     return examples
 
 
-def _replace_prefix_tokens(
-    tokenizer,
-    model_prefix_token_ids: list[int],
-    template_prefix_token_ids: list[int],
-    template_token_ids: list[int],
-) -> list[int]:
-    """Fix chat-template re-tokenization differences across multi-turn calls.
-
-    Find the first eos  token that appears at or after the first
-    divergence point between model_prefix and template.  That eos marks the
-    end of the re-tokenized assistant turn. Everything from that eos onward
-    in template_token_ids (eos + tool-result + gen-prompt) becomes the new
-    observation suffix, and the model's original prefix tokens are kept intact.
-
-    TODO: review why original was not sufficient (re-tokenized turn can be shorter or longer)
-    TODO: verl avoids this entirely by appending token ids each turn without re-tokenizing
-    """
-    if not model_prefix_token_ids:
-        return template_token_ids
-    raw_eos = tokenizer.eos_token_id
-    if raw_eos is None:
-        return template_token_ids
-    # handle case where eos_token_id is list (ideally there is just 1 lol)
-    eos_ids: set[int] = set(raw_eos) if isinstance(raw_eos, list) else {raw_eos}
-
-    model_cut = len(model_prefix_token_ids)
-    if model_prefix_token_ids[-1] in eos_ids:
-        model_cut -= 1
-
-    # Find first position where the two sequences differ
-    first_diff = next(
-        (i for i, (a, b) in enumerate(zip(model_prefix_token_ids, template_token_ids, strict=False)) if a != b),
-        min(len(model_prefix_token_ids), len(template_token_ids)),
-    )
-
-    # look ahead from first_diff: find the eos that ends the re-tokenized assistant turn.
-    # works even when the re-tokenized turn is shorter than the original.
-    cut = -1
-    for pos in range(first_diff, len(template_token_ids)):
-        if template_token_ids[pos] in eos_ids:
-            cut = pos
-            break
-
-    # look back up to first_diff (for uncommon longer retokenized case)
-    if cut < 0:
-        for pos in reversed(range(first_diff)):
-            if template_token_ids[pos] in eos_ids:
-                cut = pos
-                break
-
-    if cut < 0:
-        return template_token_ids
-    return model_prefix_token_ids[:model_cut] + template_token_ids[cut:]
-
-
 def _postprocess_nemo_gym_result(nemo_gym_result: dict, tokenizer) -> dict:
     message_log = []
     seen_token_ids: list[int] = []
@@ -359,28 +283,9 @@ def _postprocess_nemo_gym_result(nemo_gym_result: dict, tokenizer) -> dict:
 
         prompt_ids = item["prompt_token_ids"]
 
-        # If token IDs are non-contiguous apply _replace_prefix_tokens fix to restore monotonic token IDs.
-        # TODO use verl way
-        if seen_token_ids and seen_token_ids != prompt_ids[: len(seen_token_ids)]:
-            prompt_ids = _replace_prefix_tokens(
-                tokenizer,
-                model_prefix_token_ids=seen_token_ids,
-                template_prefix_token_ids=seen_token_ids,
-                template_token_ids=prompt_ids,
-            )
-
-        if seen_token_ids != prompt_ids[: len(seen_token_ids)]:
-            diverge_at = next(
-                (i for i, (a, b) in enumerate(zip(seen_token_ids, prompt_ids, strict=False)) if a != b),
-                len(seen_token_ids),
-            )
-            raise AssertionError(
-                f"Non-contiguous token IDs after replace_prefix fix. "
-                f"seen_len={len(seen_token_ids)} prompt_len={len(prompt_ids)} "
-                f"first_diverge={diverge_at} "
-                f"seen[{diverge_at - 2}:{diverge_at + 3}]={seen_token_ids[max(0, diverge_at - 2) : diverge_at + 3]} "
-                f"prompt[{diverge_at - 2}:{diverge_at + 3}]={prompt_ids[max(0, diverge_at - 2) : diverge_at + 3]}"
-            )
+        assert (
+            seen_token_ids == prompt_ids[: len(seen_token_ids)]
+        ), f"Non-contiguous token IDs (server_patch active?). seen={len(seen_token_ids)} prompt={len(prompt_ids)}"
 
         message_log.append(
             {
@@ -409,7 +314,7 @@ def _postprocess_nemo_gym_result(nemo_gym_result: dict, tokenizer) -> dict:
     if not message_log:
         raise ValueError(
             "nemo-gym returned a result with no generation data. "
-            "The prompt (ie full context in multi step/turn) probably exceeds vLLM's max_model_len."
+            "The prompt may exceed vLLM's max_model_len."
         )
 
     return {
@@ -561,7 +466,7 @@ def _compute_rollout_metrics(results: list[dict], max_model_len: Optional[int] =
             }
         )
 
-    return {
+    metrics = {
         "turns_per_sample/mean": _mean([s["turns"] for s in stats]),
         "total_tokens_per_sample/mean": _mean([s["total"] for s in stats]),
         "gen_tokens_per_sample/mean": _mean([s["asst"] for s in stats]),
@@ -570,3 +475,13 @@ def _compute_rollout_metrics(results: list[dict], max_model_len: Optional[int] =
         "natural_termination_rate": sum(not s["hit_max"] for s in stats) / batch_size,
         "truncation_rate": sum(s["hit_max"] for s in stats) / batch_size,
     }
+
+    # per environment metrics
+    env_rewards: dict = defaultdict(list)
+    for r, s in zip(results, stats, strict=True):
+        env_rewards[r.get("env", "unknown")].append(s["reward"])
+    if len(env_rewards) > 1:
+        for env, rewards in env_rewards.items():
+            metrics[f"env/{env}/reward_mean"] = _mean(rewards)
+
+    return metrics
