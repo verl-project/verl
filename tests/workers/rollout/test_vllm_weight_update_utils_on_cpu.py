@@ -112,10 +112,11 @@ def test_split_buffer_updates_routes_registered_buffers():
         ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32)),
     ]
 
-    param_updates, buffer_updates = split_buffer_updates(model, weights)
+    param_updates, buffer_updates, named_buffers = split_buffer_updates(model, weights)
 
     assert [name for name, _ in param_updates] == ["model.layers.0.linear.weight"]
     assert [name for name, _ in buffer_updates] == ["model.layers.0.e_score_correction_bias"]
+    assert "model.layers.0.e_score_correction_bias" in named_buffers
 
 
 def test_apply_buffer_updates_copies_buffer_values():
@@ -143,6 +144,7 @@ def test_apply_buffer_updates_ignores_non_buffer_weights():
 def test_vllm_update_weights_loads_params_and_buffers():
     model = _ToyModel()
     loaded_param_names = []
+    apply_named_buffers = []
 
     class _FakeModelRunner:
         def __init__(self, inner_model):
@@ -154,6 +156,14 @@ def test_vllm_update_weights_loads_params_and_buffers():
 
     model.load_weights = _fake_load_weights
 
+    original_apply_buffer_updates = _vllm_rollout_utils.apply_buffer_updates
+
+    def _spy_apply_buffer_updates(inner_model, buffer_updates, named_buffers=None):
+        apply_named_buffers.append(named_buffers)
+        return original_apply_buffer_updates(inner_model, buffer_updates, named_buffers=named_buffers)
+
+    _vllm_rollout_utils.apply_buffer_updates = _spy_apply_buffer_updates
+
     worker = object.__new__(vLLMColocateWorkerExtension)
     worker.model_runner = _FakeModelRunner(model)
 
@@ -162,9 +172,13 @@ def test_vllm_update_weights_loads_params_and_buffers():
         ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32) + 5),
     ]
 
-    worker._update_weights(weights, peft_config=None, base_sync_done=False)
+    try:
+        worker._update_weights(weights, peft_config=None, base_sync_done=False)
+    finally:
+        _vllm_rollout_utils.apply_buffer_updates = original_apply_buffer_updates
 
     assert loaded_param_names == ["model.layers.0.linear.weight"]
+    assert apply_named_buffers and apply_named_buffers[0] is not None
     torch.testing.assert_close(
         model.model.layers[0].e_score_correction_bias, torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     )

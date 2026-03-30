@@ -17,7 +17,7 @@ import torch
 
 def split_buffer_updates(
     model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]]
-) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
+) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]], dict[str, torch.Tensor]]:
     """Split incoming weight updates into parameter and buffer updates."""
     named_buffers = dict(model.named_buffers())
     param_updates, buffer_updates = [], []
@@ -26,16 +26,21 @@ def split_buffer_updates(
             buffer_updates.append((name, tensor))
         else:
             param_updates.append((name, tensor))
-    return param_updates, buffer_updates
+    return param_updates, buffer_updates, named_buffers
 
 
 @torch.no_grad()
-def apply_buffer_updates(model: torch.nn.Module, buffer_updates: list[tuple[str, torch.Tensor]]) -> int:
+def apply_buffer_updates(
+    model: torch.nn.Module,
+    buffer_updates: list[tuple[str, torch.Tensor]],
+    named_buffers: dict[str, torch.Tensor] | None = None,
+) -> int:
     """Copy updated buffer tensors into the target model in-place."""
     if not buffer_updates:
         return 0
 
-    named_buffers = dict(model.named_buffers())
+    if named_buffers is None:
+        named_buffers = dict(model.named_buffers())
     loaded = 0
     for name, tensor in buffer_updates:
         if name not in named_buffers:
