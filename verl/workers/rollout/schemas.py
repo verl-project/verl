@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin
 
 from verl.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema, ToolResponse
-from verl.utils.model import compute_position_id_with_mask
+from verl.utils.model import build_qwen_vl_position_ids, compute_position_id_with_mask, is_qwen_vl_processor
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -264,35 +264,13 @@ class AsyncRolloutRequest(BaseModel):
         attention_mask: torch.Tensor,
         multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        # special case for qwen2vl
-        is_qwen2vl = (
-            hasattr(processing_class, "image_processor")
-            and "Qwen2VLImageProcessor" in processing_class.image_processor.__class__.__name__
-        )
-        if is_qwen2vl:
-            from verl.models.transformers.qwen2_vl import get_rope_index
-
-            image_grid_thw = video_grid_thw = second_per_grid_ts = None
-            if multi_modal_inputs:
-                image_grid_thw = multi_modal_inputs.get("image_grid_thw")
-                video_grid_thw = multi_modal_inputs.get("video_grid_thw")
-                second_per_grid_ts = multi_modal_inputs.get("second_per_grid_ts")
-
-            assert input_ids.dim() == 2 and input_ids.shape[0] == 1, (
-                f"input_ids should be 2D with batch size 1, but got shape {input_ids.shape}"
-            )
-            assert attention_mask.dim() == 2 and attention_mask.shape[0] == 1, (
-                f"attention_mask should be 2D with batch size 1, but got shape {attention_mask.shape}"
-            )
-            new_position_ids = get_rope_index(
+        if is_qwen_vl_processor(processing_class):
+            return build_qwen_vl_position_ids(
                 processing_class,
-                input_ids=input_ids.squeeze(0),
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                attention_mask=attention_mask.squeeze(0),
-            )
-            return new_position_ids  # (3, seq_len)
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                multi_modal_inputs=multi_modal_inputs,
+            )  # (4, seq_len)
         else:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
