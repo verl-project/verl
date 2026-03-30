@@ -87,6 +87,29 @@ verl is fast with:
 - **FSDP**, **FSDP2** and **Megatron-LM** for training.
 - **vLLM**, **SGLang** and **HF Transformers** for rollout generation.
 - Compatible with Hugging Face Transformers and Modelscope Hub: [Qwen-3](https://github.com/volcengine/verl/blob/main/examples/grpo_trainer/run_qwen3-8b.sh), Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
+
+<details><summary><b>Model Support Matrix</b> (click to expand)</summary>
+
+| Model | FSDP/FSDP2 | Megatron/MCore | vLLM | SGLang | LoRA | Sequence Parallel |
+|---|---|---|---|---|---|---|
+| **Llama 2/3/3.1/3.2** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Qwen 2/2.5** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Qwen 3** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Qwen 2-MoE / 3-MoE** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **DeepSeek-V2/V3/R1** | ✅ | ⚠️ | ✅ | ✅ | ✅ | ✅ |
+| **Mixtral** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Gemma / Gemma 2/3** | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| **Mistral / Phi-3** | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| **Llama 4** | ✅ | ⚠️ | ✅ | ✅ | ✅ | ✅ |
+| **Qwen2-VL / Qwen2.5-VL** | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ |
+| **Qwen3-VL / Qwen3-MoE-VL** | ✅ | ⚠️ | ✅ | ✅ | ✅ | ⚠️ |
+| **Kimi-VL / GLM-4V** | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ |
+
+✅ Supported &nbsp; ⚠️ Partial/experimental &nbsp; ❌ Not supported
+
+For the full matrix (FP8, MTP, reward models, hardware backends, etc.), see the **[Model Support Matrix](https://verl.readthedocs.io/en/latest/models/model_support.html)** documentation.
+
+</details>
 - Supervised fine-tuning.
 - Reinforcement learning with [PPO](examples/ppo_trainer/), [GRPO](examples/grpo_trainer/), [GSPO](https://github.com/verl-project/verl-recipe/tree/main/gspo/), [ReMax](examples/remax_trainer/), [REINFORCE++](https://verl.readthedocs.io/en/latest/examples/config.html#algorithm), [RLOO](examples/rloo_trainer/), [PRIME](https://github.com/verl-project/verl-recipe/tree/main/prime/), [DAPO](https://github.com/verl-project/verl-recipe/tree/main/dapo/), [DrGRPO](https://github.com/verl-project/verl-recipe/tree/main/drgrpo), [KL_Cov & Clip_Cov](https://github.com/verl-project/verl-recipe/tree/main/entropy) etc.
   - Support model-based reward and function-based reward (verifiable reward) for math, [coding](https://github.com/verl-project/verl-recipe/tree/main/dapo), etc
