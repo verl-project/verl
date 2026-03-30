@@ -120,3 +120,21 @@ router_replay:
   # File path to load recorded routing decisions for replay
   # Required when mode is 'replay'
   replay_file: null
+
+# QAT (Quantization-Aware Training) configuration
+qat:
+  _target_: verl.workers.config.QATEngineConfig
+  # Whether to enable QAT
+  enable: false
+  # Quantization mode: "w4a16" (weight-only FP4) or "w4a4" (weight + activation FP4)
+  mode: "w4a16"
+  # Group size for blockwise quantization (NVFP4 requires 16)
+  group_size: 16
+  # Module name patterns to exclude from quantization (fnmatch style for Megatron)
+  ignore_patterns:
+    - "lm_head"
+    - "*mlp.gate"
+  # Activation observer strategy (W4A4 only): "static_minmax", "memoryless_minmax", "minmax"
+  activation_observer: null
+  # Path to quantization config JSON for vLLM weight export
+  quantization_config_path: null

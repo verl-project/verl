@@ -122,6 +122,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self, DistProfiler(rank=self.rank, config=self.profiler_config, tool_config=self.profiler_tool_config)
         )
 
+        self.model_config.model_type = self.config.model_type
         self.engine: BaseEngine = EngineRegistry.new(
             model_type=self.config.model_type,
             backend=self.engine_config.strategy,
@@ -696,7 +697,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After update_weights", logger=logger)
 
         # 3. offload model to cpu
-        self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+        if self.actor.engine.is_param_offload_enabled:
+            self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
         aggressive_empty_cache(force_sync=True)
 
         # 4. resume kv_cache

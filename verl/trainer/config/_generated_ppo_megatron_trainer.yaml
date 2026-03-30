@@ -66,6 +66,16 @@ actor_rollout_ref:
         mode: disabled
         record_file: null
         replay_file: null
+      qat:
+        _target_: verl.workers.config.QATEngineConfig
+        enable: false
+        mode: w4a16
+        group_size: 16
+        ignore_patterns:
+        - lm_head
+        - '*mlp.gate'
+        activation_observer: null
+        quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -141,6 +151,16 @@ actor_rollout_ref:
       mode: disabled
       record_file: null
       replay_file: null
+    qat:
+      enable: false
+      mode: w4a16
+      group_size: 16
+      ignore_patterns:
+      - lm_head
+      - embed_tokens
+      - re:.*mlp.gate$
+      activation_observer: static_minmax
+      quantization_config_path: null
     load_weight: true
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
@@ -214,6 +234,16 @@ actor_rollout_ref:
         mode: disabled
         record_file: null
         replay_file: null
+      qat:
+        _target_: verl.workers.config.QATEngineConfig
+        enable: false
+        mode: w4a16
+        group_size: 16
+        ignore_patterns:
+        - lm_head
+        - '*mlp.gate'
+        activation_observer: null
+        quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
     load_weight: true
   rollout:
@@ -301,8 +331,12 @@ actor_rollout_ref:
       backend: null
       token2text: false
       max_samples_per_step_per_worker: null
-    skip_rollout: false
-    skip_dump_dir: /tmp/rollout_dump
+    skip:
+      _target_: verl.workers.config.SkipConfig
+      enable: false
+      dump_dir: ~/.verl/rollout_dump
+      max_dump_step: 1
+      action: cache
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
     profiler:
@@ -332,7 +366,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,null}
+    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
     layer_name_map:
       qkv_layer_name: qkv
       gate_proj_layer_name: gate_up
@@ -502,6 +536,16 @@ critic:
       mode: disabled
       record_file: null
       replay_file: null
+    qat:
+      _target_: verl.workers.config.QATEngineConfig
+      enable: false
+      mode: w4a16
+      group_size: 16
+      ignore_patterns:
+      - lm_head
+      - '*mlp.gate'
+      activation_observer: null
+      quantization_config_path: null
   _target_: verl.workers.config.McoreCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: megatron
@@ -772,7 +816,7 @@ trainer:
   ray_wait_register_center_timeout: 300
   device: cuda
   rollout_data_dir: null
-  use_legacy_worker_impl: auto
+  use_legacy_worker_impl: disable
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null

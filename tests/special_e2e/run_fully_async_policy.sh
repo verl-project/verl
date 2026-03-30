@@ -185,20 +185,14 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running fully async training with Megatron strategy..."
     # Megatron specific parameters
     gen_tp=2
-    train_tp=1
+    train_tp=2
     train_pp=2
     ref_offload=True
-    actor_offload=False
+    actor_offload=True
+    common_params+=(
+        actor_rollout_ref.rollout.gpu_memory_utilization=0.60
+    )
 
-    if [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
-        train_tp=2
-        actor_offload=True
-        common_params+=(
-            # Todo The checkpoint_engine.backend should be unified to nccl
-            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.60
-        )
-    fi
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         --config-path=config \
         --config-name='fully_async_ppo_megatron_trainer.yaml' \
