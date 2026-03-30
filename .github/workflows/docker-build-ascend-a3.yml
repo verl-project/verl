@@ -1,4 +1,4 @@
-name: docker-build-ascend-a3
+name: docker-build-ascend-sglang-a3
 
 on:
   workflow_dispatch:
