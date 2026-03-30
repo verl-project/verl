@@ -239,6 +239,84 @@ def compute_position_id_with_mask(mask):
     return torch.clip(torch.cumsum(mask, dim=-1) - 1, min=0, max=None)
 
 
+def is_qwen_vl_processor(processor) -> bool:
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None:
+        return False
+
+    image_processor_cls_name = image_processor.__class__.__name__.lower()
+    return "qwen" in image_processor_cls_name and "vl" in image_processor_cls_name and "imageprocessor" in image_processor_cls_name
+
+
+def build_qwen_vl_position_ids(
+    processor,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None,
+) -> torch.Tensor:
+    original_input_ids_dim = input_ids.dim()
+    original_attention_mask_dim = attention_mask.dim()
+    if input_ids.dim() == 2:
+        assert input_ids.shape[0] == 1, f"input_ids should have batch size 1, but got {input_ids.shape}"
+        input_ids = input_ids.squeeze(0)
+    if attention_mask.dim() == 2:
+        assert attention_mask.shape[0] == 1, (
+            f"attention_mask should have batch size 1, but got {attention_mask.shape}"
+        )
+        attention_mask = attention_mask.squeeze(0)
+
+    multi_modal_inputs = multi_modal_inputs or {}
+    image_grid_thw = multi_modal_inputs.get("image_grid_thw")
+    video_grid_thw = multi_modal_inputs.get("video_grid_thw")
+    second_per_grid_ts = multi_modal_inputs.get("second_per_grid_ts")
+
+    if callable(getattr(processor, "get_rope_index", None)):
+        batched_input_ids = input_ids.unsqueeze(0) if original_input_ids_dim == 1 else input_ids
+        batched_attention_mask = attention_mask.unsqueeze(0) if original_attention_mask_dim == 1 else attention_mask
+        vision_position_ids = processor.get_rope_index(
+            input_ids=batched_input_ids,
+            attention_mask=batched_attention_mask,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+        )
+        if isinstance(vision_position_ids, tuple):
+            vision_position_ids = vision_position_ids[0]
+        if vision_position_ids.dim() == 3:
+            if vision_position_ids.shape[0] == 3 and vision_position_ids.shape[1] == 1:
+                vision_position_ids = vision_position_ids.squeeze(1)
+            elif vision_position_ids.shape[0] == 1 and vision_position_ids.shape[1] == 3:
+                vision_position_ids = vision_position_ids.squeeze(0)
+            else:
+                raise ValueError(f"Unsupported processor.get_rope_index output shape: {vision_position_ids.shape}")
+    else:
+        image_processor_cls_name = processor.image_processor.__class__.__name__.lower()
+        if "qwen3" in image_processor_cls_name:
+            from verl.models.transformers.qwen3_vl import get_rope_index
+
+            vision_position_ids = get_rope_index(
+                processor,
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                attention_mask=attention_mask,
+            )
+        else:
+            from verl.models.transformers.qwen2_vl import get_rope_index
+
+            vision_position_ids = get_rope_index(
+                processor,
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                attention_mask=attention_mask,
+            )
+
+    text_position_ids = compute_position_id_with_mask(attention_mask).unsqueeze(0)
+    return torch.cat((text_position_ids, vision_position_ids), dim=0)
+
+
 def convert_weight_keys(state_dict: dict[str, torch.Tensor], model: PreTrainedModel):
     # convert state dict keys: https://github.com/huggingface/transformers/pull/38385
     if not hasattr(model, "_checkpoint_conversion_mapping"):
