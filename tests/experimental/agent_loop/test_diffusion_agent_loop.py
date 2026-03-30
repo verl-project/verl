@@ -64,8 +64,7 @@ def init_config() -> DictConfig:
     config.data.max_prompt_length = max_length
     config.actor_rollout_ref.rollout.max_model_len = max_length
 
-    # TODO (mike): test with TP later
-    config.actor_rollout_ref.rollout.tensor_model_parallel_size = 1
+    config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
     return config
 
 
