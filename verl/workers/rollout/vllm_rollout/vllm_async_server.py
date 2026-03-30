@@ -39,6 +39,7 @@ from verl.utils.device import get_resource_name, get_visible_devices_keyword, is
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.tq_multimodal import get_tq_client, is_tq_url, resolve_tq_images
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -481,6 +482,11 @@ class vLLMHttpServer:
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+
+        # Resolve tq:// URLs to PIL Images if TransferQueue is used for multi-modal data.
+        image_data = await _maybe_resolve_tq_media(image_data)
+        video_data = await _maybe_resolve_tq_media(video_data)
+
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
@@ -915,22 +921,27 @@ class vLLMReplica(RolloutReplica):
                 name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}"
             else:
                 name = f"{prefix}server_{self.replica_rank}_{node_rank}"
+
+            # Build environment variables for the server Ray actor.
+            env_vars = {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                # To prevent hanging or crash during synchronization of weights between actor and rollout
+                # in disaggregated mode. See:
+                # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+                # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+                "NCCL_CUMEM_ENABLE": "0",
+            }
+            # Inject TransferQueue connection info when TQ is enabled, so the
+            # TQMediaConnector inside vLLM can connect to the TQ cluster.
+            env_vars.update(_build_tq_env_vars())
+
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                        # To prevent hanging or crash during synchronization of weights between actor and rollout
-                        # in disaggregated mode. See:
-                        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
-                        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
-                        "NCCL_CUMEM_ENABLE": "0",
-                    }
-                },
+                runtime_env={"env_vars": env_vars},
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(
@@ -1029,3 +1040,62 @@ class vLLMReplica(RolloutReplica):
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix (e.g. 'vllm_' or 'vllm_omni_')."""
         return "vllm_"
+
+
+# ---------------------------------------------------------------------------
+# TransferQueue helpers (module-level, used by vLLMHttpServer and vLLMReplica)
+# ---------------------------------------------------------------------------
+
+
+def _build_tq_env_vars() -> dict[str, str]:
+    """Build TQ-related environment variables for the vLLM server Ray actor.
+
+    These variables are only populated when TransferQueue is enabled (i.e. the
+    ``VERL_TQ_CONTROLLER_INFO`` env var is set in the current process, which
+    happens after the trainer calls ``_initialize_transferqueue``).
+
+    The variables are consumed by :class:`TQMediaConnector` inside vLLM to
+    lazily initialise a TQ client when the first ``tq://`` URL is encountered.
+    """
+    env_vars: dict[str, str] = {}
+
+    for key in (
+        "VERL_TQ_CONTROLLER_INFO",
+        "VERL_TQ_STORAGE_UNIT_INFOS",
+        "VERL_TQ_STORAGE_BACKEND",
+    ):
+        val = os.environ.get(key)
+        if val is not None:
+            env_vars[key] = val
+
+    if "VERL_TQ_CONTROLLER_INFO" in env_vars:
+        env_vars["VLLM_MEDIA_CONNECTOR"] = "tq"
+
+    return env_vars
+
+
+async def _maybe_resolve_tq_media(media_data: Optional[list[Any]]) -> Optional[list[Any]]:
+    """If *media_data* contains ``tq://`` URL strings, resolve them via TransferQueue.
+
+    Returns ``numpy.ndarray`` in channels-first ``(C, H, W)`` format that
+    vLLM's ``multi_modal_data`` accepts directly — no PIL round-trip needed.
+
+    When TQ is not in use (i.e. *media_data* already contains PIL Images or
+    is ``None``), this function is a no-op and returns the input unchanged.
+    """
+    if media_data is None or len(media_data) == 0:
+        return media_data
+
+    if not is_tq_url(media_data[0]):
+        return media_data
+
+    try:
+        tq_client = get_tq_client()
+        if tq_client is None:
+            logger.warning("Received tq:// URLs but no TQ client is available; returning raw URLs.")
+            return media_data
+
+        return await resolve_tq_images(tq_client, media_data)
+    except ImportError:
+        logger.warning("transfer_queue not installed; cannot resolve tq:// URLs.")
+        return media_data

@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.utils.profiler import simple_timer
+from verl.utils.tq_multimodal import maybe_store_media_to_tq
 from verl.workers.rollout.replica import TokenOutput
 
 logger = logging.getLogger(__file__)
@@ -48,15 +49,22 @@ class SingleTurnAgentLoop(AgentLoopBase):
             videos=videos,
         )
 
-        # 3. generate sequences
+        # 3. generate sequences — when TransferQueue is enabled, store images
+        #    into TQ and pass tq:// URLs instead of raw PIL Images to avoid
+        #    serialising large image blobs over Ray RPC.
+        request_id = uuid4().hex
+        image_data_for_generate, video_data_for_generate = await maybe_store_media_to_tq(
+            images, videos, request_id=request_id
+        )
+
         metrics = {}
         with simple_timer("generate_sequences", metrics):
             output: TokenOutput = await self.server_manager.generate(
-                request_id=uuid4().hex,
+                request_id=request_id,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
-                image_data=images,
-                video_data=videos,
+                image_data=image_data_for_generate,
+                video_data=video_data_for_generate,
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
