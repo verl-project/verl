@@ -580,6 +580,13 @@ class DataParallelPPOActor(BasePPOActor):
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
 
+                    # Per-trajectory loss weight for multi-trajectory groups (1/group_size).
+                    # Applied as weighted response_mask for loss computation only.
+                    trajectory_loss_weight = model_inputs.get("trajectory_loss_weight", None)
+                    loss_response_mask = (
+                        response_mask * trajectory_loss_weight if trajectory_loss_weight is not None else response_mask
+                    )
+
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
 
@@ -622,7 +629,7 @@ class DataParallelPPOActor(BasePPOActor):
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
                         advantages=advantages,
-                        response_mask=response_mask,
+                        response_mask=loss_response_mask,
                         loss_agg_mode=loss_agg_mode,
                         config=self.config,
                         rollout_is_weights=rollout_is_weights,

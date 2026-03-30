@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import math
 import os
 import uuid
 from collections import defaultdict
@@ -134,6 +135,42 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def _propagate_shared_reward_within_groups(batch: DataProto) -> None:
+    """Safeguard for the colocated reward model path (enable_agent_reward_loop=False).
+
+    When the reward model is colocated with the actor, rewards are computed in the trainer
+    via _compute_reward_colocate after rollout completes. The reward manager sees each
+    trajectory independently and assigns per-trajectory rm_scores. However, for multi-trajectory
+    groups, all trajectories should share the same reward for advantage computation.
+
+    This function overwrites rm_scores so that all trajectories in a group get the 'final'
+    trajectory's reward (or the last trajectory's reward as fallback).
+
+    When rewards are computed inside the agent loop (enable_agent_reward_loop=True), rm_scores
+    is already set to shared_reward in _postprocess, so this function is a no-op.
+    """
+    group_ids = batch.non_tensor_batch["trajectory_group_id"]
+    roles = batch.non_tensor_batch.get("trajectory_role")
+    rm_scores = batch.batch["rm_scores"]
+
+    for gid in np.unique(group_ids):
+        mask = group_ids == gid
+        indices = np.where(mask)[0]
+        if len(indices) <= 1:
+            continue
+
+        # Find 'final' trajectory, fallback to last
+        final_idx = indices[-1]
+        if roles is not None:
+            for idx in indices:
+                if roles[idx] == "final":
+                    final_idx = idx
+                    break
+        shared_score = rm_scores[final_idx].clone()
+        for idx in indices:
+            rm_scores[idx] = shared_score
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
@@ -147,6 +184,10 @@ def compute_advantage(
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, etc.
     The advantage estimates are used to guide policy optimization in RL algorithms.
+
+    When trajectory_group_id is present (multi-trajectory rollouts), advantages are computed at the
+    rollout level (one representative per group) to avoid over-counting rollouts with more trajectories,
+    then broadcast back to all trajectories in each group.
 
     Args:
         data (DataProto): The data containing batched model outputs and inputs.
@@ -164,9 +205,37 @@ def compute_advantage(
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch.keys():
         data.batch["response_mask"] = compute_response_mask(data)
+
+    has_groups = "trajectory_group_id" in data.non_tensor_batch
+
+    # For multi-trajectory groups, deduplicate to one representative per group so that
+    # advantage estimators count each rollout once (not once per trajectory).
+    if has_groups:
+        trajectory_group_id = data.non_tensor_batch["trajectory_group_id"]
+        seen = {}
+        representative_indices = []
+        for i, gid in enumerate(trajectory_group_id):
+            if gid not in seen:
+                seen[gid] = len(representative_indices)
+                representative_indices.append(i)
+        repr_idx = torch.tensor(representative_indices, dtype=torch.long)
+        # Build broadcast mapping: trajectory i -> dedup index
+        broadcast_idx = torch.tensor([seen[gid] for gid in trajectory_group_id], dtype=torch.long)
+
+        # Deduplicated views for the advantage estimator
+        dedup_rewards = data.batch["token_level_rewards"][repr_idx]
+        dedup_mask = data.batch["response_mask"][repr_idx]
+        dedup_uid = data.non_tensor_batch["uid"][representative_indices] if "uid" in data.non_tensor_batch else None
+    else:
+        dedup_rewards = data.batch["token_level_rewards"]
+        dedup_mask = data.batch["response_mask"]
+        dedup_uid = data.non_tensor_batch.get("uid")
+
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
-        # Compute advantages and returns using Generalized Advantage Estimation (GAE)
+        # GAE: no dedup — each trajectory computes its own per-token advantages using
+        # its own values and token_level_rewards. Per-token advantages from one trajectory
+        # cannot be meaningfully broadcast to another with different tokens.
         advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],
@@ -183,30 +252,33 @@ def compute_advantage(
                 config.pf_ppo.get("weight_pow"),
             )
     elif adv_estimator == AdvantageEstimator.GRPO:
-        # Initialize the mask for GRPO calculation
-        grpo_calculation_mask = data.batch["response_mask"]
-
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
-            token_level_rewards=data.batch["token_level_rewards"],
-            response_mask=grpo_calculation_mask,
-            index=data.non_tensor_batch["uid"],
+            token_level_rewards=dedup_rewards,
+            response_mask=dedup_mask,
+            index=dedup_uid,
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         )
+        if has_groups:
+            advantages = advantages[broadcast_idx]
+            returns = returns[broadcast_idx]
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
         adv_kwargs = {
-            "token_level_rewards": data.batch["token_level_rewards"],
-            "response_mask": data.batch["response_mask"],
+            "token_level_rewards": dedup_rewards,
+            "response_mask": dedup_mask,
             "config": config,
         }
-        if "uid" in data.non_tensor_batch:  # optional
-            adv_kwargs["index"] = data.non_tensor_batch["uid"]
+        if dedup_uid is not None:
+            adv_kwargs["index"] = dedup_uid
         if "reward_baselines" in data.batch:  # optional
-            adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+            if has_groups:
+                adv_kwargs["reward_baselines"] = data.batch["reward_baselines"][repr_idx]
+            else:
+                adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
         # GDPO: pass raw data for per-dimension reward extraction
         if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
@@ -218,15 +290,23 @@ def compute_advantage(
                 "Step-dependent optimal baseline requires sum_pi_squared from actor. "
                 "Please set actor.calculate_sum_pi_squared=True in config."
             )
-            adv_kwargs["sum_pi_squared"] = data.batch["sum_pi_squared"]
+            if has_groups:
+                adv_kwargs["sum_pi_squared"] = data.batch["sum_pi_squared"][repr_idx]
+            else:
+                adv_kwargs["sum_pi_squared"] = data.batch["sum_pi_squared"]
             # old_log_probs needed for path-variance proxy: w_t = 1 - 2*exp(old_log_probs) + sum_pi_squared
             adv_kwargs["old_log_probs"] = data.batch["old_log_probs"]
             # Get pre-computed rollout IS weights if available
             rollout_is_weights = data.batch.get("rollout_is_weights", None)
+            if rollout_is_weights is not None and has_groups:
+                rollout_is_weights = rollout_is_weights[repr_idx]
             adv_kwargs["rollout_is_weights"] = rollout_is_weights
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
+        if has_groups:
+            advantages = advantages[broadcast_idx]
+            returns = returns[broadcast_idx]
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     return data
@@ -546,11 +626,6 @@ class RayPPOTrainer:
                 repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
             )
 
-            ground_truths = [
-                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
-            ]
-            sample_gts.extend(ground_truths)
-
             test_gen_batch = self._get_gen_batch(test_batch)
             test_gen_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
@@ -585,17 +660,43 @@ class RayPPOTrainer:
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
-            sample_outputs.extend(output_texts)
 
-            test_batch = test_batch.union(test_output_gen_batch)
+            # Agent loop _postprocess reconstructs non_tensor_batch fields (extra_info, etc.)
+            # which are copies, not the same objects as in test_batch. union() asserts
+            # _deep_equal on overlapping keys, which fails on these copies.
+            # Detect agent loop output by __num_turns__ (always set by _postprocess)
+            # and use it directly; collapse multi-trajectory groups if needed.
+            is_agent_loop_output = "__num_turns__" in test_output_gen_batch.non_tensor_batch or len(
+                test_output_gen_batch
+            ) != len(test_batch)
+            if is_agent_loop_output:
+                if "trajectory_group_id" in test_output_gen_batch.non_tensor_batch:
+                    group_ids = test_output_gen_batch.non_tensor_batch["trajectory_group_id"]
+                    seen = set()
+                    keep = []
+                    for i in range(len(group_ids) - 1, -1, -1):
+                        if group_ids[i] not in seen:
+                            seen.add(group_ids[i])
+                            keep.append(i)
+                    keep.sort()
+                    test_output_gen_batch = test_output_gen_batch[keep]
+                    output_texts = [output_texts[i] for i in keep]
+                test_batch = test_output_gen_batch
+            else:
+                test_batch = test_batch.union(test_output_gen_batch)
+            sample_outputs.extend(output_texts)
             test_batch.meta_info["validate"] = True
 
             # Store original inputs
             input_ids = test_batch.batch["prompts"]
-            # TODO: Can we keep special tokens except for padding tokens?
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
+
+            ground_truths = [
+                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
+            ]
+            sample_gts.extend(ground_truths)
 
             # evaluate using reward_function
             reward_tensor, reward_extra_info = extract_reward(test_batch)
@@ -1412,8 +1513,22 @@ class RayPPOTrainer:
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
                     # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+                    input_batch_size = len(batch) * self.config.actor_rollout_ref.rollout.n
+                    output_batch_size = len(gen_batch_output)
+
+                    if output_batch_size == input_batch_size:
+                        # No expansion: legacy path (single trajectory per rollout)
+                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        batch = batch.union(gen_batch_output)
+                    else:
+                        # Multi-trajectory expansion: gen_batch_output has more rows than input.
+                        # gen_batch_output already contains replicated non_tensor_batch fields
+                        # (uid, data_source, reward_model, etc.) from _postprocess via flat_input_indices.
+                        # Carry over meta_info from original batch (temperature, multi_turn, etc.)
+                        gen_batch_output.meta_info.update(
+                            {k: v for k, v in batch.meta_info.items() if k not in gen_batch_output.meta_info}
+                        )
+                        batch = gen_batch_output
                     if self._should_compute_teacher_colocate(batch):
                         with marked_timer("teacher", timing_raw, color="cyan"):
                             batch_teacher = self._compute_teacher_colocate(batch)
@@ -1421,12 +1536,44 @@ class RayPPOTrainer:
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
+
+                    # Pad batch to be divisible by the effective mini-batch size for
+                    # multi-trajectory agent loops where the total trajectory count may not
+                    # divide evenly. The duplicated entries share the same trajectory_group_id,
+                    # so the per-group loss weight (computed below) auto-adjusts to eliminate bias.
+                    # Training multiplies ppo_mini_batch_size by rollout.n (see _update_actor line 1332),
+                    # so we must use the same effective size here.
+                    dp_size = self._get_dp_size(self.actor_rollout_wg, "actor")
+                    ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+                    rollout_n = self.config.actor_rollout_ref.rollout.n
+                    effective_mbs = ppo_mini_batch_size * rollout_n
+                    size_divisor = math.lcm(dp_size, effective_mbs)
+                    if len(batch) % size_divisor != 0:
+                        batch, _ = pad_dataproto_to_divisor(batch, size_divisor)
+
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
+
+                    # Compute per-trajectory loss weight for multi-trajectory groups.
+                    # Each trajectory is weighted by 1/group_size so each rollout
+                    # contributes equally regardless of how many turns it took.
+                    # Padding duplicates share the same group_id, so group total = 1.
+                    if "trajectory_group_id" in batch.non_tensor_batch:
+                        from collections import Counter
+
+                        group_ids = batch.non_tensor_batch["trajectory_group_id"]
+                        group_counts = Counter(group_ids)
+                        weights = torch.tensor(
+                            [1.0 / group_counts[gid] for gid in group_ids],
+                            dtype=torch.float32,
+                        )
+                        batch.batch["trajectory_loss_weight"] = weights.unsqueeze(1).expand_as(
+                            batch.batch["response_mask"]
+                        )
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
@@ -1442,6 +1589,12 @@ class RayPPOTrainer:
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
+
+                        # Safeguard for colocated reward model path: when _compute_reward_colocate
+                        # computed per-trajectory rewards, ensure all trajectories in a multi-trajectory
+                        # group share the same reward. No-op when rewards were already set by agent loop.
+                        if "trajectory_group_id" in batch.non_tensor_batch and "rm_scores" in batch.batch.keys():
+                            _propagate_shared_reward_within_groups(batch)
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)

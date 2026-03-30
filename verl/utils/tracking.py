@@ -184,12 +184,18 @@ class Tracking:
                 logger_instance.log(data=data, step=step)
 
     def __del__(self):
-        if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
+        try:
+            if "wandb" in self.logger:
+                self.logger["wandb"].finish(exit_code=0)
+        except (ValueError, RuntimeError):
+            pass  # wandb.finish() fails inside async event loops during GC
         if "swanlab" in self.logger:
             self.logger["swanlab"].finish()
-        if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
+        try:
+            if "vemlp_wandb" in self.logger:
+                self.logger["vemlp_wandb"].finish(exit_code=0)
+        except (ValueError, RuntimeError):
+            pass
         if "tensorboard" in self.logger:
             self.logger["tensorboard"].finish()
         if "clearml" in self.logger:

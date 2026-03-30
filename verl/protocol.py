@@ -932,29 +932,37 @@ class DataProto:
         for key, val in non_tensor_batch.items():
             non_tensor_batch[key] = np.concatenate(val, axis=0)
 
-        # Merge meta_info with special handling for metrics
+        # Merge meta_info with special handling for list-valued keys that should
+        # be concatenated across chunks (e.g. metrics, group_sizes) rather than
+        # checked for equality.
+        _CONCAT_KEYS = {"metrics", "group_sizes"}
         merged_meta_info = {}
         if data:
-            # Merge non-metric meta_info and aggregate metrics from all workers.
-            all_metrics = []
+            concat_accumulators: dict[str, list] = {k: [] for k in _CONCAT_KEYS}
             for d in data:
                 for k, v in d.meta_info.items():
-                    if k == "metrics":
+                    if k in _CONCAT_KEYS:
                         if v is not None:
                             if isinstance(v, list):
-                                all_metrics.extend(v)
+                                concat_accumulators[k].extend(v)
                             else:
-                                all_metrics.append(v)
+                                concat_accumulators[k].append(v)
                     else:
                         if k in merged_meta_info:
-                            # Ensure consistency for overlapping non-metric keys
+                            # Ensure consistency for overlapping non-concat keys
                             assert merged_meta_info[k] == v, f"Conflicting values for meta_info key '{k}'"
                         else:
                             merged_meta_info[k] = v
 
             # Flatten list of dicts to dict of lists for consistent metrics structure
+            all_metrics = concat_accumulators.pop("metrics")
             if all_metrics:
                 merged_meta_info["metrics"] = list_of_dict_to_dict_of_list(all_metrics)
+
+            # Store remaining concat keys as plain lists
+            for k, v in concat_accumulators.items():
+                if v:
+                    merged_meta_info[k] = v
 
         cls = type(data[0]) if len(data) > 0 else DataProto
         return cls(batch=new_batch, non_tensor_batch=non_tensor_batch, meta_info=merged_meta_info)
