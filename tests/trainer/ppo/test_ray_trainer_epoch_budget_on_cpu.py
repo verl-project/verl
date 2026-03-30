@@ -12,23 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import types
-
-import torch
-
-if not hasattr(torch.distributed, "tensor"):
-    torch.distributed.tensor = types.SimpleNamespace()
-if not hasattr(torch.distributed.tensor, "DTensor"):
-    torch.distributed.tensor.DTensor = torch.Tensor
-
 from verl.trainer.ppo.ray_trainer import (
     _completed_training_steps,
     _compute_effective_total_epochs,
     _compute_training_epoch_bounds,
     _format_early_stop_warning,
 )
-
-
 
 def test_compute_effective_total_epochs_expands_epoch_budget_for_step_mode():
     assert _compute_effective_total_epochs(1, 100, 25) == 4
