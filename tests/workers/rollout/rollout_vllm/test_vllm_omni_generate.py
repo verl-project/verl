@@ -160,7 +160,7 @@ def test_generate(init_server):
             prompt_ids=prompt_ids,
             sampling_params={
                 "num_inference_steps": 10,
-                "guidance_scale": 4.0,
+                "true_cfg_scale": 4.0,
                 "height": 512,
                 "width": 512,
             },
