@@ -65,7 +65,7 @@ Megatron Backend Usage Guide
 
 You need to install and enable Megatron-Bridge for Megatron LoRA support.
 
-Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `this commit <https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/83a7c1134c562d8c6decd10a1f0a6e6a7a8a3a44>`_ or later for proper support, and use the following settings to enable Megatron-Bridge:
+Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `this commit <https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/6259ae83c735c4412796fc5cfb4c9607b949ae29>`_ or later for proper support, and use the following settings to enable Megatron-Bridge:
 
 - ``actor_rollout_ref.actor.megatron.use_mbridge=True``
 - ``actor_rollout_ref.actor.megatron.vanilla_mbridge=False``

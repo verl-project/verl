@@ -107,7 +107,8 @@ class ServerAdapter(BaseRollout):
         device_mesh: DeviceMesh,
         replica_rank: int = -1,
     ):
-        if config.get("quantization", None) == "fp8":
+        super().__init__(config, model_config, device_mesh)
+        if self.config.get("quantization", None) == "fp8":
             import sglang
             from packaging import version
 
@@ -121,8 +122,7 @@ class ServerAdapter(BaseRollout):
                 "weight_block_size": [128, 128],
             }
             fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
-            model_config.hf_config.quantization_config = fp8_block_quant_kwargs
-        super().__init__(config, model_config, device_mesh)
+            self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])

@@ -232,14 +232,31 @@ class FSDPEngine(BaseEngine):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
+            if self.model_config.model_type == "language_model":
+                auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
 
-            module = auto_class.from_pretrained(
-                pretrained_model_name_or_path=self.model_config.local_path,
-                torch_dtype=torch_dtype,
-                config=self.model_config.hf_config,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+                module = auto_class.from_pretrained(
+                    pretrained_model_name_or_path=self.model_config.local_path,
+                    torch_dtype=torch_dtype,
+                    config=self.model_config.hf_config,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
+            else:
+                from verl.utils.model import load_valuehead_model
+
+                assert self.model_config.model_type == "value_model", (
+                    f"Unsupported model type: {self.model_config.model_type}"
+                )
+                self.model_config.hf_config.num_labels = 1
+                self.model_config.hf_config.classifier_dropout = 0.0
+                self.model_config.hf_config.hidden_dropout = "0"
+                self.model_config.hf_config.summary_dropout_prob = 0.0
+                module = load_valuehead_model(
+                    local_path=self.model_config.local_path,
+                    torch_dtype=torch_dtype,
+                    model_config=self.model_config.hf_config,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
 
             use_liger = self.model_config.use_liger
             # Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with verl's forward patching)
@@ -1171,7 +1188,7 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
         if use_remove_padding:
             if hasattr(self.module, "v_head"):
                 # For trl.AutoModelForCausalLMWithValueHead
-                values_rmpad = output[2].squeeze(0).unsqueeze(-1)
+                values_rmpad = output[2].squeeze(0)
             else:
                 values_rmpad = output.logits
                 values_rmpad = values_rmpad.squeeze(0)  # (total_nnz, 1)
