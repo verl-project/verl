@@ -287,7 +287,6 @@ class DiffusionModelConfig(BaseConfig):
     height: int = 512
     width: int = 512
     num_inference_steps: int = 10
-    guidance_scale: float = 4.5
 
     # extra configs for algorithm specific features.
     extra_configs: dict[str, Any] = field(default_factory=dict)
@@ -308,9 +307,11 @@ class DiffusionModelConfig(BaseConfig):
         # construct tokenizer
         if self.load_tokenizer:
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
-            # see issue https://github.com/huggingface/tokenizers/issues/537, we use a non-fast tokenizer here
+            # Fast tokenizer for diffusion: DiffusionSingleTurnAgentLoop applies chat template on the asyncio
+            # thread (not run_in_executor) so Rust-backed tokenizers avoid RuntimeError: Already borrowed
+            # with recent transformers when combined with thread-pool tokenization.
             self.tokenizer = hf_tokenizer(
-                self.local_tokenizer_path, trust_remote_code=self.trust_remote_code, use_fast=False
+                self.local_tokenizer_path, trust_remote_code=self.trust_remote_code, use_fast=True
             )
             if os.path.exists(os.path.join(self.local_path, "processor")):
                 self.processor = hf_processor(

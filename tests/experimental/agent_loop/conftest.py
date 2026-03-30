@@ -1,4 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,17 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pytest
 
-from .agent_loop import (
-    AgentLoopBase,
-    AgentLoopManager,
-    AgentLoopWorker,
-    AsyncLLMServerManager,
-)
-from .diffusion_agent_loop import DiffusionAgentLoopWorker
-from .single_turn_agent_loop import SingleTurnAgentLoop
-from .tool_agent_loop import ToolAgentLoop
 
-_ = [SingleTurnAgentLoop, ToolAgentLoop]
+def pytest_configure(config):
+    config.addinivalue_line("markers", "vllm_omni: requires the vllm-omni package")
 
-__all__ = ["AgentLoopBase", "AgentLoopManager", "AsyncLLMServerManager", "AgentLoopWorker", "DiffusionAgentLoopWorker"]
+
+def pytest_collection_modifyitems(config, items):
+    try:
+        import vllm_omni  # noqa: F401
+    except ImportError:
+        skip = pytest.mark.skip(reason="vllm-omni not installed")
+        for item in items:
+            if "vllm_omni" in item.keywords:
+                item.add_marker(skip)
