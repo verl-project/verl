@@ -40,7 +40,7 @@ jobs:
           echo "Base image full: $BASE_IMAGE_FULL" 
           BASE_IMAGE_TAG=$(echo "$BASE_IMAGE_FULL" | cut -d':' -f2)
           echo "Base image tag: $BASE_IMAGE_TAG"
-          NEW_IMAGE_NAME="verl-$BASE_IMAGE_TAG"
+          NEW_IMAGE_NAME="verl-sglang-$BASE_IMAGE_TAG"
           echo "New image name: $NEW_IMAGE_NAME"  
           echo "base_image_tag=$BASE_IMAGE_TAG" >> "$GITHUB_OUTPUT"
           echo "new_image_name=$NEW_IMAGE_NAME" >> "$GITHUB_OUTPUT"
