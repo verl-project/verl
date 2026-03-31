@@ -77,8 +77,6 @@ class QwenImage(DiffusionModelBase):
         height = tu.get_non_tensor_data(data=micro_batch, key="height", default=None)
         width = tu.get_non_tensor_data(data=micro_batch, key="width", default=None)
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)
-        # QwenImage-specific: spatial tokens are downsampled by vae_scale_factor then by
-        # an additional patch_size=2 factor inside QwenImageTransformer2DModel.
         img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]]
 
         if getattr(module.config, "guidance_embeds", False):
@@ -87,7 +85,6 @@ class QwenImage(DiffusionModelBase):
             guidance = None
 
         hidden_states = latents[:, step]
-        # QwenImage-specific: timestep is normalised to [0, 1] by dividing by 1000.
         timestep = timesteps[:, step] / 1000.0
 
         model_inputs = {
