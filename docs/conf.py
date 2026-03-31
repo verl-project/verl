@@ -45,6 +45,7 @@ master_doc = "index"
 # ones.
 extensions = [
     "myst_parser",
+    "sphinxcontrib.mermaid",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.autosectionlabel",

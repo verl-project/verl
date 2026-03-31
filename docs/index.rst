@@ -44,6 +44,12 @@ verl is fast with:
 
 .. toctree::
    :maxdepth: 1
+   :caption: Deep Dive Tutorials (English)
+
+   en/index
+
+.. toctree::
+   :maxdepth: 1
    :caption: Data Preparation
 
    preparation/prepare_data

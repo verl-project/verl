@@ -1,6 +1,7 @@
 # markdown support
 recommonmark
 myst_parser
+sphinxcontrib-mermaid
 # markdown table support
 sphinx-markdown-tables
 
