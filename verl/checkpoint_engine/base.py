@@ -283,9 +283,14 @@ class CheckpointEngineWorker(Worker):
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, peft_config: dict = None):
         weights = self.checkpoint_engine.receive_weights()
-        await self.server_adapter.update_weights(weights, global_steps=global_steps)
+        if peft_config is not None:
+            await self.server_adapter.update_weights(
+                weights, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            )
+        else:
+            await self.server_adapter.update_weights(weights, global_steps=global_steps)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
@@ -411,6 +416,11 @@ class CheckpointEngineManager:
             ray.get(self.trainer.update_weights(global_steps=global_steps))
             return
 
+        # 0.5 fetch peft_config from trainer once (static across syncs)
+        if not hasattr(self, "_peft_config"):
+            results = ray.get(self.trainer.get_peft_config())
+            self._peft_config = results[0] if isinstance(results, list) else results
+
         # 1. abort and save all unfinished requests for partial rollout
         await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
 
@@ -425,7 +435,11 @@ class CheckpointEngineManager:
         self.build_process_group(rollout)
 
         # 4. update weights of all workers
-        ray.get(trainer.update_weights(global_steps=global_steps) + rollout.update_weights(global_steps=global_steps))
+        peft_config = self._peft_config
+        ray.get(
+            trainer.update_weights(global_steps=global_steps)
+            + rollout.update_weights(global_steps=global_steps, peft_config=peft_config)
+        )
 
         # 5. finalize all workers
         ray.get(

@@ -749,10 +749,6 @@ class FSDPEngine(BaseEngine):
                 with merged_lora_context(self.module, backup_adapters=True):
                     params = self.module.state_dict()
                     params = normalize_peft_param_name(params)
-                    # Clone tensors before context exits, otherwise
-                    # restore_base_model_weights undoes the merge in-place
-                    # and the shared-storage tensors revert to unmerged values.
-                    params = {k: v.clone() for k, v in params.items()}
         else:
             params = self.module.state_dict()
 

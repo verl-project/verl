@@ -630,7 +630,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if self.config.rollout.checkpoint_engine.backend != "naive":
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+            per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon, base_sync_done=True
+            )
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
@@ -681,6 +683,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.base_sync_done = True
         set_expandable_segments(True)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_peft_config(self):
+        """Return the peft_config_dict if the actor uses LoRA."""
+        peft_model = getattr(self.actor.engine.module, "_fsdp_wrapped_module", self.actor.engine.module)
+        if hasattr(peft_model, "peft_config"):
+            peft_config = peft_model.peft_config.get("default", None)
+            return peft_config.to_dict() if peft_config is not None else None
+        return None
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
