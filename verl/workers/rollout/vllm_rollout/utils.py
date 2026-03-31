@@ -264,8 +264,7 @@ class vLLMColocateWorkerExtension:
                     self.model_runner.model, buffer_updates, named_buffers=named_buffers
                 )
                 logger.info(
-                    f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, "
-                    f"loaded_buffers: {loaded_buffers}"
+                    f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
                 )
             else:
                 if param_updates:
