@@ -566,8 +566,9 @@ def preprocess_bshd_engine(
     local_max_seqlen = max_seqlen // cp_size if cp_size > 1 else max_seqlen
     attention_mask = torch.zeros(batch_size, local_max_seqlen, dtype=torch.bool, device=input_ids.device)
     input_ids_bshd = torch.zeros(batch_size, local_max_seqlen, dtype=input_ids.dtype, device=input_ids.device)
+    seqlens_in_batch_cpu: list[int] = seqlens_in_batch.tolist()
     for i in range(batch_size):
-        seqlen_i = int(seqlens_in_batch[i].item())
+        seqlen_i = int(seqlens_in_batch_cpu[i])
         if cp_size <= 1:
             attention_mask[i, :seqlen_i] = True
             input_ids_bshd[i, :seqlen_i] = input_ids[i]
