@@ -31,7 +31,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
 
-from verl.models.diffusers_model import build_scheduler, forward_and_sample_previous_step
+from verl.models.diffusers_model import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -521,6 +521,13 @@ class DiffusersFSDPEngine(BaseEngine):
         return embeds, mask
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        """
+        Extract and pre-process universal tensors, then delegate architecture-specific
+        input construction to the registered DiffusionModelBase subclass.
+
+        Handles common tensor extraction and nested-embed unpadding here.
+        Architecture-specific input dict construction is delegated to the model registry.
+        """
         latents = micro_batch["all_latents"]
         timesteps = micro_batch["all_timesteps"]
         prompt_embeds = micro_batch["prompt_embeds"]
@@ -536,40 +543,19 @@ class DiffusersFSDPEngine(BaseEngine):
                 negative_prompt_embeds, negative_prompt_embeds_mask
             )
 
-        height = tu.get_non_tensor_data(data=micro_batch, key="height", default=None)
-        width = tu.get_non_tensor_data(data=micro_batch, key="width", default=None)
-        vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)
-        img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]]
-
-        if getattr(self.module.config, "guidance_embeds", False):
-            guidance = torch.full([1], self._guidance_scale, device=timesteps.device, dtype=torch.float32)
-        else:
-            guidance = None
-
-        hidden_states = latents[:, step]
-        timestep = timesteps[:, step] / 1000.0
-
-        model_inputs = {
-            "hidden_states": hidden_states,
-            "timestep": timestep,
-            "guidance": guidance,
-            "encoder_hidden_states_mask": prompt_embeds_mask,
-            "encoder_hidden_states": prompt_embeds,
-            "img_shapes": img_shapes,
-            "return_dict": False,
-        }
-
-        negative_model_inputs = {
-            "hidden_states": hidden_states,
-            "timestep": timestep,
-            "guidance": guidance,
-            "encoder_hidden_states_mask": negative_prompt_embeds_mask,
-            "encoder_hidden_states": negative_prompt_embeds,
-            "img_shapes": img_shapes,
-            "return_dict": False,
-        }
-
-        return model_inputs, negative_model_inputs
+        return prepare_model_inputs(
+            module=self.module,
+            model_config=self.model_config,
+            latents=latents,
+            timesteps=timesteps,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            micro_batch=micro_batch,
+            step=step,
+            guidance_scale=self._guidance_scale,
+        )
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
         log_prob, prev_sample_mean, std_dev_t = output

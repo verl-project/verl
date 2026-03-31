@@ -24,6 +24,51 @@ from verl.workers.config import DiffusionModelConfig
 from .base import DiffusionModelBase
 
 
+def prepare_model_inputs(
+    module: ModelMixin,
+    model_config: DiffusionModelConfig,
+    latents: torch.Tensor,
+    timesteps: torch.Tensor,
+    prompt_embeds: torch.Tensor,
+    prompt_embeds_mask: torch.Tensor,
+    negative_prompt_embeds: torch.Tensor,
+    negative_prompt_embeds_mask: torch.Tensor,
+    micro_batch: TensorDict,
+    step: int,
+    guidance_scale: Optional[float] = None,
+) -> tuple[dict, dict]:
+    """Build architecture-specific model inputs for the forward pass.
+    Dispatches to the registered DiffusionModelBase subclass for the current architecture.
+
+    Args:
+        module (ModelMixin): the diffusion transformer module.
+        model_config (DiffusionModelConfig): the configuration of the diffusion model.
+        latents (torch.Tensor): full latent tensor from the micro-batch, shape (B, T, ...).
+        timesteps (torch.Tensor): full timestep tensor from the micro-batch, shape (B, T).
+        prompt_embeds (torch.Tensor): dense positive prompt embeddings, shape (B, L, D).
+        prompt_embeds_mask (torch.Tensor): attention mask for prompt_embeds, shape (B, L).
+        negative_prompt_embeds (torch.Tensor): dense negative prompt embeddings, shape (B, L, D).
+        negative_prompt_embeds_mask (torch.Tensor): attention mask for negative_prompt_embeds.
+        micro_batch (TensorDict): the full micro-batch, available for architecture-specific
+            metadata (e.g. height, width, vae_scale_factor).
+        step (int): the current denoising step index.
+        guidance_scale (Optional[float]): optional guidance scale for classifier-free guidance.
+    """
+    return DiffusionModelBase.get_class(model_config).prepare_model_inputs(
+        module,
+        model_config,
+        latents,
+        timesteps,
+        prompt_embeds,
+        prompt_embeds_mask,
+        negative_prompt_embeds,
+        negative_prompt_embeds_mask,
+        micro_batch,
+        step,
+        guidance_scale,
+    )
+
+
 def build_scheduler(model_config: DiffusionModelConfig) -> SchedulerMixin:
     """Build and configure the scheduler for the diffusion model.
     The returned scheduler has timesteps and sigmas already set.

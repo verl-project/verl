@@ -110,6 +110,42 @@ class DiffusionModelBase(ABC):
 
     @classmethod
     @abstractmethod
+    def prepare_model_inputs(
+        cls,
+        module: ModelMixin,
+        model_config: DiffusionModelConfig,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        prompt_embeds_mask: torch.Tensor,
+        negative_prompt_embeds: torch.Tensor,
+        negative_prompt_embeds_mask: torch.Tensor,
+        micro_batch: TensorDict,
+        step: int,
+        guidance_scale: Optional[float] = None,
+    ) -> tuple[dict, dict]:
+        """Build architecture-specific model inputs for the forward pass.
+        The caller is responsible for universal pre-processing (common tensor extraction
+        and nested-embed unpadding) before invoking this method.
+
+        Args:
+            module (ModelMixin): the diffusion transformer module.
+            model_config (DiffusionModelConfig): the configuration of the diffusion model.
+            latents (torch.Tensor): full latent tensor from the micro-batch, shape (B, T, ...).
+            timesteps (torch.Tensor): full timestep tensor from the micro-batch, shape (B, T).
+            prompt_embeds (torch.Tensor): dense positive prompt embeddings, shape (B, L, D).
+            prompt_embeds_mask (torch.Tensor): attention mask for prompt_embeds, shape (B, L).
+            negative_prompt_embeds (torch.Tensor): dense negative prompt embeddings, shape (B, L, D).
+            negative_prompt_embeds_mask (torch.Tensor): attention mask for negative_prompt_embeds.
+            micro_batch (TensorDict): the full micro-batch, available for architecture-specific
+                metadata (e.g. height, width, vae_scale_factor).
+            step (int): the current denoising step index.
+            guidance_scale (Optional[float]): optional guidance scale for classifier-free guidance.
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
     def forward_and_sample_previous_step(
         cls,
         module: ModelMixin,
