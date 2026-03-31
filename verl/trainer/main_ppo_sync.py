@@ -67,7 +67,7 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -335,7 +335,9 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             logger.exception(f"Error in _run_prompt: {e}")
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
-    async def _agent_loop_postprocess(self, output: AgentLoopOutput | list[AgentLoopOutput], **kwargs) -> None:
+    async def _agent_loop_postprocess(
+        self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
+    ) -> None:
         """Put agent loop outputs into TransferQueue."""
         uid, session_id = kwargs["uid"], kwargs["session_id"]
         outputs = output if isinstance(output, list) else [output]
@@ -363,6 +365,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             position_ids=final_position_ids.unsqueeze(0),  # [1, seq_len] or [1, 4, seq_len]
             kwargs=kwargs,
         )
+
         if final_output.reward_score is not None:
             for output in outputs[:-1]:
                 output.reward_score = final_output.reward_score
@@ -491,6 +494,7 @@ class PPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
+        self.use_teacher_policy = need_teacher_policy(self.config)
         self.replay_buffer = ReplayBuffer()
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
@@ -664,6 +668,15 @@ class PPOTrainer:
         )
         logger.info("reward loop manager initialized")
 
+        # TODO: Support OPD
+        if self.use_teacher_policy:
+            logger.info("OPD is not supported in `main_ppo_sync.py` yet.")
+            self.teacher_model_manager = None
+            self.distillation_config = None
+        else:
+            self.teacher_model_manager = None
+            self.distillation_config = None
+
         # 8. initialize agent loop manager
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
@@ -675,6 +688,7 @@ class PPOTrainer:
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             reward_loop_worker_handles=self.reward_loop_manager.reward_loop_workers,
+            teacher_model_manager=self.teacher_model_manager,
             replay_buffer=self.replay_buffer,
         )
         logger.info("agent loop manager initialized")
