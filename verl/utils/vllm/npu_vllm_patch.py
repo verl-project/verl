@@ -201,6 +201,20 @@ if is_torch_npu_available(check_device=False):
         patch_vllm013_rotary_emb()
         FusedMoE.weight_loader = vllm_v013_weight_loader_method_wrapper(FusedMoE.weight_loader)
 
+    try:
+        from vllm_ascend.worker.worker_v1 import NPUWorker as _NPUWorker
+        _orig_warm_up_atb = _NPUWorker._warm_up_atb
+
+        def _safe_warm_up_atb(self):
+            try:
+                _orig_warm_up_atb(self)
+            except (AttributeError, RuntimeError):
+                pass
+
+        _NPUWorker._warm_up_atb = _safe_warm_up_atb
+    except (ImportError, RuntimeError):
+        pass
+
     VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2 = bool(int(os.getenv("VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2", "1")))
     if VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2:
         # only support vllm 0.13 and 0.11 now.
@@ -216,12 +230,18 @@ if is_torch_npu_available(check_device=False):
             )
 
         elif _VLLM_VERSION >= version.parse("0.11.0"):
-            from vllm_ascend.ops.linear_op import SequenceRowParallelOp
-            from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+            try:
+                from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+                from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-            NPUModelRunner._select_moe_comm_method = vllm_ascend_v011_select_moe_comm_method_wrapper(
-                NPUModelRunner._select_moe_comm_method
-            )
-            SequenceRowParallelOp.matmul_and_reduce = vllm_ascend_v011_matmul_and_reduce_wrapper(
-                SequenceRowParallelOp.matmul_and_reduce
-            )
+                NPUModelRunner._select_moe_comm_method = vllm_ascend_v011_select_moe_comm_method_wrapper(
+                    NPUModelRunner._select_moe_comm_method
+                )
+                SequenceRowParallelOp.matmul_and_reduce = vllm_ascend_v011_matmul_and_reduce_wrapper(
+                    SequenceRowParallelOp.matmul_and_reduce
+                )
+            except (ImportError, RuntimeError) as e:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "Skipping vllm_ascend v0.11 MC2 patches due to import error: %s", e
+                )

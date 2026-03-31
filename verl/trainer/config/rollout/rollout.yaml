@@ -407,7 +407,7 @@ prometheus:
   # Specify served_model_name to avoid displaying overly long model paths in Grafana
   served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
 
-# type of quantization in vllm, currently support fp8 and torchao
+# type of quantization in vllm, supported values: fp8, torchao, ascend, int8-ascend
 quantization: null
 
 # extra quantization information serialized in a config file, e.g. torchao_config.json

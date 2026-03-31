@@ -28,6 +28,7 @@ from verl.utils.device import is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
+from verl.utils.vllm.vllm_int8_ascend_utils import is_int8_ascend_model, load_int8_ascend_weights
 
 try:
     from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
@@ -191,6 +192,8 @@ class vLLMColocateWorkerExtension:
 
         use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
             self.model_runner.vllm_config
+        ) and not is_int8_ascend_model(
+            self.model_runner.vllm_config
         )
 
         if self._is_qat_model:
@@ -256,9 +259,15 @@ class vLLMColocateWorkerExtension:
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_fp8_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
-                # Convert bf16 weights to fp8 format before loading
                 loaded_params = load_quanted_weights(weights, self.model_runner)
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
+            elif is_int8_ascend_model(self.model_runner.vllm_config):
+                logger.info("INT8-Ascend (W8A8_DYNAMIC) model detected (async)")
+                vllm_dtype = self.model_runner.vllm_config.model_config.dtype
+                loaded_params = load_int8_ascend_weights(
+                    weights, self.model_runner.model, dtype=vllm_dtype
+                )
+                logger.info(f"INT8-Ascend weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
                 self.model_runner.model.load_weights(weights)

@@ -804,8 +804,8 @@ class vLLMHttpServer:
             logger.info(f"QAT quantization config injected (quant_method={quant_method})")
             hf_overrides["quantization_config"] = quantization_config_dict
         elif quantization is not None:
-            # Handle other quantization methods (fp8, torchao)
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao", "ascend"]
+            # Handle other quantization methods (fp8, torchao, ascend, int8-ascend)
+            _SUPPORTED_QUANTIZATION = ["fp8", "torchao", "ascend", "int8-ascend"]
             if quantization not in _SUPPORTED_QUANTIZATION:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
@@ -828,6 +828,15 @@ class vLLMHttpServer:
                 apply_vllm_fp8_patches()
                 # for subprocesses patching
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+
+            elif quantization == "int8-ascend":
+                from verl.utils.vllm.vllm_int8_ascend_utils import build_int8_ascend_quant_description
+
+                quant_desc = build_int8_ascend_quant_description(self.model_config.hf_config)
+                hf_overrides["quantization_config"] = quant_desc
+                quantization = "ascend"
+                os.environ["VERL_VLLM_INT8_ASCEND_QUANT_ENABLED"] = "1"
+                logger.info("INT8-Ascend (W8A8_DYNAMIC) quantization config injected")
 
         if quantization is not None and self.config.quantization_config_file is not None:
             hf_overrides["quantization_config_file"] = self.config.quantization_config_file
