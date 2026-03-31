@@ -35,6 +35,9 @@ from verl.protocol import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.ray_utils import auto_await
 
+# _postprocess is an AgentLoopWorker method that stacks _InternalAgentLoopOutput
+# into a DataProto batch. It accesses self.distillation_enabled and
+# self.reward_loop_worker_handles, both of which we set in _init_nemo_gym.
 _postprocess = _AgentLoopWorker._postprocess
 
 
@@ -137,6 +140,7 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         from verl.utils.config import omega_conf_to_dataclass
 
         self._tokenizer = omega_conf_to_dataclass(self.model_config).tokenizer
+        self.distillation_enabled = False
 
         self._rollout_loop = asyncio.new_event_loop()
         self._rollout_thread = threading.Thread(
@@ -179,8 +183,11 @@ class NemoGymAgentLoopManager(AgentLoopManager):
             raw_results.append(result)
 
         results = [None] * len(nemo_gym_examples)
-        for rowidx, result in zip(rowidxs, raw_results, strict=False):
+        for rowidx, result in zip(rowidxs, raw_results, strict=True):
             results[rowidx] = result
+        missing = [i for i, r in enumerate(results) if r is None]
+        if missing:
+            raise RuntimeError(f"nemo-gym did not return results for samples: {missing}")
 
         prompt_lens = [sum(len(m["token_ids"]) for m in r["input_message_log"]) for r in results]
         response_lens = [
@@ -282,9 +289,10 @@ def _postprocess_nemo_gym_result(nemo_gym_result: dict, tokenizer) -> dict:
 
         prompt_ids = item["prompt_token_ids"]
 
-        assert seen_token_ids == prompt_ids[: len(seen_token_ids)], (
-            f"Non-contiguous token IDs (server_patch active?). seen={len(seen_token_ids)} prompt={len(prompt_ids)}"
-        )
+        if seen_token_ids != prompt_ids[: len(seen_token_ids)]:
+            raise ValueError(
+                f"Non-contiguous token IDs (server_patch active?). seen={len(seen_token_ids)} prompt={len(prompt_ids)}"
+            )
 
         message_log.append(
             {

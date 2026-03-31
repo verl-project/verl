@@ -22,20 +22,23 @@ def _replace_prefix_tokens(model_prefix, template_prefix, template_ids, tok):
     if not model_prefix:
         return template_ids
     eos = tok.eos_token_id
-    assert eos is not None, "tokenizer must have eos_token_id"
+    if eos is None:
+        raise ValueError("tokenizer must have eos_token_id")
     cut_model = len(model_prefix)
     if model_prefix[-1] == eos:
         cut_model -= 1
-    assert len(template_ids) > len(template_prefix), (
-        f"non-monotonically increasing trajectory: "
-        f"template_ids={len(template_ids)} template_prefix={len(template_prefix)}"
-    )
+    if len(template_ids) <= len(template_prefix):
+        raise ValueError(
+            f"non-monotonically increasing trajectory: "
+            f"template_ids={len(template_ids)} template_prefix={len(template_prefix)}"
+        )
     cut = -1
     for pos in reversed(range(len(template_prefix))):
         if template_ids[pos] == eos:
             cut = pos
             break
-    assert cut >= 0, "no EOS token found in chat-templated messages"
+    if cut < 0:
+        raise ValueError("no EOS token found in chat-templated messages")
     return model_prefix[:cut_model] + template_ids[cut:]
 
 
