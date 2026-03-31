@@ -13,10 +13,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import math
 from typing import Optional
 
 import torch
+from megatron.core import parallel_state as mpu
 from torch.nested._internal.nested_tensor import NestedTensor
 
 from verl.utils.megatron_utils import unwrap_model
@@ -352,9 +353,28 @@ def gptmodel_forward_model_engine(
         if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
 
+        # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
+        attention_mask = attention_mask_bshd
+        if vision_model:
+            seqlens_in_batch = input_ids.offsets().diff()
+            max_seqlen = seqlens_in_batch.max().item()
+
+            # For CP, sequence length must be divisible by (2 * cp_size), and for SP by tp_size.
+            tp_size = mpu.get_tensor_model_parallel_world_size()
+            cp_size = mpu.get_context_parallel_world_size()
+            align_size = math.lcm(tp_size, 2 * cp_size) if cp_size > 1 else tp_size
+            if align_size > 1:
+                pad_size = (align_size - max_seqlen % align_size) % align_size
+                max_seqlen += pad_size
+
+            input_ids_bshd = input_ids.to_padded_tensor(pad_token_id, output_size=(batch_size, max_seqlen))
+            attention_mask = torch.zeros_like(input_ids_bshd, dtype=torch.bool)
+            for i, seqlen in enumerate(seqlens_in_batch):
+                attention_mask[i, :seqlen] = True
+
         output_orig = model(
             input_ids=input_ids_bshd,
-            attention_mask=attention_mask_bshd,
+            attention_mask=attention_mask,
             position_ids=None if vision_model else position_ids_bshd,
             **model_kwargs,
         )

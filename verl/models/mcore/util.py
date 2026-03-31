@@ -636,6 +636,9 @@ def postprocess_bshd_engine(
     """
     Postprocess bshd sequences
     """
+    assert output.shape[:2] == attention_mask.shape, (
+        f"output.shape: {output.shape}, attention_mask.shape: {attention_mask.shape}"
+    )
     if not post_process:
         return output
 
