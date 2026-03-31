@@ -35,7 +35,6 @@ def prepare_model_inputs(
     negative_prompt_embeds_mask: torch.Tensor,
     micro_batch: TensorDict,
     step: int,
-    guidance_scale: Optional[float] = None,
 ) -> tuple[dict, dict]:
     """Build architecture-specific model inputs for the forward pass.
     Dispatches to the registered DiffusionModelBase subclass for the current architecture.
@@ -52,7 +51,6 @@ def prepare_model_inputs(
         micro_batch (TensorDict): the full micro-batch, available for architecture-specific
             metadata (e.g. height, width, vae_scale_factor).
         step (int): the current denoising step index.
-        guidance_scale (Optional[float]): optional guidance scale for classifier-free guidance.
     """
     return DiffusionModelBase.get_class(model_config).prepare_model_inputs(
         module,
@@ -65,7 +63,6 @@ def prepare_model_inputs(
         negative_prompt_embeds_mask,
         micro_batch,
         step,
-        guidance_scale,
     )
 
 

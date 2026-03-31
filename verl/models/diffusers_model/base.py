@@ -122,7 +122,6 @@ class DiffusionModelBase(ABC):
         negative_prompt_embeds_mask: torch.Tensor,
         micro_batch: TensorDict,
         step: int,
-        guidance_scale: Optional[float] = None,
     ) -> tuple[dict, dict]:
         """Build architecture-specific model inputs for the forward pass.
         The caller is responsible for universal pre-processing (common tensor extraction
@@ -140,7 +139,6 @@ class DiffusionModelBase(ABC):
             micro_batch (TensorDict): the full micro-batch, available for architecture-specific
                 metadata (e.g. height, width, vae_scale_factor).
             step (int): the current denoising step index.
-            guidance_scale (Optional[float]): optional guidance scale for classifier-free guidance.
         """
         pass
 

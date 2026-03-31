@@ -70,15 +70,15 @@ class QwenImage(DiffusionModelBase):
         prompt_embeds_mask: torch.Tensor,
         negative_prompt_embeds: torch.Tensor,
         negative_prompt_embeds_mask: torch.Tensor,
-        micro_batch,
+        micro_batch: TensorDict,
         step: int,
-        guidance_scale: Optional[float] = None,
     ) -> tuple[dict, dict]:
         height = tu.get_non_tensor_data(data=micro_batch, key="height", default=None)
         width = tu.get_non_tensor_data(data=micro_batch, key="width", default=None)
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)
         img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]]
 
+        guidance_scale = model_config.extra_configs.get("guidance_scale", None)
         if getattr(module.config, "guidance_embeds", False):
             guidance = torch.full([1], guidance_scale, device=timesteps.device, dtype=torch.float32)
         else:

@@ -112,7 +112,6 @@ class DiffusersFSDPEngine(BaseEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
-        self._guidance_scale = self.model_config.extra_configs.get("guidance_scale", None)
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -554,7 +553,6 @@ class DiffusersFSDPEngine(BaseEngine):
             negative_prompt_embeds_mask=negative_prompt_embeds_mask,
             micro_batch=micro_batch,
             step=step,
-            guidance_scale=self._guidance_scale,
         )
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
@@ -589,7 +587,7 @@ class DiffusersFSDPEngine(BaseEngine):
             tu.assign_non_tensor(
                 data,
                 gradient_accumulation_steps=tu.get_non_tensor_data(
-                    micro_batch, "gradient_accumulation_steps", default=1
+                    micro_batch, "gradient_accumulation_steps", default=None
                 ),
             )
 
