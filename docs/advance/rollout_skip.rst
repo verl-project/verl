@@ -44,7 +44,7 @@ Add these parameters to enable RolloutSkip:
     actor_rollout_ref.rollout.skip.max_dump_step=10
 
     # Optional: dump only on selected training steps (1-based), e.g. steps 1, 2, and 5:
-    # actor_rollout_ref.rollout.skip.dump_steps='[1,2,5]'
+    actor_rollout_ref.rollout.skip.dump_steps=[1,2,5]
 
 
 Configuration Parameters

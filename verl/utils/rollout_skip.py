@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import warnings
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -126,9 +127,27 @@ class RolloutSkip:
         raw_steps = _get_skip_attr(self.skip_config, "dump_steps", None)
         self._dump_step_set: frozenset[int] | None = None
         if raw_steps is not None:
-            step_list = [int(x) for x in raw_steps]
-            if len(step_list) > 0:
-                self._dump_step_set = frozenset(step_list)
+            if isinstance(raw_steps, str):
+                try:
+                    raw_steps = json.loads(raw_steps)
+                except json.JSONDecodeError:
+                    warnings.warn(
+                        f"{self.print_mark}Could not parse 'dump_steps' string: {raw_steps!r}. "
+                        "Falling back to max_dump_step.",
+                        stacklevel=2,
+                    )
+                    raw_steps = None
+            if raw_steps:
+                try:
+                    step_list = [int(x) for x in raw_steps]
+                    if step_list:
+                        self._dump_step_set = frozenset(step_list)
+                except (ValueError, TypeError):
+                    warnings.warn(
+                        f"{self.print_mark}'dump_steps' must be a list of integers, got: {raw_steps!r}. "
+                        "Falling back to max_dump_step.",
+                        stacklevel=2,
+                    )
 
         _use_max_dump_window = self._dump_step_set is None
         if _use_max_dump_window and self.max_dump_step <= 0:
