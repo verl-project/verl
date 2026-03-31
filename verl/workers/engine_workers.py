@@ -15,8 +15,10 @@ import functools
 import logging
 import os
 from contextlib import nullcontext
+from copy import deepcopy
 from functools import partial
 from itertools import chain
+from typing import Optional
 
 import torch
 from codetiming import Timer
@@ -24,17 +26,14 @@ from omegaconf import DictConfig, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
-try:
-    from verl.workers.engine.mindspeed.transformer_impl import repatch
-except ImportError:
-    repatch = None
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name, set_expandable_segments
-from verl.utils.distributed import initialize_global_process_group_ray
+from verl.utils.device import get_device_name, is_npu_available, set_expandable_segments
+from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
@@ -43,7 +42,14 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.utils.transferqueue_utils import tqbridge
-from verl.workers.config import ActorConfig, HFModelConfig, RolloutConfig, TrainingWorkerConfig
+from verl.workers.config import (
+    ActorConfig,
+    DistillationConfig,
+    HFModelConfig,
+    MtpConfig,
+    RolloutConfig,
+    TrainingWorkerConfig,
+)
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
@@ -78,7 +84,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         from verl.workers.engine import BaseEngine, EngineRegistry
 
+        # TODO(jhz): Switch to `set_expandable_segments` when the torch_npu library
+        # supports `torch.npu.memory._set_allocator_settings`
+        if is_npu_available:
+            os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
+
         initialize_global_process_group_ray(timeout_second=None)
+
+        set_numa_affinity()
 
         self.config = config
         self.model_config = self.config.model_config
@@ -104,10 +117,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.engine_config.use_remove_padding = self.model_config.use_remove_padding
         self.engine_config.use_fused_kernels = self.model_config.use_fused_kernels
 
-        if repatch is not None:
-            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
-            repatch(self.engine_config.get("override_transformer_config", {}))
-
         # TODO: add DistProfilerExtension
         self.profiler_config = self.config.profiler_config
         if self.profiler_config is not None:
@@ -119,6 +128,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self, DistProfiler(rank=self.rank, config=self.profiler_config, tool_config=self.profiler_tool_config)
         )
 
+        self.model_config.model_type = self.config.model_type
         self.engine: BaseEngine = EngineRegistry.new(
             model_type=self.config.model_type,
             backend=self.engine_config.strategy,
@@ -422,9 +432,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     NOTE: ActorRolloutRefWorker no longer support spmd mode and run native server mode.
     """
 
-    def __init__(self, config: DictConfig, role: str, **kwargs):
+    def __init__(
+        self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
+    ):
         Worker.__init__(self)
         self.config = config
+        self.distillation_config = distillation_config
+        self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
@@ -484,7 +498,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
-            ref_config.model_config = model_config
+
+            # The ref model does not need to enable MTP; force it to false.
+            ref_config.model_config = deepcopy(model_config)
+            ref_config.model_config.mtp = MtpConfig(enable=False)
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
@@ -511,6 +528,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+            distillation_config: Optional[DistillationConfig] = (
+                omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
+            )
+
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",
                 model_config=actor_config.model_config,
@@ -541,8 +562,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-
-            self.loss_fn = partial(ppo_loss, config=actor_config)
+            if self.distillation_enabled:
+                self.loss_fn = partial(
+                    distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
+                )
+            else:
+                self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
@@ -571,7 +596,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
             )
 
-            # used for LoRA
+            # used for LoRA (base_sync_done is unused in merge-only mode but kept for Phase 2 adapter path)
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
@@ -632,6 +657,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
            - before update_weights: rollout should be in sleep mode.
            - after update_weights: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
+
+        LoRA handling: when model.lora.merge=True (peft_merge), LoRA is merged into
+        base weights before sync. The engine returns full HF-keyed params with
+        peft_config=None, so the rollout receives a standard weight update.
         """
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
@@ -643,12 +672,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(False)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
-        # 1. resume weights and update weights
+        # 1. resume rollout memory (weights were released during sleep)
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
-        # 2. get per tensor generator from engine, this will load model to gpu
+        # 2. get per tensor params from engine, this will load model to gpu
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon, base_sync_done=True
         )
@@ -677,7 +706,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After update_weights", logger=logger)
 
         # 3. offload model to cpu
-        self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+        if self.actor.engine.is_param_offload_enabled:
+            self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
         aggressive_empty_cache(force_sync=True)
 
         # 4. resume kv_cache

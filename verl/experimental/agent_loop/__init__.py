@@ -20,6 +20,7 @@ from .agent_loop import (
     AsyncLLMServerManager,
     get_trajectory_info,
 )
+from .diffusion_agent_loop import DiffusionAgentLoopWorker
 from .single_turn_agent_loop import SingleTurnAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
@@ -32,4 +33,5 @@ __all__ = [
     "AgentLoopWorker",
     "AgentLoopOutput",
     "get_trajectory_info",
+    "DiffusionAgentLoopWorker",
 ]

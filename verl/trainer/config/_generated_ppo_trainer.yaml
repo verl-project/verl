@@ -131,13 +131,6 @@ actor_rollout_ref:
       mode: disabled
       record_file: null
       replay_file: null
-    grad_clip: 1.0
-    ulysses_sequence_parallel_size: 1
-    entropy_from_logits_with_chunking: false
-    entropy_checkpointing: false
-    use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
-    calculate_sum_pi_squared: false
-    sum_pi_squared_checkpointing: false
     qat:
       enable: false
       mode: w4a16
@@ -148,6 +141,13 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    grad_clip: 1.0
+    ulysses_sequence_parallel_size: 1
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
+    use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+    calculate_sum_pi_squared: false
+    sum_pi_squared_checkpointing: false
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: ${actor_rollout_ref.actor.strategy}
@@ -307,8 +307,12 @@ actor_rollout_ref:
       backend: null
       token2text: false
       max_samples_per_step_per_worker: null
-    skip_rollout: false
-    skip_dump_dir: /tmp/rollout_dump
+    skip:
+      _target_: verl.workers.config.SkipConfig
+      enable: false
+      dump_dir: ~/.verl/rollout_dump
+      max_dump_step: 1
+      action: cache
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
     profiler:
@@ -338,7 +342,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,null}
+    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
     layered_summon: false
   model:
     _target_: verl.workers.config.HFModelConfig
@@ -657,6 +661,53 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
+distillation:
+  _target_: verl.workers.config.DistillationConfig
+  enabled: false
+  num_workers: 8
+  distillation_loss:
+    _target_: verl.workers.config.DistillationLossConfig
+    loss_mode: k3
+    topk: 32
+    use_task_rewards: true
+    distillation_loss_coef: 1.0
+    loss_max_clamp: null
+    log_prob_min_clamp: null
+    use_policy_gradient: false
+    policy_loss_mode: vanilla
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+  teacher_model:
+    _target_: verl.workers.config.DistillationTeacherModelConfig
+    enable_resource_pool: false
+    n_gpus_per_node: 8
+    nnodes: 0
+    model_path: null
+    inference:
+      _target_: verl.workers.config.RolloutConfig
+      name: ${oc.select:actor_rollout_ref.rollout.name}
+      dtype: ${oc.select:actor_rollout_ref.rollout.dtype}
+      gpu_memory_utilization: 0.5
+      enforce_eager: true
+      cudagraph_capture_sizes: null
+      free_cache_engine: true
+      data_parallel_size: 1
+      expert_parallel_size: 1
+      tensor_model_parallel_size: 2
+      max_num_batched_tokens: 8192
+      max_model_len: null
+      max_num_seqs: 1024
+      load_format: auto
+      engine_kwargs: {}
+      limit_images: null
+      enable_chunked_prefill: true
+      enable_prefix_caching: true
+      disable_log_stats: true
+      skip_tokenizer_init: false
+      prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
+      response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
+      temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -686,7 +737,7 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_legacy_worker_impl: auto
+  use_legacy_worker_impl: disable
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null

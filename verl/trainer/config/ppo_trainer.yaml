@@ -38,6 +38,9 @@ defaults:
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
 
+  # distillation config
+  - distillation@distillation: distillation
+
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
   - _self_
@@ -201,7 +204,7 @@ trainer:
 
   # whether to use legacy worker implementation
   #  mode: "auto", "enable", or "disable"
-  use_legacy_worker_impl: auto
+  use_legacy_worker_impl: disable
 
 # profiler configs
 global_profiler:

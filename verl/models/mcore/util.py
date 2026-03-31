@@ -16,11 +16,13 @@
 import logging
 import math
 import os
+from typing import Optional
 
 import torch
 from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 
+from verl.utils.device import is_npu_available
 from verl.utils.model import CausalLMOutputForPPO
 
 logger = logging.getLogger(__file__)
@@ -289,11 +291,9 @@ def postprocess_packed_seqs_for_dict_output(
 
 ### No padding versions for model engine
 ### inputs are nested tensors
-
-
 def preprocess_thd_no_padding(
     input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
-) -> tuple[torch.Tensor, PackedSeqParams]:
+) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
     """
     Preprocess packed sequences
     CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0 gets first and last chunks, GPU1
@@ -341,14 +341,20 @@ def preprocess_thd_no_padding(
     shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
+        position_ids_rmpad = torch.zeros(shape[0], dtype=torch.long, device=input_ids.device)
         if need_roll:
             saved_roll_dict = {}
+            saved_position_roll_dict = {}
         for i in range(batch_size):
             # Use Python int, so no GPU→CPU sync in the loop
             if cp_size <= 1:
                 seqlen = seqlens_in_batch_cpu[i]
                 start_idx = cu_seqlens_padded_cpu[i]
                 input_ids_rmpad[start_idx : start_idx + seqlen] = input_ids[i]
+                # Build position_ids: 0, 1, 2, ..., seqlen-1 for this sequence
+                position_ids_rmpad[start_idx : start_idx + seqlen] = torch.arange(
+                    seqlen, dtype=torch.long, device=input_ids.device
+                )
                 continue
 
             seqlen_padded_i = seqlens_in_batch_padded_cpu[i]
@@ -374,6 +380,11 @@ def preprocess_thd_no_padding(
                 half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)
             ]
 
+            # Build position_ids for the first chunk
+            position_ids_rmpad[start_idx : start_idx + half_seqlen] = torch.arange(
+                half_seqlen * cp_rank, half_seqlen * (cp_rank + 1), dtype=torch.long, device=input_ids.device
+            )
+
             remain_start = seqlen_padded_i - half_seqlen * (cp_rank + 1)
             remain_end = seqlen_padded_i - half_seqlen * cp_rank
             remain_end = min(remain_end, d.shape[0])
@@ -382,21 +393,33 @@ def preprocess_thd_no_padding(
                 input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[
                     remain_start:remain_end
                 ]
+                # Build position_ids for the remaining chunk
+                position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = torch.arange(
+                    seqlen_padded_i - remain_len, seqlen_padded_i, dtype=torch.long, device=input_ids.device
+                )
 
             if need_roll:
                 # Handle roll for cp_size > 1 case
                 saved_roll_dict[start_idx + half_seqlen - 1] = d[(cp_rank + 1) * half_seqlen]
+                saved_position_roll_dict[start_idx + half_seqlen - 1] = position_ids_rmpad[start_idx + half_seqlen - 1]
                 if remain_len > 0:
                     if remain_end == d.shape[0]:
                         saved_roll_dict[start_idx + half_seqlen + remain_len - 1] = d[0]
+                        saved_position_roll_dict[start_idx + half_seqlen + remain_len - 1] = 0
                     else:
                         saved_roll_dict[start_idx + half_seqlen + remain_len - 1] = d[remain_end]
+                        saved_position_roll_dict[start_idx + half_seqlen + remain_len - 1] = position_ids_rmpad[
+                            start_idx + half_seqlen + remain_len - 1
+                        ]
 
         if need_roll:
             input_ids_rmpad = torch.roll(input_ids_rmpad, shifts=-1, dims=0)
+            position_ids_rmpad = torch.roll(position_ids_rmpad, shifts=-1, dims=0)
             if len(saved_roll_dict) > 0:
                 for k, v in saved_roll_dict.items():
                     input_ids_rmpad[k] = v
+                for k, v in saved_position_roll_dict.items():
+                    position_ids_rmpad[k] = v
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
@@ -408,9 +431,9 @@ def preprocess_thd_no_padding(
         cu_seqlens_kv_padded=cu_seqlens_padded,
     )
     if pre_process:
-        return input_ids_rmpad.unsqueeze(0), packed_seq_params
+        return input_ids_rmpad.unsqueeze(0), packed_seq_params, position_ids_rmpad.unsqueeze(0)
     else:
-        return input_ids, packed_seq_params
+        return input_ids, packed_seq_params, None
 
 
 def postprocess_thd_no_padding(
@@ -477,6 +500,15 @@ def postprocess_thd_no_padding(
     return output_new_tensor
 
 
+def _build_npu_attn_mask(original_attention_mask: torch.Tensor) -> torch.Tensor:
+    """Build attn_mask for torch_npu.npu_fusion_attention (B1SS / [B, 1, Sq, Skv])"""
+    _, seq_len = original_attention_mask.shape
+    causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=original_attention_mask.device)).to(torch.bool)
+    attn_mask = original_attention_mask.unsqueeze(-1) & original_attention_mask.unsqueeze(-2)
+    attn_mask = attn_mask & causal_mask
+    return (~attn_mask).unsqueeze(1).contiguous()
+
+
 def preprocess_bshd_no_padding(
     input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
 ):
@@ -486,7 +518,7 @@ def preprocess_bshd_no_padding(
     """
     cp_size = mpu.get_context_parallel_world_size()
     # TODO: support context parallel size > 1
-    assert cp_size == 1, "Context parallel size without bshd is not supported yet"
+    assert cp_size == 1, "Context parallel size with bshd is not supported yet"
 
     batch_size = input_ids.shape[0]
     seqlens_in_batch = input_ids.offsets().diff()
@@ -516,6 +548,10 @@ def preprocess_bshd_no_padding(
     if need_roll:
         input_ids_bshd = torch.roll(input_ids_bshd, shifts=-1, dims=1)
 
+    if is_npu_available:
+        # Ascend npu_fusion_attention's attn_mask must be BNSS / B1SS / 11SS / SS; [B, S] is invalid.
+        attention_mask = _build_npu_attn_mask(attention_mask)
+
     return input_ids_bshd, attention_mask, position_ids
 
 
@@ -529,6 +565,10 @@ def postprocess_bshd_no_padding(
     """
     if not post_process:
         return output
+
+    if is_npu_available:
+        attention_mask = attention_mask.diagonal(dim1=-2, dim2=-1).squeeze(1)
+        attention_mask = ~attention_mask.bool()
 
     batch_size = output.shape[0]
     output_new = []

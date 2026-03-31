@@ -119,6 +119,15 @@ class SFTTrainer:
             profiler_config=self.profiler_config,
         )
 
+        wg_kwargs = {}
+        if self.start_profile_step != -1:
+            wg_kwargs["profile_steps"] = list(range(self.start_profile_step, self.end_profile_step + 1))
+            # Only require nsight worker options when tool is nsys
+            if OmegaConf.select(self.config.profiler, "tool") == "nsys":
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                )
+
         # create resource pool and worker group
         from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 
@@ -130,6 +139,7 @@ class SFTTrainer:
             resource_pool=self.resource_pool,
             ray_cls_with_init=ray_cls_with_init,
             device_name=self.config.trainer.device,
+            **wg_kwargs,
         )
         self.training_client.set_loss_fn(loss_fn=self.loss_fn)
         self.training_client.reset()
@@ -300,6 +310,7 @@ class SFTTrainer:
                 # start profile in SPMD mode
                 if global_step == self.start_profile_step:
                     self.training_client.start_profile()
+
                 # train for on batch
                 output = self.training_client.train_batch(data)
                 output = output.get()

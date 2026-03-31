@@ -21,6 +21,8 @@ defaults:
   - reward@reward: reward
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
+  # distillation config
+  - distillation@distillation: distillation
   - _self_
 
 actor_rollout_ref:
@@ -167,7 +169,7 @@ trainer:
 
   # whether to use legacy worker implementation
   #  mode: "auto", "enable", or "disable"
-  use_legacy_worker_impl: auto
+  use_legacy_worker_impl: disable
 
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
