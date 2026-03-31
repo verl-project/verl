@@ -46,6 +46,7 @@ from transfer_queue import KVBatchMeta
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
 from verl.experimental.reward_loop import RewardLoopManager
+from verl.experimental.teacher_loop import TeacherModelManager
 from verl.protocol import DataProto, DataProtoFuture
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
@@ -427,13 +428,20 @@ class AgentLoopManagerTQ(AgentLoopManager):
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        teacher_model_manager: TeacherModelManager = None,
         replay_buffer: ReplayBuffer = None,
     ):
         """Create agent loop manager."""
         instance = cls(
-            config, worker_group, rollout_resource_pool, reward_loop_worker_handles, replay_buffer=replay_buffer
+            config,
+            worker_group,
+            rollout_resource_pool,
+            teacher_model_manager,
+            reward_loop_worker_handles,
+            replay_buffer=replay_buffer,
         )
         await instance._initialize_llm_servers()
+        await instance._init_global_load_balancer()
         await instance._init_agent_loop_workers()
         return instance
 
