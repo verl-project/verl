@@ -185,7 +185,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 self.model_config.local_path,
                 torch_dtype=torch_dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
-                subfolder="transformer",
+                subfolder="transformer",  # currently we support DiT with transformer backbone only.
             )
 
             # some parameters may not in torch_dtype
