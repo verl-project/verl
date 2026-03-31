@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-eval "$(conda shell.bash hook)"
-conda activate verl
-export PATH=$CONDA_PREFIX/bin:$PATH
+
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
 export NCCL_P2P_DISABLE=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0,2,8,9
+
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5}"
+export NPU_VISIBLE_DEVICES="${NPU_VISIBLE_DEVICES:-$ASCEND_RT_VISIBLE_DEVICES}"
+
+# vLLM on some NPU images requires V1 engine flag.
+export VLLM_USE_V1="${VLLM_USE_V1:-1}"
+
 export DATA_PATH=$PWD/../verlData
 export HF_HOME=$DATA_PATH
 export VLLM_CACHE_DIR=$DATA_PATH/vllm_cache
+mkdir -p "$DATA_PATH/gsm8k" "$VLLM_CACHE_DIR"
 
 set -xeuo pipefail
 
@@ -47,7 +54,7 @@ STUDENT_WORLD_SIZE=4
 TEACHER_RESOURCE_POOL=False
 TEACHER_WORLD_SIZE=2
 
-ENFORCE_EAGER=False # true for faster debugging
+ENFORCE_EAGER=True
 
 ############################ Paths ############################
 
@@ -71,11 +78,11 @@ DATA=(
 )
 
 MODEL=(
-    actor_rollout_ref.model.path="${FAMILY}/${STUDENT_MODEL}"
+    actor_rollout_ref.model.path="${DATA_PATH}/weights/${FAMILY}/${STUDENT_MODEL}"
     actor_rollout_ref.model.use_fused_kernels=$USE_FUSED_KERNELS
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.use_remove_padding=True
-    actor_rollout_ref.actor.use_torch_compile=True
+    actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.rollout.enforce_eager=$ENFORCE_EAGER
 )
 
@@ -85,7 +92,7 @@ DISTILLATION=(
     distillation.teacher_model.enable_resource_pool=$TEACHER_RESOURCE_POOL
     distillation.teacher_model.n_gpus_per_node=$TEACHER_WORLD_SIZE
     distillation.teacher_model.nnodes=1
-    distillation.teacher_model.model_path="${FAMILY}/${TEACHER_MODEL}"
+    distillation.teacher_model.model_path="${DATA_PATH}/weights/${FAMILY}/${TEACHER_MODEL}"
     distillation.teacher_model.inference.tensor_model_parallel_size=1
     distillation.teacher_model.inference.name=$ROLLOUT_NAME
     distillation.teacher_model.inference.gpu_memory_utilization=0.3
@@ -132,7 +139,7 @@ ALGORITHM=(
 )
 
 TRAINER=(
-    trainer.logger='["console","wandb"]'
+    trainer.logger='["console"]'
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXP_NAME
     trainer.n_gpus_per_node=$STUDENT_WORLD_SIZE
