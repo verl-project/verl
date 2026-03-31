@@ -29,7 +29,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
 
 from verl.utils.device import is_npu_available
-from verl.utils.transformers_compat import is_transformers_version_in_range
+from verl.utils.transformers_compat import is_transformers_version_in_range, unpack_visual_output
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
     gather_seq_scatter_heads,
@@ -346,16 +346,8 @@ def _get_input_embeds(
         pixel_values = pixel_values.type(model.visual.dtype)
         image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
-        if is_transformers_version_in_range(min_version="5.0.0"):
-            assert getattr(image_embeds, "pooler_output", None) is not None, (
-                "Expected image_embeds as BaseModelOutputWithPooling type in newer transformers versions"
-            )
-            n_image_features = image_embeds.pooler_output.shape[0]
-        else:
-            assert getattr(image_embeds, "shape", None) is not None, (
-                "Expected image_embeds to have shape attribute in transformers v5.0.0 -"
-            )
-            n_image_features = image_embeds.shape[0]
+        image_embeds, _ = unpack_visual_output(image_embeds)
+        n_image_features = image_embeds.shape[0]
         if n_image_tokens != n_image_features:
             raise ValueError(
                 f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"

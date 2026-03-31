@@ -72,3 +72,18 @@ def get_auto_model_for_vision2seq():
         return AutoModelForVision2Seq
 
     return AutoModelForImageTextToText
+
+
+def unpack_visual_output(visual_output):
+    """Unpack the output from the visual encoder, handling both tuple and object return types.
+
+    Newer versions of transformers return an object with `pooler_output` and `deepstack_features`
+    attributes instead of a plain tuple.
+    """
+    if hasattr(visual_output, "pooler_output"):
+        # For newer versions(>=5.0.0) of transformers, return the pooler_output and deepstack_features
+        if hasattr(visual_output, "deepstack_features"):
+            return visual_output.pooler_output, visual_output.deepstack_features
+        else:
+            return visual_output.pooler_output
+    return visual_output

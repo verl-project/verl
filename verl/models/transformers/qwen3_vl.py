@@ -24,7 +24,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLForConditionalGeneration,
 )
 
-from verl.utils.transformers_compat import is_transformers_version_in_range
+from verl.utils.transformers_compat import unpack_visual_output
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -136,17 +136,6 @@ def get_rope_index(
     return position_ids
 
 
-def _unpack_visual_output(visual_output):
-    """Unpack the output from the visual encoder, handling both tuple and object return types.
-
-    Newer versions of transformers return an object with `pooler_output` and `deepstack_features`
-    attributes instead of a plain tuple.
-    """
-    if hasattr(visual_output, "pooler_output"):
-        return visual_output.pooler_output, visual_output.deepstack_features
-    return visual_output
-
-
 def _get_input_embeds(
     model: "Qwen3VLForConditionalGeneration",
     input_ids: torch.LongTensor,
@@ -160,20 +149,9 @@ def _get_input_embeds(
     image_mask, video_mask = None, None
     if pixel_values is not None:
         pixel_values = pixel_values.type(model.visual.dtype)
-        image_embeds, deepstack_image_embeds = _unpack_visual_output(
-            model.visual(pixel_values, grid_thw=image_grid_thw)
-        )
+        image_embeds, deepstack_image_embeds = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
-        if is_transformers_version_in_range(min_version="5.0.0"):
-            assert getattr(image_embeds, "pooler_output", None) is not None, (
-                "Expected image_embeds as BaseModelOutputWithPooling type in newer transformers versions"
-            )
-            n_image_features = image_embeds.pooler_output.shape[0]
-        else:
-            assert getattr(image_embeds, "shape", None) is not None, (
-                "Expected image_embeds to have shape attribute in transformers <= v4.57.6"
-            )
-            n_image_features = image_embeds.shape[0]
+        n_image_features = image_embeds.shape[0]
         if n_image_tokens != n_image_features:
             raise ValueError(
                 f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
@@ -189,7 +167,7 @@ def _get_input_embeds(
 
     if pixel_values_videos is not None:
         pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
-        video_embeds, deepstack_video_embeds = _unpack_visual_output(
+        video_embeds, deepstack_video_embeds = unpack_visual_output(
             model.visual(pixel_values_videos, grid_thw=video_grid_thw)
         )
         n_video_tokens = (input_ids == model.config.video_token_id).sum().item()
@@ -236,7 +214,7 @@ def _get_input_embeds(
         patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
         pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
         image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds, dummy_deepstack_image_embeds = _unpack_visual_output(
+        image_embeds, dummy_deepstack_image_embeds = unpack_visual_output(
             model.visual(pixel_values, grid_thw=image_grid_thw)
         )
         inputs_embeds += 0.0 * image_embeds.mean()
