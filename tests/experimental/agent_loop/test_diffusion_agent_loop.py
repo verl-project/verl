@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import shutil
+import tempfile
 
 import numpy as np
 import pytest
@@ -24,6 +26,36 @@ from verl.protocol import DataProto
 pytestmark = pytest.mark.vllm_omni
 
 
+def _create_tp_compatible_model(src_model_path, num_attention_heads=2):
+    """Copy base model and recreate transformer on-the-fly with TP-compatible head count.
+
+    The tiny-random Qwen-Image model has num_attention_heads=1 in its transformer config,
+    which is not divisible by tensor_model_parallel_size=2. This helper copies the full
+    model directory (vae, text_encoder, tokenizer, scheduler) and overwrites only the
+    transformer component with a freshly-initialized one that has the desired head count.
+    """
+    from diffusers import QwenImageTransformer2DModel
+
+    tmp_dir = tempfile.mkdtemp()
+    dst = os.path.join(tmp_dir, "Qwen-Image")
+    shutil.copytree(src_model_path, dst)
+
+    transformer = QwenImageTransformer2DModel(
+        num_attention_heads=num_attention_heads,
+        attention_head_dim=32,
+        num_layers=2,
+        in_channels=64,
+        out_channels=16,
+        patch_size=2,
+        joint_attention_dim=32,
+        axes_dims_rope=(8, 12, 12),
+        guidance_embeds=False,
+    )
+    transformer.save_pretrained(os.path.join(dst, "transformer"))
+
+    return dst, tmp_dir
+
+
 @pytest.fixture
 def init_config() -> DictConfig:
     from hydra import compose, initialize_config_dir
@@ -31,7 +63,8 @@ def init_config() -> DictConfig:
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
         config = compose(config_name="diffusion_trainer")
 
-    model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
+    base_model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
+    model_path, tmp_dir = _create_tp_compatible_model(base_model_path, num_attention_heads=2)
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.model.tokenizer_path = os.path.join(model_path, "tokenizer")
     config.actor_rollout_ref.rollout.name = "vllm_omni"
@@ -65,7 +98,10 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.max_model_len = max_length
 
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
-    return config
+
+    yield config
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def test_single_turn(init_config):
