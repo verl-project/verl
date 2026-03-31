@@ -440,18 +440,15 @@ class DiffusersFSDPEngine(BaseEngine):
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
-        # compute num_tokens in global batch for loss normalization
-        batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
-        torch.distributed.all_reduce(
-            batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
-        )
-        tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
-        tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+        num_timesteps = data["all_timesteps"].shape[1]
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )
+
+        gradient_accumulation_steps = len(micro_batches) * num_timesteps
+        tu.assign_non_tensor(data, gradient_accumulation_steps=gradient_accumulation_steps)
 
         output_lst = []
 
@@ -462,7 +459,7 @@ class DiffusersFSDPEngine(BaseEngine):
             meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
             # Forward and backward for each timestep
             with ctx:
-                for step in range(micro_batch["all_timesteps"].shape[1]):
+                for step in range(num_timesteps):
                     loss, meta_info = self.forward_step(
                         micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
                     )
@@ -603,6 +600,13 @@ class DiffusersFSDPEngine(BaseEngine):
                     "response_mask": micro_batch["response_mask"][:, step],
                 },
             )
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=1
+                ),
+            )
+
             if micro_batch.get("ref_log_prob", None) is not None:
                 data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
 

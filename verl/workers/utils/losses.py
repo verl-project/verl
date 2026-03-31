@@ -223,4 +223,7 @@ def diffusion_loss(config: ActorConfig, model_output, data: TensorDict, dp_group
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=AggregationType.MEAN)
         metrics["kl_coef"] = config.kl_loss_coef
 
+    gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
+    policy_loss = policy_loss / gradient_accumulation_steps
+
     return policy_loss, metrics
