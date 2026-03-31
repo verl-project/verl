@@ -291,8 +291,12 @@ def postprocess_packed_seqs_for_dict_output(
 
 ### No padding versions for model engine
 ### inputs are nested tensors
-def preprocess_thd_no_padding(
-    input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
+def preprocess_thd_engine(
+    input_ids: torch.Tensor,
+    pre_process: bool = True,
+    need_roll: bool = False,
+    use_fp8_padding: bool = False,
+    local_cp_size: Optional[int] = None,
 ) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
     """
     Preprocess packed sequences
@@ -303,8 +307,17 @@ def preprocess_thd_no_padding(
     batch_size = input_ids.shape[0]
 
     tp_size = mpu.get_tensor_model_parallel_world_size()
-    cp_size = mpu.get_context_parallel_world_size()
-    cp_rank = mpu.get_context_parallel_rank()
+    extra_packed_args = {}
+    if local_cp_size is not None:
+        # dynamic CP
+        cp_size = local_cp_size
+        cp_group = mpu.get_dynamic_data_context_parallel_groups(group_size=local_cp_size)
+        cp_rank = torch.distributed.get_rank(group=cp_group)
+        extra_packed_args["local_cp_size"] = local_cp_size
+        extra_packed_args["cp_group"] = cp_group
+    else:
+        cp_size = mpu.get_context_parallel_world_size()
+        cp_rank = mpu.get_context_parallel_rank()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
     seqlens_in_batch = input_ids.offsets().diff()
 
@@ -429,6 +442,7 @@ def preprocess_thd_no_padding(
         max_seqlen_kv=max_seqlen_in_batch,
         cu_seqlens_q_padded=cu_seqlens_padded,
         cu_seqlens_kv_padded=cu_seqlens_padded,
+        **extra_packed_args,
     )
     if pre_process:
         return input_ids_rmpad.unsqueeze(0), packed_seq_params, position_ids_rmpad.unsqueeze(0)
@@ -436,12 +450,13 @@ def preprocess_thd_no_padding(
         return input_ids, packed_seq_params, None
 
 
-def postprocess_thd_no_padding(
+def postprocess_thd_engine(
     output: torch.Tensor,
     packed_seq_params: PackedSeqParams,
     input_ids: torch.Tensor,
     batch_size: int,
     post_process: bool = True,
+    local_cp_size: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Postprocess packed sequences
@@ -461,14 +476,21 @@ def postprocess_thd_no_padding(
 
     output_new = []
 
-    cp_size = mpu.get_context_parallel_world_size()
+    if local_cp_size is not None:
+        cp_size = local_cp_size
+        cp_group = packed_seq_params.cp_group
+        cp_rank = torch.distributed.get_rank(group=cp_group)
+    else:
+        cp_size = mpu.get_context_parallel_world_size()
+        cp_group = mpu.get_context_parallel_group()
+        cp_rank = mpu.get_context_parallel_rank()
     # all gather output across context parallel group
     if cp_size > 1:
         # output shape: [1, packed_len, hidden_dim]
         # need to gather across cp group and concatenate in sequence dimension
         output_list = [torch.empty_like(output) for _ in range(cp_size)]
-        torch.distributed.all_gather(output_list, output.detach(), group=mpu.get_context_parallel_group())
-        output_list[mpu.get_context_parallel_rank()] = output
+        torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
+        output_list[cp_rank] = output
     else:
         output_list = [output]
 
@@ -509,7 +531,7 @@ def _build_npu_attn_mask(original_attention_mask: torch.Tensor) -> torch.Tensor:
     return (~attn_mask).unsqueeze(1).contiguous()
 
 
-def preprocess_bshd_no_padding(
+def preprocess_bshd_engine(
     input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
 ):
     """
@@ -555,7 +577,7 @@ def preprocess_bshd_no_padding(
     return input_ids_bshd, attention_mask, position_ids
 
 
-def postprocess_bshd_no_padding(
+def postprocess_bshd_engine(
     output: torch.Tensor,
     attention_mask: torch.Tensor,
     post_process: bool = True,

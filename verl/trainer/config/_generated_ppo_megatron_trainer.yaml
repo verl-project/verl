@@ -41,6 +41,8 @@ actor_rollout_ref:
       use_distributed_optimizer: true
       use_dist_checkpointing: false
       dist_checkpointing_path: null
+      dynamic_context_parallel: false
+      max_seqlen_per_dp_cp_rank: null
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
@@ -213,6 +215,8 @@ actor_rollout_ref:
       use_distributed_optimizer: true
       use_dist_checkpointing: false
       dist_checkpointing_path: null
+      dynamic_context_parallel: false
+      max_seqlen_per_dp_cp_rank: null
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
@@ -507,6 +511,8 @@ critic:
     use_distributed_optimizer: true
     use_dist_checkpointing: false
     dist_checkpointing_path: null
+    dynamic_context_parallel: false
+    max_seqlen_per_dp_cp_rank: null
     dist_checkpointing_prefix: ''
     dist_ckpt_optim_fully_reshardable: false
     distrib_optim_fully_reshardable_mem_efficient: false

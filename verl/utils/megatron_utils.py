@@ -36,9 +36,11 @@ from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
+from tensordict import TensorDict
 from transformers import PretrainedConfig
 
 import verl.utils.megatron.tensor_parallel as tp_utils
+from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing
@@ -1351,6 +1353,84 @@ def get_megatron_module_device(models: list[Any]) -> str:
         return "cpu"
     else:
         return get_device_name()
+
+
+def dynamic_cp_split_batch(
+    batch: TensorDict, engine_config: McoreEngineConfig, dp_size: int, dp_rank: int
+) -> TensorDict:
+    """
+    Split the batch into sub-batches for dynamic context parallel.
+
+    we can spilt a microbatch into several sub-batches with different local_cp_size, but for simplicity now,
+    we only split the batch into a fixed local_cp_size.
+
+    """
+    input_ids = batch["input_ids"]
+    assert input_ids.is_nested, "input_ids must be a nested tensor"
+    seq_len_effective: torch.Tensor = input_ids.offsets().diff()
+    max_seq_len = max(seq_len_effective)
+    # if num of sequences is less than dp_size, we don't need to split the batch
+    local_cp_size = None
+    if len(seq_len_effective) < dp_size:
+        local_cp_size = dp_size
+        return batch
+    else:
+        # decide the local_cp_size based on the max_seq_len and dp_size
+        max_seqlen_per_dp_cp_rank = engine_config.max_seqlen_per_dp_cp_rank
+        import math
+
+        local_cp_size = math.ceil(max_seq_len / max_seqlen_per_dp_cp_rank)
+        # round up to the nearest power of 2, for [1,2,3,4,5,6,7,8] -> [1,2,4,4,8,8,8,8]
+        local_cp_size = 1 << (local_cp_size - 1).bit_length()
+
+        assert local_cp_size <= dp_size, (
+            "local_cp_size must be less than or equal to dp_size, try to increase max_seqlen_per_dp_cp_rank"
+        )
+        if local_cp_size < dp_size:
+            # split the batch into local_cp_size sub-batches
+            local_dp_rank = dp_rank // local_cp_size
+            local_dp_size = dp_size // local_cp_size
+            indices = list(range(len(seq_len_effective)))
+            num_seq_per_local_cp = math.ceil(len(seq_len_effective) / local_dp_size)
+            start_idx = local_dp_rank * num_seq_per_local_cp
+            end_idx = min(start_idx + num_seq_per_local_cp, len(seq_len_effective))
+            selected_indices = indices[start_idx:end_idx]
+            batch = tu.index_select_tensor_dict(batch, selected_indices)
+
+    # print(f"rank={torch.distributed.get_rank()}, local_cp_size={local_cp_size} max_seq_len={max_seq_len}")
+    tu.assign_non_tensor_data(batch, "local_cp_size", local_cp_size)
+    return batch
+
+
+def dynamic_cp_merge_output(
+    outputs: dict[str, torch.Tensor],
+    dp_size: int,
+    dp_rank: int,
+    local_cp_size: int,
+) -> TensorDict:
+    """
+    Merge the outputs from different sub-batches for dynamic context parallel.
+    """
+    if local_cp_size == dp_size:
+        return outputs
+
+    merged_output = {}
+    for k in outputs:
+        data_local = outputs[k]
+        object_list = [None for _ in range(dp_size)]
+        torch.distributed.all_gather_object(
+            object_list=object_list, obj=data_local, group=mpu.get_data_parallel_group()
+        )
+
+        to_merge = object_list[(dp_rank % local_cp_size) :: local_cp_size]
+        merged = torch.nested.nested_tensor(
+            sum([list(x.to(data_local.device).unbind()) for x in to_merge], []), layout=torch.jagged
+        )
+        merged_output[k] = merged
+        # print(f'local_cp_size={local_cp_size}, dp_rank={dp_rank}, key={k},
+        # data_local shape={data_local.shape}, merged shape={merged_output[k].shape} ')
+
+    return merged_output
 
 
 def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConfig):
