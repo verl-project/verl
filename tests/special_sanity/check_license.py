@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import subprocess
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import Iterable
@@ -44,20 +45,24 @@ license_headers = [
 ]
 
 
-EXCLUDE_DIRS = {".venv", "venv", ".git", "__pycache__", "node_modules"}
+def _git_tracked_py_files() -> set[Path]:
+    """Return the set of .py files tracked by git (respects .gitignore)."""
+    result = subprocess.run(["git", "ls-files", "*.py", "**/*.py"], capture_output=True, text=True, check=True)
+    return {Path(line) for line in result.stdout.splitlines() if line}
 
 
-def get_py_files(path_arg: Path) -> Iterable[Path]:
+def get_py_files(path_arg: Path, tracked: set[Path]) -> Iterable[Path]:
     """get py files under a dir. if already py file return it
 
     Args:
         path_arg (Path): path to scan for py files
+        tracked (set[Path]): set of git-tracked py files
 
     Returns:
         Iterable[Path]: list of py files
     """
     if path_arg.is_dir():
-        return (p for p in path_arg.glob("**/*.py") if not (EXCLUDE_DIRS & set(p.parts)))
+        return (p for p in tracked if p == path_arg or path_arg in p.parents)
     elif path_arg.is_file() and path_arg.suffix == ".py":
         return [path_arg]
     return []
@@ -75,8 +80,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Collect all Python files from specified directories
-    pathlist = set(path for path_arg in args.directories for path in get_py_files(path_arg))
+    # Collect all Python files from specified directories (only git-tracked files)
+    tracked = _git_tracked_py_files()
+    pathlist = set(path for path_arg in args.directories for path in get_py_files(path_arg, tracked))
 
     for path in pathlist:
         # because path is object not string
