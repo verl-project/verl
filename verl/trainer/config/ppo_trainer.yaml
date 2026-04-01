@@ -54,12 +54,6 @@ actor_rollout_ref:
   # Timeout for operations executed against the process group
   nccl_timeout: 600
 
-  # Rollout model config.
-  rollout:
-
-    # for huge model, layered summon can save memory (prevent OOM) but make it slower
-    layered_summon: False
-
 # config for the algorithm
 algorithm:
 
