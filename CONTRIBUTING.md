@@ -85,6 +85,13 @@ Thanks for submitting a PR! To streamline reviews:
 - Update docs for any user-facing changes.
 - Add or update tests in the CI workflows, or explain why tests aren't applicable.
 
+## AI-Assisted Contributions
+
+See
+
+- [`AGENTS.md`](AGENTS.md) for rules that all AI coding agents must follow
+- [`editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md) for guidelines on editing agent instructions.
+
 ## License
 
 See the [LICENSE](https://github.com/volcengine/verl/blob/main/LICENSE) file for full details.

@@ -28,6 +28,6 @@ Run pre-commit and fix any issues before creating or pushing.
 ### 4. Create or Update the PR
 
 - **Create**: target `main` by default unless the user specifies otherwise.
-- **Update**: push new commits and update the title and body if the scope has changed. When updating the body, **read the current PR body first** and incorporate any edits the user may have made directly on GitHub — never overwrite with a version generated from scratch.
+- **Update**: push new commits and update the title and body if the scope has changed. **Read the current PR title and body first** and incorporate any edits the user may have made directly on GitHub — never overwrite with a version generated from scratch.
 
 Return the PR URL when done.
