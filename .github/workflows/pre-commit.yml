@@ -33,7 +33,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Install dev dependencies
         run: |
-          uv sync --group dev --no-install-project
+          uv pip install pre-commit hydra-core
           uv pip install --no-deps -e .
       - name: Set ruff --output-format=github
         run: |

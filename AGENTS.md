@@ -49,7 +49,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv --python 3.12
 source .venv/bin/activate
 
-uv sync --group dev --no-install-project # See pyproject.toml for the list of dependencies.
+uv pip install pre-commit hydra-core
 pre-commit install
 ```
 

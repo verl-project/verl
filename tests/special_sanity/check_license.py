@@ -44,6 +44,9 @@ license_headers = [
 ]
 
 
+EXCLUDE_DIRS = {".venv", "venv", ".git", "__pycache__", "node_modules"}
+
+
 def get_py_files(path_arg: Path) -> Iterable[Path]:
     """get py files under a dir. if already py file return it
 
@@ -54,7 +57,7 @@ def get_py_files(path_arg: Path) -> Iterable[Path]:
         Iterable[Path]: list of py files
     """
     if path_arg.is_dir():
-        return path_arg.glob("**/*.py")
+        return (p for p in path_arg.glob("**/*.py") if not (EXCLUDE_DIRS & set(p.parts)))
     elif path_arg.is_file() and path_arg.suffix == ".py":
         return [path_arg]
     return []
