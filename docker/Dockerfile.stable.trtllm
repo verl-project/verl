@@ -1,7 +1,7 @@
 # Base image from NGC TensorRT-LLM, which includes a pre-installed TensorRT-LLM.
 # For available images, visit: https://nvidia.github.io/TensorRT-LLM/installation/containers.html
 # Use TRTLLM_BASE_IMAGE to specify the base image (default: release:1.2.0rc6)
-ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc4
+ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 FROM ${TRTLLM_BASE_IMAGE}
 
 
