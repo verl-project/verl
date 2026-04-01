@@ -222,6 +222,20 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    if "uid" in batch.non_tensor_batch:
+        uids = batch.non_tensor_batch["uid"]
+        scores_np = sequence_score.detach().cpu().numpy()
+
+        id2scores = defaultdict(list)
+        for i, uid in enumerate(uids):
+            id2scores[uid].append(scores_np[i])
+
+        group_stds = [np.std(v) for v in id2scores.values() if len(v) > 1]
+        if group_stds:
+            metrics["critic/group_reward/std_mean"] = float(np.mean(group_stds))
+            metrics["critic/group_reward/std_max"]  = float(np.max(group_stds))
+            metrics["critic/group_reward/std_min"]  = float(np.min(group_stds))
+
     return metrics
 
 
@@ -411,6 +425,11 @@ def compute_variance_proxy_metrics(batch: DataProto, gradient_norm: float = None
             # Component metrics for debugging
             "variance_proxy/expected_a_squared": expected_a_squared.detach().item(),
             "variance_proxy/expected_w": expected_w.detach().item(),
+            "variance_proxy/snr": (
+                proxy1_signal_strength / (proxy3_pure_noise + 1e-8)
+                if proxy1_signal_strength is not None and proxy3_pure_noise is not None and proxy3_pure_noise > 0
+                else 0.0
+            ),
         }
     )
 
