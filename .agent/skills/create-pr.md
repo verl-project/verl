@@ -21,12 +21,7 @@ Based on the diff and commits, compose a title strictly following the format def
 
 ### 3. Compose PR Body
 
-Fill in each section of `.github/PULL_REQUEST_TEMPLATE.md` based on the actual changes:
-- **What does this PR do?** — 1-3 sentence summary, reference related issues
-- **Test** — how the changes were validated
-- **API and Usage Example** — show before/after if API changed, or usage snippet for new features
-- **Design & Code Changes** — list key changes
-- **Checklist** — only check boxes for steps that have actually been completed; leave the rest unchecked
+Fill in each section of `.github/PULL_REQUEST_TEMPLATE.md` based on the actual changes. Only check checklist boxes for steps that have actually been completed.
 
 ### 4. Pre-submit Checks
 
