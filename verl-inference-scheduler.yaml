@@ -19,7 +19,7 @@ spec:
         - name: artifact-registry-secret
         containers:
         - name: ray-head
-          image: us-central1-docker.pkg.dev/gke-shared-ai-dev/verl-grpo/verl-ray:latest
+          image: us-central1-docker.pkg.dev/yangspirit-gke-dev/rl-weight-transfer/verl-ray:latest
           ports:
           - containerPort: 6379
             name: gcs
@@ -56,7 +56,7 @@ spec:
         - name: artifact-registry-secret
         containers:
         - name: ray-worker
-          image: us-central1-docker.pkg.dev/gke-shared-ai-dev/verl-grpo/verl-ray:latest
+          image: us-central1-docker.pkg.dev/yangspirit-gke-dev/rl-weight-transfer/verl-ray:latest
           env:
           - name: HUGGING_FACE_HUB_TOKEN
             valueFrom:
