@@ -36,9 +36,3 @@ Create the PR targeting `main` by default unless the user specifies otherwise.
 ### 6. Report Back
 
 Return the PR URL to the user.
-
-## Important Notes
-
-- Always analyze ALL commits on the branch, not just the latest one
-- If unsure which module(s) to tag, ask the user
-- If the user provides a PR description or title, incorporate their input rather than overriding it
