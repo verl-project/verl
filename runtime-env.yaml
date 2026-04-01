@@ -1,0 +1,21 @@
+env_vars:
+  PYTHONPATH: "."
+  NCCL_DEBUG: "INFO"
+  NUM_WORKERS: "4"
+  CPUS_PER_WORKER: "32"
+  GPUS_PER_WORKER: "4"
+  NCCL_NET_PLUGIN: "/usr/local/gib/lib64/libnccl-net_internal.so"
+  NCCL_CROSS_NIC: "0"
+  NCCL_NET_GDR_LEVEL: "PIX"
+  NCCL_P2P_NET_CHUNKSIZE: "131072"
+  NCCL_NVLS_CHUNKSIZE: "524288"
+  NCCL_IB_ADAPTIVE_ROUTING: "1"
+  NCCL_IB_QPS_PER_CONNECTION: "4"
+  NCCL_IB_TC: "52"
+  NCCL_IB_FIFO_TC: "84"
+  NCCL_TUNER_CONFIG_PATH: "/usr/local/gib/configs/tuner_config_a3u.txtpb"
+  GLOO_SOCKET_IFNAME: "eth0"
+pip:
+  packages:
+    - torch
+    - torchvision
