@@ -161,7 +161,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."
     # Megatron specific parameters
     gen_tp=2
-    train_tp=1
+    train_tp=2
     train_pp=2
     ref_offload=True
     actor_offload=False
