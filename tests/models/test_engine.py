@@ -416,7 +416,7 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
     # get per tensor parameter
     per_tensor_params, _ = engine.get_per_tensor_param()
 
-    if revert_weight_conversion is not None:
+    if strategy == "megatron" and revert_weight_conversion is not None:
         ref_state_dict = revert_weight_conversion(ref_model, ref_model.state_dict())
     else:
         ref_state_dict = ref_model.state_dict()
