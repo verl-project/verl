@@ -38,4 +38,5 @@ If a duplicate exists, inform the user instead of creating a new one.
 
 ### 5. Create the Issue
 
+Add `good first issue` and/or `call for contribution` labels if the issue is straightforward and suitable for new contributors.
 Create the issue and return the URL when done.
