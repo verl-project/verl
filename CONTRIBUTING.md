@@ -26,7 +26,7 @@ Furthermore, you can learn the development plan and roadmap via [RFC](https://gi
 We rely on pre-commit to keep our code consistent. To set it up:
 
 ```bash
-pip install pre-commit # or uv sync --group dev
+pip install pre-commit hydra-core # or uv sync --group dev --no-install-project
 pre-commit install
 # for staged changes
 pre-commit run
