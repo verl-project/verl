@@ -8,7 +8,7 @@ When the user asks to create a PR, follow these steps:
 
 ### 1. Gather Context
 
-Read `.github/PULL_REQUEST_TEMPLATE.md` and understand the current branch's changes compared to main.
+Read `CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE.md` and understand the current branch's changes compared to main.
 
 ### 2. Compose PR Title and Body
 
