@@ -86,7 +86,7 @@ def unpack_visual_output(visual_output):
             return visual_output.pooler_output, visual_output.deepstack_features
         else:
             return visual_output.pooler_output, None
-    if len(visual_output) == 2:
-        return visual_output[0], visual_output[1]
+    if isinstance(visual_output, tuple):
+        return visual_output
     else:
-        return visual_output[0], None
+        return visual_output, None
