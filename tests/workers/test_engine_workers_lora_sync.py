@@ -59,9 +59,9 @@ async def _update_weights(
         if getattr(rollout, "sleep_level", 2) != 1:
             await rollout.resume(tags=["weights"])
 
-    # 2. get params
+    # 2. probe adapter-mode params first so we can discover peft_config
     per_tensor_param, peft_config = actor_engine.get_per_tensor_param(
-        layered_summon=layered_summon, base_sync_done=base_sync_done
+        layered_summon=layered_summon, base_sync_done=True
     )
 
     # 3. determine base sync need
@@ -72,38 +72,45 @@ async def _update_weights(
 
     # 4. sync weights
     if do_lora_base_sync:
-        await rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
-        )
-        per_tensor_param, peft_config = actor_engine.get_per_tensor_param(
-            layered_summon=layered_summon, base_sync_done=True
+        per_tensor_param_base, peft_config = actor_engine.get_per_tensor_param(
+            layered_summon=layered_summon, base_sync_done=False
         )
         await rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
         )
-    else:
-        await rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=base_sync_done, global_steps=global_steps
-        )
+
+    await rollout.update_weights(
+        per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+    )
 
     # 5. resume kv_cache
     if free_cache_engine:
         await rollout.resume(tags=["kv_cache"])
 
 
-def _make_mocks(peft_config=None):
+def _make_mocks(peft_config=None, params_by_base_sync_done=None):
     """Create mock rollout and actor engine.
 
     Args:
         peft_config: If not None, get_per_tensor_param returns this as peft_config.
             Use a truthy value (e.g. MagicMock()) for LoRA, None for non-LoRA/merge.
+        params_by_base_sync_done: Optional mapping used to return different params
+            for probe (`True`) and base sync (`False`) calls.
     """
     rollout = AsyncMock()
     # Don't pre-set sleep_level — let the code set it via getattr default
     del rollout.sleep_level
 
+    if params_by_base_sync_done is None:
+        params_by_base_sync_done = {False: "fake_params", True: "fake_params"}
+
     actor_engine = MagicMock()
-    actor_engine.get_per_tensor_param = MagicMock(return_value=("fake_params", peft_config))
+
+    def _get_per_tensor_param(*args, **kwargs):
+        base_sync_done = kwargs.get("base_sync_done", True)
+        return params_by_base_sync_done[base_sync_done], peft_config
+
+    actor_engine.get_per_tensor_param = MagicMock(side_effect=_get_per_tensor_param)
 
     return rollout, actor_engine
 
@@ -119,7 +126,10 @@ class TestAdapterModeFirstIteration:
     def test_sends_base_before_adapter(self):
         """Base weights must be sent before adapter deltas."""
         peft_cfg = MagicMock()
-        rollout, engine = _make_mocks(peft_config=peft_cfg)
+        rollout, engine = _make_mocks(
+            peft_config=peft_cfg,
+            params_by_base_sync_done={False: "fake_base_params", True: "fake_adapter_params"},
+        )
 
         asyncio.run(
             _update_weights(
@@ -131,16 +141,19 @@ class TestAdapterModeFirstIteration:
             )
         )
 
-        # get_per_tensor_param called twice: first with base_sync_done=False, then True
+        # get_per_tensor_param called twice: first probe with base_sync_done=True, then fetch base weights
         assert engine.get_per_tensor_param.call_count == 2
         calls = engine.get_per_tensor_param.call_args_list
-        assert calls[0] == call(layered_summon=False, base_sync_done=False)
-        assert calls[1] == call(layered_summon=False, base_sync_done=True)
+        assert calls[0] == call(layered_summon=False, base_sync_done=True)
+        assert calls[1] == call(layered_summon=False, base_sync_done=False)
 
     def test_update_weights_called_twice(self):
         """Two update_weights calls: base (base_sync_done=False), then adapter (True)."""
         peft_cfg = MagicMock()
-        rollout, engine = _make_mocks(peft_config=peft_cfg)
+        rollout, engine = _make_mocks(
+            peft_config=peft_cfg,
+            params_by_base_sync_done={False: "fake_base_params", True: "fake_adapter_params"},
+        )
 
         asyncio.run(
             _update_weights(
@@ -155,6 +168,8 @@ class TestAdapterModeFirstIteration:
         assert rollout.update_weights.call_count == 2
         first_call = rollout.update_weights.call_args_list[0]
         second_call = rollout.update_weights.call_args_list[1]
+        assert first_call.args[0] == "fake_base_params"
+        assert second_call.args[0] == "fake_adapter_params"
         assert first_call.kwargs["base_sync_done"] is False
         assert second_call.kwargs["base_sync_done"] is True
 
@@ -368,7 +383,10 @@ class TestEdgeCases:
     def test_adapter_full_call_ordering(self):
         """Verify the complete call sequence on first adapter iteration."""
         peft_cfg = MagicMock()
-        rollout, engine = _make_mocks(peft_config=peft_cfg)
+        rollout, engine = _make_mocks(
+            peft_config=peft_cfg,
+            params_by_base_sync_done={False: "fake_base_params", True: "fake_adapter_params"},
+        )
 
         asyncio.run(
             _update_weights(
@@ -385,8 +403,8 @@ class TestEdgeCases:
         # 1. resume(weights)  2. update_weights(base)  3. update_weights(adapter)  4. resume(kv_cache)
         expected = [
             call.resume(tags=["weights"]),
-            call.update_weights("fake_params", peft_config=peft_cfg, base_sync_done=False, global_steps=42),
-            call.update_weights("fake_params", peft_config=peft_cfg, base_sync_done=True, global_steps=42),
+            call.update_weights("fake_base_params", peft_config=peft_cfg, base_sync_done=False, global_steps=42),
+            call.update_weights("fake_adapter_params", peft_config=peft_cfg, base_sync_done=True, global_steps=42),
             call.resume(tags=["kv_cache"]),
         ]
         # Filter to only resume and update_weights calls
@@ -428,3 +446,20 @@ class TestEdgeCases:
 
         rollout.update_weights.assert_not_called()
         rollout.resume.assert_not_called()
+
+    def test_non_lora_probe_still_uses_base_sync_done_true(self):
+        """Non-LoRA path still probes with base_sync_done=True and sends a standard update."""
+        rollout, engine = _make_mocks(peft_config=None)
+
+        asyncio.run(
+            _update_weights(
+                rollout=rollout,
+                actor_engine=engine,
+                peft_merge=False,
+                base_sync_done=False,
+                free_cache_engine=True,
+            )
+        )
+
+        engine.get_per_tensor_param.assert_called_once_with(layered_summon=False, base_sync_done=True)
+        assert rollout.update_weights.call_args.kwargs["base_sync_done"] is True
