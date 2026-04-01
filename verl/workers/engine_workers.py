@@ -675,7 +675,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. determine if we need a base weight sync (adapter path only)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=self.base_sync_done
+            layered_summon=self.layered_summon, base_sync_done=True
         )
 
         do_lora_base_sync = False
@@ -698,7 +698,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
         else:
             await self.rollout.update_weights(
-                per_tensor_param, peft_config=peft_config, base_sync_done=self.base_sync_done, global_steps=global_steps
+                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
             )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
