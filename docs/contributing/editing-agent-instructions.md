@@ -73,3 +73,7 @@ Before submitting changes to any agent instruction file:
 - [ ] **Under budget?** `AGENTS.md` < 200 lines, domain guides < 300 lines?
 - [ ] **No hardcoded paths?** Uses "search for X" where paths may change?
 - [ ] **Tested?** Verified that an agent actually follows the new instruction?
+
+## Acknowledgements
+
+This guide is adapted from the [vLLM project](https://github.com/vllm-project/vllm)'s [`editing-agent-instructions.md`](https://github.com/vllm-project/vllm/blob/main/docs/contributing/editing-agent-instructions.md).
