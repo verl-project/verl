@@ -677,35 +677,40 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
+        # When sleep_level=1 (adapter mode), sleep() only released kv_cache,
+        # so skip the weight resume to avoid a no-op sglang call.
         if self.config.rollout.free_cache_engine:
-            await self.rollout.resume(tags=["weights"])
+            if getattr(self.rollout, "sleep_level", 2) != 1:
+                await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
-        # 2. get per tensor params from engine, this will load model to gpu
+        # 2. determine if we need a base weight sync (adapter path only)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
-        )
-
-        await self.rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            layered_summon=self.layered_summon, base_sync_done=self.base_sync_done
         )
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
-            # set sleep level for LoRA adapter weights only sync
-            # TODO: make this configurable so that users with small
-            # main memory can trade sync time to avoid OOM
             self.rollout.sleep_level = 1
+            do_lora_base_sync = not self.base_sync_done
 
-            do_lora_base_sync = (not self.base_sync_done) or (
-                self.rollout.sleep_level != 1 and self.config.rollout.free_cache_engine
-            )
-
+        # 3. sync weights: base first (when needed), then adapter/merged
         if do_lora_base_sync:
-            per_tensor_base_params, _ = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon, base_sync_done=False
+            # First iteration: per_tensor_param has base params (base_sync_done was False).
+            # Send base weights, then fetch and send adapter deltas.
+            await self.rollout.update_weights(
+                per_tensor_param, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
             )
-            await self.rollout.update_weights(per_tensor_base_params, peft_config=peft_config, base_sync_done=False)
+            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon, base_sync_done=True
+            )
+            await self.rollout.update_weights(
+                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            )
+        else:
+            await self.rollout.update_weights(
+                per_tensor_param, peft_config=peft_config, base_sync_done=self.base_sync_done, global_steps=global_steps
+            )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
