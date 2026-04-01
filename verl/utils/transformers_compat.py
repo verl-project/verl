@@ -85,5 +85,5 @@ def unpack_visual_output(visual_output):
         if hasattr(visual_output, "deepstack_features"):
             return visual_output.pooler_output, visual_output.deepstack_features
         else:
-            return visual_output.pooler_output
-    return visual_output
+            return visual_output.pooler_output, None
+    return visual_output, None
