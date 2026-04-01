@@ -31,9 +31,23 @@ from verl.protocol import DataProto
 if TYPE_CHECKING:
     from verl.single_controller.base.decorator import Dispatch
 
-import transfer_queue as tq
 from tensordict import TensorDict
-from transfer_queue import BatchMeta, KVBatchMeta
+
+try:
+    import transfer_queue as tq
+    from transfer_queue import (
+        BatchMeta,
+        KVBatchMeta,
+    )
+
+except ImportError:
+
+    class BatchMeta:
+        pass
+
+    class KVBatchMeta:
+        pass
+
 
 from verl.utils import tensordict_utils as tu
 

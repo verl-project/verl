@@ -34,11 +34,11 @@ from packaging import version
 from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
-from transfer_queue.metadata import BatchMeta, KVBatchMeta
 
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.py_functional import list_of_dict_to_dict_of_list, union_two_dict
 from verl.utils.torch_functional import allgather_dict_tensors
+from verl.utils.transferqueue_utils import BatchMeta, KVBatchMeta
 
 __all__ = ["DataProto", "union_tensor_dict"]
 
