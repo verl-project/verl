@@ -223,14 +223,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
     if "uid" in batch.non_tensor_batch:
-        uids = batch.non_tensor_batch["uid"]
-        scores_np = sequence_score.detach().cpu().numpy()
+        uids = batch.non_tensor_batch["uid"][non_aborted_mask.cpu().numpy()]
+        rewards_np = non_aborted_sequence_reward.detach().cpu().numpy()
 
-        id2scores = defaultdict(list)
+        id2rewards = defaultdict(list)
         for i, uid in enumerate(uids):
-            id2scores[uid].append(scores_np[i])
+            id2rewards[uid].append(rewards_np[i])
 
-        group_stds = [np.std(v) for v in id2scores.values() if len(v) > 1]
+        group_stds = [np.std(v) for v in id2rewards.values() if len(v) > 1]
         if group_stds:
             metrics["critic/group_reward/std_mean"] = float(np.mean(group_stds))
             metrics["critic/group_reward/std_max"]  = float(np.max(group_stds))
