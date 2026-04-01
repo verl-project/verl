@@ -18,7 +18,6 @@ Understand the current branch's changes compared to main:
 Based on the diff and commits, compose a title strictly following the format defined in `.github/PULL_REQUEST_TEMPLATE.md`:
 - Pick the correct `{modules}` and `{type}` from the template's allowed values
 - If changes break any existing API, prepend `[BREAKING]`
-- Keep the title under 70 characters
 
 ### 3. Compose PR Body
 
