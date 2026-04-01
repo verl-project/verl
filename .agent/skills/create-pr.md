@@ -8,34 +8,29 @@ When the user asks to create a PR, follow these steps:
 
 ### 1. Gather Context
 
-Understand the current branch's changes compared to main:
-
-- What files were changed and why
-- The full commit history on this branch
-- Read `.github/PULL_REQUEST_TEMPLATE.md` for the latest template format
+Read `.github/PULL_REQUEST_TEMPLATE.md` and understand the current branch's changes compared to main.
 
 ### 2. Determine PR Title
 
-Based on the diff and commits, compose a title strictly following the format defined in `.github/PULL_REQUEST_TEMPLATE.md`:
+Compose a title strictly following the format defined in the PR template:
 
 - Pick the correct `{modules}` and `{type}` from the template's allowed values
 - If changes break any existing API, prepend `[BREAKING]`
 
 ### 3. Compose PR Body
 
-Fill in each section of `.github/PULL_REQUEST_TEMPLATE.md` based on the actual changes. Only check checklist boxes for steps that have actually been completed.
+Fill in each section of the PR template based on the actual changes. Only check checklist boxes for steps that have actually been completed.
 
 ### 4. Pre-submit Checks
 
-Before creating the PR:
-
-- Run `pre-commit run --all-files --show-diff-on-failure --color=always` and fix any issues
-- Verify the branch is pushed to the remote with `git push -u origin <branch>`
+Run pre-commit and fix any issues before creating the PR.
 
 ### 5. Create the PR
 
-Create the PR targeting `main` by default unless the user specifies otherwise.
+Target `main` by default unless the user specifies otherwise. Return the PR URL when done.
 
-### 6. Report Back
+## Important Notes
 
-Return the PR URL to the user.
+- Always analyze ALL commits on the branch, not just the latest one
+- If unsure which module(s) to tag, ask the user
+- If the user provides a PR description or title, incorporate their input rather than overriding it
