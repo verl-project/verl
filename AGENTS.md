@@ -66,6 +66,10 @@ Co-authored-by: gemini-code-assist
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
+### Resolving agent reviews
+
+Review comments from agent bots (e.g., gemini-code-assist) can be outdated or wrong. Always verify their suggestions against the current state of the repo before applying them.
+
 ---
 
 ## Domain-Specific Guides
