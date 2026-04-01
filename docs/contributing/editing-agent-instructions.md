@@ -47,6 +47,7 @@ touch, what order to change them in, and which tests to run.
 ## Keeping Docs Lean
 
 - Every addition should trigger review of surrounding content for stale or redundant items.
+- Refer to existing files (e.g., "follow the PR template") instead of restating their content — keep a single source of truth.
 - Prefer examples over explanations — a 3-line snippet beats a paragraph of prose.
 - Merge related bullets into one principle instead of listing variants.
 - Use `search for X` instead of hardcoded file paths.
