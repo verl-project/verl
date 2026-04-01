@@ -1,8 +1,8 @@
-# create-pr
-
-Create a pull request for the current branch following the verl project's PR conventions.
-
-## Instructions
+---
+name: create-pr
+description: Create a pull request for the current branch following verl project conventions.
+user_invocable: true
+---
 
 When the user asks to create a PR, follow these steps:
 
