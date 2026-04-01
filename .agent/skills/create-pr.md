@@ -18,6 +18,6 @@ Follow the PR template strictly for both title format and body sections. Only ch
 
 Run pre-commit and fix any issues before creating the PR.
 
-### 5. Create the PR
+### 4. Create the PR
 
 Target `main` by default unless the user specifies otherwise. Return the PR URL when done.
