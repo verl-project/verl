@@ -31,14 +31,7 @@ Before creating the PR:
 
 ### 5. Create the PR
 
-```bash
-gh pr create --title "<title>" --body "$(cat <<'EOF'
-<body>
-EOF
-)"
-```
-
-Target `main` by default unless the user specifies otherwise.
+Create the PR targeting `main` by default unless the user specifies otherwise.
 
 ### 6. Report Back
 
