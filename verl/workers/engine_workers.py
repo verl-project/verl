@@ -683,23 +683,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.rollout.sleep_level = 1
             do_lora_base_sync = not self.base_sync_done
 
-        # 3. sync weights: base first (when needed), then adapter/merged
+        # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
-            # First iteration: per_tensor_param has base params (base_sync_done was False).
-            # Send base weights, then fetch and send adapter deltas.
-            await self.rollout.update_weights(
-                per_tensor_param, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
-            )
-            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon, base_sync_done=True
+            per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon, base_sync_done=False
             )
             await self.rollout.update_weights(
-                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+                per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
             )
-        else:
-            await self.rollout.update_weights(
-                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
-            )
+
+        await self.rollout.update_weights(
+            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+        )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
