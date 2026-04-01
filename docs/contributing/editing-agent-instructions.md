@@ -2,6 +2,16 @@
 
 > Read this before modifying `AGENTS.md` or any guide it links to.
 
+## File Layout
+
+| Generic     | Variants                   | Audience        | Scope                          |
+| ----------- | -------------------------- | --------------- | ------------------------------ |
+| `AGENTS.md` | `CLAUDE.md`, ...           | Agents          | Project-wide instructions.     |
+| `.agent/`   | `.claude/`, `.codex/`, ... | Agents          | Agent specification directory. |
+| `docs/`     | N/A                        | Humans & Agents | Project documentation.         |
+
+Generic files are framework-agnostic. Variants directly symlink generic files or refer to them and add framework-specific content.
+
 ## Token Budget Mindset
 
 `AGENTS.md` loads on every agent request; domain guides load on entry to a relevant area.
