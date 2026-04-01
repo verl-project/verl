@@ -9,6 +9,7 @@ When the user asks to create a PR, follow these steps:
 ### 1. Gather Context
 
 Understand the current branch's changes compared to main:
+
 - What files were changed and why
 - The full commit history on this branch
 - Read `.github/PULL_REQUEST_TEMPLATE.md` for the latest template format
@@ -16,6 +17,7 @@ Understand the current branch's changes compared to main:
 ### 2. Determine PR Title
 
 Based on the diff and commits, compose a title strictly following the format defined in `.github/PULL_REQUEST_TEMPLATE.md`:
+
 - Pick the correct `{modules}` and `{type}` from the template's allowed values
 - If changes break any existing API, prepend `[BREAKING]`
 
@@ -26,6 +28,7 @@ Fill in each section of `.github/PULL_REQUEST_TEMPLATE.md` based on the actual c
 ### 4. Pre-submit Checks
 
 Before creating the PR:
+
 - Run `pre-commit run --all-files --show-diff-on-failure --color=always` and fix any issues
 - Verify the branch is pushed to the remote with `git push -u origin <branch>`
 
