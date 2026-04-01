@@ -25,7 +25,12 @@ from verl.experimental.agent_loop import AsyncLLMServerManager
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import DistillationConfig, DistillationLossConfig
+from verl.workers.config import (
+    DistillationConfig,
+    DistillationLossConfig,
+    DistillationTeacherModelConfig,
+    HFModelConfig,
+)
 
 
 def _get_teacher_sampling_params(
@@ -86,23 +91,27 @@ def _unpad_teacher_inputs(data: DataProto) -> tuple[list[int], int, int]:
 
 
 class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
-    """Teacher-specific async client used for distillation logprob computation."""
+    """Teacher-specific async client used for distillation logprob computation.
+    TODO: MOPD -- servers and load_balance_handle become a dict (one per teacher)
+    """
 
     def __init__(
         self,
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
-        distillation_config: DictConfig | DistillationConfig,
-        pad_token_id: int,
     ):
         super().__init__(config=config, servers=servers, load_balancer_handle=load_balancer_handle)
-        if isinstance(distillation_config, DistillationConfig):
-            self.distillation_config = distillation_config
-        else:
-            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
+        self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
-        self.pad_token_id = pad_token_id
+
+        # Get pad token ID
+        teacher_model_config: DistillationTeacherModelConfig = self.distillation_config.teacher_model
+        model_config = HFModelConfig(path=teacher_model_config.model_path)
+        text_tokenizer = model_config.tokenizer
+        if model_config.tokenizer is None:
+            raise ValueError(f"Tokenizer is required for teacher model {teacher_model_config.model_path}")
+        self.pad_token_id = text_tokenizer.pad_token_id
 
     async def compute_teacher_logprobs_single(
         self,

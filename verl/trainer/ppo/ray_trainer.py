@@ -845,11 +845,11 @@ class RayPPOTrainer:
 
         # initialize teacher loop manager
         if self.use_teacher_policy:
-            from verl.experimental.teacher_loop import TeacherModelManager
+            from verl.experimental.teacher_loop import MultiTeacherModelManager
 
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
-            self.teacher_model_manager = TeacherModelManager(
-                config=self.config.distillation,
+            self.teacher_model_manager = MultiTeacherModelManager(
+                config=self.config,
                 resource_pool=teacher_resource_pool,
             )
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
