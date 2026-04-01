@@ -87,3 +87,5 @@ Before submitting changes to any agent instruction file:
 ## Acknowledgements
 
 This guide is adapted from the [vLLM project](https://github.com/vllm-project/vllm)'s [`editing-agent-instructions.md`](https://github.com/vllm-project/vllm/blob/main/docs/contributing/editing-agent-instructions.md).
+
+Last updated: 04/01/2026
