@@ -184,6 +184,12 @@ verl is fast with:
 
 .. toctree::
    :maxdepth: 1
+   :caption: Contributing
+
+   contributing/editing-agent-instructions.md
+
+.. toctree::
+   :maxdepth: 1
    :caption: Development Notes
 
    sglang_multiturn/sandbox_fusion.rst

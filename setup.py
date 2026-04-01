@@ -44,7 +44,8 @@ install_requires = [
     "tensorboard",
 ]
 
-TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
+# TODO: Migrate to the [dependency-groups] in pyproject.toml. `dev` is already there.
+TEST_REQUIRES = ["pytest", "pytest-asyncio", "pytest-rerunfailures"]
 PRIME_REQUIRES = ["pyext"]
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]

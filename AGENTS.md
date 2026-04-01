@@ -39,6 +39,20 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 
 ## 2. Development Workflow
 
+### Environment setup
+
+```bash
+# Install `uv` if you don't have it already:
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Always use `uv` for Python environment management:
+uv venv --python 3.12
+source .venv/bin/activate
+
+uv sync --group dev # See pyproject.toml for the list of dependencies.
+pre-commit install
+```
+
 ### Commit messages
 
 Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
