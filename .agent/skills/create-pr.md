@@ -28,9 +28,3 @@ Run pre-commit and fix any issues before creating the PR.
 ### 5. Create the PR
 
 Target `main` by default unless the user specifies otherwise. Return the PR URL when done.
-
-## Important Notes
-
-- Always analyze ALL commits on the branch, not just the latest one
-- If unsure which module(s) to tag, ask the user
-- If the user provides a PR description or title, incorporate their input rather than overriding it
