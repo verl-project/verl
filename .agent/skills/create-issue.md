@@ -12,7 +12,7 @@ Read the following to understand available issue types and their required fields
 
 - [`bug-report.yml`](.github/ISSUE_TEMPLATE/bug-report.yml)
 - [`feature-request.yml`](.github/ISSUE_TEMPLATE/feature-request.yml)
-- [`config.yml`](.github/ISSUE_TEMPLATE/config.yml)
+
 
 ### 2. Determine Issue Type
 
