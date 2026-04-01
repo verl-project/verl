@@ -26,8 +26,6 @@ from typing import TYPE_CHECKING, Any, Callable
 import torch
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
-from verl.protocol import DataProto
-
 if TYPE_CHECKING:
     from verl.single_controller.base.decorator import Dispatch
 
@@ -223,6 +221,8 @@ def _postprocess_common(output, put_data, need_collect):
         across different execution paths and avoid redundant data operations in
         distributed scenarios.
     """
+    from verl.protocol import DataProto
+
     if put_data and not need_collect:
         return BatchMeta()
     elif not put_data and not need_collect and isinstance(output, DataProto):

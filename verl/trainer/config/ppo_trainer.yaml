@@ -308,8 +308,10 @@ transfer_queue:
     # SimpleStorage with ZeroMQ
     storage_backend: SimpleStorage
 
+    # Backend specific configs
     SimpleStorage:
-        # Total number of samples
+      
+        # Maximum number of samples to hold
         total_storage_size: 100000
 
         # Number of distributed storage units
