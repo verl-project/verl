@@ -136,7 +136,7 @@ class QwenImage(DiffusionModelBase):
 
         _, log_prob, prev_sample_mean, std_dev_t = scheduler.sample_previous_step(
             sample=latents[:, step].float(),
-            model_output=noise_pred,
+            model_output=noise_pred.float(),
             timestep=timesteps[:, step],
             noise_level=model_config.extra_configs.get("noise_level", None),
             prev_sample=latents[:, step + 1].float(),
