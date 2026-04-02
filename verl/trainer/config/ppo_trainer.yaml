@@ -28,6 +28,7 @@ defaults:
 
   # Critic model config.
   - critic@critic: ${model_engine}_critic
+  - model@critic.model: hf_model
 
   # legacy reward impl config, for backward compatibility
   - legacy_reward_impl

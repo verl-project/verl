@@ -78,8 +78,6 @@ class BaseModelConfig(BaseConfig):
     external_lib: Optional[str] = None
     trust_remote_code: bool = False
     lora: dict[str, Any] = field(default_factory=dict)
-    # TODO: deprecated, use engine.use_remove_padding instead
-    use_remove_padding: bool = False
 
 
 @dataclass
