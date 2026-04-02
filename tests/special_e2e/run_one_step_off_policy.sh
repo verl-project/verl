@@ -45,11 +45,13 @@ val_top_p=0.7
 
 # One-step-off-policy specific parameters
 # Allocate 2 GPUs for rollout, remaining for training
-n_gpus_rollout=2
+n_gpus_rollout=4
+n_gpus_training=4
 
 exp_name="$(basename "${MODEL_ID,,}")-one-step-off-policy-${ACTOR_STRATEGY}-minimal"
 
 echo "Running one_step_off_policy with ${ACTOR_STRATEGY} strategy"
+echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
 
 # Common parameters for both FSDP2 and Megatron
 common_params=(
@@ -106,6 +108,7 @@ common_params=(
     trainer.total_training_steps=2
     trainer.resume_mode=disable
     trainer.nnodes=1
+    trainer.n_gpus_per_node=${n_gpus_training}
     rollout.nnodes=1
     rollout.n_gpus_per_node=${n_gpus_rollout}
 
@@ -119,10 +122,6 @@ EOF
 )
 
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
-    n_gpus_training=$((NUM_GPUS - n_gpus_rollout))
-    echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
-
-
     echo "Running with FSDP2 strategy..."
     # FSDP2 specific parameters
     gen_tp=2
@@ -136,7 +135,6 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
             # Todo The checkpoint_engine.backend should be unified to nccl
             # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
             actor_rollout_ref.rollout.gpu_memory_utilization=0.60
-            trainer.n_gpus_per_node=${n_gpus_training}
         )
         actor_offload=True
     fi
@@ -167,27 +165,21 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     train_pp=2
     ref_offload=True
     actor_offload=False
-    n_gpus_training=4
-    echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
 
     if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
         common_params+=(
             # Todo The checkpoint_engine.backend should be unified to nccl
             # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
             actor_rollout_ref.rollout.gpu_memory_utilization=0.70
-            rollout.n_gpus_per_node=4
             actor_rollout_ref.model.use_remove_padding=True \
             actor_rollout_ref.model.enable_gradient_checkpointing=True \
             actor_rollout_ref.actor.use_dynamic_bsz=True \
             actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
             actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
         )
+        train_tp=2
         actor_offload=True
     fi
-
-    common_params+=(
-        trainer.n_gpus_per_node=${n_gpus_training}
-    )
 
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
