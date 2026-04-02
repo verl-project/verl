@@ -260,10 +260,12 @@ class MegatronEngine(BaseEngine):
 
         wrap_config = McoreModuleWrapperConfig(
             is_value_model=self.is_value_model,
-            share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
         )
+        if self.is_value_model:
+            self.model_config.hf_config.tie_word_embeddings = False
+
         module, updated_tf_config = make_megatron_module(
             wrap_config=wrap_config,
             tf_config=self.tf_config,
@@ -989,7 +991,6 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             value_model=True,
             vision_model=hasattr(self.model_config.hf_config, "vision_config"),
             pad_token_id=self.model_config.tokenizer.pad_token_id,
-            enable_mtp=self.model_config.mtp.enable_train,
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)

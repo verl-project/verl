@@ -1562,7 +1562,11 @@ class RayPPOTrainer:
                         metrics.update(critic_output_metrics)
 
                     # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_steps:
+                    if self.config.trainer.critic_warmup > self.global_steps:
+                        breakpoint()
+                        # Still in critic warmup, only update weights to wake up rollout replicas.
+                        self.checkpoint_manager.update_weights(self.global_steps)
+                    else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
