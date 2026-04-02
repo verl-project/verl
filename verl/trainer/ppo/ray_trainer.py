@@ -744,7 +744,7 @@ class RayPPOTrainer:
 
                 critic_cfg = TrainingWorkerConfig(
                     model_type="value_model",
-                    model_config=orig_critic_cfg.model_config,
+                    model_config=orig_critic_cfg.model,
                     engine_config=engine_config,
                     optimizer_config=orig_critic_cfg.optim,
                     checkpoint_config=orig_critic_cfg.checkpoint,
@@ -1563,7 +1563,6 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup > self.global_steps:
-                        breakpoint()
                         # Still in critic warmup, only update weights to wake up rollout replicas.
                         self.checkpoint_manager.update_weights(self.global_steps)
                     else:
