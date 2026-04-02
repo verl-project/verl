@@ -637,15 +637,19 @@ def postprocess_bshd_engine(
     """
     Postprocess bshd sequences
     """
-    assert output.shape[:2] == attention_mask.shape, (
-        f"output.shape: {output.shape}, attention_mask.shape: {attention_mask.shape}"
-    )
-    if not post_process:
-        return output
-
     if is_npu_available:
         attention_mask = attention_mask.diagonal(dim1=-2, dim2=-1).squeeze(1)
         attention_mask = ~attention_mask.bool()
+
+    if not post_process:
+        return output
+
+    if output.ndim >= 2 and output.shape[0] != attention_mask.shape[0] and output.shape[1] == attention_mask.shape[0]:
+        output = output.transpose(0, 1).contiguous()
+
+    assert output.shape[:2] == attention_mask.shape, (
+        f"output.shape: {output.shape}, attention_mask.shape: {attention_mask.shape}"
+    )
 
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
