@@ -29,6 +29,35 @@ from transformers import PretrainedConfig
 T = TypeVar("T", bound=TransformerConfig)
 
 
+def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
+    """Return RoPE base frequency theta.
+
+    Most configs expose ``rope_theta`` on the root. Newer models (e.g. Qwen3 in transformers>=5) store it under
+    ``rope_parameters["rope_theta"]``, optionally nested per attention pattern when ``rope_parameters`` maps names
+    to parameter dicts.
+    """
+    if hasattr(hf_config, "rope_theta"):
+        return hf_config.rope_theta
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_theta"):
+        return hf_config.text_config.rope_theta
+
+    rp = None
+    if hasattr(hf_config, "rope_parameters"):
+        rp = hf_config.rope_parameters
+    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_parameters"):
+        rp = hf_config.text_config.rope_parameters
+    if isinstance(rp, dict):
+        if "rope_theta" in rp:
+            return rp["rope_theta"]
+        for v in rp.values():
+            if isinstance(v, dict) and "rope_theta" in v:
+                return v["rope_theta"]
+    raise AttributeError(
+        f"{type(hf_config).__name__} has no rope_theta and no rope_parameters['rope_theta'] — "
+        "cannot determine RoPE base."
+    )
+
+
 def _get_base_transformer_config(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> dict:
@@ -120,7 +149,7 @@ def _get_mla_transformer_config(
         "qk_head_dim": hf_config.qk_nope_head_dim,
         "qk_pos_emb_head_dim": hf_config.qk_rope_head_dim,
         "v_head_dim": hf_config.v_head_dim,
-        "rotary_base": hf_config.rope_theta,
+        "rotary_base": get_hf_rope_theta(hf_config),
         "rotary_scaling_factor": mla_rope_config["factor"],
         "rope_type": mla_rope_config["type"],
         "max_position_embeddings": mla_rope_config["original_max_position_embeddings"],

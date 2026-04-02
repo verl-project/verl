@@ -195,8 +195,13 @@ class TaskRunner:
 
         elif config.critic.strategy == "megatron":
             # TODO: switch this to TrainingWorker as well
-            from verl.workers.megatron_workers import CriticWorker
+            if use_legacy_worker_impl in ["auto", "enable"]:
+                from verl.workers.megatron_workers import CriticWorker
+            elif use_legacy_worker_impl == "disable":
+                from verl.workers.engine_workers import TrainingWorker
 
+                CriticWorker = TrainingWorker
+                print("Using new worker implementation")
         elif config.critic.strategy == "veomni" or config.critic.strategy == "torchtitan":
             if use_legacy_worker_impl == "disable":
                 from verl.workers.engine_workers import TrainingWorker
@@ -237,16 +242,20 @@ class TaskRunner:
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
         distillation_config = config.get("distillation")
-        if is_distillation_enabled(distillation_config) and distillation_config.teacher_model.enable_resource_pool:
-            if distillation_config.teacher_model.n_gpus_per_node <= 0:
-                raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
-            if distillation_config.teacher_model.nnodes <= 0:
-                raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
+        if is_distillation_enabled(distillation_config):
+            if distillation_config.teacher_model.enable_resource_pool:
+                if distillation_config.teacher_model.n_gpus_per_node <= 0:
+                    raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
+                if distillation_config.teacher_model.nnodes <= 0:
+                    raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
 
-            teacher_pool = [
-                distillation_config.teacher_model.n_gpus_per_node
-            ] * distillation_config.teacher_model.nnodes
-            resource_pool_spec["teacher_pool"] = teacher_pool
+                teacher_pool = [
+                    distillation_config.teacher_model.n_gpus_per_node
+                ] * distillation_config.teacher_model.nnodes
+                resource_pool_spec["teacher_pool"] = teacher_pool
+            else:
+                distillation_config.teacher_model.nnodes = config.trainer.nnodes
+                distillation_config.teacher_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 

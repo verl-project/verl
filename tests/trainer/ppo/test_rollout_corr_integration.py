@@ -230,6 +230,44 @@ class TestRolloutISIntegration:
         # Losses should be different (weights have an effect)
         assert not torch.allclose(pg_loss_no_weights, pg_loss_with_weights)
 
+    def test_exact_icepop_matches_filtered_weighted_ppo_loss(self, config_with_rollout_is):
+        """IcePop should match the local RL zero-weight semantics."""
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        old_log_prob = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+        log_prob = old_log_prob.clone()
+        rollout_log_prob = torch.tensor([[-0.5, -3.5, -0.8]], device=device)
+        advantages = torch.tensor([[1.0, -1.0, 2.0]], device=device)
+        response_mask = torch.ones_like(old_log_prob)
+
+        rollout_is_weights_proto, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+            old_log_prob=old_log_prob,
+            rollout_log_prob=rollout_log_prob,
+            response_mask=response_mask,
+            rollout_is="token",
+            rollout_is_threshold="0.5_5.0",
+            rollout_rs=None,
+        )
+
+        rollout_is_weights = rollout_is_weights_proto.batch["rollout_is_weights"]
+        expected_weights = torch.tensor([[0.60653067, 0.0, 0.81873075]], device=device)
+        expected_loss = torch.mean(expected_weights * (-advantages))
+
+        pg_loss, _ = compute_policy_loss_vanilla(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode="token-mean",
+            config=config_with_rollout_is,
+            rollout_is_weights=rollout_is_weights,
+        )
+
+        assert torch.equal(modified_response_mask, response_mask)
+        assert metrics["rollout_corr/rollout_is_oob_ratio"] == pytest.approx(1.0 / 3.0, abs=1e-6)
+        torch.testing.assert_close(rollout_is_weights, expected_weights, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(pg_loss, expected_loss, atol=1e-6, rtol=1e-6)
+
 
 class TestRolloutCorrectionConfigNormalization:
     """Unit tests for RolloutCorrectionConfig canonicalization logic."""
@@ -256,6 +294,11 @@ class TestRolloutCorrectionConfigNormalization:
         config = RolloutCorrectionConfig.decoupled_geo_rs_seq_tis(rs_threshold=1.001)
         assert config.rollout_rs == "seq_mean_k1"
         assert config.rollout_rs_threshold == 1.001
+
+    def test_icepop_factory(self):
+        config = RolloutCorrectionConfig.decoupled_token_icepop()
+        assert config.rollout_is == "token"
+        assert config.rollout_is_threshold == "0.5_5.0"
 
 
 if __name__ == "__main__":

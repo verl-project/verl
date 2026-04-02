@@ -91,7 +91,6 @@ python3 -m verl.trainer.main_ppo --config-path=config  --config-name='ppo_megatr
     actor_rollout_ref.rollout.data_parallel_size=${gen_dp} \
     actor_rollout_ref.rollout.expert_parallel_size=64 \
     actor_rollout_ref.rollout.name=vllm \
-    +actor_rollout_ref.rollout.enable_expert_parallel=True \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${offload} \
@@ -122,8 +121,8 @@ python3 -m verl.trainer.main_ppo --config-path=config  --config-name='ppo_megatr
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
-    +actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
-    actor_rollout_ref.rollout.enforce_eager=True \
+    actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
+    actor_rollout_ref.rollout.enforce_eager=False \
     trainer.device=npu \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[8, 16, 32, 64, 128]" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY" 2>&1 | tee "logs/verl_qwen3_235b_sy$(date +%Y%m%d_%H%M).log"

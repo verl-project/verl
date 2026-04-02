@@ -72,6 +72,7 @@ class MtpConfig(BaseConfig):
 class HFModelConfig(BaseConfig):
     # note that we separate model_path, model_config_path and tokenizer_path in case they are different
     _mutable_fields = {
+        "model_type",
         "hf_config_path",
         "tokenizer_path",
         "hf_config",
@@ -91,6 +92,9 @@ class HFModelConfig(BaseConfig):
     local_hf_config_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
+
+    # model type, e.g., "language_model", "value_model", "diffusion_model"
+    model_type: str = "language_model"
 
     # whether to load tokenizer. This is useful when we only want to load model config
     load_tokenizer: bool = True
@@ -278,7 +282,6 @@ class DiffusionModelConfig(BaseConfig):
     height: int = 512
     width: int = 512
     num_inference_steps: int = 10
-    guidance_scale: float = 4.5
 
     # extra configs for algorithm specific features.
     extra_configs: dict[str, Any] = field(default_factory=dict)
@@ -299,9 +302,11 @@ class DiffusionModelConfig(BaseConfig):
         # construct tokenizer
         if self.load_tokenizer:
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
-            # see issue https://github.com/huggingface/tokenizers/issues/537, we use a non-fast tokenizer here
+            # Fast tokenizer for diffusion: DiffusionSingleTurnAgentLoop applies chat template on the asyncio
+            # thread (not run_in_executor) so Rust-backed tokenizers avoid RuntimeError: Already borrowed
+            # with recent transformers when combined with thread-pool tokenization.
             self.tokenizer = hf_tokenizer(
-                self.local_tokenizer_path, trust_remote_code=self.trust_remote_code, use_fast=False
+                self.local_tokenizer_path, trust_remote_code=self.trust_remote_code, use_fast=True
             )
             if os.path.exists(os.path.join(self.local_path, "processor")):
                 self.processor = hf_processor(

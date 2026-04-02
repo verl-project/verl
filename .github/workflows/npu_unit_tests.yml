@@ -52,6 +52,7 @@ on:
       - "**/*.py"
       # Other entrypoints
       - "!examples/**"
+      - "!tests/special_sanity/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
       - "!recipe/**"
@@ -97,7 +98,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .[test]
           pip install mlflow pytest-asyncio
       - name: Check final pip list

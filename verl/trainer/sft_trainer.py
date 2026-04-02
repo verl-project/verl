@@ -277,6 +277,12 @@ class SFTTrainer:
         else:
             batch_seqlens: torch.Tensor = data["attention_mask"].sum(dim=-1)
         batch_seqlens = batch_seqlens.to(self.device_name)  # (global_bsz // dp)
+        if self.engine.get_data_parallel_size() > 1:
+            output_tensor = torch.empty(
+                (batch_seqlens.shape[0] * self.engine.get_data_parallel_size(),),
+                dtype=batch_seqlens.dtype,
+                device=self.device_name,
+            )  # (global_bsz,)
 
         dp_group = self.engine.get_data_parallel_group()
         dp_size = self.engine.get_data_parallel_size()

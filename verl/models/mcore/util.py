@@ -22,6 +22,7 @@ import torch
 from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 
+from verl.utils.device import is_npu_available
 from verl.utils.model import CausalLMOutputForPPO
 
 logger = logging.getLogger(__file__)
@@ -290,8 +291,12 @@ def postprocess_packed_seqs_for_dict_output(
 
 ### No padding versions for model engine
 ### inputs are nested tensors
-def preprocess_thd_no_padding(
-    input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
+def preprocess_thd_engine(
+    input_ids: torch.Tensor,
+    pre_process: bool = True,
+    need_roll: bool = False,
+    use_fp8_padding: bool = False,
+    local_cp_size: Optional[int] = None,
 ) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
     """
     Preprocess packed sequences
@@ -302,8 +307,17 @@ def preprocess_thd_no_padding(
     batch_size = input_ids.shape[0]
 
     tp_size = mpu.get_tensor_model_parallel_world_size()
-    cp_size = mpu.get_context_parallel_world_size()
-    cp_rank = mpu.get_context_parallel_rank()
+    extra_packed_args = {}
+    if local_cp_size is not None:
+        # dynamic CP
+        cp_size = local_cp_size
+        cp_group = mpu.get_dynamic_data_context_parallel_groups(group_size=local_cp_size)
+        cp_rank = torch.distributed.get_rank(group=cp_group)
+        extra_packed_args["local_cp_size"] = local_cp_size
+        extra_packed_args["cp_group"] = cp_group
+    else:
+        cp_size = mpu.get_context_parallel_world_size()
+        cp_rank = mpu.get_context_parallel_rank()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
     seqlens_in_batch = input_ids.offsets().diff()
 
@@ -428,6 +442,7 @@ def preprocess_thd_no_padding(
         max_seqlen_kv=max_seqlen_in_batch,
         cu_seqlens_q_padded=cu_seqlens_padded,
         cu_seqlens_kv_padded=cu_seqlens_padded,
+        **extra_packed_args,
     )
     if pre_process:
         return input_ids_rmpad.unsqueeze(0), packed_seq_params, position_ids_rmpad.unsqueeze(0)
@@ -435,12 +450,13 @@ def preprocess_thd_no_padding(
         return input_ids, packed_seq_params, None
 
 
-def postprocess_thd_no_padding(
+def postprocess_thd_engine(
     output: torch.Tensor,
     packed_seq_params: PackedSeqParams,
     input_ids: torch.Tensor,
     batch_size: int,
     post_process: bool = True,
+    local_cp_size: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Postprocess packed sequences
@@ -460,14 +476,21 @@ def postprocess_thd_no_padding(
 
     output_new = []
 
-    cp_size = mpu.get_context_parallel_world_size()
+    if local_cp_size is not None:
+        cp_size = local_cp_size
+        cp_group = packed_seq_params.cp_group
+        cp_rank = torch.distributed.get_rank(group=cp_group)
+    else:
+        cp_size = mpu.get_context_parallel_world_size()
+        cp_group = mpu.get_context_parallel_group()
+        cp_rank = mpu.get_context_parallel_rank()
     # all gather output across context parallel group
     if cp_size > 1:
         # output shape: [1, packed_len, hidden_dim]
         # need to gather across cp group and concatenate in sequence dimension
         output_list = [torch.empty_like(output) for _ in range(cp_size)]
-        torch.distributed.all_gather(output_list, output.detach(), group=mpu.get_context_parallel_group())
-        output_list[mpu.get_context_parallel_rank()] = output
+        torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
+        output_list[cp_rank] = output
     else:
         output_list = [output]
 
@@ -499,7 +522,16 @@ def postprocess_thd_no_padding(
     return output_new_tensor
 
 
-def preprocess_bshd_no_padding(
+def _build_npu_attn_mask(original_attention_mask: torch.Tensor) -> torch.Tensor:
+    """Build attn_mask for torch_npu.npu_fusion_attention (B1SS / [B, 1, Sq, Skv])"""
+    _, seq_len = original_attention_mask.shape
+    causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=original_attention_mask.device)).to(torch.bool)
+    attn_mask = original_attention_mask.unsqueeze(-1) & original_attention_mask.unsqueeze(-2)
+    attn_mask = attn_mask & causal_mask
+    return (~attn_mask).unsqueeze(1).contiguous()
+
+
+def preprocess_bshd_engine(
     input_ids: torch.Tensor, pre_process: bool = True, need_roll: bool = False, use_fp8_padding: bool = False
 ):
     """
@@ -507,41 +539,97 @@ def preprocess_bshd_no_padding(
     return "input_ids, attention_mask, position_ids"
     """
     cp_size = mpu.get_context_parallel_world_size()
-    # TODO: support context parallel size > 1
-    assert cp_size == 1, "Context parallel size without bshd is not supported yet"
+    cp_rank = mpu.get_context_parallel_rank()
 
     batch_size = input_ids.shape[0]
     seqlens_in_batch = input_ids.offsets().diff()
     max_seqlen = seqlens_in_batch.max().item()
     tp_size = mpu.get_tensor_model_parallel_world_size()
-    if tp_size > 1:
-        sp_world_size = tp_size
-        pad_size = (sp_world_size - max_seqlen % sp_world_size) % sp_world_size
-        max_seqlen = max_seqlen + pad_size
+    # For CP, sequence length must be divisible by (2 * cp_size), and for SP by tp_size.
+    align_size = math.lcm(tp_size, 2 * cp_size) if cp_size > 1 else tp_size
+    if align_size > 1:
+        pad_size = (align_size - max_seqlen % align_size) % align_size
+        max_seqlen += pad_size
     if use_fp8_padding:
         # For FP8 block quantization, batch_size * max_seqlen / tp_size must be divisible by 128.
-        # We need: max_seqlen % tp_size == 0 (for SP) AND batch_size * max_seqlen % (128 * tp_size) == 0.
+        # With CP, local sequence length is max_seqlen / cp_size.
+        # We need:
+        # 1) max_seqlen aligned for SP/CP splitting.
+        # 2) batch_size * max_seqlen % (128 * tp_size * cp_size) == 0.
         # Compute the required alignment for max_seqlen:
-        fp8_total_align = 128 * tp_size
+        fp8_total_align = 128 * tp_size * cp_size
         fp8_seq_align = fp8_total_align // math.gcd(batch_size, fp8_total_align)
-        # Also ensure tp alignment for SP
-        fp8_seq_align = math.lcm(fp8_seq_align, tp_size)
+        # Also ensure SP and CP split alignment.
+        fp8_seq_align = math.lcm(fp8_seq_align, align_size)
         max_seqlen = ((max_seqlen + fp8_seq_align - 1) // fp8_seq_align) * fp8_seq_align
 
-    attention_mask = torch.zeros(batch_size, max_seqlen, dtype=torch.bool, device=input_ids.device)
-    input_ids_bshd = torch.zeros(batch_size, max_seqlen, dtype=input_ids.dtype, device=input_ids.device)
+    local_max_seqlen = max_seqlen // cp_size if cp_size > 1 else max_seqlen
+    attention_mask = torch.zeros(batch_size, local_max_seqlen, dtype=torch.bool, device=input_ids.device)
+    input_ids_bshd = torch.zeros(batch_size, local_max_seqlen, dtype=input_ids.dtype, device=input_ids.device)
+    seqlens_in_batch_cpu: list[int] = seqlens_in_batch.tolist()
     for i in range(batch_size):
-        attention_mask[i, : seqlens_in_batch[i]] = True
-        input_ids_bshd[i, : seqlens_in_batch[i]] = input_ids[i]
-    position_ids = torch.arange(max_seqlen, dtype=torch.long, device=input_ids.device)
-    position_ids = position_ids.unsqueeze(0).expand_as(input_ids_bshd)
-    if need_roll:
+        seqlen_i = int(seqlens_in_batch_cpu[i])
+        if cp_size <= 1:
+            attention_mask[i, :seqlen_i] = True
+            input_ids_bshd[i, :seqlen_i] = input_ids[i]
+            continue
+
+        seq = input_ids[i]
+        if seqlen_i < max_seqlen:
+            seq_padded = torch.zeros(max_seqlen, dtype=seq.dtype, device=seq.device)
+            seq_padded[:seqlen_i] = seq
+            seq = seq_padded
+
+        chunk_len = max_seqlen // (2 * cp_size)
+        first_start = cp_rank * chunk_len
+        second_start = (2 * cp_size - cp_rank - 1) * chunk_len
+        first_chunk = seq[first_start : first_start + chunk_len]
+        second_chunk = seq[second_start : second_start + chunk_len]
+        local_seq = torch.cat((first_chunk, second_chunk), dim=0)
+        if need_roll:
+            local_pos = torch.cat(
+                (
+                    torch.arange(first_start, first_start + chunk_len, dtype=torch.long, device=seq.device),
+                    torch.arange(second_start, second_start + chunk_len, dtype=torch.long, device=seq.device),
+                ),
+                dim=0,
+            )
+            local_seq = seq[(local_pos + 1) % max_seqlen]
+        input_ids_bshd[i] = local_seq
+
+        valid_first = max(0, min(seqlen_i - first_start, chunk_len))
+        valid_second = max(0, min(seqlen_i - second_start, chunk_len))
+        if valid_first > 0:
+            attention_mask[i, :valid_first] = True
+        if valid_second > 0:
+            attention_mask[i, chunk_len : chunk_len + valid_second] = True
+
+    if cp_size <= 1:
+        position_ids = torch.arange(local_max_seqlen, dtype=torch.long, device=input_ids.device)
+        position_ids = position_ids.unsqueeze(0).expand_as(input_ids_bshd)
+    else:
+        chunk_len = max_seqlen // (2 * cp_size)
+        first_pos = torch.arange(
+            cp_rank * chunk_len, (cp_rank + 1) * chunk_len, dtype=torch.long, device=input_ids.device
+        )
+        second_pos = torch.arange(
+            max_seqlen - (cp_rank + 1) * chunk_len,
+            max_seqlen - cp_rank * chunk_len,
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+        position_ids = torch.cat((first_pos, second_pos), dim=0).unsqueeze(0).expand_as(input_ids_bshd)
+    if need_roll and cp_size <= 1:
         input_ids_bshd = torch.roll(input_ids_bshd, shifts=-1, dims=1)
+
+    if is_npu_available:
+        # Ascend npu_fusion_attention's attn_mask must be BNSS / B1SS / 11SS / SS; [B, S] is invalid.
+        attention_mask = _build_npu_attn_mask(attention_mask)
 
     return input_ids_bshd, attention_mask, position_ids
 
 
-def postprocess_bshd_no_padding(
+def postprocess_bshd_engine(
     output: torch.Tensor,
     attention_mask: torch.Tensor,
     post_process: bool = True,
@@ -549,15 +637,67 @@ def postprocess_bshd_no_padding(
     """
     Postprocess bshd sequences
     """
+    assert output.shape[:2] == attention_mask.shape, (
+        f"output.shape: {output.shape}, attention_mask.shape: {attention_mask.shape}"
+    )
     if not post_process:
         return output
 
+    if is_npu_available:
+        attention_mask = attention_mask.diagonal(dim1=-2, dim2=-1).squeeze(1)
+        attention_mask = ~attention_mask.bool()
+
+    cp_size = mpu.get_context_parallel_world_size()
+    cp_rank = mpu.get_context_parallel_rank()
+    cp_group = mpu.get_context_parallel_group()
+
     batch_size = output.shape[0]
+
+    if cp_size > 1:
+        output_list = [torch.empty_like(output, dtype=output.dtype) for _ in range(cp_size)]
+        torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
+        output_list[cp_rank] = output
+
+        mask_list = [torch.empty_like(attention_mask, dtype=attention_mask.dtype) for _ in range(cp_size)]
+        torch.distributed.all_gather(mask_list, attention_mask, group=cp_group)
+    else:
+        output_list = [output]
+        mask_list = [attention_mask]
+
     output_new = []
 
     for i in range(batch_size):
-        mask = attention_mask[i].bool()
-        output_new.append(output[i][mask])
+        if cp_size <= 1:
+            mask = attention_mask[i].bool()
+            output_new.append(output[i][mask])
+            continue
+
+        local_seqlen = output.shape[1]
+        assert local_seqlen % 2 == 0, "CP bshd expects local sequence length to be divisible by 2"
+        half_seqlen = local_seqlen // 2
+        full_seqlen = local_seqlen * cp_size
+
+        tmp = torch.empty(full_seqlen, *output.shape[2:], device=output.device, dtype=output.dtype)
+        full_mask = torch.zeros(full_seqlen, device=attention_mask.device, dtype=torch.bool)
+
+        for j in range(cp_size):
+            o = output_list[j][i]
+            m = mask_list[j][i].bool()
+
+            o0, o1 = o[:half_seqlen], o[half_seqlen:]
+            m0, m1 = m[:half_seqlen], m[half_seqlen:]
+
+            front_start = j * half_seqlen
+            front_end = (j + 1) * half_seqlen
+            back_start = full_seqlen - (j + 1) * half_seqlen
+            back_end = full_seqlen - j * half_seqlen
+
+            tmp[front_start:front_end] = o0
+            tmp[back_start:back_end] = o1
+            full_mask[front_start:front_end] = m0
+            full_mask[back_start:back_end] = m1
+
+        output_new.append(tmp[full_mask])
 
     output_new_tensor = torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 

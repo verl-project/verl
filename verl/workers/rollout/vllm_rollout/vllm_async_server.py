@@ -282,8 +282,8 @@ class vLLMHttpServer:
                     served_model_name = served_model_name.split("/")[-1]
                 args["served_model_name"] = served_model_name
 
-        # mtp
-        if self.config.mtp.enable and self.config.mtp.enable_rollout:
+        # mtp (None for diffusion models; only LLM models use speculative decoding)
+        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             speculative_config = {
                 "method": self.config.mtp.method,
                 "num_speculative_tokens": self.config.mtp.num_speculative_tokens,
@@ -367,13 +367,8 @@ class vLLMHttpServer:
 
         # 3. launch server
         if self.node_rank == 0:
-            self._master_sock.close()
-            self._dp_rpc_sock.close()
-            self._dp_master_sock.close()
             await self.run_server(server_args)
         else:
-            # TODO: avoid connect before master_sock close
-            await asyncio.sleep(3)
             await self.run_headless(server_args)
 
     async def run_server(self, args: argparse.Namespace):
@@ -779,6 +774,7 @@ class vLLMHttpServer:
         """Process quantization config. Returns (quantization_str, hf_overrides)."""
         quantization = self.config.quantization
         hf_overrides = {}
+
         if is_torch_npu_available(check_device=False):
             from verl.utils.vllm.npu_vllm_patch import check_vllm_ascend_before_server_launch
 
@@ -787,21 +783,30 @@ class vLLMHttpServer:
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
         if qat_config_dict.get("enable", False):
-            # QAT uses compressed-tensors quantization, apply patches for dynamic weight loading
-            from verl.utils.qat import QATConfig, apply_qat_patches, load_quantization_config
+            from verl.utils.qat import QATConfig, load_quantization_config
 
-            apply_qat_patches()
-
-            # Load quantization config from JSON file
             qat_config = QATConfig(**qat_config_dict)
             quantization_config_dict = load_quantization_config(qat_config)
-            hf_overrides["quantization_config"] = quantization_config_dict
-            quantization = "compressed-tensors"
+            quant_method = quantization_config_dict.get("quant_method", None)
 
-            logger.info("QAT quantization config injected to vLLM async server")
+            if quant_method == "modelopt":
+                from verl.utils.modelopt import apply_modelopt_nvfp4_patches
+
+                apply_modelopt_nvfp4_patches()
+                quantization = "modelopt"
+            elif quant_method == "compressed-tensors":
+                from verl.utils.qat import apply_qat_patches
+
+                apply_qat_patches()
+                quantization = "compressed-tensors"
+            else:
+                raise ValueError(f"Unsupported quant_method: {quant_method}")
+
+            logger.info(f"QAT quantization config injected (quant_method={quant_method})")
+            hf_overrides["quantization_config"] = quantization_config_dict
         elif quantization is not None:
             # Handle other quantization methods (fp8, torchao)
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]
+            _SUPPORTED_QUANTIZATION = ["fp8", "torchao", "ascend"]
             if quantization not in _SUPPORTED_QUANTIZATION:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 

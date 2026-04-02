@@ -48,6 +48,7 @@ class TeacherModelManager:
         self.config: DistillationConfig = omega_conf_to_dataclass(config)
         self.resource_pool = resource_pool
         self._initialize_llm_servers()
+        self._initialize_async_server_manager()
         self._initialize_router()
 
         self.sleep()
@@ -70,6 +71,10 @@ class TeacherModelManager:
         rollout_config = teacher_model_config.inference
         model_config = HFModelConfig(path=teacher_model_config.model_path)
         self.tokenizer = model_config.get_processor()
+        text_tokenizer = model_config.tokenizer
+        if model_config.tokenizer is None:
+            raise ValueError(f"Tokenizer is required for teacher model {teacher_model_config.model_path}")
+        self.pad_token_id = text_tokenizer.pad_token_id
         self.rollout_replicas = [
             rollout_replica_class(
                 replica_rank=replica_rank,
@@ -94,6 +99,21 @@ class TeacherModelManager:
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
+    def _initialize_async_server_manager(self):
+        from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer
+        from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
+
+        self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=self.server_addresses,
+        )
+        self.server_manager = AsyncTeacherLLMServerManager(
+            config=self.config,
+            servers=list(zip(self.server_addresses, self.server_handles, strict=True)),
+            load_balancer_handle=self.load_balancer_handle,
+            distillation_config=self.config,
+            pad_token_id=self.pad_token_id,
+        )
+
     def _initialize_router(self):
         worker_urls = [f"http://{server_address}" for server_address in self.server_addresses]
 
@@ -103,6 +123,13 @@ class TeacherModelManager:
 
     def get_router_address(self):
         return self.router_address
+
+    def compute_logprobs(self, data):
+        self.wake_up()
+        try:
+            return self._run_single(self.server_manager.compute_teacher_logprobs_batch(data))
+        finally:
+            self.sleep()
 
     @auto_await
     async def wake_up(self):
@@ -117,3 +144,9 @@ class TeacherModelManager:
     @auto_await
     async def _run_all(self, tasks: list[asyncio.Task]):
         await asyncio.gather(*tasks)
+
+    def _run_single(self, task):
+        async def run():
+            return await task
+
+        return asyncio.run(run())
