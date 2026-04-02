@@ -472,6 +472,30 @@ class MegatronPPOActor(BasePPOActor):
 
         forward_backward_func = get_forward_backward_func()
 
+        # Compute global batch info for correct loss normalization across DP ranks.
+        #
+        # batch_num_tokens: all_reduce over DP×CP group (with_context_parallel=True)
+        #   so that batch_num_tokens = T_total across all DP and CP ranks.
+        #   Without CP the two groups are identical; with CP>1 the pure DP group
+        #   would give T_total/CP, causing gradients to be CP times too large
+        #   (Megatron internally multiplies loss by cp_group_size).
+        #
+        # dp_size: pure DP size (without CP).  agg_loss multiplies by dp_size to
+        #   pre-compensate DDP averaging.  DDP averages over DP×CP, and Megatron
+        #   adds ×CP, so the correct pre-factor is DP (not DP×CP):
+        #     agg_loss × DP → ×N (below) → ×CP ÷N (Megatron) → accum → ÷(DP×CP) (DDP)
+        #     = S_total / T_total
+        if not forward_only:
+            _response_mask = mini_batch.batch["response_mask"].to(bool)
+            _batch_num_tokens = _response_mask.sum().to(get_device_id())
+            torch.distributed.all_reduce(
+                _batch_num_tokens,
+                op=torch.distributed.ReduceOp.SUM,
+                group=mpu.get_data_parallel_group(with_context_parallel=True),
+            )
+            self.config.global_batch_info["dp_size"] = mpu.get_data_parallel_world_size()
+            self.config.global_batch_info["batch_num_tokens"] = _batch_num_tokens.item()
+
         def loss_func(output, data, meta_info):
             # For memory efficiency
             # We move calculation of entropy to compute_log_probs, forward_only == True
@@ -550,7 +574,12 @@ class MegatronPPOActor(BasePPOActor):
             if calculate_entropy:
                 entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
                 if not forward_only:
-                    entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                    entropy_loss = agg_loss(
+                        loss_mat=entropy,
+                        loss_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        **self.config.global_batch_info,
+                    )
                     entropy_coeff = meta_info["entropy_coeff"]
                     policy_loss = pg_loss - entropy_coeff * entropy_loss
                 else:
@@ -563,7 +592,12 @@ class MegatronPPOActor(BasePPOActor):
                     ref_log_prob = data["ref_log_prob"]
                     # compute kl loss
                     kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
-                    kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=self.config.loss_agg_mode)
+                    kl_loss = agg_loss(
+                        loss_mat=kld,
+                        loss_mask=response_mask,
+                        loss_agg_mode=self.config.loss_agg_mode,
+                        **self.config.global_batch_info,
+                    )
 
                     policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                     metrics["actor/kl_loss"] = kl_loss.detach().item()
@@ -572,6 +606,15 @@ class MegatronPPOActor(BasePPOActor):
                 # return loss and stats
 
             append_to_dict(metrics, stats)
+
+            # Megatron-Core's PP schedule divides the returned loss by
+            # num_microbatches before backward (output_tensor /= num_microbatches).
+            # Without compensation the accumulated gradient would be N times too
+            # small.  Pre-multiply to cancel it out so that gradient accumulation
+            # yields the exact global token-mean.
+            if not forward_only:
+                policy_loss = policy_loss * n_micro_batch
+
             return policy_loss, [metrics, ret_entropy]
 
         def forward_step(batch_iter, model, return_schedule_plan: bool = False):
