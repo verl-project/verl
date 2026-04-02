@@ -103,6 +103,7 @@ class AsyncTeacherLLMServerManager:
     ):
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+        self.teacher_config: DistillationTeacherModelConfig = self.distillation_config.teacher_model
 
         # Get pad token ID
         teacher_model_config: DistillationTeacherModelConfig = self.distillation_config.teacher_model
@@ -137,7 +138,7 @@ class AsyncTeacherLLMServerManager:
         teacher_output = await self.server_manager.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
-            sampling_params=_get_teacher_sampling_params(self.distillation_config, self.distillation_loss_config),
+            sampling_params=_get_teacher_sampling_params(self.teacher_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
         )
