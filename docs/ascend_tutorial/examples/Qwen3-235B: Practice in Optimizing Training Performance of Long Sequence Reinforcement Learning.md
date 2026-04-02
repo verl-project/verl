@@ -104,7 +104,7 @@ VLLM后端支持eager与图模式切换。通过将 `enforce_eager=False` 启用
 ```yaml
 actor_rollout_ref.actor.megatron.use_distributed_optimizer=True
 actor_rollout_ref.ref.megatron.use_distributed_optimizer=True
-+actor_rollout_ref.actor.megatron.override_transformer_config.use_distributed_optimizer=True
+actor_rollout_ref.actor.megatron.override_transformer_config.use_distributed_optimizer=True
 ```
 
 #### 3.3.3 ETP（Expert Tensor Parallel）优化
