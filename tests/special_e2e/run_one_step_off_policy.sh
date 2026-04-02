@@ -50,7 +50,6 @@ n_gpus_rollout=2
 exp_name="$(basename "${MODEL_ID,,}")-one-step-off-policy-${ACTOR_STRATEGY}-minimal"
 
 echo "Running one_step_off_policy with ${ACTOR_STRATEGY} strategy"
-echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
 
 # Common parameters for both FSDP2 and Megatron
 common_params=(
@@ -121,6 +120,7 @@ EOF
 
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     n_gpus_training=$((NUM_GPUS - n_gpus_rollout))
+    echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
 
 
     echo "Running with FSDP2 strategy..."
@@ -168,6 +168,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
     n_gpus_training=4
+    echo "Total GPUs: ${NUM_GPUS}, Rollout GPUs: ${n_gpus_rollout}, Training GPUs: ${n_gpus_training}"
 
     if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
         common_params+=(
