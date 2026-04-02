@@ -991,6 +991,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             value_model=True,
             vision_model=hasattr(self.model_config.hf_config, "vision_config"),
             pad_token_id=self.model_config.tokenizer.pad_token_id,
+            data_format="thd" if self.engine_config.use_remove_padding else "bshd",
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)
