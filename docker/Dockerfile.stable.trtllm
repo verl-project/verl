@@ -29,7 +29,7 @@ RUN git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
     popd && rm -rf deepep
 
 # Install Python dependencies
-RUN pip3 install --no-cache-dir --no-deps trl && \
+RUN pip3 install --no-cache-dir --no-deps trl==0.27.0 && \
     pip3 install --no-cache-dir nvtx matplotlib liger_kernel cachetools && \
     pip install --no-cache-dir -U git+https://github.com/ISEEKYAN/mbridge.git && \
     pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
