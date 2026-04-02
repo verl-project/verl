@@ -45,8 +45,8 @@ val_top_p=0.7
 
 # One-step-off-policy specific parameters
 # Allocate 2 GPUs for rollout, remaining for training
-n_gpus_rollout=4
-n_gpus_training=4
+n_gpus_rollout=2
+n_gpus_training=$((NUM_GPUS - n_gpus_rollout))
 
 exp_name="$(basename "${MODEL_ID,,}")-one-step-off-policy-${ACTOR_STRATEGY}-minimal"
 
@@ -161,8 +161,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."
     # Megatron specific parameters
     gen_tp=2
-    train_tp=2
-    train_pp=2
+    train_tp=4
+    train_pp=1
     ref_offload=True
     actor_offload=False
 
@@ -180,6 +180,9 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         train_tp=2
         actor_offload=True
     fi
+    common_params+=(
+            trainer.n_gpus_per_node=4 \
+    )
 
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
