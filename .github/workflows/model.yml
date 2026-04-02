@@ -159,10 +159,10 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --upgrade "accelerate>=1.13.0"
       - name: Download model config files
         run: |
           hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
-
       - name: Running mcore engine tests on 8 L20 GPUs
         run: |
           ray stop --force

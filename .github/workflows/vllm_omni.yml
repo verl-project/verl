@@ -111,7 +111,7 @@ jobs:
           pip3 install --no-deps -e .
       - name: Install vllm-omni
         run: |
-          pip3 install git+https://github.com/vllm-project/vllm-omni.git@3158e9d28f1286119756604e9c40292cee4808d3
+          pip3 install git+https://github.com/vllm-project/vllm-omni.git@a90a769
       - name: Test vLLM Omni generate
         run: |
           ray stop --force
