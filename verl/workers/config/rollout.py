@@ -64,9 +64,7 @@ class SamplingConfig(BaseConfig):
 
 
 @dataclass
-class DiffusionSamplingConfig(BaseConfig):
-    do_sample: bool = True
-    n: int = 1
+class DiffusionSamplingConfig(SamplingConfig):
     noise_level: float = 0.0
     num_inference_steps: int = 40
     seed: int = 42
@@ -341,8 +339,6 @@ class DiffusionRolloutConfig(RolloutConfig):
     width: int = 512
 
     num_inference_steps: int = 10
-
-    guidance_scale: float = 4.5
 
     def __post_init__(self):
         """Validate diffusion rollout config"""

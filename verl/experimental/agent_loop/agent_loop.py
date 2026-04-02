@@ -47,8 +47,13 @@ from verl.utils.rollout_trace import (
     rollout_trace_op,
 )
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import DistillationConfig, DistillationLossConfig, HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
+from verl.workers.config import (
+    DistillationConfig,
+    DistillationLossConfig,
+    HFModelConfig,
+    RolloutConfig,
+)
+from verl.workers.rollout.replica import DiffusionOutput, TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -143,7 +148,8 @@ class AsyncLLMServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-    ) -> TokenOutput:
+        **kwargs: Any,
+    ) -> TokenOutput | DiffusionOutput:
         """Generate tokens from prompt ids.
 
         Args:
@@ -152,16 +158,17 @@ class AsyncLLMServerManager:
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
 
         Returns:
-            TokenOutput: token output
+            TokenOutput | DiffusionOutput: token or diffusion output
         """
         server_id, server = await self._acquire_server(request_id)
         try:
-            output: TokenOutput = await server.generate.remote(
+            output: TokenOutput | DiffusionOutput = await server.generate.remote(
                 request_id=uuid4().hex,  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
                 video_data=video_data,
+                **kwargs,
             )
             return output
         finally:
@@ -227,7 +234,7 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
-    """Multi-modal inputs for processors (e.g., pixel_values, image_grid_thw)."""
+    """Multi-modal inputs for processors (e.g. pixel_values, image_grid_thw, video_grid_thw)."""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
@@ -1022,7 +1029,12 @@ class AgentLoopManager:
         if not hasattr(self, "rollout_replica_class"):
             self.rollout_replica_class = get_rollout_replica_class(self.rollout_config.name)
         if not hasattr(self, "agent_loop_workers_class"):
-            self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
+            if OmegaConf.select(self.config, "actor_rollout_ref.model.model_type", default=None) == "diffusion_model":
+                from verl.experimental.agent_loop.diffusion_agent_loop import DiffusionAgentLoopWorker
+
+                self.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
+            else:
+                self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
     @classmethod
     @auto_await
@@ -1176,13 +1188,15 @@ class AgentLoopManager:
 
         # batch sequence generation is bounded by the slowest sample
         slowest = np.argmax(t_generate_sequences + t_tool_calls)
-        attention_mask = output.batch["attention_mask"][slowest]
         prompt_length = output.batch["prompts"].shape[1]
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
-        timing["agent_loop/slowest/prompt_length"] = attention_mask[:prompt_length].sum().item()
-        timing["agent_loop/slowest/response_length"] = attention_mask[prompt_length:].sum().item()
         timing["agent_loop/slowest/num_preempted"] = num_preempted[slowest]
+
+        if "attention_mask" in output.batch:
+            attention_mask = output.batch["attention_mask"][slowest]
+            timing["agent_loop/slowest/prompt_length"] = attention_mask[:prompt_length].sum().item()
+            timing["agent_loop/slowest/response_length"] = attention_mask[prompt_length:].sum().item()
 
         return timing
 

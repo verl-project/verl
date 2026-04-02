@@ -156,6 +156,8 @@ class McoreEngineConfig(EngineConfig):
         virtual_pipeline_model_parallel_size (Optional[int]): Virtual pipeline model parallel size
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
+        dynamic_context_parallel (bool): Whether to enable hybrid context parallelism.
+        max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
         use_dist_checkpointing (bool): Whether to use distributed checkpointing.
@@ -178,6 +180,8 @@ class McoreEngineConfig(EngineConfig):
     pipeline_model_parallel_size: int = 1
     virtual_pipeline_model_parallel_size: Optional[int] = None
     context_parallel_size: int = 1
+    dynamic_context_parallel: bool = False
+    max_seqlen_per_dp_cp_rank: Optional[int] = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
     use_dist_checkpointing: bool = False

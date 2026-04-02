@@ -44,6 +44,7 @@ on:
       - v0.*
     paths:
       - "**/*.py"
+      - "!tests/special_sanity/**"
       - .github/workflows/cpu_unit_tests.yml
 
 # Cancel jobs on the same ref if a new one is triggered

@@ -251,6 +251,7 @@ actor_rollout_ref:
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
+    layered_summon: false
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
@@ -343,7 +344,6 @@ actor_rollout_ref:
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
     qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
-    layered_summon: false
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -382,6 +382,27 @@ actor_rollout_ref:
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
+    lora:
+      type: lora
+      merge: false
+      rank: 0
+      alpha: 32
+      dropout: 0.0
+      target_modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+      exclude_modules: []
+      dropout_position: pre
+      lora_A_init_method: xavier
+      lora_B_init_method: zero
+      a2a_experimental: false
+      dtype: null
+      adapter_path: null
+      freeze_vision_model: true
+      freeze_vision_projection: true
+      freeze_language_model: true
   hybrid_engine: true
   nccl_timeout: 600
 data:

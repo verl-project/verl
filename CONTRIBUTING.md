@@ -3,6 +3,7 @@
 Thank you for considering a contribution to verl! We welcome contributions of any kind - bug fixes, enhancements, documentation improvements, or even just feedback. Whether you're an experienced developer or this is your first open-source project, your help is invaluable.
 
 Your support can take many forms:
+
 - Report issues or unexpected behaviors.
 - Suggest or implement new features.
 - Improve or expand documentation.
@@ -12,10 +13,10 @@ Your support can take many forms:
 ## Finding Issues to Contribute
 
 Looking for ways to dive in? Check out these issues:
+
 - [Good first issues](https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
 - [Call for contribution](https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22call%20for%20contribution%22)
-Furthermore, you can learn the development plan and roadmap via [RFC](https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3ARFC) and [Roadmap](https://github.com/volcengine/verl/issues?q=state%3Aopen%20label%3A%22roadmap%22).
-
+  Furthermore, you can learn the development plan and roadmap via [RFC](https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3ARFC) and [Roadmap](https://github.com/volcengine/verl/issues?q=state%3Aopen%20label%3A%22roadmap%22).
 
 ## Developing
 
@@ -26,14 +27,14 @@ Furthermore, you can learn the development plan and roadmap via [RFC](https://gi
 We rely on pre-commit to keep our code consistent. To set it up:
 
 ```bash
-pip install pre-commit
+pip install pre-commit hydra-core
 pre-commit install
 # for staged changes
 pre-commit run
 # for all files in the repo
 pre-commit run --all-files
 # run a specific hook with pre-commit
-# pre-commit run --all-files --show-diff-on-failure --color=always <hood-id>
+# pre-commit run --all-files --show-diff-on-failure --color=always <hook-id>
 pre-commit run --all-files --show-diff-on-failure --color=always ruff
 pre-commit run --all-files --show-diff-on-failure --color=always autogen-trainer-cfg
 ```
@@ -41,6 +42,7 @@ pre-commit run --all-files --show-diff-on-failure --color=always autogen-trainer
 ## Testing
 
 Our test suites run on GitHub Actions. Check these workflows for details:
+
 - [GPU unit tests](https://github.com/volcengine/verl/blob/main/.github/workflows/gpu_unit_tests.yml)
 - [CPU unit tests](https://github.com/volcengine/verl/blob/main/.github/workflows/cpu_unit_tests.yml)
 - [vLLM tests](https://github.com/volcengine/verl/blob/main/.github/workflows/vllm.yml)
@@ -55,6 +57,7 @@ If possible, please add CI test(s) for your new feature:
 3. Minimize the workload of the test script(s) (see existing scripts for examples).
 
 ## Building the Docs
+
 ```
 # Ensure verl is on your PYTHONPATH, e.g.:
 pip install -e .[test]
@@ -70,15 +73,24 @@ make html
 # Preview locally
 python -m http.server -d _build/html/
 ```
+
 Open your browser at http://localhost:8000 to explore the docs.
 
 ## Pull Requests & Code Reviews
 
 Thanks for submitting a PR! To streamline reviews:
+
 - Follow our Pull Request Template for title format and checklist.
 - Adhere to our pre-commit lint rules and ensure all checks pass.
 - Update docs for any user-facing changes.
 - Add or update tests in the CI workflows, or explain why tests aren't applicable.
+
+## AI-Assisted Contributions
+
+See
+
+- [`AGENTS.md`](AGENTS.md) for rules that all AI coding agents must follow
+- [`editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md) for guidelines on editing agent instructions.
 
 ## License
 
@@ -87,4 +99,3 @@ See the [LICENSE](https://github.com/volcengine/verl/blob/main/LICENSE) file for
 ## Thank You
 
 We appreciate your contributions to verl. Your efforts help make the project stronger and more user-friendly. Happy coding!
-
