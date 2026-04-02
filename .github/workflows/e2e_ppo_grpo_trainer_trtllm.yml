@@ -134,7 +134,7 @@ jobs:
         run: |
           export TRTLLM_TEST_MODEL_PATH_ROOT="${HOME}/models"
           ray stop --force
-          pytest -v -s \
+          pytest -v -s --durations=20 \
             tests/workers/rollout/rollout_trtllm/test_adapter.py \
             tests/workers/rollout/rollout_trtllm/test_async_server.py \
             tests/workers/rollout/rollout_trtllm/test_trtllm_rollout_utils.py

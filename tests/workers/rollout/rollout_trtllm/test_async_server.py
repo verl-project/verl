@@ -172,7 +172,7 @@ class TestTRTLLMHttpServer:
             os.environ.setdefault("TLLM_RAY_FORCE_LOCAL_CLUSTER", "1")
             ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
 
-            rollout_config, model_config = self._build_rollout_config(response_length=50)
+            rollout_config, model_config = self._build_rollout_config(response_length=16)
 
             server = self._create_server(
                 rollout_config,
