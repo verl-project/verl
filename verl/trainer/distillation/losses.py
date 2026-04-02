@@ -23,7 +23,7 @@ from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.losses import ppo_loss
-from verl.workers.utils.padding import no_padding_2_padding
+from verl.workers.utils.padding import extract_response
 
 DistillationLossFn = Callable[
     [
@@ -255,7 +255,7 @@ def distillation_loss(
         policy_loss_fn = get_policy_loss_fn(loss_config.policy_loss_mode)
         for k, v in config.global_batch_info.items():
             loss_config.global_batch_info[k] = v
-        log_prob = no_padding_2_padding(model_output["log_probs"], data)
+        log_prob = extract_response(data, model_output["log_probs"])
         old_log_prob = data["old_log_probs"]
         rollout_is_weights = data.get("rollout_is_weights", None)
         distillation_loss, pg_metrics = policy_loss_fn(
@@ -294,10 +294,10 @@ def compute_forward_kl_topk(
     - distillation_losses: (bsz, resp_len)
     - distillation_metrics: Dictionary of metrics.
     """
-    # topk loss has been computed in logits processor
-    distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
-    student_mass = no_padding_2_padding(model_output["student_mass"], data)
-    teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
+    # topk loss has been computed in logits processor.
+    distillation_losses = extract_response(data, model_output["distillation_losses"])
+    student_mass = extract_response(data, model_output["student_mass"])
+    teacher_mass = extract_response(data, model_output["teacher_mass"])
     response_mask_bool = data["response_mask"].bool()
     assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
 
@@ -338,8 +338,8 @@ def compute_distillation_loss_reverse_kl_estimator(
     - distillation_losses: (bsz, resp_len)
     - distillation_metrics: Dictionary of metrics.
     """
-    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
-    teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
+    student_log_probs = extract_response(data, model_output["log_probs"])
+    teacher_log_probs = extract_response(data, data["teacher_logprobs"]).squeeze(-1)
     response_mask_bool = data["response_mask"].bool()
     assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
 

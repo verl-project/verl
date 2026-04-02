@@ -161,6 +161,9 @@ trainer:
   # "resume_path": resume from a user-defined path
   resume_mode: auto
 
+  # Use mask-driven RLE nesting instead of legacy left_right_2_no_padding
+  use_mask_nesting: False
+
   # Path to resume training from (only used when resume_mode is "resume_path")
   resume_from_path: null
 
