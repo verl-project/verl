@@ -543,6 +543,27 @@ critic:
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
+    lora:
+      type: lora
+      merge: false
+      rank: 0
+      alpha: 32
+      dropout: 0.0
+      target_modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+      exclude_modules: []
+      dropout_position: pre
+      lora_A_init_method: xavier
+      lora_B_init_method: zero
+      a2a_experimental: false
+      dtype: null
+      adapter_path: null
+      freeze_vision_model: true
+      freeze_vision_projection: true
+      freeze_language_model: true
 custom_reward_function:
   path: null
   name: null
