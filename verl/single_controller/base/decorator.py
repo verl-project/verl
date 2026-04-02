@@ -411,6 +411,7 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
         materialize_futures:
             Whether to materialize the data before dispatching. Defaults to True.
 
+
     Returns:
         A decorator that wraps the original function with distributed execution
         configuration.

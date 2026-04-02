@@ -63,6 +63,12 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
             - prompt_length: Tensor of prompt lengths for each item in the batch
             - response_length: Tensor of response lengths for each item in the batch
     """
+    if "prompt_length" in batch.batch and "response_length" in batch.batch:
+        return dict(
+            prompt_length=batch.batch["prompt_length"],
+            response_length=batch.batch["response_length"],
+        )
+
     response_length = batch.batch["responses"].shape[-1]
 
     prompt_mask = batch.batch["attention_mask"][:, :-response_length]
@@ -72,7 +78,6 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     response_length = response_mask.sum(-1).float()  # (batch_size,)
 
     return dict(
-        response_mask=response_mask,
         prompt_length=prompt_length,
         response_length=response_length,
     )
@@ -108,12 +113,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
 
+    max_prompt_length = batch.batch["prompts"].shape[-1]
     max_response_length = batch.batch["responses"].shape[-1]
 
-    prompt_mask = batch.batch["attention_mask"][:, :-max_response_length].bool()
     response_mask = batch.batch["response_mask"].bool()
-
-    max_prompt_length = prompt_mask.size(-1)
 
     response_info = _compute_response_info(batch)
     prompt_length = response_info["prompt_length"]
