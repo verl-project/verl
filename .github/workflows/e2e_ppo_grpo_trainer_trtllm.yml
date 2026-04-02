@@ -165,6 +165,17 @@ jobs:
           DATADIR=${HOME}/data \
             bash examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh 2 \
             trainer.total_training_steps=1 \
+            data.train_batch_size=32 \
+            data.max_prompt_length=128 \
+            data.max_response_length=64 \
+            actor_rollout_ref.rollout.n=1 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+            actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
+            actor_rollout_ref.rollout.max_num_seqs=32 \
+            actor_rollout_ref.rollout.max_num_batched_tokens=1024 \
+            actor_rollout_ref.rollout.max_model_len=256 \
             data.train_files="['${PWD}/data/gsm8k/train.parquet']" \
             data.val_files="['${PWD}/data/gsm8k/test.parquet']" \
             trainer.logger='["console"]' \
@@ -200,6 +211,14 @@ jobs:
           ACTOR_TP=2 \
             bash examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh 2 \
             trainer.total_training_steps=1 \
+            data.train_batch_size=32 \
+            data.max_prompt_length=128 \
+            data.max_response_length=64 \
+            actor_rollout_ref.rollout.n=1 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+            actor_rollout_ref.rollout.max_num_seqs=32 \
+            actor_rollout_ref.rollout.max_num_batched_tokens=1024 \
+            actor_rollout_ref.rollout.max_model_len=256 \
             data.train_files="['${PWD}/data/gsm8k/train.parquet']" \
             data.val_files="['${PWD}/data/gsm8k/test.parquet']" \
             trainer.logger='["console"]' \
@@ -256,10 +275,10 @@ jobs:
           bash examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh \
             reward_model.reward_kwargs.overlong_buffer_cfg.len=258 \
             reward_model.reward_kwargs.max_resp_len=512 \
-            data.max_prompt_length=512 \
-            data.max_response_length=512 \
+            data.max_prompt_length=128 \
+            data.max_response_length=64 \
             data.train_batch_size=32 \
-            actor_rollout_ref.rollout.n=4 \
+            actor_rollout_ref.rollout.n=1 \
             actor_rollout_ref.rollout.max_num_seqs=16 \
             actor_rollout_ref.rollout.max_num_batched_tokens=1024 \
             actor_rollout_ref.rollout.max_model_len=1024 \
