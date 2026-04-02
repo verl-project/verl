@@ -51,7 +51,8 @@ else:
 
 
 def init_fn(x: torch.nn.Module):
-    if torch.distributed.get_rank() != 0:
+    skip_meta = os.environ.get("VERL_LOAD_ALL_RANKS", "0") == "1"
+    if not skip_meta and torch.distributed.get_rank() != 0:
         x = x.to_empty(device=get_device_id(), recurse=False)
         get_torch_device().empty_cache()
     return x
@@ -61,7 +62,10 @@ def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = Non
     from accelerate import init_empty_weights
 
     cpu_init_weights = lambda: torch.device("cpu")
-    if use_meta_tensor:
+    skip_meta = os.environ.get("VERL_LOAD_ALL_RANKS", "0") == "1"
+    if skip_meta:
+        init_context = cpu_init_weights
+    elif use_meta_tensor:
         if mesh is None:
             init_context = init_empty_weights if torch.distributed.get_rank() != 0 else cpu_init_weights
         else:
@@ -469,18 +473,55 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
     # To broadcast, it needs to be instantiated in the GPU.
-    if dist.get_rank() == 0:
+    skip_broadcast = os.environ.get("VERL_LOAD_ALL_RANKS", "0") == "1"
+    if skip_broadcast:
+        # All ranks have full weights on CPU. Manually load each FSDP2 shard
+        # to avoid HCCL collectives that fail on large tensors (CANN AICPU bug).
+        from torch.distributed.tensor import DTensor
+        device = get_device_id()
+        get_torch_device().empty_cache()
+        cpu_offload_flag = cpu_offload is not None
+        for name, param in model.named_parameters():
+            if name in full_state:
+                full_tensor = full_state[name]
+                if isinstance(param, DTensor):
+                    local_tensor = param.to_local()
+                    spec = param._spec
+                    chunk = full_tensor
+                    for placement, mesh_dim in zip(spec.placements, range(spec.mesh.ndim)):
+                        if isinstance(placement, Shard):
+                            num_chunks = spec.mesh.size(mesh_dim)
+                            coord = spec.mesh.get_local_rank(mesh_dim)
+                            chunks = chunk.chunk(num_chunks, dim=placement.dim)
+                            chunk = chunks[min(coord, len(chunks) - 1)]
+                    local_tensor.data.copy_(chunk.to(local_tensor.dtype).to(device))
+                else:
+                    param.data.copy_(full_tensor.to(param.dtype).to(device))
+        for name, buf in model.named_buffers():
+            if name in full_state:
+                buf.data.copy_(full_state[name].to(buf.dtype).to(device))
+            elif buf.device.type == "meta":
+                buf.data = torch.empty_like(buf, device=device)
+        if cpu_offload_flag:
+            model.to("cpu", non_blocking=True)
+            for buf in model.buffers():
+                buf.data = buf.data.to(device)
+        del full_state
+        return
+    elif dist.get_rank() == 0:
         model = model.to(device=get_device_id(), non_blocking=True)
     else:
         model = model.to_empty(device=get_device_id())
 
     cpu_offload = cpu_offload is not None
-    options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
+    broadcast = not skip_broadcast
+    options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=broadcast)
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
-    for name, buf in model.named_buffers():
-        dist.broadcast(buf, src=0)
+    if not skip_broadcast:
+        for name, buf in model.named_buffers():
+            dist.broadcast(buf, src=0)
 
     if cpu_offload:
         model.to("cpu", non_blocking=True)

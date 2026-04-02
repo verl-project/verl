@@ -47,7 +47,13 @@ def is_int8_ascend_model(vllm_config) -> bool:
     if quant_config is None:
         return False
     quant_desc = getattr(quant_config, "quant_description", None)
-    if quant_desc is not None and isinstance(quant_desc, _W8A8DynamicQuantDescription):
+    if quant_desc is None:
+        return False
+    if isinstance(quant_desc, _W8A8DynamicQuantDescription):
+        return True
+    if isinstance(quant_desc, dict) and any(
+        v == "W8A8_DYNAMIC" for v in quant_desc.values()
+    ):
         return True
     return False
 
@@ -55,38 +61,93 @@ def is_int8_ascend_model(vllm_config) -> bool:
 def load_int8_ascend_weights(weights, model, dtype=torch.bfloat16):
     """Quantize bf16 weights to INT8 and load into the vllm model.
 
-    For W8A8_DYNAMIC, the model already has int8 weight parameters plus
-    weight_scale / weight_offset created by AscendLinearMethod.  We quantize
-    the incoming bf16 weights to int8 and directly copy them into the
-    existing parameters, bypassing vLLM weight_loader which would
-    incorrectly try to shard already-sharded weights.
+    Ascend W8A8_DYNAMIC stores weight as (input_size, output_size) — transposed.
+    Scale/offset are 1D (output_size,).
 
-    Returns the set of loaded parameter names.
+    Handles vLLM's fused parameter mapping:
+      q/k/v_proj -> qkv_proj, gate/up_proj -> gate_up_proj.
     """
-    loaded_params = set()
     param_dict = dict(model.named_parameters())
 
+    qkv_mod = None
+    gate_up_mod = None
+    for n, m in model.named_modules():
+        if n.endswith(".self_attn") and qkv_mod is None:
+            qkv_mod = getattr(m, "qkv_proj", None)
+        if n.endswith(".mlp") and gate_up_mod is None:
+            gate_up_mod = getattr(m, "gate_up_proj", None)
+        if qkv_mod and gate_up_mod:
+            break
+
+    _FUSE_MAP = {}
+    if qkv_mod:
+        h = qkv_mod.num_heads * qkv_mod.head_size
+        kv = qkv_mod.num_kv_heads * qkv_mod.head_size
+        _FUSE_MAP["q_proj"] = ("qkv_proj", 0, h)
+        _FUSE_MAP["k_proj"] = ("qkv_proj", h, kv)
+        _FUSE_MAP["v_proj"] = ("qkv_proj", h + kv, kv)
+    if gate_up_mod and hasattr(gate_up_mod, "output_partition_sizes"):
+        sizes = gate_up_mod.output_partition_sizes
+        _FUSE_MAP["gate_proj"] = ("gate_up_proj", 0, sizes[0])
+        _FUSE_MAP["up_proj"] = ("gate_up_proj", sizes[0], sizes[1])
+
+    loaded_params = set()
+
     for name, tensor in quant_weights_int8_ascend(weights, dtype=dtype):
-        if name not in param_dict:
-            logger.debug("Skipping unknown parameter: %s", name)
+        parts = name.rsplit(".", 1)
+        if len(parts) != 2:
             continue
-        param = param_dict[name]
-        loaded = tensor
+        prefix, attr = parts
+        proj = prefix.rsplit(".", 1)[-1]
 
-        if loaded.shape != param.shape:
-            if loaded.ndim == 2 and param.ndim == 1 and loaded.shape[0] == param.shape[0]:
-                loaded = loaded.squeeze(-1)
-            elif loaded.ndim == 2 and param.ndim == 2 and loaded.shape == (param.shape[1], param.shape[0]):
-                loaded = loaded.t().contiguous()
+        if proj in _FUSE_MAP:
+            fused_name, offset, size = _FUSE_MAP[proj]
+            base = prefix.rsplit(".", 1)[0] if "." in prefix else ""
+            full_name = f"{base}.{fused_name}.{attr}" if base else f"{fused_name}.{attr}"
+            if full_name not in param_dict:
+                continue
+            param = param_dict[full_name]
+            loaded = tensor
 
-        if param.shape != loaded.shape:
-            logger.warning(
-                "Shape mismatch for %s: param %s vs loaded %s, skipping",
-                name, param.shape, loaded.shape,
-            )
-            continue
-        param.data.copy_(loaded)
-        loaded_params.add(name)
+            if attr == "weight":
+                if loaded.ndim == 2 and param.ndim == 2:
+                    if loaded.shape[0] == size and loaded.shape[1] == param.shape[0]:
+                        param.data.narrow(1, offset, size).copy_(loaded.t().contiguous())
+                        loaded_params.add(full_name)
+                    elif loaded.shape[1] == size and loaded.shape[0] == param.shape[0]:
+                        param.data.narrow(1, offset, size).copy_(loaded)
+                        loaded_params.add(full_name)
+            else:
+                if loaded.ndim == 2:
+                    loaded = loaded.squeeze(-1)
+                if param.ndim == 1 and loaded.ndim == 1:
+                    if offset + loaded.shape[0] <= param.shape[0]:
+                        param.data.narrow(0, offset, loaded.shape[0]).copy_(loaded)
+                        loaded_params.add(full_name)
+                    elif loaded.shape == param.shape:
+                        param.data.copy_(loaded)
+                        loaded_params.add(full_name)
+        else:
+            if name not in param_dict:
+                continue
+            param = param_dict[name]
+            loaded = tensor
+            if attr == "weight" and loaded.ndim == 2 and param.ndim == 2:
+                if loaded.shape == (param.shape[1], param.shape[0]):
+                    param.data.copy_(loaded.t().contiguous())
+                    loaded_params.add(name)
+                elif loaded.shape == param.shape and loaded.shape[0] != loaded.shape[1]:
+                    param.data.copy_(loaded)
+                    loaded_params.add(name)
+                elif loaded.shape == param.shape:
+                    param.data.copy_(loaded.t().contiguous())
+                    loaded_params.add(name)
+            else:
+                if loaded.ndim == 2 and param.ndim == 1 and loaded.shape[0] == param.shape[0]:
+                    loaded = loaded.squeeze(-1)
+                if loaded.shape == param.shape:
+                    param.data.copy_(loaded)
+                    loaded_params.add(name)
 
     return loaded_params
 

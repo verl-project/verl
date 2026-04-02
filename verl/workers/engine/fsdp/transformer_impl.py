@@ -38,7 +38,7 @@ from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.device import get_device_id, get_device_name
+from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fsdp_utils import (
     CPUOffloadPolicy,
     FSDPModule,
@@ -399,7 +399,9 @@ class FSDPEngine(BaseEngine):
             }
             full_state = module.state_dict()
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)
+            get_torch_device().empty_cache()
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            get_torch_device().empty_cache()
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 
