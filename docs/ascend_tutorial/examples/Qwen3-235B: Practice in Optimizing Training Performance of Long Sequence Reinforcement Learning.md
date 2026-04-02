@@ -35,7 +35,7 @@ MindSpeed-RL 2.2.0商发配套版本：
 | MindSpeed   | 1cdd0ab                                  |
 | Megatron-LM | core_v0.12.1                             |
 | torch       | 2.7.1                                    |
-| toch-npu    | 2.7.1                                    |
+| torch-npu    | 2.7.1                                    |
 
 ## 三、性能瓶颈分析
 
