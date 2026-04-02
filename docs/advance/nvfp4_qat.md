@@ -1,5 +1,7 @@
 # NVFP4 QAT (Quantization-Aware Training) in verl
 
+Last updated: 04/02/2026
+
 verl supports NVFP4 Quantization-Aware Training (QAT), which applies fake quantization during training so the model learns to tolerate NVFP4 quantization error. At rollout time, weights are packed into real NVFP4 format for vLLM inference. This closes the precision gap between training and inference, preventing KL divergence explosion.
 
 | Training Backend | Training Precision | Rollout Precision | vLLM Quant Method |

@@ -138,6 +138,7 @@ verl is fast with:
    data/transfer_queue.md
    advance/grafana_prometheus.md
    advance/fp8.md
+   advance/nvfp4_qat.md
    advance/async-on-policy-distill
    advance/mtp.md
 
