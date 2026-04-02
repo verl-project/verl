@@ -268,6 +268,213 @@ class SessionHandle:
 - token ingress
 - `AgentLoop` compatibility bridge
 
+#### 5.4.1 session truth source
+
+`GatewayActor` 内部对单个 session 的真相源拆分为三层：
+
+- `message_history`
+  - 当前已提交的消息级对话历史，用于 prefix consistency 判断
+- `active_trajectory`
+  - 当前仍在追加中的 trajectory buffer
+- `trajectories`
+  - 已 materialize 的稳定 trajectories
+
+设计要求：
+
+- 一个 turn 只有在 `GatewayActor` 完成 backend 返回处理并更新 `message_history` / `active_trajectory` 后，才算对该 session 提交成功。
+- `finalize_session()` 只能返回已经 materialize 的 trajectories；如果存在 `active_trajectory`，必须先 materialize 再返回。
+- 不引入额外的 segment/sub-trajectory 概念；prefix mismatch 直接切新 trajectory。
+
+#### 5.4.2 session lifecycle
+
+PR1 采用最小化 session phase model，而不是重型 workflow state machine。
+
+最小状态：
+
+- `ACTIVE`
+  - session 已创建，可继续接收 chat completions
+- `COMPLETED`
+  - 已收到显式完成信号，不再接收新的 chat completions，但仍可 finalize
+- `FINALIZED`
+  - session 已完成 materialization 并从 runtime 中移除
+- `ABORTED`
+  - session 已被放弃并从 runtime 中移除
+
+允许的主要转移：
+
+- `create_session`: 创建 `ACTIVE` session
+- `complete_session`: `ACTIVE -> COMPLETED`
+- `finalize_session`: `ACTIVE|COMPLETED -> FINALIZED`
+- `abort_session`: `ACTIVE|COMPLETED -> ABORTED`
+
+约束：
+
+- `FINALIZED` / `ABORTED` 是 terminal states。
+- PR1 不要求 `/complete` 成为所有本地 path 的必经步骤，因此 `finalize_session()` 允许直接从 `ACTIVE` 进入 `FINALIZED`。
+- 默认 `session_id` 应由 runtime/framework 侧生成唯一值，而不是默认复用外部业务 `uid`；PR1 推荐使用 `uuid4().hex` 这一类本地唯一 id 生成方式。
+- 若调用方显式传入 `session_id`，其唯一性与幂等边界由调用方负责；Gateway 侧 duplicate reject 属于防御性校验，而不是主去重机制。
+- duplicate `create_session(session_id)` 必须显式 reject，不能静默覆盖已有 session state。
+
+#### 5.4.3 per-session serialization boundary
+
+Frozen decision 中“same-session requests should be serialized”在实现上不应只覆盖 `/v1/chat/completions`，而应覆盖所有会修改 session truth source 的同-session 操作。
+
+PR1 约束：
+
+- 下列 mutating operations 必须共享同一个 per-session serialization boundary：
+  - `chat_completions`
+  - `complete_session`
+  - `finalize_session`
+  - `abort_session`
+- `wait_for_completion()` 不应长时间持有该锁，但其完成条件只能在持锁的合法状态转移后触发。
+- 目标不是防止“两个 finalize 同时到来”这种低频场景，而是防止 in-flight `chat_completions` 与 `complete/finalize/abort` 并发竞争同一个 session truth source。
+
+#### 5.4.4 `/v1/chat/completions` request handling
+
+PR1 的 `GatewayActor` 不是完整 OpenAI API reimplementation，而是一个 session-aware、OpenAI-compatible 的最小子集。
+
+请求处理要求：
+
+- 路径必须绑定到已存在 session；unknown session 返回明确 4xx，而不是隐式创建 session。
+- `messages` 必须存在且非空；malformed request 返回明确 4xx。
+- `GatewayActor` 内部保存的 session truth source 应是“可无损送入 VERL chat template 与 vision helper”的 canonical structured request context，而不是 text-only normalize 结果。
+- PR1 的 prefix consistency 基于 canonical structured request context，而不是 token-level fuzzy match。
+- 若请求消息是当前 `message_history` 的 prefix continuation：
+  - 继续追加到同一个 `active_trajectory`
+  - 新增的 prompt-side token 写入 `response_ids`
+  - 这些 token 的 `response_mask` 置为 `0`
+- 若请求消息与当前 `message_history` 不再 prefix-compatible：
+  - 先 materialize 当前 `active_trajectory`
+  - 再为新消息开启新的 trajectory
+
+OpenAI compatibility boundary：
+
+- PR1 正式主路径是 `messages` 驱动的 non-streaming chat completions。
+- canonical session truth source 至少应覆盖：
+  - `messages`
+  - `tools`
+- canonical message schema 应尽量贴近 OpenAI message shape，而不是引入新的 Gateway 私有消息协议；最小保留字段包括：
+  - `role`
+  - `content`
+  - `tool_calls`
+  - `tool_call_id`
+  - `name`
+- 为与 VERL 现有 chat-template / tool-agent 路径对齐，PR1 的设计基线应包含：
+  - 顶层 `tools`
+  - assistant message 上的 `tool_calls`
+  - `role == "tool"` 的消息
+  - multimodal `content` parts
+- `content` 若是 multimodal parts，应保留结构化 list 及其顺序，不得为了 prefix matching 或内部存储而压平成纯文本。
+- `tool_calls` 至少应保留 `id`、`type`、`function.name`、`function.arguments`。
+- PR1 对 `tool_calls[*].function.arguments` 的最小 contract：
+  - 外部请求可接受 OpenAI-compatible string form
+  - canonicalization 时必须成功解析为 JSON object
+  - internal comparison / prefix matching 必须基于稳定 canonical 表示，而不是原始字符串表示
+  - 若解析失败，或结果不是 JSON object，不得静默接受为“看起来像 tool call”的历史
+- 同一 active trajectory 内，`tools` 属于 request compatibility boundary 的一部分；若 `tools` 与已有 session truth source 不再 canonical-compatible，则不得静默沿用旧 trajectory。
+- `GatewayActor` 不应把上述结构化字段静默压平为纯 `role/content` 文本，否则会破坏 chat template correctness 与后续 trajectory truth source。
+- `name` 不应自动视为已支持字段；只有在某一类 message / model path 的语义被单独定义清楚后，才能宣称正式支持。
+- PR1 不应通过静默忽略字段来制造“看似兼容”的假象。
+- PR1 的 prefix match 采用 exact canonical prefix match：
+  - 比较对象是 canonicalized `tools + messages`
+  - 不做 token-level fuzzy matching
+  - 不做基于文本近似的弱匹配
+- 错误类型需要区分：
+  - malformed request
+    - 指请求缺少必需字段、字段类型不合法、结构不满足最小 chat-completions contract
+  - unsupported-but-well-formed request
+    - 指请求结构合法，但使用了 PR1 尚未支持的 capability，例如未定义语义的 `name`、streaming 或其它未承诺字段
+- `GatewayActor` 应对这两类错误返回可区分的明确 4xx，而不是统一混成“malformed request”。
+
+#### 5.4.5 `complete / wait / finalize / abort`
+
+`POST /sessions/{id}/complete`：
+
+- 指 agent-side completion signal，而不是 framework-facing public API。
+- 是可选完成信号与可选 `reward_info` 上传通道。
+- 对 remote/hosted agents 很重要；对本地 path 不是必经步骤。
+- 成功处理后将 session 从 `ACTIVE` 转为 `COMPLETED`。
+- `COMPLETED` 是 bridge state：表示 agent side 已声明完成，但 trajectory 尚未被 framework/runtime 侧消费并移除。
+- 在 `ACTIVE` 上调用时成功。
+- 在 `COMPLETED` 上重复调用时应视为幂等成功。
+- 在 `FINALIZED` / `ABORTED` 上调用时应明确失败。
+
+`wait_for_completion(session_id)`：
+
+- 是 framework/runtime-facing synchronization primitive，不负责 finalize。
+- 语义应当是“等待 session 到达可安全 finalize 的完成状态”，而不只是等待某个 event 被任意设置。
+- 成功条件：
+  - session 进入 `COMPLETED`
+  - 或 session 已经是 `FINALIZED`
+- 失败条件：
+  - session 在等待期间进入 `ABORTED`
+  - 或等待超时
+- `ACTIVE` 状态下继续等待，不得把“仍可接受新 chat”误判为完成。
+- 若 session 在等待期间被 abort，应以明确的 terminal failure 结束等待，而不是无限阻塞。
+
+`finalize_session(session_id)`：
+
+- 负责 materialize 任何尚未提交的 `active_trajectory`
+- 复制当前 session 级别的 reward/session metadata 到返回的 trajectories（PR1 仅需最小调试与 reward 语义，不要求定义完整训练侧 metadata propagation 契约）
+- 返回 trajectories 后，将 session 置为 `FINALIZED` 并从 runtime 中移除
+- 是 framework/runtime 侧唯一的 consume-and-close 出口。
+- 在 `ACTIVE` 上调用时允许直接 finalize；这对应本地 path 中 `/complete` 不是必经步骤的情况。
+- 在 `COMPLETED` 上调用时允许 finalize。
+- 在 `FINALIZED` / `ABORTED` 上调用时应明确失败，而不是伪幂等地重复返回旧结果。
+
+`abort_session(session_id)`：
+
+- 将 session 置为 `ABORTED` 并从 runtime 中移除
+- 不产生训练可见 trajectories
+- 不允许与 in-flight chat mutation 并发打架；必须经过同一 serialization boundary
+- 在 `ACTIVE` / `COMPLETED` 上调用时成功。
+- 在 `ABORTED` 上重复调用可视为幂等成功，用于清理路径。
+- 在 `FINALIZED` 上调用时应明确失败。
+
+#### 5.4.6 session debug metadata
+
+PR1 允许 `GatewayActor` 维护最小 session debug metadata，例如：
+
+- `metadata`
+- `created_at` / `updated_at`
+- completion / abort flags
+- `num_trajectories`
+
+但这类 metadata 默认只构成 runtime/debug contract，不自动等价于训练侧 `DataProto` contract。
+
+#### 5.4.7 failure handling / retry semantics
+
+PR1 需要明确定义 `GatewayActor` 的 commit point 和失败后的 no-op / no-commit 语义，避免 session truth source 被部分写坏。
+
+最小约束：
+
+- 对单次 chat completion，请求的 commit point 发生在：
+  - backend generation 成功返回
+  - 且 `GatewayActor` 已完成本轮 response processing，并准备好一致地更新 `message_history` / `active_trajectory`
+- 在 commit point 之前，本轮请求中的 prefix split、prompt-side delta 追加、active trajectory replacement 都只能视为 tentative state；若本轮请求失败，必须整体丢弃，而不是部分写回 session。
+- malformed request、unsupported-but-well-formed request、unknown session 等前置失败必须是纯 no-op：
+  - 不更新 `message_history`
+  - 不更新 `active_trajectory`
+  - 不 materialize trajectory
+  - 不改变 completion / abort state
+- backend.generate(...) 失败、超时或被取消时，本轮 chat request 必须按 no-commit 处理：
+  - 不提交本轮新增的 prompt-side delta
+  - 不提交本轮 assistant response
+  - 不因为本轮请求而 materialize 新 trajectory
+  - session 应保持在本轮请求开始前的最后一个稳定状态
+- `POST /complete` 只改变 lifecycle / optional reward info，不负责 trajectory materialization。
+- PR1 不承诺跨网络故障场景下的 exactly-once completion semantics；若未来需要安全 retry / dedup，应通过显式 request id / idempotency key 机制单独设计。
+
+#### 5.4.8 明确不做的事情
+
+为避免过度设计，PR1 的 `GatewayActor` 不引入：
+
+- backend generation 子状态
+- token ingress 相关状态
+- persistence / recovery state machine
+- framework-level public lifecycle 扩张
+- token-level fuzzy prefix matching
+
 ### 5.5 `TrajectoryAssembler` / helpers
 
 负责：
