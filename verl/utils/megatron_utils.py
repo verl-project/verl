@@ -1368,47 +1368,69 @@ def get_megatron_module_device(models: list[Any]) -> str:
 def dynamic_cp_split_batch(
     batch: TensorDict, engine_config: McoreEngineConfig, dp_size: int, dp_rank: int
 ) -> TensorDict:
-    """
-    Split the batch into sub-batches for dynamic context parallel.
+    """Split a micro-batch for Dynamic Context Parallel.
 
-    we can spilt a microbatch into several sub-batches with different local_cp_size, but for simplicity now,
-    we only split the batch into a fixed local_cp_size.
+    Preconditions (enforced by caller):
+      - engine.context_parallel_size is 1 when DCP is enabled, so dp_size
+        already spans the full DP×CP space.
+      - max_token_len_per_gpu == max_seqlen_per_dp_cp_rank.
 
+    The function decides a *local_cp_size* (power-of-2) based on the longest
+    sequence in the micro-batch.  Consecutive dp_ranks are grouped into CP
+    sub-groups of that size, and the remaining dp dimension becomes the
+    effective data parallelism (*local_dp_size = dp_size / local_cp_size*).
+
+    After splitting, ``batch["dp_size"]`` is overwritten to *local_dp_size*
+    so that the downstream loss formula
+        ``loss = -masked_sum / batch_num_tokens * dp_size``
+    automatically compensates for the duplicated CP gradients during the DP
+    all-reduce.
     """
+    import math
+
     input_ids = batch["input_ids"]
     assert input_ids.is_nested, "input_ids must be a nested tensor"
     seq_len_effective: torch.Tensor = input_ids.offsets().diff()
-    max_seq_len = max(seq_len_effective)
-    # if num of sequences is less than dp_size, we don't need to split the batch
-    local_cp_size = None
-    if len(seq_len_effective) < dp_size:
-        local_cp_size = dp_size
-        return batch
+    max_seq_len = int(max(seq_len_effective))
+    num_seqs = len(seq_len_effective)
+    max_seqlen_per_dp_cp_rank = engine_config.max_seqlen_per_dp_cp_rank
+
+    # --- determine local_cp_size ---
+    local_cp_size = math.ceil(max_seq_len / max_seqlen_per_dp_cp_rank)
+    local_cp_size = 1 << (local_cp_size - 1).bit_length() if local_cp_size > 1 else 1
+
+    # Every DP sub-group must get at least one sequence; increase CP if needed.
+    min_cp_for_coverage = math.ceil(dp_size / num_seqs) if num_seqs > 0 else dp_size
+    if min_cp_for_coverage > 1:
+        min_cp_for_coverage = 1 << (min_cp_for_coverage - 1).bit_length()
+    local_cp_size = max(local_cp_size, min_cp_for_coverage)
+    local_cp_size = min(local_cp_size, dp_size)
+
+    local_dp_size = dp_size // local_cp_size
+    local_dp_rank = dp_rank // local_cp_size
+
+    # --- split data across local_dp groups ---
+    if local_dp_size > 1:
+        base_count = num_seqs // local_dp_size
+        remainder = num_seqs % local_dp_size
+        if local_dp_rank < remainder:
+            start_idx = local_dp_rank * (base_count + 1)
+            count = base_count + 1
+        else:
+            start_idx = remainder * (base_count + 1) + (local_dp_rank - remainder) * base_count
+            count = base_count
+        end_idx = start_idx + count
+        selected_indices = list(range(start_idx, end_idx))
+        batch = tu.index_select_tensor_dict(batch, selected_indices)
+        decision = "split"
     else:
-        # decide the local_cp_size based on the max_seq_len and dp_size
-        max_seqlen_per_dp_cp_rank = engine_config.max_seqlen_per_dp_cp_rank
-        import math
+        selected_indices = list(range(num_seqs))
+        decision = "no_split_full_cp"
 
-        local_cp_size = math.ceil(max_seq_len / max_seqlen_per_dp_cp_rank)
-        # round up to the nearest power of 2, for [1,2,3,4,5,6,7,8] -> [1,2,4,4,8,8,8,8]
-        local_cp_size = 1 << (local_cp_size - 1).bit_length()
-
-        assert local_cp_size <= dp_size, (
-            "local_cp_size must be less than or equal to dp_size, try to increase max_seqlen_per_dp_cp_rank"
-        )
-        if local_cp_size < dp_size:
-            # split the batch into local_cp_size sub-batches
-            local_dp_rank = dp_rank // local_cp_size
-            local_dp_size = dp_size // local_cp_size
-            indices = list(range(len(seq_len_effective)))
-            num_seq_per_local_cp = math.ceil(len(seq_len_effective) / local_dp_size)
-            start_idx = local_dp_rank * num_seq_per_local_cp
-            end_idx = min(start_idx + num_seq_per_local_cp, len(seq_len_effective))
-            selected_indices = indices[start_idx:end_idx]
-            batch = tu.index_select_tensor_dict(batch, selected_indices)
-
-    # print(f"rank={torch.distributed.get_rank()}, local_cp_size={local_cp_size} max_seq_len={max_seq_len}")
+    # --- attach metadata used by downstream model forward and loss ---
     tu.assign_non_tensor_data(batch, "local_cp_size", local_cp_size)
+    tu.assign_non_tensor(batch, dp_size=local_dp_size)
+
     return batch
 
 
