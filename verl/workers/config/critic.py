@@ -58,6 +58,7 @@ class CriticConfig(BaseConfig):
         "ppo_micro_batch_size_per_gpu",
         "ppo_mini_batch_size",
         "ppo_micro_batch_size",
+        "engine",
         "model_config",
     }
 
@@ -161,6 +162,11 @@ class McoreCriticConfig(CriticConfig):
         """Validate Megatron critic configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size)
 
+    def __post_init__(self):
+        """Validate Megatron critic configuration parameters."""
+        super().__post_init__()
+        self.engine = self.megatron
+
 
 @dataclass
 class FSDPCriticConfig(CriticConfig):
@@ -181,6 +187,7 @@ class FSDPCriticConfig(CriticConfig):
     }
 
     strategy: str = "fsdp"
+    fsdp: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     forward_micro_batch_size: int = 1
     forward_micro_batch_size_per_gpu: int = 1
     ulysses_sequence_parallel_size: int = 1
@@ -189,6 +196,7 @@ class FSDPCriticConfig(CriticConfig):
     def __post_init__(self):
         """Validate FSDP critic configuration parameters."""
         super().__post_init__()
+        self.engine = self.fsdp
 
         if self.strategy in {"fsdp", "fsdp2"}:
             if self.ulysses_sequence_parallel_size > 1:

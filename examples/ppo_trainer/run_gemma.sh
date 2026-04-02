@@ -26,8 +26,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.path=google/gemma-2-2b-it \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size_per_gpu=4 \
-    critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.fsdp.param_offload=False \
+    critic.fsdp.optimizer_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \

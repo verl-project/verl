@@ -76,8 +76,8 @@ python3 -m verl.trainer.main_ppo \
     critic.use_dynamic_bsz="${SEQ_BALANCE}" \
     critic.ppo_max_token_len_per_gpu=${train_max_token_num_per_gpu} \
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.fsdp.param_offload=False \
+    critic.fsdp.optimizer_offload=False \
     reward.num_workers=8 \
     reward.reward_model.enable=True \
     reward.reward_model.model_path="${MODEL_PATH}" \
