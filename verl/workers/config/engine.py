@@ -189,6 +189,11 @@ class McoreEngineConfig(EngineConfig):
     dist_checkpointing_prefix: str = ""
     dist_ckpt_optim_fully_reshardable: bool = False
     distrib_optim_fully_reshardable_mem_efficient: bool = False
+    # Megatron FSDP (ZeRO-style sharding)
+    use_megatron_fsdp: bool = False
+    megatron_fsdp_zero_stage: int = 3  # 0=no_shard, 1=optim, 2=optim_grads, 3=optim_grads_params
+    megatron_fsdp_overlap_grad_reduce: bool = True
+    megatron_fsdp_overlap_param_gather: bool = True
     override_ddp_config: dict[str, Any] = field(default_factory=dict)
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)

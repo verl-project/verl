@@ -59,6 +59,15 @@ distrib_optim_fully_reshardable_mem_efficient: False
 # oc.select: default val for ref.megatron.seed
 seed: 42
 
+# Megatron FSDP (ZeRO-style sharding, replaces DDP when enabled)
+use_megatron_fsdp: False
+# ZeRO stage: 0=no_shard, 1=optim, 2=optim_grads, 3=optim_grads_params
+megatron_fsdp_zero_stage: 3
+# Overlap gradient reduce with backward computation
+megatron_fsdp_overlap_grad_reduce: True
+# Overlap parameter gather with forward computation
+megatron_fsdp_overlap_param_gather: True
+
 # Allow to override Distributed Data Parallel (DDP) config
 override_ddp_config: {}
 
