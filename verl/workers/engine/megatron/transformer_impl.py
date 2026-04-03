@@ -262,11 +262,15 @@ class MegatronEngine(BaseEngine):
             is_value_model=self.is_value_model,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
+            use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
+            megatron_fsdp_zero_stage=self.engine_config.megatron_fsdp_zero_stage,
+            megatron_fsdp_overlap_grad_reduce=self.engine_config.megatron_fsdp_overlap_grad_reduce,
+            megatron_fsdp_overlap_param_gather=self.engine_config.megatron_fsdp_overlap_param_gather,
         )
         if self.is_value_model:
             self.model_config.hf_config.tie_word_embeddings = False
 
-        module, updated_tf_config = make_megatron_module(
+        module, updated_tf_config, pending_fsdp_config = make_megatron_module(
             wrap_config=wrap_config,
             tf_config=self.tf_config,
             hf_config=self.model_config.hf_config,
@@ -280,7 +284,7 @@ class MegatronEngine(BaseEngine):
         self.tf_config = updated_tf_config
         print(f"module: {len(module)}")
 
-        if self.engine_config.use_dist_checkpointing:
+        if self.engine_config.use_dist_checkpointing and self.engine_config.dist_checkpointing_path:
             load_mcore_dist_weights(
                 module, self.engine_config.dist_checkpointing_path, is_value_model=self.is_value_model
             )
@@ -294,6 +298,11 @@ class MegatronEngine(BaseEngine):
                 self.bridge.load_hf_weights(
                     module, self.model_config.local_path, allowed_mismatched_params=allowed_mismatched_params
                 )
+
+        if pending_fsdp_config is not None:
+            from verl.utils.megatron_utils import wrap_model_with_fsdp
+
+            module = wrap_model_with_fsdp(module, pending_fsdp_config)
 
         if torch.distributed.get_rank() == 0:
             print_model_size(module[0])

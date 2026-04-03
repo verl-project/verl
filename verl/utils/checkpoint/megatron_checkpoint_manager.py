@@ -270,7 +270,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     key = f"model{vpp_rank}" if len(self.model) > 1 else "model"
                 else:
                     key = "model"
-                if hasattr(model, "module"):
+                while hasattr(model, "module") and not hasattr(model, "sharded_state_dict"):
                     model = model.module
 
                 # GPTModel's sharded_state_dict function when having mtp requires metadata['dp_cp_group']
@@ -279,8 +279,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 kwargs = {"metadata": model_metadata}
                 state_dict[key] = model.sharded_state_dict(**kwargs)
 
-        # Optimizer State Dict
-        if generate_optimizer:
+        # Optimizer State Dict (skip for FSDP — upstream sharding not yet supported)
+        is_fsdp = getattr(getattr(self.model[0], "ddp_config", None), "use_megatron_fsdp", False)
+        if generate_optimizer and not is_fsdp:
             torch.distributed.barrier()
             sharded_state_dict_kwargs = {"is_loading": is_loading}
             if base_metadata is not None:
@@ -479,7 +480,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 self.bridge.load_hf_weights(self.model, hf_model_path)
             log_with_rank(f"Loaded HF model checkpoint from {hf_model_path} with bridge", rank=self.rank, logger=logger)
 
-        if self.should_load_optimizer:
+        is_fsdp = getattr(getattr(self.model[0], "ddp_config", None), "use_megatron_fsdp", False)
+        if self.should_load_optimizer and is_fsdp:
+            log_with_rank(
+                "Skipping optimizer state loading for Megatron FSDP (not yet supported). "
+                "Training will resume with fresh optimizer state.",
+                rank=self.rank,
+                logger=logger,
+            )
+        elif self.should_load_optimizer:
             assert "optimizer" in state_dict, (
                 f"Optimizer state dict not found in {state_dict.keys()}. Please check the checkpoint file {local_path}."
             )
@@ -582,7 +591,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 assert async_save_request is None, "Async save request should be None when not using async save."
                 torch.distributed.barrier()
 
-        if self.should_save_model:
+        is_fsdp = getattr(getattr(self.model[0], "ddp_config", None), "use_megatron_fsdp", False)
+        if self.should_save_model and not is_fsdp:
             if self.use_hf_checkpoint:
                 # Use mbridge to save HF model checkpoint
                 log_with_rank(f"Saving HF model checkpoint to {local_path} with bridge", rank=self.rank, logger=logger)
