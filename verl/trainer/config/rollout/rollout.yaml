@@ -278,6 +278,11 @@ checkpoint_engine:
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
 
+  # If set, this Python module is imported on every worker process before the
+  # backend is instantiated, allowing custom backends to register themselves
+  # in CheckpointEngineRegistry.
+  custom_backend_module: null
+
 # trace rollout data
 trace:
 

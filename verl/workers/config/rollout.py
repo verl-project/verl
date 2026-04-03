@@ -159,6 +159,10 @@ class CheckpointEngineConfig(BaseConfig):
     update_weights_bucket_megabytes: int = 2048
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
+    # If set, this Python module is imported on every worker process before the
+    # backend is instantiated, allowing custom backends to register themselves
+    # in CheckpointEngineRegistry.
+    custom_backend_module: Optional[str] = None
 
 
 @dataclass
@@ -242,6 +246,10 @@ class RolloutConfig(BaseConfig):
 
     # Extension point for custom configurations
     custom: Optional[dict] = None
+
+    # Fully qualified class name for a custom CheckpointEngineManager. When set, the trainer
+    # loads this class instead of the built-in CheckpointEngineManager.
+    checkpoint_manager_class: Optional[str] = None
 
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)

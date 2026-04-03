@@ -83,7 +83,6 @@ def import_external_libs(external_libs=None):
         return
     if not isinstance(external_libs, list):
         external_libs = [external_libs]
-    import importlib
 
     for external_lib in external_libs:
         importlib.import_module(external_lib)
