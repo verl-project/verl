@@ -77,6 +77,7 @@ class DistProfiler:
     - npu: NPUProfiler (Ascend)
     - torch: PyTorch torch.profiler wrapper
     - torch_memory: Torch CUDA memory snapshot dump
+    - precision_debugger: msprobe precision debugger
     """
 
     def __init__(
@@ -125,6 +126,10 @@ class DistProfiler:
             self._impl = _Torch(rank=rank, config=config, tool_config=tool_config)
         elif self._tool == "torch_memory":
             self._impl = TorchMemoryProfiler(rank=rank, config=config, tool_config=tool_config)
+        elif self._tool == "precision_debugger":
+            from .precision_debugger_profile import PrecisionDebuggerProfiler as _Precision
+
+            self._impl = _Precision(precision_cfg=tool_config, rank=rank)
         else:
             # Fallback to a no-op impl
             self._impl = _NoOpProfiler()
