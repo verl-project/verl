@@ -22,6 +22,29 @@ import numpy as np
 import torch
 
 
+def _flatten_metric_values(values: list[Any]) -> list[Any]:
+    """Flatten potentially nested metric values into a 1-D list of scalars.
+
+    When DP ranks produce different numbers of micro-batches (e.g. because
+    ``prepare_dynamic_batch`` was called without ``dp_group``), the collected
+    metric lists can become *jagged* -- a list whose elements are themselves
+    lists of different lengths.  Passing such a structure directly to
+    ``np.mean`` / ``np.max`` / ``np.min`` raises ``ValueError: setting an
+    array element with a sequence``.
+
+    This helper recursively flattens any nested lists / tuples so that the
+    downstream NumPy reduction always receives a plain 1-D sequence of
+    scalars.
+    """
+    flat: list[Any] = []
+    for v in values:
+        if isinstance(v, (list, tuple)):
+            flat.extend(_flatten_metric_values(v))
+        else:
+            flat.append(v)
+    return flat
+
+
 def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, Any]:
     """
     Reduces a dictionary of metric lists by computing the mean, max, or min of each list.
@@ -49,12 +72,14 @@ def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, 
     for key, val in metrics.items():
         if isinstance(val, Metric):
             metrics[key] = val.aggregate()
-        elif "max" in key:
-            metrics[key] = np.max(val)
-        elif "min" in key:
-            metrics[key] = np.min(val)
         else:
-            metrics[key] = np.mean(val)
+            val = _flatten_metric_values(val)
+            if "max" in key:
+                metrics[key] = np.max(val)
+            elif "min" in key:
+                metrics[key] = np.min(val)
+            else:
+                metrics[key] = np.mean(val)
     return metrics
 
 
