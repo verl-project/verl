@@ -94,11 +94,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository and upgrade to latest transformers(4.54.0)/flash_attn, transformers 4.55.0 has strange behavior with model backward
+      - name: Install the current repository and upgrade to latest transformers
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --upgrade "transformers<5.0.0"
+          pip3 install --upgrade"
       - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
         run: |
           pytest -s tests/models/test_transformer.py
@@ -118,6 +118,9 @@ jobs:
       - name: Run distributed test
         run: |
           bash tests/special_distributed/run_all.sh
+      - name: Clean up and recover transformers
+        run: |
+          pip3 install --upgrade "transformers==5.3.0"
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # NOTE: List as an independent job to make rerun easier.
