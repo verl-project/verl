@@ -146,6 +146,7 @@ actor_rollout_ref:
     entropy_from_logits_with_chunking: false
     entropy_checkpointing: false
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+    truncate_padding: false
     calculate_sum_pi_squared: false
     sum_pi_squared_checkpointing: false
   ref:
@@ -357,6 +358,7 @@ actor_rollout_ref:
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true
+    truncate_padding: false
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
@@ -508,6 +510,7 @@ critic:
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: false
+    truncate_padding: false
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
