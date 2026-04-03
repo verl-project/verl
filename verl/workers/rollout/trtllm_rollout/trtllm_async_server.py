@@ -122,12 +122,17 @@ class TRTLLMHttpServer:
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
+        kv_cache_overrides = engine_kwargs.pop("kv_cache_config", {})
         kv_cache_config = KvCacheConfig(
             enable_block_reuse=self.config.enable_prefix_caching,
             free_gpu_memory_fraction=self.config.gpu_memory_utilization,
+            **kv_cache_overrides,
         )
 
-        per_worker_gpu_share = 1.0 / self.max_colocate_count
+        if self.config.enable_sleep_mode:
+            per_worker_gpu_share = self.config.gpu_memory_utilization / self.max_colocate_count
+        else:
+            per_worker_gpu_share = 1.0 / self.max_colocate_count
 
         quantization = self.config.quantization
         if quantization is not None:
@@ -164,11 +169,18 @@ class TRTLLMHttpServer:
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
             "per_worker_gpu_share": per_worker_gpu_share,
-            "enable_sleep": self.config.enable_sleep_mode,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,
         }
+        if self.config.enable_sleep_mode:
+            from tensorrt_llm.llmapi.llm_args import SleepConfig, ExecutorMemoryType
+            llm_kwargs["sleep_config"] = SleepConfig(
+                restore_modes={
+                    ExecutorMemoryType.MODEL_WEIGHTS_MAIN: "NONE",
+                    ExecutorMemoryType.KV_CACHE: "NONE",
+                }
+            )
 
         self_defined_extension = {
             "ray_worker_extension_cls": "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.WorkerExtension",
