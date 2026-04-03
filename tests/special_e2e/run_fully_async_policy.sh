@@ -49,8 +49,8 @@ top_k=-1
 val_top_p=0.7
 
 # Fully async specific parameters
-n_gpus_rollout=4
-n_gpus_training=4
+n_gpus_rollout=2
+n_gpus_training=6
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
@@ -186,7 +186,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     # Megatron specific parameters
     gen_tp=2
     train_tp=2
-    train_pp=2
+    train_pp=3
     ref_offload=True
     actor_offload=True
     common_params+=(
