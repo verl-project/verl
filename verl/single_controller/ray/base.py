@@ -14,6 +14,7 @@
 import inspect
 import logging
 import os
+import re
 import socket
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -31,10 +32,36 @@ from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
 from verl.utils.device import get_device_name, is_torch_npu_available
 from verl.utils.py_functional import temp_env_var
 
-__all__ = ["Worker"]
+__all__ = ["Worker", "RayError", "RayWorkerError", "RayOOMError", "RayResourceError", "RayCommunicationError"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+# Custom exception classes for better error classification
+class RayError(Exception):
+    """Base exception class for all Ray-related errors in verl."""
+    pass
+
+
+class RayWorkerError(RayError):
+    """Exception raised when there's an error with Ray workers."""
+    pass
+
+
+class RayOOMError(RayWorkerError):
+    """Exception raised when a Ray worker encounters an out-of-memory error."""
+    pass
+
+
+class RayResourceError(RayError):
+    """Exception raised when there's an error with Ray resource allocation."""
+    pass
+
+
+class RayCommunicationError(RayError):
+    """Exception raised when there's an error with Ray communication."""
+    pass
 
 
 def get_random_string(length: int) -> str:
@@ -45,6 +72,186 @@ def get_random_string(length: int) -> str:
     return "".join(random.choice(letters_digits) for _ in range(length))
 
 
+def detect_error_type(error_message: str) -> tuple[bool, str, str]:
+    """Detect if an error is a specific type of error and classify it.
+    
+    Args:
+        error_message: Error message to check
+        
+    Returns:
+        Tuple of (is_special, error_type, error_subtype) where:
+        - is_special: True if the error is a special type (OOM, connection, etc.)
+        - error_type: Classification of error ("oom", "connection", "timeout", etc.)
+        - error_subtype: Sub-classification of error ("device", "host", "network", etc.)
+    """
+    error_lower = error_message.lower()
+    
+    # Helper function to check both exact strings and regex patterns
+    def check_keywords(keywords, is_regex=False):
+        if is_regex:
+            return any(re.search(pattern, error_lower) for pattern in keywords)
+        return any(keyword in error_lower for keyword in keywords)
+    
+    # --- OOM Error Detection --- #
+    # Device-side OOM (GPU/NPU) - all exact string matches
+    oom_device_keywords = [
+        "cuda out of memory",
+        "npu out of memory",
+        "torch.cuda.outofmemoryerror",
+        "torch_npu.outofmemoryerror",
+        "gpu out of memory",
+        "accelerator out of memory"
+    ]
+    # Host-side RAM OOM - separate exact strings and regex patterns
+    oom_host_exact = [
+        "memoryerror",
+        "cannot allocate memory",
+        "failed to allocate memory",
+        "unable to allocate",
+        "not enough memory",
+        "insufficient memory",
+        "ran out of memory",
+        "malloc failed",
+        "allocate_bytes",
+        "oom: system memory"
+    ]
+    oom_host_regex = [
+        "allocation of .* bytes failed"
+    ]
+    # General OOM keywords - all exact string matches
+    oom_general_keywords = [
+        "out of memory",
+        "oom",
+        "memory error"
+    ]
+    
+    # Check OOM errors in order of specificity
+    if check_keywords(oom_device_keywords):
+        return True, "oom", "device"
+    elif check_keywords(oom_host_exact) or check_keywords(oom_host_regex, is_regex=True):
+        return True, "oom", "host"
+    elif check_keywords(oom_general_keywords):
+        return True, "oom", "unknown"
+    
+    # --- Connection Error Detection --- #
+    connection_keywords = [
+        "connection refused",
+        "connection reset",
+        "timeout",
+        "network error",
+        "socket error",
+        "unreachable"
+    ]
+    if any(keyword in error_lower for keyword in connection_keywords):
+        return True, "connection", "network"
+    
+    # --- Resource Error Detection --- #
+    resource_keywords = [
+        "resource unavailable",
+        "no such file or directory",
+        "permission denied",
+        "disk full"
+    ]
+    if any(keyword in error_lower for keyword in resource_keywords):
+        return True, "resource", "filesystem"
+    
+    # Default: unknown error type
+    return False, "unknown", "unknown"
+
+
+def detect_oom_type(error_message: str) -> tuple[bool, str]:
+    """Check if an error message indicates an out-of-memory error.
+    
+    Args:
+        error_message: Error message to check
+        
+    Returns:
+        True if the error is an OOM error, False otherwise
+    """
+    is_special, error_type, error_subtype = detect_error_type(error_message)
+    return is_special and error_type == "oom", error_subtype
+
+
+def is_oom_error(error_message: str) -> bool:
+    """Check if an error message indicates an out-of-memory error.
+    
+    Args:
+        error_message: Error message to check
+        
+    Returns:
+        True if the error is an OOM error, False otherwise
+    """
+    is_oom, _ = detect_oom_type(error_message)
+    return is_oom
+
+
+def aggregate_worker_errors(results):
+    """Aggregate errors from multiple workers into a concise summary.
+    
+    This function processes the results from ray.get() calls, identifies errors,
+    classifies them by type and subtype, and generates a concise summary that
+    highlights patterns across workers.
+    
+    Args:
+        results: List of results/errors from ray.get()
+        
+    Returns:
+        Tuple of (has_error, error_summary, detailed_errors)
+        - has_error: True if there are any errors
+        - error_summary: Concise summary of errors grouped by type and subtype
+        - detailed_errors: List of detailed error information for each worker
+    """
+    # Step 1: Collect and classify all errors
+    errors = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            error_msg = str(result)
+            # Classify the error type and subtype
+            is_special, error_type, error_subtype = detect_error_type(error_msg)
+            
+            errors.append({
+                'worker_index': i,          # Which worker encountered the error
+                'error_type': error_type,    # High-level error category
+                'error_subtype': error_subtype,  # More specific error type
+                'error_message': error_msg   # Full error message
+            })
+    
+    # No errors found, return early
+    if not errors:
+        return False, "", []
+    
+    # Step 2: Group errors by type and subtype for aggregation
+    error_groups = {}
+    for error in errors:
+        # Create a key based on error type and subtype
+        key = (error['error_type'], error['error_subtype'])
+        if key not in error_groups:
+            error_groups[key] = []
+        error_groups[key].append(error)
+    
+    # Step 3: Generate concise error summary
+    summary_parts = []
+    for (error_type, error_subtype), group_errors in error_groups.items():
+        # Collect indices of workers with this error pattern
+        worker_indices = [e['worker_index'] for e in group_errors]
+        count = len(worker_indices)
+        
+        # Format summary based on whether subtype is known
+        if error_subtype != "unknown":
+            summary_parts.append(
+                f"{count} workers (indices: {worker_indices}) encountered {error_type} error ({error_subtype})"
+            )
+        else:
+            summary_parts.append(
+                f"{count} workers (indices: {worker_indices}) encountered {error_type} error"
+            )
+    
+    # Join all summary parts into a single string
+    error_summary = "; ".join(summary_parts)
+    
+    return True, error_summary, errors
+
+
 def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, blocking):
     class Functor:
         def __call__(this, *args, **kwargs):
@@ -52,7 +259,31 @@ def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, block
             padding_count = kwargs.pop(_padding_size_key, 0)
             output = execute_fn(method_name, *args, **kwargs)
             if blocking:
-                output = ray.get(output)
+                try:
+                    output = ray.get(output)
+                except Exception as e:
+                    error_msg = str(e)
+                    is_oom, oom_type = detect_oom_type(error_msg)
+                    if is_oom:
+                        # Special handling for OOM errors with type-specific solutions
+                        if oom_type == "device":
+                            solution = "Consider reducing batch size, model size, or using gradient checkpointing."
+                        elif oom_type == "host":
+                            solution = "Consider reducing dataset size, using more memory-efficient data loading, or increasing system RAM."
+                        else:
+                            solution = "Consider reducing resource usage or increasing available memory."
+                            
+                        raise RayOOMError(
+                            f"Worker encountered {oom_type}-side out-of-memory error when executing method '{method_name}'. "
+                            f"World size: {self.world_size}. {solution} "
+                            f"Original error: {error_msg}"
+                        ) from e
+                    # General error handling
+                    raise RayCommunicationError(
+                        f"Error getting result for method '{method_name}' from remote workers. "
+                        f"World size: {self.world_size}. "
+                        f"Original error: {error_msg}"
+                    ) from e
             output = collect_fn(self, output)
             if padding_count > 0:
                 if isinstance(output, DataProto):
@@ -88,12 +319,29 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
 
 @ray.remote
 def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
-    addr = ray.util.get_node_ip_address().strip("[]")
+    """Get master address and port for distributed training.
+    
+    Args:
+        master_port_range: Optional port range to try for the master port
+        
+    Returns:
+        Tuple of (master_address, master_port)
+    
+    Raises:
+        RuntimeError: If failed to get node IP address or find a free port
+    """
+    try:
+        addr = ray.util.get_node_ip_address().strip("[]")
+    except Exception as e:
+        raise RuntimeError(f"Failed to get node IP address: {str(e)}") from e
 
     if master_port_range is None:
-        with socket.socket() as s:
-            s.bind(("", 0))
-            port = s.getsockname()[1]
+        try:
+            with socket.socket() as s:
+                s.bind(("", 0))
+                port = s.getsockname()[1]
+        except Exception as e:
+            raise RuntimeError(f"Failed to bind to a random port: {str(e)}") from e
     else:
         port = master_port_range[0]
         while port < master_port_range[1]:
@@ -101,7 +349,7 @@ def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple
                 with socket.socket() as s:
                     s.bind(("", port))
                     break
-            except OSError:
+            except OSError as e:
                 port += 1  # Increment port number if already in use
                 logger.info("Port %d is already in use, trying port %d", port - 1, port)
         else:
@@ -128,13 +376,25 @@ class RayResourcePool(ResourcePool):
         self.accelerator_type = accelerator_type
 
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
+        """Create and get placement groups for resource allocation.
+        
+        Args:
+            strategy: Ray placement group strategy (STRICT_PACK, PACK, SPREAD)
+            name: Optional name prefix for placement groups
+            device_name: Device type (cuda, npu, etc.)
+            
+        Returns:
+            List of placement groups
+            
+        Raises:
+            RayResourceError: If there's an error creating or initializing placement groups
+        """
         if self.pgs is not None:
             return self.pgs
 
         pg_name_prefix = (
-            name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
-        )
-        # print(f"pg_name_prefix = {pg_name_prefix}")
+            name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:")
+        
         if device_name == "npu":
             device_name = "NPU"
         elif device_name == "cuda":
@@ -149,12 +409,24 @@ class RayResourcePool(ResourcePool):
 
         lifetime = "detached" if self.detached else None
 
-        pgs = [
-            placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime)
-            for idx, bundles in enumerate(pg_scheme)
-        ]
+        try:
+            pgs = [
+                placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime)
+                for idx, bundles in enumerate(pg_scheme)
+            ]
+        except Exception as e:
+            raise RayResourceError(
+                f"Failed to create placement groups. Strategy: {strategy}, Device: {device_name}, "
+                f"Bundle: {bundle}, Store: {self._store}. Original error: {str(e)}"
+            ) from e
 
-        ray.get([pg.ready() for pg in pgs])
+        try:
+            ray.get([pg.ready() for pg in pgs])
+        except Exception as e:
+            raise RayResourceError(
+                f"Failed to initialize placement groups. Strategy: {strategy}, Device: {device_name}. "
+                f"Original error: {str(e)}"
+            ) from e
 
         self.pgs = sort_placement_group_by_node_ip(pgs)
         return pgs
@@ -522,7 +794,7 @@ class RayWorkerGroup(WorkerGroup):
                 ).remote(master_port_range=master_port_range)
             )
         elif self._master_addr is not None and self._master_port is not None:
-            logger.debug(f"{self._master_addr=} {self._master_port=}")
+            logger.debug(f"self._master_addr={self._master_addr} self._master_port={self._master_port}")
         else:
             raise ValueError(
                 "Both 'master_addr' and 'master_port' must be provided if you intend to manually specify them, "
@@ -631,6 +903,10 @@ class RayWorkerGroup(WorkerGroup):
             "RAY_LOCAL_WORLD_SIZE": str(local_world_size),
             "MASTER_ADDR": self._master_addr,
             "MASTER_PORT": self._master_port,
+            # Configure logging for worker processes
+            "VERL_LOGGING_LEVEL": os.getenv("VERL_LOGGING_LEVEL", "INFO"),
+            "RAY_AIR_WORKER_LOG_TO_DRIVER": "1",  # Enable Ray to log worker output to driver
+            "PYTHONUNBUFFERED": "1",  # Disable buffering for immediate log output
         }
         if worker_env is not None:
             logging.debug(f"Appending ray class env, origin: {env_vars}, customized env: {worker_env}")
@@ -784,13 +1060,23 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             Remote object reference to the method execution
+
+        Raises:
+            RayWorkerError: If there's an error invoking the remote method
         """
-        if self.fused_worker_used and method_name not in self.method_names:
-            remote_call = getattr(worker, self.fused_worker_execute_fn_name)
-            return remote_call.remote(f"{self.sub_cls_name}_fwmn_{method_name}", *args, **kwargs)
-        # fused worker not used
-        remote_call = getattr(worker, method_name)
-        return remote_call.remote(*args, **kwargs)
+        try:
+            if self.fused_worker_used and method_name not in self.method_names:
+                remote_call = getattr(worker, self.fused_worker_execute_fn_name)
+                return remote_call.remote(f"{self.sub_cls_name}_fwmn_{method_name}", *args, **kwargs)
+            # fused worker not used
+            remote_call = getattr(worker, method_name)
+            return remote_call.remote(*args, **kwargs)
+        except Exception as e:
+            raise RayWorkerError(
+                f"Error invoking remote method '{method_name}' on worker. "
+                f"World size: {self.world_size}, worker index: {self._workers.index(worker) if worker in self._workers else 'unknown'}. "
+                f"Original error: {str(e)}"
+            ) from e
 
     def execute_rank_zero_sync(self, method_name: str, *args, **kwargs):
         """Execute a method on rank zero worker synchronously.
@@ -802,8 +1088,36 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             Result of the method execution
+
+        Raises:
+            RayOOMError: If the rank zero worker encounters an out-of-memory error
+            RayCommunicationError: If there's an error communicating with the rank zero worker
         """
-        return ray.get(self.execute_rank_zero_async(method_name, *args, **kwargs))
+        try:
+            return ray.get(self.execute_rank_zero_async(method_name, *args, **kwargs))
+        except Exception as e:
+            error_msg = str(e)
+            is_oom, oom_type = detect_oom_type(error_msg)
+            if is_oom:
+                # Special handling for OOM errors with type-specific solutions
+                if oom_type == "device":
+                    solution = "Consider reducing batch size, model size, or using gradient checkpointing."
+                elif oom_type == "host":
+                    solution = "Consider reducing dataset size, using more memory-efficient data loading, or increasing system RAM."
+                else:
+                    solution = "Consider reducing resource usage or increasing available memory."
+                    
+                raise RayOOMError(
+                    f"Rank zero worker encountered {oom_type}-side out-of-memory error when executing method '{method_name}'. "
+                    f"{solution} "
+                    f"Original error: {error_msg}"
+                ) from e
+            # General error handling
+            raise RayCommunicationError(
+                f"Error executing method '{method_name}' on rank zero worker. "
+                f"World size: {self.world_size}. "
+                f"Original error: {error_msg}"
+            ) from e
 
     def execute_rank_zero_async(self, method_name: str, *args, **kwargs):
         """Execute a method on rank zero worker asynchronously.
@@ -845,7 +1159,11 @@ class RayWorkerGroup(WorkerGroup):
         return self.execute_all_async(method_name, *args, **kwargs)
 
     def execute_all_sync(self, method_name: str, *args, **kwargs):
-        """Execute a method on all workers synchronously.
+        """Execute a method on all workers synchronously with enhanced error reporting.
+
+        This method executes a method on all workers and provides aggregated error reporting
+        when multiple workers encounter errors. It classifies errors by type and provides
+        type-specific solutions where applicable.
 
         Args:
             method_name: Name of the method to execute
@@ -854,8 +1172,90 @@ class RayWorkerGroup(WorkerGroup):
 
         Returns:
             List of results from all workers
+
+        Raises:
+            RayOOMError: If any worker encounters an out-of-memory error
+            RayCommunicationError: If there's an error communicating with any worker
         """
-        return ray.get(self.execute_all_async(method_name, *args, **kwargs))
+        # Step 1: Get async references for all worker executions
+        refs = self.execute_all_async(method_name, *args, **kwargs)
+        
+        # Step 2: Collect results with individual error handling
+        # This allows us to aggregate errors from multiple workers
+        results = []
+        for ref in refs:
+            try:
+                result = ray.get(ref)
+                results.append(result)
+            except Exception as e:
+                # Store exceptions individually for later aggregation
+                results.append(e)
+        
+        # Step 3: Analyze and aggregate errors if any occurred
+        has_error, error_summary, detailed_errors = aggregate_worker_errors(results)
+        
+        if has_error:
+            # --- Error Handling Logic --- #
+            
+            # Priority 1: Handle OOM errors first (most common in ML training)
+            oom_errors = [e for e in detailed_errors if e['error_type'] == 'oom']
+            if oom_errors:
+                # Get the first OOM error for detailed information
+                oom_error = oom_errors[0]
+                oom_type = oom_error['error_subtype']
+                
+                # Provide type-specific solutions
+                if oom_type == "device":
+                    solution = "Consider reducing batch size, model size, or using gradient checkpointing."
+                elif oom_type == "host":
+                    solution = "Consider reducing dataset size, using more memory-efficient data loading, or increasing system RAM."
+                else:
+                    solution = "Consider reducing resource usage or increasing available memory."
+                    
+                # Find the original OOM exception
+                original_exception = None
+                for result in results:
+                    if isinstance(result, Exception) and "oom" in str(result).lower():
+                        original_exception = result
+                        break
+                
+                raise RayOOMError(
+                    f"{error_summary} when executing method '{method_name}'. "
+                    f"World size: {self.world_size}. {solution} "
+                    f"Detailed error: {oom_error['error_message']}"
+                ) from original_exception
+            
+            # Priority 2: Handle other classified error types
+            special_errors = [e for e in detailed_errors if e['error_type'] != 'unknown']
+            if special_errors:
+                # Find the original special exception
+                original_exception = None
+                for result in results:
+                    if isinstance(result, Exception) and special_errors[0]['error_message'] in str(result):
+                        original_exception = result
+                        break
+                
+                raise RayCommunicationError(
+                    f"{error_summary} when executing method '{method_name}'. "
+                    f"World size: {self.world_size}. "
+                    f"Detailed error: {special_errors[0]['error_message']}"
+                ) from original_exception
+            
+            # Priority 3: Handle unclassified errors
+            # Find the original unclassified exception
+            original_exception = None
+            for result in results:
+                if isinstance(result, Exception) and detailed_errors[0]['error_message'] in str(result):
+                    original_exception = result
+                    break
+            
+            raise RayCommunicationError(
+                f"{error_summary} when executing method '{method_name}'. "
+                f"World size: {self.world_size}. "
+                f"Detailed error: {detailed_errors[0]['error_message']}"
+            ) from original_exception
+        
+        return results
 
     def execute_all_async(self, method_name: str, *args, **kwargs):
         """Execute a method on all workers asynchronously.
