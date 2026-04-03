@@ -581,15 +581,21 @@ class MegatronEngine(BaseEngine):
             offload_megatron_optimizer(self.optimizer)
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
-        tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
+        if self.engine_config.dynamic_context_parallel:
+            tu.assign_non_tensor(data, sp_size=mpu.get_data_parallel_world_size())
+        else:
+            tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
         # compute num_tokens in global batch for loss normalization
         batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
-        torch.distributed.all_reduce(
-            batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
-        )
+        if self.engine_config.dynamic_context_parallel:
+            pass
+        else:
+            torch.distributed.all_reduce(
+                batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+            )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
-        tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+        tu.assign_non_tensor(data, dp_size=mpu.get_data_parallel_world_size())
 
         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
         if vpp_size is not None and vpp_size > 1:
