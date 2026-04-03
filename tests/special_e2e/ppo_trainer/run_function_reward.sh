@@ -22,8 +22,8 @@ RETURN_RAW_CHAT="True"
 SKIP_TOKENIZER_INIT="True"
 
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
-ACTOR_FSDP_PARAM_OFFLOAD=${ACTOR_FSDP_PARAM_OFFLOAD:-False}
-ACTOR_FSDP_OPTIMIZER_OFFLOAD=${ACTOR_FSDP_OPTIMIZER_OFFLOAD:-False}
+ACTOR_FSDP_PARAM_OFFLOAD=${ACTOR_FSDP_PARAM_OFFLOAD:-True}
+ACTOR_FSDP_OPTIMIZER_OFFLOAD=${ACTOR_FSDP_OPTIMIZER_OFFLOAD:-True}
 REF_FSDP_PARAM_OFFLOAD=${REF_FSDP_PARAM_OFFLOAD:-True}
 RM_PAD=${RM_PAD:-True}
 FUSED_KERNELS=${FUSED_KERNELS:-False}
@@ -131,8 +131,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.path="${MODEL_PATH}" \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    critic.fsdp.param_offload=False \
-    critic.fsdp.optimizer_offload=False \
+    critic.fsdp.param_offload=True \
+    critic.fsdp.optimizer_offload=True \
     reward.custom_reward_function.path="${reward_fn_file_path}"\
     reward.custom_reward_function.name="${reward_fn_name}"\
     algorithm.use_kl_in_reward="${USE_KL}" \
