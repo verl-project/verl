@@ -55,6 +55,8 @@ Last updated: 12/20/2025.
 
 -  analysis: 启用自动数据解析。
 -  discrete: 使用离散模式。
+-  start_response_token：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集起始 response token；参数合法时生效（从 0 开始，满足 ``stop_response_token > start_response_token``，且区间在 response 长度内）。
+-  stop_response_token：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集结束 response token（右边界不包含）；参数合法时生效（从 0 开始，满足 ``stop_response_token > start_response_token``，且区间在 response 长度内）。
 
 示例
 ----
@@ -114,6 +116,9 @@ Last updated: 12/20/2025.
                tool_config:
                   npu:
                      discrete: True  # Agent Loop 模式下必须开启离散模式
+                     # 可选：按 response token 区间采集；不设置 start/stop 时采集整个 rollout 阶段
+                     start_response_token: 12
+                     stop_response_token: 46
          # ref follow actor settings
 
 **Agent Loop 模式说明**：

@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from verl.utils.profiler.config import (
+    NPUToolConfig,
     ProfilerConfig,
     TorchProfilerToolConfig,
     build_sglang_profiler_args,
@@ -48,6 +49,25 @@ class TestServerProfilerArgs(unittest.TestCase):
             self.assertTrue(profiler_config_dict["torch_profiler_with_stack"])
             self.assertTrue(profiler_config_dict["torch_profiler_record_shapes"])
             self.assertTrue(profiler_config_dict["torch_profiler_with_memory"])
+            self.assertEqual(profiler_config_dict["delay_iterations"], 0)
+            self.assertEqual(profiler_config_dict["max_iterations"], 0)
+
+    def test_build_vllm_profiler_args_with_profile_window(self):
+        tool_config = TorchProfilerToolConfig(contents=["stack"], start_response_token=12, stop_response_token=46)
+        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
+
+        args = build_vllm_profiler_args(config, tool_config, rank=1)
+        profiler_config_dict = json.loads(args["profiler_config"])
+        self.assertEqual(profiler_config_dict["delay_iterations"], 12)
+        self.assertEqual(profiler_config_dict["max_iterations"], 34)
+
+    def test_build_vllm_profiler_args_with_npu_profile_window(self):
+        tool_config = NPUToolConfig(contents=["npu"], start_response_token=5, stop_response_token=13)
+        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
+        args = build_vllm_profiler_args(config, tool_config, rank=0)
+        profiler_config_dict = json.loads(args["profiler_config"])
+        self.assertEqual(profiler_config_dict["delay_iterations"], 5)
+        self.assertEqual(profiler_config_dict["max_iterations"], 8)
 
     def test_build_sglang_profiler_args(self):
         # Case 1: Basic features
@@ -58,6 +78,15 @@ class TestServerProfilerArgs(unittest.TestCase):
         self.assertEqual(args["output_dir"], "/tmp/test/agent_loop_rollout_replica_0")
         self.assertTrue(args["with_stack"])
         self.assertTrue(args["record_shapes"])
+        self.assertIsNone(args["start_step"])
+        self.assertIsNone(args["num_steps"])
+
+    def test_build_sglang_profiler_args_with_profile_window(self):
+        tool_config = TorchProfilerToolConfig(contents=["stack"], start_response_token=7, stop_response_token=16)
+        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
+        args = build_sglang_profiler_args(config, tool_config, rank=0)
+        self.assertEqual(args["start_step"], 7)
+        self.assertEqual(args["num_steps"], 9)
 
 
 class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):

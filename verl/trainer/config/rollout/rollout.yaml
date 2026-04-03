@@ -379,6 +379,14 @@ profiler:
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
 
+      # Start collecting profiler data from this response-token index.
+      # null means collect from the first response token (full collection start).
+      start_response_token: null
+
+      # Stop collecting profiler data at this response-token index (exclusive).
+      # null means collect until the end (full collection).
+      stop_response_token: null
+
     # torch profiler config
     torch:
 
@@ -391,6 +399,14 @@ profiler:
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+
+      # Start collecting profiler data from this response-token index.
+      # null means collect from the first response token (full collection start).
+      start_response_token: null
+
+      # Stop collecting profiler data at this response-token index (exclusive).
+      # null means collect until the end (full collection).
+      stop_response_token: null
 
 # prometheus configuration for vllm/sglang server mode
 prometheus:

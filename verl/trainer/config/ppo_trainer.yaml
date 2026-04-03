@@ -272,6 +272,7 @@ global_profiler:
         # Send signal to the target application's process group. We let the program to exit by itself.
         kill: none
 
+
     # enable memory visualization for debugging memory usage
     torch_memory:
 

@@ -63,6 +63,8 @@ Use parameters in each role's ``profiler.tool_config.npu`` to control npu profil
 
 -  analysis: Enables automatic data parsing.
 -  discrete: Whether to enable discrete mode.
+-  start_response_token: Effective only for the rollout role; defines the start response-token index for rollout decoding collection. It is applied only when valid (0-based, ``stop_response_token > start_response_token``, and the window is within response length).
+-  stop_response_token: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, ``stop_response_token > start_response_token``, and the window is within response length).
 
 
 Examples
@@ -122,6 +124,9 @@ Discrete Mode Collection
                tool_config:
                   npu:
                      discrete: True  # Must be enabled in Agent Loop mode
+                     # Optional response-token window for engine-side collection; if not set, the entire rollout stage is collected
+                     start_response_token: 12
+                     stop_response_token: 46
          # ref follow actor settings
 
 **Agent Loop Mode Description**:

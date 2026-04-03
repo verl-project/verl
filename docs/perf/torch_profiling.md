@@ -34,6 +34,8 @@ You can customize the PyTorch Profiler behavior using the following fields under
     *   **`memory`**: Track tensor memory allocation/free.
     *   **`shapes`**: Record shapes of operator inputs.
     *   **`stack`**: Record source code file and line number.
+* **`start_response_token`**: Effective only for the rollout role; defines the start response-token index for rollout decoding collection. It is applied only when valid (0-based, `stop_response_token > start_response_token`, and within response length).
+* **`stop_response_token`**: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, `stop_response_token > start_response_token`, and within response length).
 * **`schedule`**: (Advanced) configuration for `wait`, `warmup`, `active`, `repeat` cycles.
 
 ## Examples
@@ -86,6 +88,11 @@ actor_rollout_ref:
       tool_config:
         torch:
           discrete: True # REQUIRED 
+          # Optional response-token window for rollout engine side collection.
+          # If start/stop are not set, the entire rollout stage is collected.
+          # Collect tokens in [12, 46), i.e. token index 12~45.
+          start_response_token: 12
+          stop_response_token: 46
   # ref follow actor settings
 ```
 
