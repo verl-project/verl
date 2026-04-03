@@ -242,6 +242,9 @@ class BaseEngineCtx:
     def _context_switch(self, device):
         if self.disable_auto_offload:
             return
+        if device != "cpu":
+            if not self.engine.is_param_offload_enabled and not self.engine.is_optimizer_offload_enabled:
+                return
         if self.mode == "eval":
             self.engine.to(device=device, model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
         elif self.mode == "train":
