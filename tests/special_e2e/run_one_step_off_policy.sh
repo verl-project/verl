@@ -12,6 +12,8 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 #hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 # Algorithm parameters
 adv_estimator=grpo
@@ -90,8 +92,9 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    +actor_rollout_ref.rollout.enable_sleep_mode=False
+    actor_rollout_ref.rollout.enforce_eager=True
     reward.reward_manager.name=dapo
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
     +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
@@ -130,15 +133,6 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
-    if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
-        common_params+=(
-            # Todo The checkpoint_engine.backend should be unified to nccl
-            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.60
-        )
-        actor_offload=True
-    fi
-
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
@@ -166,29 +160,13 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
-    if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
-        common_params+=(
-            # Todo The checkpoint_engine.backend should be unified to nccl
-            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
-            trainer.n_gpus_per_node=4
-            rollout.n_gpus_per_node=4
-            actor_rollout_ref.model.use_remove_padding=True \
-            actor_rollout_ref.model.enable_gradient_checkpointing=True \
-            actor_rollout_ref.actor.use_dynamic_bsz=True \
-            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
-            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-        )
-        train_tp=2
-        actor_offload=True
-    fi
-
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
         --config-name='one_step_off_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \
         actor_rollout_ref.actor.strategy=megatron \
         critic.strategy=megatron \
+        actor_rollout_ref.model.use_remove_padding=True \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
         actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
         actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
@@ -200,7 +178,9 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
-        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
+        actor_rollout_ref.actor.use_dynamic_bsz=True \
+        actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+        actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
     exit 1

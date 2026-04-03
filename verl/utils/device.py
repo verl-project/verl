@@ -313,6 +313,14 @@ def is_support_ipc() -> bool:
     if is_npu_available:
         try:
             software_version, cann_version = get_npu_versions()
+            support_ipc = check_ipc_version_support(software_version, cann_version)
+            if not support_ipc:
+                logger.warning(
+                    "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
+                    "which may cause performance degradation. If you are using Ascend NPUs, please ensure that "
+                    "your software and CANN toolkit versions meet the requirements for IPC support. "
+                    "(Ascend HDK version >= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
+                )
             return check_ipc_version_support(software_version, cann_version)
 
         except subprocess.CalledProcessError as e:

@@ -98,13 +98,6 @@ class ServerAdapter(BaseRollout):
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
         self.use_shm = not is_support_ipc()
-        if self.use_shm:
-            logger.warning(
-                "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
-                "which may cause performance degradation. If you are using Ascend NPUs, please ensure that "
-                "your software and CANN toolkit versions meet the requirements for IPC support. (Ascend HDK version "
-                ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
-            )
 
     async def _execute_method(
         self,

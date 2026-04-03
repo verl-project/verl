@@ -27,7 +27,7 @@ import torch
 import zmq
 from torch.multiprocessing.reductions import reduce_tensor
 
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name, get_torch_device, set_expandable_segments
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -272,7 +272,10 @@ class BucketedWeightReceiver:
         buffer, shm = None, None
         if not self.use_shm:
             handle = comm_metadata
+            expandable_memory_enabled = "expandable_segments:True" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+            set_expandable_segments(False)
             buffer = rebuild_ipc(handle, self.device.index)
+            set_expandable_segments(expandable_memory_enabled)
             assert buffer.dtype == torch.uint8
         else:
             shm_name = comm_metadata["name"]
