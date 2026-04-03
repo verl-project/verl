@@ -46,9 +46,9 @@ forward_max_token_len_per_gpu=${FWD_MAX_TOKEN_LEN:-4800}
 train_traj_micro_bsz_per_gpu=${MICRO_BSZ:-2} # b
 n_resp_per_prompt=4 # g
 
-train_traj_micro_bsz=$((train_traj_micro_bsz_per_gpu * NUM_GPUS)) # b * n
+train_traj_micro_bsz=$((train_traj_micro_bsz_per_gpu * 1)) # b * n
 train_traj_mini_bsz=$((train_traj_micro_bsz * 2)) # 2 * b * n
-train_prompt_mini_bsz=$((train_traj_mini_bsz * n_resp_per_prompt)) # 2 * b * n / g
+train_prompt_mini_bsz=$((train_traj_mini_bsz * 2)) # 2 * b * n / g
 train_prompt_bsz=$((train_prompt_mini_bsz * 2)) # 4 * b * n / g
 
 LORA_RANK=${LORA_RANK:-0}

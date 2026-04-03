@@ -865,15 +865,6 @@ class EngineTrainModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, FSDPEngine)
         set_ulysses_sequence_parallel_group(self.prev_sp_group)
         self.engine.optimizer_zero_grad()
-
-        # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
-        # reshard the root FSDP module before offloading to CPU
-        if self.engine.engine_config.fsdp_size > 1:
-            if fsdp_version(self.engine.module) == 1:
-                self.engine.module._handle.reshard(True)
-            elif fsdp_version(self.engine.module) == 2:
-                self.engine.module.reshard()
-
         super().__exit__(exc_type, exc_value, traceback)
 
 
