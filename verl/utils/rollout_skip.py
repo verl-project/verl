@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import warnings
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -66,15 +67,20 @@ def _find_last_gen_step_for_train_step(step_file: Path, target_train_step: int) 
 
 
 class SkipAction(Enum):
-    CACHE = "cache"  # cache the sample. If dump_date is found, use it. If not found, dump it.
-    REPEAT = "repeat"  # Repeat the sample when gen_step reach skip.max_dump_step
-    REPEAT_LAST = "repeat_last"  # Repeat the last sample when gen_step reach skip.max_dump_step
+    # Used only when ``is_dump_step`` is False (see ``is_dump_step``). On dump steps, the wrapper always
+    # tries load-from-disk first, then generate+dump if missing.
+    CACHE = "cache"  # Always run real generation; no reloading from rollout dump dirs.
+    REPEAT = (
+        "repeat"  # Round-robin reload from ``genstep_*`` dirs recorded in ``list_dumped_steps`` (from earlier dumps).
+    )
+    REPEAT_LAST = "repeat_last"  # Reload only from the last dumped ``genstep_*`` (``list_dumped_steps[-1]``).
 
 
 class RolloutSkip:
     """
-    RolloutSkip skips sequence generation during rollout by attempting to load previously dumped data.
-    If no dumped data is found, it generates new sequences and saves them to disk.
+    RolloutSkip can reuse disk-cached rollout batches: on **dump steps** (see ``is_dump_step``), it tries to
+    load ``genstep_*`` data first and only generates+writes if missing. On **non-dump** steps, behavior is
+    controlled by ``skip.action`` (``cache`` / ``repeat`` / ``repeat_last``); see ``SkipAction``.
 
     Args:
         config: The configuration object containing rollout settings.
@@ -118,7 +124,33 @@ class RolloutSkip:
         self.action = _get_skip_attr(self.skip_config, "action", SkipAction.REPEAT)
         self.action = SkipAction(self.action)
 
-        if self.max_dump_step <= 0:
+        raw_steps = _get_skip_attr(self.skip_config, "dump_steps", None)
+        self._dump_step_set: frozenset[int] | None = None
+        if raw_steps is not None:
+            if isinstance(raw_steps, str):
+                try:
+                    raw_steps = json.loads(raw_steps)
+                except json.JSONDecodeError:
+                    warnings.warn(
+                        f"{self.print_mark}Could not parse 'dump_steps' string: {raw_steps!r}. "
+                        "Falling back to max_dump_step.",
+                        stacklevel=2,
+                    )
+                    raw_steps = None
+            if raw_steps:
+                try:
+                    step_list = [int(x) for x in raw_steps]
+                    if step_list:
+                        self._dump_step_set = frozenset(step_list)
+                except (ValueError, TypeError):
+                    warnings.warn(
+                        f"{self.print_mark}'dump_steps' must be a list of integers, got: {raw_steps!r}. "
+                        "Falling back to max_dump_step.",
+                        stacklevel=2,
+                    )
+
+        _use_max_dump_window = self._dump_step_set is None
+        if _use_max_dump_window and self.max_dump_step <= 0:
             assert self.action in [SkipAction.CACHE]
 
         self._create_dump_path()
@@ -133,10 +165,23 @@ class RolloutSkip:
     @property
     def is_dump_step(self) -> bool:
         """
-        Determine if the current step is a dump step based on the configured dump interval.
-        If train_step is given, it follows the train_step, otherwise it follows the gen_step.
+        Whether the current training step should run the dump/load path (try disk cache before generating).
+
+        **Explicit list** — If ``dump_steps`` is non-empty, only steps whose index is in that list
+        are dump steps. Step indices are 1-based (first update is 1), same counter as used for
+        ``max_dump_step`` below—not a different numbering scheme.
+
+        **Window** — If ``dump_steps`` is null or empty, dump/load while ``curr_train_step <= max_dump_step``.
+
+        ``curr_train_step`` follows ``record(..., global_steps=...)`` when the trainer passes it;
+        otherwise it is advanced by ``step()`` each rollout.
         """
-        return self.is_active and self.curr_train_step <= self.max_dump_step
+        if not self.is_active:
+            return False
+        t = self.curr_train_step
+        if self._dump_step_set is not None:
+            return t in self._dump_step_set
+        return t <= self.max_dump_step
 
     @property
     def num_dumped_step(self) -> int:
@@ -238,7 +283,7 @@ class RolloutSkip:
                     if found is not None:
                         last_train_step, last_gen_step = found
                         if last_train_step + 1 != global_steps:
-                            print(f"{self.print_mark}\033[31mWarning: Train step not continues.\033[0m")
+                            print(f"{self.print_mark}\033[31mWarning: Train step not continuous.\033[0m")
                         self.__gen_offset_step = last_gen_step
                 except Exception as e:
                     print(
