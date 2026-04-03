@@ -941,6 +941,11 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        # save KL controller state so that the adaptive coefficient survives resume
+        if self.config.algorithm.use_kl_in_reward:
+            kl_ctrl_path = os.path.join(local_global_step_folder, "kl_ctrl.pt")
+            torch.save({"value": torch.tensor(self.kl_ctrl_in_reward.value)}, kl_ctrl_path)
+
         # latest checkpointed iteration tracker (for atomic usage)
         if (
             hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save")
@@ -1023,6 +1028,19 @@ class RayPPOTrainer:
                 self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+        # load KL controller state
+        if self.config.algorithm.use_kl_in_reward:
+            kl_ctrl_path = os.path.join(global_step_folder, "kl_ctrl.pt")
+            if os.path.exists(kl_ctrl_path):
+                kl_state = torch.load(kl_ctrl_path, weights_only=True)
+                self.kl_ctrl_in_reward.value = kl_state["value"].item()
+                print(f"Restored KL controller value: {self.kl_ctrl_in_reward.value}")
+            else:
+                print(
+                    f"Warning: No KL controller state found at {kl_ctrl_path}, "
+                    f"using initial value {self.kl_ctrl_in_reward.value}"
+                )
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
