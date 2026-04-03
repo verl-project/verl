@@ -1,9 +1,13 @@
-# vllm017
+# vllm018
 
-FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_NO_CACHE_DIR=1
+# PEP 668: Ubuntu 24.04 blocks system-wide pip installs; override for Docker
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+RUN sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list.d/ubuntu.sources
 
 RUN apt-get update && apt-get install -y \
     git \
@@ -16,7 +20,6 @@ RUN apt-get update && apt-get install -y \
     numactl \
     software-properties-common \
     vim && \
-    add-apt-repository ppa:deadsnakes/ppa -y && \
     apt-get update && \
     apt-get install -y \
     python3.12 \
@@ -30,11 +33,9 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && \
 RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
-RUN pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
+RUN pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu129
 
-RUN pip install vllm==0.17.0
-
-RUN pip install pybind11
+RUN pip install pybind11 wheel
 
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
@@ -42,20 +43,18 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_6
     apt-get -y install cudnn && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install nvidia-mathdx
+RUN pip install nvidia-mathdx ninja
 
-RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
+RUN MAX_JOBS=256 pip install -v --disable-pip-version-check --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
 
 RUN export NVTE_FRAMEWORK=pytorch && \
-    MAX_JOBS=128 \
+    MAX_JOBS=256 \
     NVTE_BUILD_THREADS_PER_JOB=4 \
     pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.12
 
-# RUN pip install --upgrade transformers tokenizers
-
 RUN pip install codetiming mathruler pylatexenc qwen_vl_utils cachetools pytest-asyncio
 
-RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=16 pip install --no-build-isolation flash_attn==2.8.3
+RUN export FLASH_ATTENTION_FORCE_BUILD="TRUE" && MAX_JOBS=32 pip install --no-build-isolation flash_attn==2.8.3
 
 RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
     wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
@@ -90,15 +89,19 @@ RUN git clone -b hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
     export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:$CPATH && \
     python setup.py install
 
+RUN pip install vllm==0.18.0
+
 RUN pip3 install --no-deps trl==0.27.0
 
 RUN pip3 install nvtx matplotlib liger_kernel
 
-RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
+RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@641a5a0
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
 
-RUN pip install git+https://github.com/volcengine/verl.git@v0.7.0 && \
+RUN pip install transformers==5.3.0
+
+RUN pip install git+https://github.com/volcengine/verl.git@v0.7.1 && \
     pip uninstall -y verl
 
 RUN apt-get update && apt-get install -y curl \

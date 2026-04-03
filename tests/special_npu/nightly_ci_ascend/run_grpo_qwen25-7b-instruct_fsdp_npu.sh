@@ -46,4 +46,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
-    trainer.total_training_steps=15 2>&1 | tee /root/.cache/grpo_qwen25-7b-instruct_fsdp_npu.log
+    trainer.total_training_steps=15 2>&1 | tee /root/.cache/nightly_log/qwen25-7b/grpo_qwen25-7b-instruct_fsdp_npu-$(date +%Y%m%d_%H%M).log

@@ -363,8 +363,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             await asyncio.sleep(0)
             batch = self._fit_update_actor(batch)
             await asyncio.sleep(0)
-            self._fit_update_weights()
-            await asyncio.sleep(0)
             self._fit_dump_data(batch)
             await asyncio.sleep(0)
 

@@ -25,10 +25,10 @@ FSDP Backend Usage Guide
 
 1. Lora is available in the `verl.trainer.ppo.ray_trainer.RayPPOTrainer`. Examples are provided via the `verl.trainer.main_ppo` entry point.
 
-2. Currently, LoRA is supported via huggingface peft, only with fsdp/fsdp2 and vllm backend (sglang support coming soon).
+2. LoRA is supported via huggingface peft with fsdp/fsdp2 and both vllm and sglang rollout backends.
 
 - `strategy=fsdp` or `strategy=fsdp2`
-- `rollout.name=vllm`
+- `rollout.name=vllm` or `rollout.name=sglang`
 
 3. Required configurations for LoRA:
 
@@ -42,8 +42,9 @@ FSDP Backend Usage Guide
 - `actor_rollout_ref.model.lora_adapter_path`: string, path to a pretrained LoRA adapter directory. 
    If provided, loads existing adapter instead of creating new one. Enables multi-stage training from previously saved adapters.
    Directory need contain `adapter_model.safetensors` and `adapter_config.json`.
-- `actor_rollout_ref.model.lora.merge`: bool, whether to merge LoRA adapters into the base model weights before transferring to vLLM. 
-   If True, it will merge LoRA adapters into the base model weights before transferring to vLLM. If False, it will transfer only adapters to vLLM. This option is currently supported **only for engine-based rollout workers** (i.e. vLLM engine workers using the new worker implementation with ``trainer.use_legacy_worker_impl`` disabled) and is not available when using the legacy worker implementation.
+- `actor_rollout_ref.model.lora.merge`: bool, whether to merge LoRA adapters into the base model weights before transferring to the rollout engine (vLLM or SGLang).
+   If True, LoRA adapters are merged into base weights and full merged weights are synced. If False, only LoRA adapter deltas are transferred natively.
+   For SGLang, ``merge=True`` is currently required. Native adapter loading (``merge=False``) for SGLang is planned.
 
 5. Recommend options:
 
@@ -64,7 +65,7 @@ Megatron Backend Usage Guide
 
 You need to install and enable Megatron-Bridge for Megatron LoRA support.
 
-Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `this commit <https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/83a7c1134c562d8c6decd10a1f0a6e6a7a8a3a44>`_ or later for proper support, and use the following settings to enable Megatron-Bridge:
+Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `this commit <https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/6259ae83c735c4412796fc5cfb4c9607b949ae29>`_ or later for proper support, and use the following settings to enable Megatron-Bridge:
 
 - ``actor_rollout_ref.actor.megatron.use_mbridge=True``
 - ``actor_rollout_ref.actor.megatron.vanilla_mbridge=False``

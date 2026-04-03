@@ -15,6 +15,7 @@
 from . import actor, critic, engine, model, optimizer, reward, rollout
 from .actor import *  # noqa: F401
 from .critic import *  # noqa: F401
+from .distillation import *  # noqa: F401
 from .engine import *  # noqa: F401
 from .model import *  # noqa: F401
 from .optimizer import *  # noqa: F401
@@ -29,4 +30,5 @@ __all__ = (
     + optimizer.__all__
     + rollout.__all__
     + model.__all__
+    + distillation.__all__
 )

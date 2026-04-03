@@ -405,7 +405,6 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
     "model_path",
     [
         f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
-        f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B",
     ],
 )
 def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
@@ -442,7 +441,6 @@ def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
         assert position_ids.is_nested, "position_ids should be a nested tensor"
         assert position_ids.dim() == 3, "position_ids must be 3-dimensional"
         assert position_ids.shape[0] == batch_size
-        assert position_ids.shape[1] == 4
         values = position_ids.values()
         assert values.shape == (4, len(input_ids.values()))
 

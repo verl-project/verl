@@ -123,9 +123,9 @@ MindSpeed 源码安装指令：
         cd MindSpeed && git checkout 2.3.0_core_r0.12.1 && cd ..
         git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
     
-        # 安装 MindSpeed & Megatron
-        pip install -e MindSpeed
+        # 安装 Megatron & MindSpeed
         pip install -e Megatron-LM
+        pip install -e MindSpeed
     
         # 安装 mbridge
         pip install mbridge

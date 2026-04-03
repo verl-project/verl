@@ -3,7 +3,7 @@ set -xeuo pipefail
 
 # Need to install Megatron-Bridge
 # NOTE: Make sure you use Megatron-Bridge later than 0.2.0 
-# (Recommend https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/83a7c1134c562d8c6decd10a1f0a6e6a7a8a3a44 or later)
+# (Recommend https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/6259ae83c735c4412796fc5cfb4c9607b949ae29 or later)
 # for proper MoE LoRA support.
 
 # For Megatron communication/computation overlapping

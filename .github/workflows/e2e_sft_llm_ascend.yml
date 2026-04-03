@@ -95,8 +95,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
-          pip install -e .
+          pip install --no-deps -e .
           pip install git+https://github.com/ByteDance-Seed/VeOmni.git@v0.1.4
           pip install pandas==2.3.3
           pip uninstall -y mbridge

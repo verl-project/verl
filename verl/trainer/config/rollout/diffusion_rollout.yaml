@@ -1,0 +1,51 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Hydra defaults: compose base rollout then apply overrides from this file
+defaults:
+
+  - rollout
+
+  - _self_
+
+# Target class for this configuration
+_target_: verl.workers.config.DiffusionRolloutConfig
+
+# image height for diffusion model rollout
+height: 512
+
+# image width for diffusion model rollout
+width: 512
+
+# number of inference steps for diffusion model rollout
+num_inference_steps: 10
+
+# Extra inference engine arguments: add vllm_omni for diffusion
+engine_kwargs:
+
+  # vLLM-Omni engine options for diffusion rollout (empty dict uses defaults)
+  vllm_omni: {}
+
+# Sampling parameters used during validation (diffusion-specific).
+val_kwargs:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.DiffusionSamplingConfig
+
+  # whether to repeat n times for validation
+  n: 1
+
+  # Whether to sample during training rollout. False uses greedy sampling.
+  do_sample: False
+
+  # number of inference steps for diffusion model rollout
+  num_inference_steps: 40
+
+  # noise level for diffusion model rollout
+  noise_level: 0.0
+
+  # random seed for validation
+  seed: 42

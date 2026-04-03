@@ -28,7 +28,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, Place
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, is_torch_npu_available
 from verl.utils.py_functional import temp_env_var
 
 __all__ = ["Worker"]
@@ -294,7 +294,8 @@ def split_resource_pool(
         start_bundle_idx_list = np.cumsum([0] + split_size_list[:-1])
 
     # ensure resource_pool.pgs has been initialized
-    placement_groups = resource_pool.get_placement_groups()
+    device = "npu" if is_torch_npu_available(check_device=False) else "cuda"
+    placement_groups = resource_pool.get_placement_groups(device_name=device)
     split_resource_pools = [
         SubRayResourcePool(
             process_on_nodes=resource_pool.store,

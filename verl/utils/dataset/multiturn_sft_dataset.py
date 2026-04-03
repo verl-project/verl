@@ -250,7 +250,7 @@ class MultiTurnSFTDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[self.messages_key]
+        messages: list = convert_nested_value_to_list_recursive(example[self.messages_key])
         images = example[self.image_key] if self.image_key in example else []
         videos = example[self.video_key] if self.video_key in example else []
 
@@ -293,6 +293,8 @@ class MultiTurnSFTDataset(Dataset):
         enable_thinking = (
             self.enable_thinking[item] if self.enable_thinking is not None else self.enable_thinking_default
         )
+        if enable_thinking is not None:
+            enable_thinking = bool(enable_thinking)
 
         # 1. tokenize each message
         input_ids, loss_mask, attention_mask, multi_modal_inputs = [], [], [], {}

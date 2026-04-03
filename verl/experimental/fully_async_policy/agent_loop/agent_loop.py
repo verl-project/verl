@@ -26,12 +26,14 @@ from verl.experimental.agent_loop.agent_loop import (
     AsyncLLMServerManager,
     TokenOutput,
 )
+from verl.experimental.teacher_loop import TeacherModelManager
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import (
     rollout_trace_op,
 )
+from verl.utils.tokenizer import normalize_token_ids
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -64,6 +66,8 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         Returns:
             TokenOutput: token output
         """
+        prompt_ids = normalize_token_ids(prompt_ids)
+
         limit_key = None
         if "max_tokens" in sampling_params:
             limit_key = "max_tokens"
@@ -130,10 +134,19 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
+        teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
+        teacher_load_balancer_handle: ray.actor.ActorHandle = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.server_manager = FullyAsyncLLMServerManager(config, servers, load_balancer_handle)
-        super().__init__(config, servers, load_balancer_handle, reward_loop_worker_handles)
+        super().__init__(
+            config,
+            servers,
+            load_balancer_handle,
+            teacher_servers,
+            teacher_load_balancer_handle,
+            reward_loop_worker_handles,
+        )
 
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
@@ -142,10 +155,13 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
+        teacher_model_manager: TeacherModelManager = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
-        super().__init__(config, worker_group, rollout_resource_pool, reward_loop_worker_handles)
+        super().__init__(config, worker_group, rollout_resource_pool, teacher_model_manager, reward_loop_worker_handles)
+        if self.distillation_enabled:
+            raise NotImplementedError("Distillation is not implemented in FullyAsyncAgentLoopManager yet.")
 
     @auto_await
     async def generate_sequences_single(self, prompts: DataProto) -> DataProto:

@@ -45,6 +45,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.use_torch_compile=False \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tensorboard'] \

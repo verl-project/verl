@@ -87,7 +87,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .[test]
       - name: Check final pip list
         run: |
@@ -127,7 +126,6 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .[test]
       - name: Prepare weights
         run: |

@@ -37,9 +37,9 @@ from megatron.core.transformer.transformer_layer import get_transformer_layer_of
 
 from verl.models.mcore.util import (
     postprocess_packed_seqs,
-    postprocess_thd_no_padding,
+    postprocess_thd_engine,
     preprocess_packed_seqs,
-    preprocess_thd_no_padding,
+    preprocess_thd_engine,
 )
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
@@ -253,8 +253,8 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
 
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
-            _, packed_seq_params = preprocess_thd_no_padding(input_ids, pre_process=True)
-            layers_topk_idx = postprocess_thd_no_padding(
+            _, packed_seq_params = preprocess_thd_engine(input_ids, pre_process=True)
+            layers_topk_idx = postprocess_thd_engine(
                 layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
             )
         else:
@@ -287,7 +287,7 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
     """
     with torch.no_grad():
         if layers_topk_idx.is_nested:
-            layers_topk_idx_rmpad, _, _ = preprocess_thd_no_padding(layers_topk_idx, pre_process=True)
+            layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(layers_topk_idx, pre_process=True)
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(layers_topk_idx, attention_mask, pre_process=True)
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk

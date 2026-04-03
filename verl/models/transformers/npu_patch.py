@@ -23,6 +23,8 @@ from transformers.activations import ACT2FN
 from transformers.models.qwen2 import modeling_qwen2
 from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl
 from transformers.models.qwen3 import modeling_qwen3
+from transformers.models.qwen3_5 import modeling_qwen3_5
+from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
 from transformers.models.qwen3_moe import modeling_qwen3_moe
 from transformers.models.qwen3_next import modeling_qwen3_next
 from transformers.models.qwen3_vl import modeling_qwen3_vl
@@ -285,6 +287,29 @@ class NPUQwen3VLMoeTextSparseMoeBlock(nn.Module):
         return routed_out
 
 
+def qwen3_5_moe_experts_forward_npu(
+    self,
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor,
+    top_k_weights: torch.Tensor,
+) -> torch.Tensor:
+    selected_experts = top_k_index
+    routing_weights = top_k_weights
+    gate_up_proj = self.gate_up_proj.permute(0, 2, 1).contiguous()
+    down_proj = self.down_proj.permute(0, 2, 1).contiguous()
+    permuted_hidden_states, row_ids_map = torch_npu.npu_moe_token_permute(
+        hidden_states, selected_experts.to(torch.int32)
+    )
+    tokens_per_expert = torch.histc(selected_experts, bins=self.num_experts, min=0, max=self.num_experts)
+    intermediate_hidden_states = NPUGmmFunction.apply(permuted_hidden_states, gate_up_proj, tokens_per_expert)
+    intermediate_activations = torch_npu.npu_swiglu(intermediate_hidden_states, dim=-1)
+    output = NPUGmmFunction.apply(intermediate_activations, down_proj, tokens_per_expert)
+    final_hidden_states = torch_npu.npu_moe_token_unpermute(
+        output.to(routing_weights.dtype), row_ids_map, probs=routing_weights
+    )
+    return final_hidden_states.to(hidden_states.dtype)
+
+
 # Patches for Qwen2 Model
 modeling_qwen2.Qwen2RMSNorm.forward = rms_norm_forward_npu
 modeling_qwen2.Qwen2MLP.forward = silu_forward_npu
@@ -318,3 +343,14 @@ modeling_qwen3_next.Qwen3NextSparseMoeBlock.forward = qwen3_next_sparse_moe_bloc
 modeling_qwen3_next.Qwen3NextRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
 modeling_qwen3_next.Qwen3NextRMSNorm.forward = qwen3_next_rms_norm_forward_npu
 modeling_qwen3_next.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+
+# Patches for Qwen3.5 Model
+modeling_qwen3_5.Qwen3_5RMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
+modeling_qwen3_5.Qwen3_5RMSNorm.forward = qwen3_next_rms_norm_forward_npu
+modeling_qwen3_5.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+
+# Patches for Qwen3.5 MoE Model
+modeling_qwen3_5_moe.Qwen3_5MoeExperts.forward = qwen3_5_moe_experts_forward_npu
+modeling_qwen3_5_moe.Qwen3_5MoeRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
+modeling_qwen3_5_moe.Qwen3_5MoeRMSNorm.forward = qwen3_next_rms_norm_forward_npu
+modeling_qwen3_5_moe.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu

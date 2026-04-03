@@ -52,6 +52,7 @@ from verl.utils.device import (
 from verl.utils.distributed import set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
+from verl.utils.import_utils import deprecated
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
@@ -103,6 +104,7 @@ def set_random_seed(seed, only_rollout=False):
     # os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
+@deprecated("legacy worker implementation is deprecated and will be removed in v0.8.0")
 class MegatronWorker(Worker):
     def _init_hf_config_and_tf_config(
         self,
@@ -219,6 +221,12 @@ class MegatronWorker(Worker):
                 provider.moe_token_dispatcher_type = "alltoall"
                 provider.moe_router_load_balancing_type = "none"
 
+                qat_enabled = getattr(self.config, "actor", {}).get("qat", {}).get("enable", False)
+                if qat_enabled:
+                    from verl.utils.modelopt import patch_provider_for_qat
+
+                    patch_provider_for_qat(provider)
+
                 # Apply transformer config overrides
                 for key, value in override_transformer_config.items():
                     setattr(provider, key, value)
@@ -237,6 +245,16 @@ class MegatronWorker(Worker):
         self.hf_config = hf_config
         self.tf_config = tf_config
 
+        actor_config = getattr(self.config, "actor", None)
+        qat_enabled = actor_config.get("qat", {}).get("enable", False) if actor_config is not None else False
+        if qat_enabled:
+            if not self.bridge or self.vanilla_bridge:
+                raise ValueError(
+                    "QAT (Quantization-Aware Training) requires Megatron bridge. "
+                    "Please ensure 'actor.megatron.use_mbridge' is set to True and "
+                    "'actor.megatron.vanilla_mbridge' is set to False in your configuration."
+                )
+
         # Get PEFT config from model.lora if specified
         from verl.workers.config.megatron_peft import get_peft_cls
 
@@ -245,6 +263,7 @@ class MegatronWorker(Worker):
         )
 
 
+@deprecated("legacy worker implementation is deprecated and will be removed in v0.8.0")
 class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
@@ -330,7 +349,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         # omega_profiler_config is DictConfig
         # profiler_config is a ProfilerConfig dataclass
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory", "precision_debugger"]:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
@@ -443,6 +462,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self.rank == 0:
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
+            qat_config = self.config.actor.get("qat", {})
+            if qat_config.get("enable", False):
+                from verl.utils.modelopt import apply_qat_to_modules
+
+                actor_module = apply_qat_to_modules(actor_module, qat_config)
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model
@@ -716,6 +740,12 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.tf_config,
                 self.layer_name_mapping,
             )
+        qat_config = self.config.actor.get("qat", {})
+        if qat_config.get("enable", False):
+            from verl.utils.modelopt import export_qat_weights
+
+            qat_mode = qat_config.get("mode", "w4a16")
+            per_tensor_param = export_qat_weights(per_tensor_param, self.actor.actor_module, qat_mode, self.bridge)
 
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
@@ -996,7 +1026,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
 
         omega_profiler_config = config.get("profiler", {})
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory", "precision_debugger"]:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
