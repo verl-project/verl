@@ -93,7 +93,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc4"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc10"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -273,7 +273,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2, e2e_grpo_trainer_fsdp-vlm]
+    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2, e2e_grpo_trainer_megatron-vlm]
     if: always()
     steps:
       - id: destroy-runner
