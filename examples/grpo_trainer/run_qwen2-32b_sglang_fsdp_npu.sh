@@ -140,7 +140,6 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
     actor_rollout_ref.rollout.expert_parallel_size=${gen_ep}
     actor_rollout_ref.rollout.enable_chunked_prefill=False
-    actor_rollout_ref.rollout.multi_stage_wake_up=True
     # Validation Generation
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.val_kwargs.do_sample=True

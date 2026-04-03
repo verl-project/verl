@@ -85,6 +85,7 @@ class MultiTurnConfig(BaseConfig):
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
+    # TODO: implement repeat rollouts per batch to reduce variance
     num_repeat_rollouts: Optional[int] = None
 
 
@@ -194,7 +195,6 @@ class RolloutConfig(BaseConfig):
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
-    ignore_eos: bool = False
     enforce_eager: bool = True
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True
@@ -223,7 +223,6 @@ class RolloutConfig(BaseConfig):
 
     disable_log_stats: bool = True
 
-    multi_stage_wake_up: bool = False
     engine_kwargs: dict = field(default_factory=dict)
 
     calculate_log_probs: bool = False

@@ -440,8 +440,6 @@ actor_rollout_ref:
     # Fraction of GPU memory used by vLLM/SGLang for KV cache.
     gpu_memory_utilization: 0.5
 
-    # Whether to ignore EOS and continue generating after EOS is hit.
-    ignore_eos: False
 
     # Whether to disable CUDA graph. Default True to allow cache freeing.
     enforce_eager: False
@@ -492,9 +490,6 @@ actor_rollout_ref:
 
     # number of responses (i.e. num sample times). > 1 for grpo
     n: 1
-
-    # Whether to wake up inference engine in multi-stage to reduce peak memory during training-rollout transition.
-    multi_stage_wake_up: false
 
     # Extra inference engine arguments, please refer vllm/sglang official doc for detail
     engine_kwargs:
