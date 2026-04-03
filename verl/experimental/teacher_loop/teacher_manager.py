@@ -25,21 +25,21 @@ from verl.experimental.agent_loop import AsyncLLMServerManager
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import DistillationConfig, DistillationLossConfig
+from verl.workers.config import DistillationConfig, DistillationLossConfig, DistillationTeacherModelConfig
 
 
 def _get_teacher_sampling_params(
-    distillation_config: DistillationConfig,
+    teacher_model_config: DistillationTeacherModelConfig,
     distillation_loss_config: DistillationLossConfig,
 ) -> dict[str, Any]:
     """Get sampling parameters for teacher model when computing log probabilities for distillation."""
-    if distillation_config.teacher_model.inference.temperature != 1.0:
+    if teacher_model_config.inference.temperature != 1.0:
         raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
 
     num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
     return {
         "max_tokens": 1,
-        "temperature": distillation_config.teacher_model.inference.temperature,
+        "temperature": teacher_model_config.inference.temperature,
         "prompt_logprobs": num_logprobs,
     }
 
@@ -102,6 +102,7 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
         else:
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+        self.teacher_model_config = self.distillation_config.get_single_teacher_model()
         self.pad_token_id = pad_token_id
 
     async def compute_teacher_logprobs_single(
@@ -114,7 +115,7 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
         teacher_output = await self.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
-            sampling_params=_get_teacher_sampling_params(self.distillation_config, self.distillation_loss_config),
+            sampling_params=_get_teacher_sampling_params(self.teacher_model_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
         )

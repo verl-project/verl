@@ -5,6 +5,11 @@ _target_: verl.workers.config.DistillationConfig
 defaults:
 
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
+  - teacher_model@teacher_model: teacher_model
+  - teacher_model@teacher_model0: teacher_model
+  - teacher_model@teacher_model1: teacher_model
+  - teacher_model@teacher_model2: teacher_model
+  - teacher_model@teacher_model3: teacher_model
 
   # load the default config, then apply the fields in the current yaml
   # self config override anything above
@@ -13,8 +18,14 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
-# we launch num_workers teacher managers to parallelize the teacher logprob computation
-num_workers: 8
+# Whether to enable a separate resource pool for distillation teacher model(s)
+enable_resource_pool: false
+
+# Number of GPUs per node in the distillation teacher resource pool
+n_gpus_per_node: 8
+
+# Number of nodes in the distillation teacher resource pool
+nnodes: 0
 
 # distillation loss config
 distillation_loss:
@@ -56,45 +67,3 @@ distillation_loss:
 
   # Upper bound for PPO clipping ratio.
   clip_ratio_high: 0.2
-
-
-# teacher model config
-teacher_model:
-  _target_: verl.workers.config.DistillationTeacherModelConfig
-
-  # Whether to enable separate resource pool for teacher model(s)
-  enable_resource_pool: false
-
-  # Number of GPUs per node to use for distillation teacher model(s)
-  n_gpus_per_node: 8
-
-  # Number of nodes to use for distillation teacher model(s)
-  nnodes: 0
-
-  model_path: null
-
-  inference:
-    _target_: verl.workers.config.RolloutConfig
-    name: ${oc.select:actor_rollout_ref.rollout.name}
-    dtype: ${oc.select:actor_rollout_ref.rollout.dtype}
-    gpu_memory_utilization: 0.5
-    enforce_eager: true
-    cudagraph_capture_sizes: null
-    free_cache_engine: true
-    data_parallel_size: 1
-    expert_parallel_size: 1
-    tensor_model_parallel_size: 2
-    max_num_batched_tokens: 8192
-    max_model_len: null
-    max_num_seqs: 1024
-    load_format: auto
-    engine_kwargs: {}
-    limit_images: null
-    enable_chunked_prefill: true
-    enable_prefix_caching: true
-    disable_log_stats: true
-    skip_tokenizer_init: false
-
-    prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
-    response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
-    temperature: ${oc.select:actor_rollout_ref.rollout.temperature}

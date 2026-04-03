@@ -54,7 +54,7 @@ class TeacherModelManager:
         self.sleep()
 
     def _initialize_llm_servers(self):
-        teacher_model_config: DistillationTeacherModelConfig = self.config.teacher_model
+        teacher_model_config: DistillationTeacherModelConfig = self.config.get_single_teacher_model()
         teacher_world_size = (
             teacher_model_config.inference.tensor_model_parallel_size
             * teacher_model_config.inference.data_parallel_size
@@ -63,8 +63,12 @@ class TeacherModelManager:
         world_size = (
             self.resource_pool.world_size
             if self.resource_pool  # colocate mode
-            else teacher_model_config.n_gpus_per_node * teacher_model_config.nnodes  # standalone mode
+            else self.config.n_gpus_per_node * self.config.nnodes  # standalone mode
         )
+        if world_size % teacher_world_size != 0:
+            raise ValueError(
+                f"Teacher world size {teacher_world_size} must divide allocated resource pool size {world_size}."
+            )
         num_replicas = world_size // teacher_world_size
 
         rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
@@ -80,7 +84,7 @@ class TeacherModelManager:
                 replica_rank=replica_rank,
                 config=rollout_config,
                 model_config=model_config,
-                gpus_per_node=teacher_model_config.n_gpus_per_node,
+                gpus_per_node=self.config.n_gpus_per_node,
                 is_teacher_model=True,
             )
             for replica_rank in range(num_replicas)

@@ -440,7 +440,7 @@ class AgentLoopWorker:
         if self.distillation_enabled:
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.distillation_config)
             self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
-            self.stream_teacher_with_rollout = self.distillation_config.teacher_model.enable_resource_pool
+            self.stream_teacher_with_rollout = self.distillation_config.enable_resource_pool
 
             if self.stream_teacher_with_rollout:
                 if teacher_servers is None:
@@ -1019,9 +1019,7 @@ class AgentLoopManager:
 
         self.teacher_model_manager = teacher_model_manager
         self.distillation_enabled = is_distillation_enabled(self.config.get("distillation", None))
-        self.stream_teacher_with_rollout = (
-            self.distillation_enabled and self.config.distillation.teacher_model.enable_resource_pool
-        )
+        self.stream_teacher_with_rollout = self.distillation_enabled and self.config.distillation.enable_resource_pool
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
