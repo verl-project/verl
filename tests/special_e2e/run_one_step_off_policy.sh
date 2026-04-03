@@ -161,8 +161,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."
     # Megatron specific parameters
     gen_tp=2
-    train_tp=4
-    train_pp=1
+    train_tp=2
+    train_pp=3
     ref_offload=True
     actor_offload=False
 
@@ -180,9 +180,6 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         train_tp=2
         actor_offload=True
     fi
-    common_params+=(
-            trainer.n_gpus_per_node=4 \
-    )
 
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
