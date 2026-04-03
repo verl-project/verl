@@ -83,6 +83,7 @@ class TorchMemoryToolConfig(BaseConfig):
 class PrecisionDebuggerToolConfig(BaseConfig):
     """Precision debugger tool config (msprobe)."""
 
+    name: str = "precision_debugger"
     enable: bool = False
     config_path: Optional[str] = None
     data_dir: str = "outputs/precision_debug"
