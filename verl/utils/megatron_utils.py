@@ -1479,22 +1479,31 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
     Check and configure MTP (Multi-Token Prediction) settings.
 
     Cases:
-        - mtp.enable == False and no MTP layers: return directly
-        - mtp.enable == False and has MTP layers: set num_nextn_predict_layers = 0
-        - mtp.enable == True and has MTP layers: configure override_transformer_config
-        - mtp.enable == True and no MTP layers: raise ValueError
+        - mtp.enable == False and neither ``num_nextn_predict_layers`` nor
+          ``mtp_num_hidden_layers`` is enabled on ``hf_config`` /
+          ``hf_config.text_config``: return directly.
+        - mtp.enable == False and MTP layers are configured: zero the first
+          supported MTP layer-count field (``num_nextn_predict_layers`` when
+          present, otherwise ``mtp_num_hidden_layers``).
+        - mtp.enable == True and MTP layers are configured: keep the existing
+          layer counts and populate ``override_transformer_config`` as needed.
+        - mtp.enable == True and no MTP layers are configured: raise
+          ``ValueError``.
     """
+    text_hf_config = getattr(model_config.hf_config, "text_config", model_config.hf_config)
     has_mtp = (
-        model_config.hf_config.num_nextn_predict_layers > 0
-        if hasattr(model_config.hf_config, "num_nextn_predict_layers")
-        else False
+        getattr(text_hf_config, "num_nextn_predict_layers", 0) > 0
+        or getattr(text_hf_config, "mtp_num_hidden_layers", 0) > 0
     )
     enable_mtp = model_config.mtp.enable
 
     if not enable_mtp and not has_mtp:
         return
     elif not enable_mtp and has_mtp:
-        model_config.hf_config.num_nextn_predict_layers = 0
+        if hasattr(text_hf_config, "num_nextn_predict_layers"):
+            text_hf_config.num_nextn_predict_layers = 0
+        elif hasattr(text_hf_config, "mtp_num_hidden_layers"):
+            text_hf_config.mtp_num_hidden_layers = 0
     elif enable_mtp and not has_mtp:
         raise ValueError("enable mtp while model has no mtp layer, please use a model with mtp layer")
     elif enable_mtp and has_mtp:

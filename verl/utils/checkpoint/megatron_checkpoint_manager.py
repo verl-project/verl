@@ -645,6 +645,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     "grad_sync_func",
                     "param_sync_func",
                     "generation_config",
+                    "vision_config",
                     "_pg_collection",
                 ]
                 backup = {}

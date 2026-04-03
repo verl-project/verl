@@ -25,6 +25,7 @@ import torch
 from vllm.outputs import RequestOutput
 
 from verl.utils.device import is_npu_available
+from verl.utils.megatron_peft_utils import remove_base_layer_from_name, resolve_base_layer_name
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
@@ -176,6 +177,149 @@ class vLLMColocateWorkerExtension:
         # patch weight loader to support MoE model
         patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
+    @staticmethod
+    def _map_weight_name_for_vllm(model, weight_name: str) -> str | None:
+        mapper = getattr(model, "hf_to_vllm_mapper", None)
+        if mapper is None:
+            return weight_name
+
+        mapped_names = mapper.apply_list([weight_name])
+        return mapped_names[0] if mapped_names else None
+
+    @staticmethod
+    def _iter_model_weight_name_candidates(weight_name: str):
+        """Yield the incoming name and its stripped `.base_layer` variant, if any."""
+        yield weight_name
+        if ".base_layer." in weight_name:
+            yield remove_base_layer_from_name(weight_name)
+
+    @staticmethod
+    def _is_leaf_weight_or_bias_name(weight_name: str) -> bool:
+        leaf = weight_name.rsplit(".", 1)[-1]
+        return leaf in {"weight", "bias"} or leaf.endswith(("_weight", "_bias"))
+
+    @classmethod
+    def _strip_bridge_base_layer_from_expert_alias(cls, weight_name: str) -> str:
+        """Undo Megatron Bridge's non-leaf expert alias rewrite.
+
+        Bridge may emit names like `...mlp.experts.base_layer.gate_up_proj`, but
+        vLLM expects the logical alias without `.base_layer` and handles the final
+        fused-expert mapping itself.
+        """
+        if ".mlp.experts.base_layer." not in weight_name:
+            return weight_name
+        if cls._is_leaf_weight_or_bias_name(weight_name):
+            return weight_name
+        return remove_base_layer_from_name(weight_name)
+
+    @staticmethod
+    def _iter_packed_owner_weight_names(model, weight_name: str):
+        """Yield packed-owner names for unpacked HF aliases such as q/k/v proj."""
+        packed_modules_mapping = getattr(model, "packed_modules_mapping", None) or {}
+        if not packed_modules_mapping or "." not in weight_name:
+            return
+
+        reverse_mapping: dict[str, list[str]] = {}
+        for packed_name, unpacked_names in packed_modules_mapping.items():
+            for unpacked_name in unpacked_names:
+                reverse_mapping.setdefault(unpacked_name, []).append(packed_name)
+
+        parts = weight_name.split(".")
+        module_idx = -3 if len(parts) >= 3 and parts[-2] == "base_layer" else -2
+        if -module_idx > len(parts):
+            return
+
+        module_name = parts[module_idx]
+        for packed_name in reverse_mapping.get(module_name, ()):
+            packed_parts = parts.copy()
+            packed_parts[module_idx] = packed_name
+            yield ".".join(packed_parts)
+
+    def _resolve_weight_name_for_vllm(
+        self,
+        model,
+        weight_name: str,
+        *,
+        model_param_names: set[str],
+    ) -> tuple[str, bool]:
+        """Map an incoming sync name onto the live vLLM parameter namespace."""
+
+        def _candidate_exists(candidate_name: str) -> bool:
+            mapped_name = self._map_weight_name_for_vllm(model, candidate_name)
+            if mapped_name is not None and mapped_name in model_param_names:
+                return True
+
+            for packed_name in self._iter_packed_owner_weight_names(model, candidate_name):
+                mapped_packed_name = self._map_weight_name_for_vllm(model, packed_name)
+                if mapped_packed_name is not None and mapped_packed_name in model_param_names:
+                    return True
+
+            return False
+
+        stripped_name = self._strip_bridge_base_layer_from_expert_alias(weight_name)
+        if stripped_name != weight_name:
+            return stripped_name, True
+
+        candidate_names = tuple(self._iter_model_weight_name_candidates(weight_name))
+
+        # First prefer names that already match the exposed vLLM parameter tree,
+        # including packed owners such as qkv_proj for incoming q_proj aliases.
+        for candidate_name in candidate_names:
+            if _candidate_exists(candidate_name):
+                return candidate_name, candidate_name != weight_name
+
+        # Only leaf parameters participate in the generic `.base_layer` toggle.
+        # Non-leaf expert aliases are handled above and then delegated to vLLM.
+        for candidate_name in candidate_names:
+            if not self._is_leaf_weight_or_bias_name(candidate_name):
+                continue
+
+            resolved_name = resolve_base_layer_name(
+                candidate_name,
+                exists=_candidate_exists,
+            )
+            if resolved_name != candidate_name:
+                return resolved_name, candidate_name != weight_name
+
+        return weight_name, False
+
+    def _normalize_base_sync_weight_names(
+        self,
+        weights: list[tuple[str, torch.Tensor]],
+    ) -> list[tuple[str, torch.Tensor]]:
+        model = self.model_runner.model
+        model_param_names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+
+        normalized_weights: list[tuple[str, torch.Tensor]] = []
+        alias_rewrite_count = 0
+        added_count = 0
+        removed_count = 0
+        for name, tensor in weights:
+            normalized_name, used_alias_rewrite = self._resolve_weight_name_for_vllm(
+                model,
+                name,
+                model_param_names=model_param_names,
+            )
+            if used_alias_rewrite:
+                alias_rewrite_count += 1
+            if ".base_layer." not in name and ".base_layer." in normalized_name:
+                added_count += 1
+            elif ".base_layer." in name and ".base_layer." not in normalized_name:
+                removed_count += 1
+
+            normalized_weights.append((normalized_name, tensor))
+
+        if alias_rewrite_count or added_count or removed_count:
+            logger.info(
+                "Normalized base-sync weight names for vLLM: rewrote %d model-specific aliases, "
+                "added '.base_layer' to %d weights, and removed it from %d weights.",
+                alias_rewrite_count,
+                added_count,
+                removed_count,
+            )
+
+        return normalized_weights
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
@@ -214,11 +358,32 @@ class vLLMColocateWorkerExtension:
             device=self.device,
             use_shm=use_shm,
         )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
-                weights, peft_config=peft_config, base_sync_done=base_sync_done
+        lora_weights: dict[str, torch.Tensor] | None = {} if peft_config and base_sync_done else None
+
+        def on_bucket_received(
+            weights: list[tuple[str, torch.Tensor]],
+            *,
+            is_last: bool,
+        ) -> None:
+            # vLLM add_lora consumes one complete adapter tensor dict, so only
+            # the LoRA sync path needs to accumulate tensors across buckets.
+            if lora_weights is not None:
+                lora_weights.update(weights)
+                if is_last:
+                    self._update_weights(
+                        list(lora_weights.items()),
+                        peft_config=peft_config,
+                        base_sync_done=base_sync_done,
+                    )
+                return
+
+            self._update_weights(
+                weights,
+                peft_config=peft_config,
+                base_sync_done=base_sync_done,
             )
-        )
+
+        receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         if self._is_qat_model:
             # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
@@ -261,6 +426,7 @@ class vLLMColocateWorkerExtension:
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
+                weights = self._normalize_base_sync_weight_names(weights)
                 self.model_runner.model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:

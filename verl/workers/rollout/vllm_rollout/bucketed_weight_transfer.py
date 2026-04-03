@@ -230,7 +230,8 @@ class BucketedWeightReceiver:
         Receive weights from sender and process each bucket via callback.
 
         Args:
-            on_bucket_received: Callback function(weights: list[(name, tensor)]) called per bucket.
+            on_bucket_received: Callback function called per bucket as
+                on_bucket_received(weights, is_last=metadata["is_last"]).
         """
         try:
             self._init_socket()
@@ -254,7 +255,7 @@ class BucketedWeightReceiver:
                     weights.append((name, tensor))
                 get_torch_device().synchronize()
                 self.socket.send(b"")
-                on_bucket_received(weights)
+                on_bucket_received(weights, is_last=metadata["is_last"])
                 del weights, tensor
                 if metadata["is_last"]:
                     break
