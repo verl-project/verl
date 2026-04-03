@@ -169,6 +169,24 @@ def validate_config(
     if config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:
         print("NOTICE: You have both enabled in-reward kl and kl loss.")
 
+    if config.algorithm.filter_zero_adv.enable and (
+        config.actor_rollout_ref.actor.use_kl_loss and config.actor_rollout_ref.actor.kl_loss_coef != 0
+    ):
+        raise ValueError(
+            "algorithm.filter_zero_adv and actor KL loss (use_kl_loss=True, kl_loss_coef != 0)"
+            " cannot both be enabled — zero-adv samples still contribute to KL loss."
+        )
+    if config.algorithm.filter_zero_adv.enable and config.actor_rollout_ref.actor.entropy_coeff != 0:
+        raise ValueError(
+            "algorithm.filter_zero_adv and actor.entropy_coeff != 0 cannot both be True"
+            " — zero-adv samples still contribute non-zero entropy gradient."
+        )
+    if config.algorithm.filter_zero_adv.enable and config.actor_rollout_ref.actor.calculate_entropy:
+        print(
+            "WARNING: filter_zero_adv with calculate_entropy=True — actor/entropy metric"
+            " is computed on the filtered batch only, not the full batch."
+        )
+
     # critic
     if use_critic:
         critic_config = omega_conf_to_dataclass(config.critic)

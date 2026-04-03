@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+__all__ = ["AlgoConfig", "FilterGroupsConfig", "FilterZeroAdvConfig", "KLControlConfig", "RolloutCorrectionConfig"]
 
 
 @dataclass
@@ -54,6 +54,22 @@ class FilterGroupsConfig(BaseConfig):
     enable: bool = False
     metric: Optional[str] = None
     max_num_gen_batches: int = 0
+
+
+@dataclass
+class FilterZeroAdvConfig(BaseConfig):
+    """Configuration for filter_zero_adv (skip zero-advantage responses in actor update).
+
+    Args:
+        enable (bool): Whether to enable filtering. Responses in all-same-reward groups
+            contribute no policy gradient; filtering them saves fwd/bwd compute.
+        match_loss_curve (bool): Whether to add ghost optimizer.step() calls to preserve
+            the same number of optimizer updates as unfiltered training, matching the
+            baseline convergence curve.
+    """
+
+    enable: bool = False
+    match_loss_curve: bool = True
 
 
 @dataclass
@@ -630,6 +646,8 @@ class AlgoConfig(BaseConfig):
         use_pf_ppo (bool): Whether to enable preference feedback PPO.
         pf_ppo (dict[str, Any]): Preference feedback PPO settings.
         filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
+        filter_zero_adv (FilterZeroAdvConfig): Configuration for skipping zero-advantage responses
+            in actor update. See FilterZeroAdvConfig for details.
         rollout_correction (Optional[RolloutCorrectionConfig]): Rollout Correction configuration.
             Addresses off-policy issues from policy mismatch, model staleness, and general distribution shifts.
 
@@ -658,6 +676,7 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
+    filter_zero_adv: FilterZeroAdvConfig = field(default_factory=FilterZeroAdvConfig)
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None
