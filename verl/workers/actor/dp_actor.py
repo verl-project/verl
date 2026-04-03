@@ -633,8 +633,12 @@ class DataParallelPPOActor(BasePPOActor):
                 _batch_num_tokens = _response_mask.sum().to(get_device_id())
                 if torch.distributed.is_initialized():
                     torch.distributed.all_reduce(_batch_num_tokens, op=torch.distributed.ReduceOp.SUM)
+                # Clamp to 1 to avoid division-by-zero when the entire
+                # mini-batch is masked.  The numerator (masked loss sum) is
+                # also zero in that case, so gradients remain zero.
+                batch_num_tokens = max(int(_batch_num_tokens.item()), 1)
                 self.config.global_batch_info["dp_size"] = self._fsdp_gradient_divisor
-                self.config.global_batch_info["batch_num_tokens"] = _batch_num_tokens.item()
+                self.config.global_batch_info["batch_num_tokens"] = batch_num_tokens
 
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
@@ -715,7 +719,11 @@ class DataParallelPPOActor(BasePPOActor):
                             loss_agg_mode=loss_agg_mode,
                             **self.config.global_batch_info,
                         )
-                        micro_batch_metrics["actor/entropy"] = entropy_agg.detach().item()
+                        # Log local micro-batch mean so the metric stays
+                        # independent of dp_size / gradient accumulation.
+                        micro_batch_metrics["actor/entropy"] = (
+                            verl_F.masked_mean(entropy, response_mask).detach().item()
+                        )
                         if entropy_coeff != 0:
                             policy_loss -= entropy_agg * entropy_coeff
 
@@ -733,7 +741,10 @@ class DataParallelPPOActor(BasePPOActor):
                         )
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
+                        # Log local micro-batch token-mean for KL, consistent
+                        # with pre-fix semantics and trainer-side averaging.
+                        kl_log_val = verl_F.masked_mean(kld, response_mask).detach().item()
+                        metrics["actor/kl_loss"] += kl_log_val * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     # When global_batch_info is populated, agg_loss already
