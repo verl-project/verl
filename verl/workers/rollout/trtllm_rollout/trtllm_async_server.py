@@ -117,7 +117,11 @@ class TRTLLMHttpServer:
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
         from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
-        from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType, SleepConfig
+        try:
+            from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType, SleepConfig
+        except ImportError:
+            ExecutorMemoryType = None
+            SleepConfig = None
         from tensorrt_llm.serve import OpenAIServer
 
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
@@ -171,7 +175,7 @@ class TRTLLMHttpServer:
                     ExecutorMemoryType.KV_CACHE: "NONE",
                 }
             )
-            if self.config.enable_sleep_mode
+            if self.config.enable_sleep_mode and SleepConfig is not None
             else None,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
