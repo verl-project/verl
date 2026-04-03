@@ -47,6 +47,10 @@ actor_rollout_ref:
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
       seed: 42
+      use_megatron_fsdp: false
+      megatron_fsdp_zero_stage: 3
+      megatron_fsdp_overlap_grad_reduce: true
+      megatron_fsdp_overlap_param_gather: true
       override_ddp_config: {}
       override_transformer_config:
         recompute_granularity: null
@@ -221,6 +225,10 @@ actor_rollout_ref:
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
       seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
+      use_megatron_fsdp: false
+      megatron_fsdp_zero_stage: 3
+      megatron_fsdp_overlap_grad_reduce: true
+      megatron_fsdp_overlap_param_gather: true
       override_ddp_config: {}
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
       override_mcore_model_config: {}
@@ -512,6 +520,10 @@ critic:
     dist_ckpt_optim_fully_reshardable: false
     distrib_optim_fully_reshardable_mem_efficient: false
     seed: 42
+    use_megatron_fsdp: false
+    megatron_fsdp_zero_stage: 3
+    megatron_fsdp_overlap_grad_reduce: true
+    megatron_fsdp_overlap_param_gather: true
     override_ddp_config: {}
     override_transformer_config:
       recompute_granularity: null
