@@ -41,6 +41,61 @@ class QueuedBackend:
         )
 
 
+class RejectToolsSamplingParamsBackend:
+    def __init__(self, response_text: str = "OK"):
+        self.response_text = response_text
+
+    async def generate(self, request_id, *, prompt_ids, sampling_params):
+        if "tools" in sampling_params:
+            raise RuntimeError("tools leaked into sampling_params")
+        token_ids = [ord(char) for char in self.response_text]
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=[-0.1] * len(token_ids),
+            stop_reason="completed",
+        )
+
+
+class FailingBackend:
+    def __init__(self, error_message: str = "backend failure"):
+        self.error_message = error_message
+        self.calls = []
+
+    async def generate(self, request_id, *, prompt_ids, sampling_params):
+        self.calls.append(
+            {
+                "request_id": request_id,
+                "prompt_ids": list(prompt_ids),
+                "sampling_params": dict(sampling_params),
+            }
+        )
+        raise RuntimeError(self.error_message)
+
+
+class SequencedBackend:
+    def __init__(self, steps):
+        self.steps = list(steps)
+        self.calls = []
+
+    async def generate(self, request_id, *, prompt_ids, sampling_params):
+        self.calls.append(
+            {
+                "request_id": request_id,
+                "prompt_ids": list(prompt_ids),
+                "sampling_params": dict(sampling_params),
+            }
+        )
+        step = self.steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        token_ids = [ord(char) for char in step]
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=[-0.1] * len(token_ids),
+            stop_reason="completed",
+        )
+
+
 @ray.remote
 class RecordingLoadBalancer:
     def __init__(self, server_id: str = "server-0"):

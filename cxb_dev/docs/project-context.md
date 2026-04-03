@@ -4,117 +4,111 @@
 
 This is the entry document for the current `AgentFramework` / `AgentGateway` workstream on `feature/agent_framework`.
 
-The next agent should be able to answer three questions quickly:
+It should let the next agent answer four questions quickly:
 
 1. What is the current architecture baseline?
 2. What is already implemented on this branch?
-3. What still needs careful follow-up?
+3. What is already settled and should not be re-litigated by default?
+4. What still needs follow-up in the next phase?
 
-Detailed design history belongs in `cxb_dev/docs/plans/`.
+Detailed design history belongs in `cxb_dev/docs/plans/`, not here.
 
 ## Current Phase
 
-Current branch state is an experimental PR1-style slice:
+Current branch state is a PR1-style experimental slice with the following baseline:
 
 - thin `AgentFramework`
-- serving-owned Gateway runtime
-- `/v1/chat/completions` session path
+- serving-owned Gateway runtime under `LLMServerManager`
+- session-based `/v1/chat/completions` as the main ingress
+- `GatewayActor` as the session truth source for chat-completion traffic
 - trajectory assembly into training-visible `DataProto`
-- minimal OpenAI-compatible reference framework
+- minimal OpenAI-compatible reference framework for validation
 
-Not in the current first slice:
+Not part of this first slice:
 
 - `AgentLoopManager` migration
 - token-request ingress
-- fully async integration
-- React / Retool / SWE validation
-- end-to-end reward-curve evidence
+- streaming
+- full chat-template / processor parity with existing VERL agent-loop utilities
+- broad SWE / Retool / React validation
+- trainer-level reward-curve evidence
 
-## Canonical References
+## Read First
 
-Read these first:
+1. Governance: `/home/cxb/rl_framework/verl/cxb_dev/AGENTS.md`
+2. Current design baseline: `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-design-v2.md`
+3. Current PR1 implementation plan: `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-implementation-plan-v2.md`
 
-1. RFC: `/home/cxb/MATE-reboot/docs/rfc/agentFramework_agentgateway_rfc/agentFramework_agentgateway_rfc.md`
-2. Governance: `/home/cxb/rl_framework/verl/cxb_dev/AGENTS.md`
-3. Current design baseline: `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-design-v2.md`
-4. Current implementation plan: `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-implementation-plan-v2.md`
-
-Older 2026-03-30 docs are discussion history only. They are useful for a few Gateway behavior details and old test ideas, but they are not the architectural source of truth anymore.
+Older 2026-03-30 docs are discussion history only, not the current architectural source of truth.
 
 ## Frozen Decisions
 
 These are the current maintainer-aligned decisions unless explicitly reopened.
 
-### 1. Thin framework
+### 1. Thin framework remains the baseline
 
 - `AgentFramework` stays thin.
 - Public trainer-facing contract is `generate_sequences(prompts: DataProto) -> DataProto`.
-- `run_session`, `compute_reward`, `finalize_session` are not required public framework interfaces.
+- Do not reintroduce thick public framework hooks such as `run_session` or `compute_reward`.
 
-### 2. Gateway ownership is on the serving side
+### 2. Gateway ownership stays on the serving side
 
 - Gateway lifecycle belongs to `LLMServerManager` / serving runtime.
-- `GatewayManager` is an internal routing/control-plane helper, not a top-level framework owner.
-- Do not resurrect `AgentFrameworkManager -> FrameworkWorker -> AgentFramework` as the public architecture.
+- `GatewayManager` is an internal routing helper, not a top-level framework owner.
+- Do not treat old framework-owned Gateway designs as the baseline.
 
-### 3. First-class ingress is chat completions
+### 3. First-class ingress is session chat completions
 
 - PR1 path is `/v1/chat/completions`.
-- Token-request ingress is deferred for later `AgentLoopManager` migration.
+- Token-request ingress is deferred to later work.
 
 ### 4. `AgentLoopManager` migration is deferred
 
-- Current `AgentLoopManager` is not the first migration target.
-- The first usable path must not depend on migrating existing native agent loops.
+- Existing native agent loops are not the first migration target.
+- The first usable path must not depend on moving `AgentLoopManager`.
 
-### 5. Gateway concurrency semantics are in scope
+### 5. Same-session serialization is part of the contract
 
-- Cross-session concurrency should remain asynchronous.
-- Same-session requests should be serialized with a per-session lock.
-- Same-session reentry should wait rather than fail with `409/429`.
+- Cross-session concurrency remains asynchronous.
+- Same-session operations are serialized through one per-session boundary.
+- This boundary is not only for chat requests; lifecycle operations matter too.
 
 ### 6. `/complete` remains optional
 
 - `POST /sessions/{id}/complete` is important for remote / hosted agents.
-- It should not be mandatory for every local OpenAI-compatible path.
+- It is not mandatory for every local completion path.
 
-## Current Code State
+## Current Code Facts
 
 This branch already contains a substantial experimental implementation.
 
 ### Framework side
 
 - `/home/cxb/rl_framework/verl/verl/experimental/agent_framework/framework.py`
-  - `AgentFramework` is now a thin abstract base with only `generate_sequences`.
-- `/home/cxb/rl_framework/verl/verl/experimental/agent_framework/types.py`
-  - lightweight `SessionHandle` and `Trajectory` types
-- `/home/cxb/rl_framework/verl/verl/experimental/agent_framework/helpers.py`
-  - reward normalization and trajectory validation helpers
-- `/home/cxb/rl_framework/verl/verl/experimental/agent_framework/assembler.py`
-  - `TrajectoryAssembler` for training-visible `DataProto`
+  - thin abstract `AgentFramework` with only `generate_sequences`
 - `/home/cxb/rl_framework/verl/verl/experimental/agent_framework/openai_compatible_framework.py`
-  - minimal reference implementation for an OpenAI-compatible / remote-style execution model
+  - minimal reference framework that creates sessions, runs an agent, optionally waits, and finalizes
+- `/home/cxb/rl_framework/verl/verl/experimental/agent_framework/assembler.py`
+  - `TrajectoryAssembler` that converts trajectories into training-visible `DataProto`
 
 ### Gateway side
 
 - `/home/cxb/rl_framework/verl/verl/experimental/agent_gateway/gateway.py`
-  - `GatewayActor` with:
-    - `/sessions/{id}/v1/chat/completions`
-    - `/sessions/{id}/complete`
-    - trajectory materialization on prefix mismatch / finalize
-    - per-session `asyncio.Lock`
-    - session-state inspection fields (`metadata`, completion flags, timestamps)
+  - `GatewayActor` now has explicit session phases and lifecycle guards
+  - duplicate session creation is rejected
+  - malformed request and unsupported-but-well-formed request are distinguished
+  - canonical request context tracks `messages + tools`
+  - assistant `tool_calls`, `tool_call_id`, and multimodal `content` are retained in canonical state
+  - `name` is currently treated as unsupported in PR1
+  - same-session chat / complete / finalize / abort are serialized
+  - backend failure follows no-commit semantics
 - `/home/cxb/rl_framework/verl/verl/experimental/agent_gateway/manager.py`
-  - `GatewayManager` with sticky routing and least-active-session placement
+  - sticky session routing plus least-active-session placement
 
 ### Serving integration
 
 - `/home/cxb/rl_framework/verl/verl/experimental/agent_loop/agent_loop.py`
-  - `LLMServerManager` now owns optional Gateway runtime and exposes:
-    - `create_session`
-    - `finalize_session`
-    - `abort_session`
-    - `wait_for_completion`
+  - `LLMServerManager` owns optional Gateway runtime and exposes session runtime methods
   - `AsyncLLMServerManager` provides the serving-backed Gateway backend path
 
 ### Tests already present
@@ -126,87 +120,65 @@ This branch already contains a substantial experimental implementation.
 - `/home/cxb/rl_framework/verl/tests/experimental/agent_gateway/test_gateway_manager.py`
 - `/home/cxb/rl_framework/verl/tests/experimental/agent_gateway/test_session_runtime.py`
 
-## Useful Reference-Branch Findings
+## What Is Already Resolved
 
-The archived `cxb/agent-framework-gateway` branch is only a reference source for behavior details and missed test ideas.
+These items were previously open and should not be reintroduced as unresolved by default:
 
-The most credible carry-over candidates are:
+- explicit minimal session state model is now part of the design direction
+- duplicate session overwrite is no longer acceptable behavior
+- unsupported fields should not be silently ignored just to look OpenAI-compatible
+- `tools` belongs to the request compatibility boundary
+- prefix continuation and mismatch semantics should be based on canonical request context, not text-only flattening
+- backend failure should not partially commit session state
 
-- richer `/v1/chat/completions` normalization and validation:
-  - `name`
-  - `tool_calls`
-  - `tools`
-  - malformed-request 4xx behavior
-- duplicate-session rejection on `create_session`
-- one regression test that locks in prefix-match continuation as a single trajectory with mixed `response_mask` semantics
-- trace/debug metadata propagation questions such as whether `uid`, sample index, and `trajectory_id` should survive into assembled `DataProto`
+## Main Remaining Risks
 
-Do not carry over from that branch:
+Only keep the current phase's real follow-up items here.
 
-- `AgentFrameworkManager`
-- `FrameworkWorker`
-- thick framework hooks such as public `run_session` / `compute_reward`
-- framework-side gateway ownership
-- round-robin routing as the preferred policy
+### 1. Chat-template / processor parity is still the biggest correctness risk
 
-## Open Questions And Risks
+Current Gateway implementation still uses a simplified `tokenizer.encode_messages(...)` path in its runtime and tests. That is not the same as VERL's existing `apply_chat_template(...)`, `initialize_system_prompt(...)`, `process_vision_info(...)`, and processor-driven multimodal path.
 
-These are the main points still worth checking before treating this slice as ready for broader review.
+This is not just a documentation concern; it is a real implementation gap that may affect correctness once the Gateway path is expected to behave like native VERL tool or multimodal flows.
 
-### 1. Chat-template alignment
+### 2. Response-side completion path still needs assessment
 
-Current Gateway implementation on this branch uses a simplified `tokenizer.encode_messages(...)` path in tests and implementation. That is not yet aligned with VERL's existing `apply_chat_template` / `initialize_system_prompt` utilities.
+PR1 tightened request-side truth source and lifecycle semantics, but the next phase still needs to assess whether completion-driven agents need additional response-side structure, such as tool-call parsing helpers or stronger assistant-message contracts.
 
-This is the biggest current correctness risk if PR1 is expected to match VERL-native chat templating behavior.
+### 3. Validation scope is still narrow
 
-### 2. OpenAI compatibility level
+Current validation is strong at the unit/component level, but still narrow in representativeness:
 
-The branch has the main chat-completions path, but the intended compatibility boundary is still worth making explicit:
+- minimal mock remote-style path exists
+- serving ownership path exists
+- broad SWE / Retool / React validation does not yet exist
 
-- whether `tools` / `tool_calls` / `name` must be supported in PR1
-- how strict malformed-request responses should be
-- whether duplicate session creation should raise a clear serving-side error
+## Recommended Next Step
 
-### 3. Metadata propagation contract
+Do not reopen the settled PR1 GatewayActor debates first.
 
-`Trajectory` already contains `uid`, `session_id`, and `trajectory_id`, but current assembler output mainly guarantees training tensors plus `__num_turns__` and extra reward fields.
+Instead, move to the next-phase planning questions:
 
-If traceability across session -> trajectory -> batch matters for debugging or evaluation, decide whether those ids must be preserved in assembled `DataProto`.
+1. assess chat-template alignment feasibility and risk
+2. assess completion return-path completeness for tool-using agents
+3. assess whether SWE-agent is worth adapting into the completion path as a main validation target
+4. run one more independent review pass for remaining fixups and doc/impl drift
 
-### 4. Validation scope is still limited
+The working note for that next phase is:
 
-Current branch has focused component tests and a minimal remote-style path, but not yet:
-
-- trainer-level end-to-end evidence
-- reward-curve evidence
-- `AgentLoopManager` compatibility migration
-- fully async validation
-
-## Recommended Next Steps
-
-1. Keep the current thin-framework / serving-owned-Gateway architecture unchanged.
-2. Review whether PR1 should absorb a small subset of archived Gateway behavior:
-   - duplicate-session rejection
-   - better malformed-request handling
-   - prefix-match regression coverage
-3. Decide explicitly whether chat-template alignment with VERL utilities is required in PR1 or deferred.
-4. Decide explicitly whether `uid` / `session_id` / `trajectory_id` must survive into assembled `DataProto`.
-5. If implementation continues, prioritize verification over expansion:
-   - session lifecycle correctness
-   - compatibility boundary documentation
-   - one trainer-visible acceptance check
+- `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-03-agent-framework-review-handoff.md`
 
 ## Fast Onboarding Order
 
-1. `/home/cxb/MATE-reboot/docs/rfc/agentFramework_agentgateway_rfc/agentFramework_agentgateway_rfc.md`
-2. `/home/cxb/rl_framework/verl/cxb_dev/AGENTS.md`
-3. `/home/cxb/rl_framework/verl/cxb_dev/docs/project-context.md`
-4. `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-design-v2.md`
-5. `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-implementation-plan-v2.md`
-6. `/home/cxb/rl_framework/verl/verl/experimental/agent_loop/agent_loop.py`
+If someone is starting fresh, use this order:
+
+1. `/home/cxb/rl_framework/verl/cxb_dev/AGENTS.md`
+2. `/home/cxb/rl_framework/verl/cxb_dev/docs/project-context.md`
+3. `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-design-v2.md`
+4. `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-implementation-plan-v2.md`
+5. `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-03-agent-framework-review-handoff.md`
+6. `/home/cxb/rl_framework/verl/tests/experimental/agent_gateway/test_gateway_actor.py`
 7. `/home/cxb/rl_framework/verl/verl/experimental/agent_gateway/gateway.py`
-8. `/home/cxb/rl_framework/verl/verl/experimental/agent_gateway/manager.py`
-9. `/home/cxb/rl_framework/verl/verl/experimental/agent_framework/framework.py`
-10. `/home/cxb/rl_framework/verl/verl/experimental/agent_framework/openai_compatible_framework.py`
-11. `/home/cxb/rl_framework/verl/tests/experimental/agent_gateway/test_gateway_actor.py`
-12. `/home/cxb/rl_framework/verl/tests/experimental/agent_gateway/test_session_runtime.py`
+8. `/home/cxb/rl_framework/verl/tests/experimental/agent_gateway/test_session_runtime.py`
+9. `/home/cxb/rl_framework/verl/verl/experimental/agent_loop/agent_loop.py`
+10. `/home/cxb/rl_framework/verl/tests/experimental/agent_framework/test_openai_compatible_framework.py`
