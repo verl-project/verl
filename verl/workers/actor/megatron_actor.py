@@ -160,10 +160,9 @@ class MegatronPPOActor(BasePPOActor):
             from verl.models.mcore.mtp_patch import patch_postprocess
 
             for model in self.actor_module:
+                patch_postprocess(model)
                 if self.mtp_config:
                     from verl.models.mcore.mtp_patch import patch_mtp_layer_get_embeddings
-
-                    patch_postprocess(model)
 
                     if self.mtp_config.detach_encoder:
                         patch_mtp_layer_get_embeddings(model)
