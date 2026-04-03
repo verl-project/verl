@@ -94,7 +94,7 @@ python3 -m verl.trainer.main_ppo --config-path=config  --config-name='ppo_megatr
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${offload} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.75 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
