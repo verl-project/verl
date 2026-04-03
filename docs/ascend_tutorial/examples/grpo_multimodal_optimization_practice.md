@@ -1,6 +1,6 @@
 # NPU Qwen3vl-8B GRPO Optimization Practice
 
-Last updated: 04/03/2026.
+Last updated: 03/03/2026.
 
 ## 概述
 
@@ -223,12 +223,4 @@ def forward_native():
 - **训练侧**：动态BatchSize、前向预取；
 - **框架层**：RMSNorm融合、Task Queue流水优化。
 
-未来，随着VeRL框架对多模态引擎VeoMni的集成（PR #4850），将进一步拓展在复杂多模态任务中的性能潜力。我们持续推动昇腾生态下的强化学习技术落地，欢迎开发者参与共建。
-
-## 附：资源链接
-
-- 昇腾后训练强化学习最佳实践：<https://mp.weixin.qq.com/s/TnilRFlpGQkfGQFBDX-wYw>
-- 昇腾技术文档：<https://www.hiascend.com/zh/developer/techArticles/20251107-1>
-- 昇腾后训练强化学习Docker镜像：<https://www.hiascend.com/developer/ascendhub/detail/2c7122f323f94a19ba7fca6b8dccf11e>
-- 昇腾开源微信小助手：ascendosc
-- VeRL开源社区讨论区：<https://github.com/volcengine/verl/discussions>
+随着VeRL框架对多模态引擎VeoMni的集成（PR #4850），将进一步拓展在复杂多模态任务中的性能潜力。我们持续推动昇腾生态下的强化学习技术落地，欢迎开发者参与共建。
