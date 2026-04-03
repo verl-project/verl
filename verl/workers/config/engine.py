@@ -192,8 +192,10 @@ class McoreEngineConfig(EngineConfig):
     override_ddp_config: dict[str, Any] = field(default_factory=dict)
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
+    # When mbridge is enabled, checkpoint 'model' saves HF format directly via bridge.save_weights().
+    # 'hf_model' in save_contents will be silently ignored. Use 'model' instead.
     use_mbridge: bool = True
-    vanilla_mbridge: bool = True
+    vanilla_mbridge: bool = True  # True: vanilla mbridge (AutoBridge); False: megatron-bridge provider
     strategy: str = "megatron"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 

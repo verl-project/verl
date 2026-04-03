@@ -29,6 +29,10 @@ class CheckpointConfig(BaseConfig):
     Args:
         save_contents (list[str]): What to include in saved checkpoints.
             Options: 'model', 'optimizer', 'extra', 'hf_model'.
+            NOTE: When mbridge is enabled (engine.use_mbridge=True, the default for Megatron),
+            'model' already saves weights in HF format via bridge.save_weights(), so 'hf_model'
+            is redundant and will be silently ignored. Use 'hf_model' only when mbridge is
+            disabled (pure Megatron dist_checkpointing mode) to convert Megatron format to HF.
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
         async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
     """
