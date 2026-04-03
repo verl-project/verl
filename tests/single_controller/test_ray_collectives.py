@@ -70,9 +70,12 @@ class Rollout(Worker):
 
 def test_ray_collective_group():
     ray.init()
+    ngpus = torch.cuda.device_count()
+    n_rollout = max(1, ngpus // 3)  # keep 2:1 actor:rollout ratio
+    n_actor = n_rollout * 2
 
-    actor_resource_pool = RayResourcePool([4])
-    rollout_resource_pool = RayResourcePool([2])
+    actor_resource_pool = RayResourcePool([n_actor])
+    rollout_resource_pool = RayResourcePool([n_rollout])
 
     actor_cls = RayClassWithInitArgs(cls=Actor)
     rollout_cls = RayClassWithInitArgs(cls=Rollout)
@@ -94,16 +97,13 @@ def test_ray_collective_group():
     ray.get(out1)
     ray.get(out2)
 
-    output = rollout_wg.get_tensors()
-
-    rollout_0_output = output[0]
-    rollout_1_output = output[1]
-
-    output = rollout_0_output | rollout_1_output
+    output = {}
+    for d in rollout_wg.get_tensors():
+        output |= d
 
     print(output)
 
-    for i in range(4):
+    for i in range(n_actor):
         assert torch.sum(output[f"src_{i}"]).item() == 4 * i
 
     ray.shutdown()
