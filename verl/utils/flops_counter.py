@@ -240,7 +240,10 @@ def _estimate_qwen3_vit_flop(images_seqlens, config):
     merger_N = (out_hidden_size + (dim * (spatial_merge_size**2))) * (dim * (spatial_merge_size**2))
 
     # Qwen3 VL uses deep stack, one merger for every deepstack layer
-    deepstack_merger_N = merger_N * len(config.deepstack_visual_indexes)
+    if config.deepstack_visual_indexes is not None:
+        deepstack_merger_N = merger_N * len(config.deepstack_visual_indexes)
+    else:
+        deepstack_merger_N = 0
     # non-attn all_layer parm
     dense_N = patch_embed_N + (mlp_N + attn_linear_N) * depth + deepstack_merger_N + merger_N
 
