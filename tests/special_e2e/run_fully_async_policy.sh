@@ -184,7 +184,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running fully async training with Megatron strategy..."
     # Megatron specific parameters
-    gen_tp=2
+    gen_tp=4
     train_tp=2
     train_pp=2
     ref_offload=True
