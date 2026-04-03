@@ -47,6 +47,56 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _get_fsdp_gradient_divisor(module: nn.Module) -> float:
+    """Return the factor by which FSDP will divide gradients during reduction.
+
+    Reads the actual divisor from FSDP internals and cross-checks it against
+    ``torch.distributed.get_world_size()``.  Raises on mismatch or if the
+    private FSDP attributes have changed (e.g. after a PyTorch upgrade) so
+    that silent mis-scaling is impossible.
+    """
+    if not torch.distributed.is_initialized():
+        return 1.0
+
+    dp_size = float(torch.distributed.get_world_size())
+
+    fsdp_divisor = None
+    if isinstance(module, FSDPModule):
+        state = module._get_fsdp_state()
+        pg = state._fsdp_param_group
+        if pg is not None:
+            if pg.gradient_divide_factor is not None:
+                raise RuntimeError(
+                    f"set_gradient_divide_factor() was called on the FSDP module "
+                    f"(gradient_divide_factor={pg.gradient_divide_factor}). "
+                    f"This overrides the default gradient averaging and breaks "
+                    f"our loss normalization assumptions. Remove the call or "
+                    f"adapt _get_fsdp_gradient_divisor() accordingly."
+                )
+            mesh_info = pg.mesh_info
+            fsdp_divisor = float(mesh_info.shard_mesh_size)
+            if hasattr(mesh_info, "replicate_mesh_size"):
+                fsdp_divisor *= mesh_info.replicate_mesh_size
+    elif isinstance(module, FSDP):
+        fsdp_divisor = float(module._gradient_predivide_factor * module._gradient_postdivide_factor)
+
+    if fsdp_divisor is None:
+        raise RuntimeError(
+            "Cannot determine FSDP gradient divisor from module internals. "
+            "This likely means the private FSDP API changed after a PyTorch "
+            "upgrade. Please update _get_fsdp_gradient_divisor() for the new API."
+        )
+
+    if fsdp_divisor != dp_size:
+        raise RuntimeError(
+            f"FSDP gradient divisor ({fsdp_divisor:.1f}) != world_size ({dp_size:.1f}). "
+            f"This may indicate a custom set_gradient_divide_factor() call or "
+            f"a non-standard FSDP configuration. Update dp_size logic accordingly."
+        )
+
+    return dp_size
+
+
 @deprecated("legacy worker implementation is deprecated and will be removed in v0.8.0")
 class DataParallelPPOActor(BasePPOActor):
     """FSDP DataParallel PPO Actor or Ref worker
@@ -62,6 +112,7 @@ class DataParallelPPOActor(BasePPOActor):
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        self._fsdp_gradient_divisor = _get_fsdp_gradient_divisor(actor_module)
         role = "Ref" if actor_optimizer is None else "Actor"
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
@@ -572,6 +623,19 @@ class DataParallelPPOActor(BasePPOActor):
 
                 self.actor_optimizer.zero_grad()
 
+                # Global batch token count for correct token-mean normalization.
+                # Computed once per mini-batch (not per micro-batch) so that every
+                # micro-batch backward divides by T_global.  When batch_num_tokens
+                # is set, loss_scale_factor is NOT applied to the backward loss —
+                # the raw sum of micro-batch gradients already equals the
+                # full-batch gradient.
+                _response_mask = mini_batch.batch["response_mask"].to(bool)
+                _batch_num_tokens = _response_mask.sum().to(get_device_id())
+                if torch.distributed.is_initialized():
+                    torch.distributed.all_reduce(_batch_num_tokens, op=torch.distributed.ReduceOp.SUM)
+                self.config.global_batch_info["dp_size"] = self._fsdp_gradient_divisor
+                self.config.global_batch_info["batch_num_tokens"] = _batch_num_tokens.item()
+
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
@@ -645,7 +709,12 @@ class DataParallelPPOActor(BasePPOActor):
 
                     policy_loss = pg_loss
                     if calculate_entropy and entropy is not None:
-                        entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        entropy_agg = agg_loss(
+                            loss_mat=entropy,
+                            loss_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            **self.config.global_batch_info,
+                        )
                         micro_batch_metrics["actor/entropy"] = entropy_agg.detach().item()
                         if entropy_coeff != 0:
                             policy_loss -= entropy_agg * entropy_coeff
@@ -656,15 +725,22 @@ class DataParallelPPOActor(BasePPOActor):
                         kld = kl_penalty(
                             logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
                         )
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        kl_loss = agg_loss(
+                            loss_mat=kld,
+                            loss_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            **self.config.global_batch_info,
+                        )
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = policy_loss * loss_scale_factor
+                    # When global_batch_info is populated, agg_loss already
+                    # returns the correctly scaled loss for FSDP gradient
+                    # reduction — no extra loss_scale_factor needed.
+                    if self.config.global_batch_info.get("batch_num_tokens") is not None:
+                        loss = policy_loss
                     else:
                         loss = policy_loss * loss_scale_factor
                     if self.scaler is not None:
