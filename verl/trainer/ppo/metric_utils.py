@@ -26,6 +26,8 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.utils.import_utils import deprecated
 
+ZERO_ADV_EPS = 1e-8
+
 
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
@@ -136,6 +138,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
 
+    # Per-response zero-advantage ratio: responses whose advantage is zero contribute no policy gradient.
+    max_abs_adv = (advantages.abs() * response_mask).max(dim=-1).values  # (bs,)
+    num_zero_adv = (max_abs_adv < ZERO_ADV_EPS).sum().item()
+    num_responses = max_abs_adv.numel()
     if use_critic:
         values = batch.batch["values"]
         valid_values = torch.masked_select(values, response_mask)
@@ -170,6 +176,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/advantages/mean": torch.mean(valid_adv).detach().item(),
         "critic/advantages/max": torch.max(valid_adv).detach().item(),
         "critic/advantages/min": torch.min(valid_adv).detach().item(),
+        "critic/advantages/zero_adv_count": num_zero_adv,
+        "critic/advantages/zero_adv_ratio": num_zero_adv / num_responses if num_responses > 0 else 0.0,
         # returns
         "critic/returns/mean": torch.mean(valid_returns).detach().item(),
         "critic/returns/max": torch.max(valid_returns).detach().item(),
