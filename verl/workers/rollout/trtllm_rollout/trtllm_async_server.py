@@ -117,6 +117,7 @@ class TRTLLMHttpServer:
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
         from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
+        from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType, SleepConfig
         from tensorrt_llm.serve import OpenAIServer
 
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
@@ -164,7 +165,14 @@ class TRTLLMHttpServer:
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
             "per_worker_gpu_share": per_worker_gpu_share,
-            "enable_sleep": self.config.enable_sleep_mode,
+            "sleep_config": SleepConfig(
+                restore_modes={
+                    ExecutorMemoryType.MODEL_WEIGHTS_MAIN: "NONE",
+                    ExecutorMemoryType.KV_CACHE: "NONE",
+                }
+            )
+            if self.config.enable_sleep_mode
+            else None,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,
@@ -245,29 +253,46 @@ class TRTLLMHttpServer:
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
-        if self.is_vlm_model and (image_data or video_data):
-            deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
-            org_prompt = self.llm.tokenizer.decode(deduped_ids)
-            input_dict = {
-                "prompt": org_prompt,
-                "multi_modal_data": {},
-                "mm_processor_kwargs": {},
-            }
-            if image_data:
-                input_dict["multi_modal_data"]["image"] = image_data
-            if video_data:
-                input_dict["multi_modal_data"]["video"] = video_data
+        try:
+            if self.is_vlm_model and (image_data or video_data):
+                deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+                org_prompt = self.llm.tokenizer.decode(deduped_ids)
+                input_dict = {
+                    "prompt": org_prompt,
+                    "multi_modal_data": {},
+                    "mm_processor_kwargs": {},
+                }
+                if image_data:
+                    input_dict["multi_modal_data"]["image"] = image_data
+                if video_data:
+                    input_dict["multi_modal_data"]["video"] = video_data
 
-            outputs = await self.llm.generate_async(
-                inputs=input_dict,
-                sampling_params=trt_llm_sampling_params,
-            )
-        else:
-            outputs = await self.llm.generate_async(
-                inputs=prompt_ids,
-                sampling_params=trt_llm_sampling_params,
-            )
+                outputs = await self.llm.generate_async(
+                    inputs=input_dict,
+                    sampling_params=trt_llm_sampling_params,
+                )
+            else:
+                outputs = await self.llm.generate_async(
+                    inputs=prompt_ids,
+                    sampling_params=trt_llm_sampling_params,
+                )
+        except RuntimeError as e:
+            if "AsyncLLM is paused" in str(e):
+                await asyncio.sleep(0.1)
+                return TokenOutput(
+                    token_ids=[],
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
+            raise
         token_ids = outputs.outputs[0].token_ids
+        if outputs.outputs[0].finish_reason == "cancelled":
+            return TokenOutput(
+                token_ids=token_ids,
+                stop_reason="aborted",
+                extra_fields={"global_steps": self.global_steps},
+            )
+
         log_probs = None
         if outputs.outputs[0].logprobs is not None:
             # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position
@@ -279,10 +304,16 @@ class TRTLLMHttpServer:
         self.global_steps = global_steps
 
     async def abort_all_requests(self):
-        raise NotImplementedError
+        """Abort all in-flight requests and block new ones. Call resume_generation() to unblock."""
+        await self.llm.pause_generation()
 
     async def resume_generation(self):
-        raise NotImplementedError
+        """Unblock new generation requests after abort_all_requests()."""
+        await self.llm.resume_generation()
+
+    async def clear_kv_cache(self):
+        """Invalidate prefix cache entries after weight update."""
+        await self.llm.collective_rpc("reset_prefix_cache")
 
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:
@@ -330,6 +361,14 @@ class TRTLLMReplica(RolloutReplica):
     def rollout_worker_use_gpu(self) -> bool:
         return False
 
+    def _standalone_use_gpu(self) -> bool:
+        # CheckpointEngineWorkers need CUDA access to create IPC handles for TRT-LLM engine workers.
+        return True
+
+    def _standalone_max_colocate_count(self) -> int:
+        # one for TRT-LLM engine worker (0.5 GPU), one for CheckpointEngineWorker (0.5 GPU).
+        return 2
+
     def get_pgs_and_bundle_indices(self) -> tuple[list[PlacementGroup], list[list[int]]]:
         """Get placement groups and bundle indices for the replica."""
 
@@ -345,11 +384,17 @@ class TRTLLMReplica(RolloutReplica):
         # For RayResourcePool, the replica is assigned to entire resource pool.
         # We need to find start pg index and local bundle index based on replica rank.
         else:
-            local_bundle_index = self.world_size * self.replica_rank
+            # In standalone mode, init_standalone() creates a per-replica RayResourcePool
+            # that contains only world_size bundles for this replica. Start at bundle 0.
+            # In colocated/hybrid mode, the shared pool spans all replicas, so offset by rank.
+            if self.rollout_mode == RolloutMode.STANDALONE:
+                local_bundle_index = 0
+            else:
+                local_bundle_index = self.world_size * self.replica_rank
 
         while local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
-            start_pg_index += 1
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
+            start_pg_index += 1
         assert (
             start_pg_index < len(self.resource_pool.pgs)
             and local_bundle_index < self.resource_pool.pgs[start_pg_index].bundle_count
@@ -386,7 +431,6 @@ class TRTLLMReplica(RolloutReplica):
         return pgs, bundle_indices
 
     async def launch_servers(self):
-        assert self.nnodes == 1, "TRTLLMReplica doesn't support multiple nodes for single replica yet."
         assert self.resource_pool.pgs is not None, "placement groups are not initialized"
 
         pgs, bundle_indices = self.get_pgs_and_bundle_indices()
