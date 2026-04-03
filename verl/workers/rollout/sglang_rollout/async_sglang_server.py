@@ -26,12 +26,24 @@ import torch
 from packaging import version
 from ray.actor import ActorHandle
 from sglang.srt.entrypoints.http_server import (
-    ServerArgs,
-    _GlobalState,
-    _launch_subprocesses,
-    app,
-    set_global_state,
-)
+        ServerArgs,
+        _GlobalState,
+        app,
+        set_global_state,
+    )
+try:
+    # For SGLang main branch or version newer than 0.5.9
+    # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
+    from sglang.srt.entrypoints.http_server import (
+        Engine,
+    )
+    SGLANG_NEW_VERSION = True
+except ImportError:
+    # For SGLang v0.5.9 and earlier versions
+    from sglang.srt.entrypoints.http_server import (
+        _launch_subprocesses,
+    )
+    SGLANG_NEW_VERSION = False
 from sglang.srt.managers.io_struct import (
     ContinueGenerationReqInput,
     GenerateReqInput,
@@ -263,17 +275,26 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        if version.parse(sglang.__version__) >= version.parse("0.5.7"):
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
+        # For SGLang main branch or version newer than 0.5.9
+        if SGLANG_NEW_VERSION:
+            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
                 server_args=server_args,
                 init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
                 run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
                 run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
             )
         else:
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
-                server_args=server_args
-            )
+            if version.parse(sglang.__version__) >= version.parse("0.5.7"):
+                self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
+                    server_args=server_args,
+                    init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
+                    run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
+                    run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
+                )
+            else:
+                self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
+                    server_args=server_args
+                )
 
         # In multi-node cases, non-zero rank nodes should not launch http server.
         if self.node_rank > 0:
