@@ -28,7 +28,7 @@ from verl.utils.device import (
     get_device_name,
 )
 from verl.utils.distributed import initialize_global_process_group_ray
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig
+from verl.utils.profiler import PROFILER_TOOL_NAMES, DistProfiler, DistProfilerExtension, ProfilerConfig
 
 
 def put_tensor_cpu(data_dict):
@@ -90,7 +90,7 @@ class EnvWorker(Worker, DistProfilerExtension):
         # Initialize profiler
         omega_profiler_config = config.train.get("profiler", {})
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+        if omega_profiler_config.get("tool", None) in PROFILER_TOOL_NAMES:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
