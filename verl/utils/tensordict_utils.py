@@ -880,4 +880,16 @@ def maybe_fix_3d_position_ids(data: TensorDict):
     # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
     # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
     if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+        batch_num, _, seq_len = data["position_ids"].shape
+        if isinstance(seq_len, int):
+            # change mrope position_ids shape from (batch_num, jx, seq_len) to (batch_num, 4, jx)
+            offsets = data["position_ids"].offsets()
+            values = data["position_ids"].values()
+            if values.shape[0] != 4:
+                # when same seq_len for all batch_num, there is wrong offsets and values
+                # offsets.shape: [wrong](0, 4, 8, ...)           -> [correct](0, seq_len, 2 * seq_len, ...)
+                # values.shape : [wrong](4 * batch_num, seq_len) -> [correct](4, batch_num * seq_len)
+                offsets = torch.arange(0, (batch_num + 1) * seq_len, seq_len, dtype=offsets.dtype)
+                values = values.contiguous().view(batch_num, 4, -1).transpose(0, 1).flatten(1)
+
+            data["position_ids"] = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets, jagged_dim=2)
