@@ -256,7 +256,6 @@ class ReplayBuffer:
                             tags.append(tag)
                         else:
                             logger.debug(f"Unknown status {tag['status']} for key {key}")
-                logger.info("partitions", self.partitions)
                 if not should_wait:
                     return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
 
@@ -271,6 +270,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
         validate = batch["validate"] if "validate" in batch else False
+        batch.pop("validate", None)
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -317,11 +317,11 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
-        uid, partition_id = prompt["uid"], "train" if not prompt.get("validate", False) else "val"
+        uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
             config = self.config.actor_rollout_ref.rollout
-            n = config.n if not prompt.get("validate", False) else config.val_kwargs.n
+            n = config.n if not trajectory["validate"] else config.val_kwargs.n
 
             tasks = []
             for i in range(n):
@@ -413,7 +413,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             keys=keys,
             fields=list_of_dict_to_tensordict(fields),
             tags=tags,
-            partition_id="train" if not kwargs.get("validate", False) else "val",
+            partition_id="train" if not validate else "val",
         )
 
 
