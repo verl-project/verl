@@ -83,6 +83,8 @@ spec:
             name: nvidia
           - mountPath: /usr/local/gib
             name: gib
+          - mountPath: /run/wpi/sockets
+            name: wpi-sockets
         volumes:
         - name: ray-tmp
           emptyDir: {}
@@ -95,6 +97,10 @@ spec:
         - name: gib
           hostPath:
             path: /home/kubernetes/bin/gib
+        - name: wpi-sockets
+          hostPath:
+            path: /run/wpi/sockets
+            type: DirectoryOrCreate
       metadata:
         annotations:
           networking.gke.io/default-interface: eth0

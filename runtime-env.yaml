@@ -15,7 +15,12 @@ env_vars:
   NCCL_IB_FIFO_TC: "84"
   NCCL_TUNER_CONFIG_PATH: "/usr/local/gib/configs/tuner_config_a3u.txtpb"
   GLOO_SOCKET_IFNAME: "eth0"
+  USE_WPI: "1"
+  WPI_BUFFER_ID: "verl-weight-buffer"
+  WPI_GRPC_SERVER: "unix:///run/wpi/sockets/wpi-grpc.sock"
 pip:
   packages:
     - torch
     - torchvision
+    - grpcio
+    - grpcio-tools

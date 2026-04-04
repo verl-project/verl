@@ -64,3 +64,11 @@ try:
     __all__ += ["MooncakeCheckpointEngine"]
 except ImportError:
     MooncakeCheckpointEngine = None
+
+try:
+    from .wpi_checkpoint_engine import WPICheckpointEngine
+
+    __all__ += ["WPICheckpointEngine"]
+except ImportError:
+    WPICheckpointEngine = None
+
