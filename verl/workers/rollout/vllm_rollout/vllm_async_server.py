@@ -172,7 +172,7 @@ class vLLMHttpServer:
 
     def apply_nemo_gym_server_patch(self):
         # called by NemoGymAgentLoopManager to apply retokenization fix only for nemo-gym runs
-        from verl.experimental.nemo_gym.server_patch import patch_serving_chat_for_nemo_gym
+        from recipe.nemo_gym.server_patch import patch_serving_chat_for_nemo_gym
         patch_serving_chat_for_nemo_gym()
 
     @property
