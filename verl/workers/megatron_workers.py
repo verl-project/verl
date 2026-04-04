@@ -63,7 +63,7 @@ from verl.utils.megatron_utils import (
     per_tensor_generator,
     register_megatron_training_hooks,
 )
-from verl.utils.memory_utils import aggressive_empty_cache
+from verl.utils.memory_utils import aggressive_empty_cache, empty_cache_context
 from verl.utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
 from verl.utils.profiler import (
     DistProfiler,
@@ -815,7 +815,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             offload_megatron_optimizer(self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
-        aggressive_empty_cache(force_sync=True)
+        aggressive_empty_cache(force_sync=False)
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
@@ -837,17 +837,20 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             offload_megatron_optimizer(self.actor_optimizer)
 
         timing_generate = {}
-        if self._is_actor:  # For rollout only, we do not switch context.
-            loop = get_event_loop()
-            loop.run_until_complete(self.rollout_mode())
-            log_gpu_memory_usage("After switch to rollout mode", logger=logger)
+        # Use empty_cache_context to merge multiple aggressive_empty_cache calls
+        # inside rollout_mode() and at the end into a single effective cleanup.
+        with empty_cache_context(force_sync=True):
+            if self._is_actor:  # For rollout only, we do not switch context.
+                loop = get_event_loop()
+                loop.run_until_complete(self.rollout_mode())
+                log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
-        with simple_timer("generate_sequences", timing_generate):
-            output = self.rollout.generate_sequences(prompts=prompts)
+            with simple_timer("generate_sequences", timing_generate):
+                output = self.rollout.generate_sequences(prompts=prompts)
 
-        if self._is_actor:
-            loop.run_until_complete(self.trainer_mode())
-            log_gpu_memory_usage("After switch to trainer mode", logger=logger)
+            if self._is_actor:
+                loop.run_until_complete(self.trainer_mode())
+                log_gpu_memory_usage("After switch to trainer mode", logger=logger)
 
         # We calculate the average timing across all ranks
         # to make sure meta_info["timing"] is the same
@@ -864,8 +867,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         )
         output.meta_info["timing"] = timing_generate
         output = output.to("cpu")
-        # clear kv cache
-        aggressive_empty_cache(force_sync=True)
+        # NOTE: aggressive_empty_cache removed here — already handled by empty_cache_context above.
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -891,7 +893,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if self._ref_is_offload_param:
             offload_megatron_model_to_cpu(self.ref_module)
             log_gpu_memory_usage("After offload ref params and grad during compute_ref_log_prob", logger=logger)
-        aggressive_empty_cache(force_sync=True)
+        aggressive_empty_cache(force_sync=False)
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -938,7 +940,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
             log_gpu_memory_usage("After offload actor params and grad during compute_log_prob", logger=logger)
-        aggressive_empty_cache(force_sync=True)
+        aggressive_empty_cache(force_sync=False)
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
