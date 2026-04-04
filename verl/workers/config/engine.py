@@ -285,9 +285,11 @@ class VeOmniEngineConfig(EngineConfig):
             2. `sdpa`
             3. `flash_attention_2`
             4. `flash_attention_3`
-            5. `veomni_flash_attention_2_with_sp`
-            6. `veomni_flash_attention_3_with_sp`
-            7. `native-sparse`
+            5. `flash_attention_4`
+            6. `veomni_flash_attention_2_with_sp`
+            7. `veomni_flash_attention_3_with_sp`
+            8. `veomni_flash_attention_4_with_sp`
+            9. `native-sparse`
             default "flash_attention_2"
             Note: In case VeOmni add more attn_implementation, please check https://github.com/ByteDance-Seed/VeOmni/
         moe_implementation (str): MoE implementation to use.
@@ -310,6 +312,7 @@ class VeOmniEngineConfig(EngineConfig):
 
     """
 
+    _mutable_fields = EngineConfig._mutable_fields | {"attn_implementation"}
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     offload_policy: bool = False
     reshard_after_forward: bool = True
@@ -340,6 +343,21 @@ class VeOmniEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+        if self.ulysses_parallel_size > 1:
+            replacements = {
+                "flash_attention_2": "veomni_flash_attention_2_with_sp",
+                "flash_attention_3": "veomni_flash_attention_3_with_sp",
+                "flash_attention_4": "veomni_flash_attention_4_with_sp",
+            }
+            if self.attn_implementation in replacements:
+                new_impl = replacements[self.attn_implementation]
+                warnings.warn(
+                    f"Sequence Parallel is enabled (ulysses_parallel_size={self.ulysses_parallel_size}), "
+                    f"automatically replacing attn_implementation from '{self.attn_implementation}' "
+                    f"to '{new_impl}'",
+                    stacklevel=2,
+                )
+                self.attn_implementation = new_impl
 
 
 @dataclass

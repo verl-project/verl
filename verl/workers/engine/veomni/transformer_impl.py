@@ -14,8 +14,7 @@
 
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
@@ -26,6 +25,7 @@ from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
 from veomni.optim import build_lr_scheduler, build_optimizer
+from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -46,7 +46,6 @@ from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     MOE_PARAM_HANDERS,
-    VL_TYPE2INDEX,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
     offload_veomni_model_to_cpu,
@@ -499,95 +498,90 @@ class EngineTrainModeCtx(BaseEngineCtx):
         super().__exit__(exc_type, exc_value, traceback)
 
 
-@dataclass
-class OmniSequenceShardCollator:
-    """
-    Data collator to chunk inputs along the sequence length.
-    """
+def sp_slice(feature: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    sp_size = parallel_state.get_parallel_state().sp_size
+    sp_rank = parallel_state.get_parallel_state().sp_rank
+    seq_length = feature.size(dim)
+    sp_chunk_size = seq_length // sp_size
+    return feature.narrow(dim, sp_rank * sp_chunk_size, sp_chunk_size)
 
-    # features to slice sequence dimension
-    sp_slice_features: dict[str, int] = field(
-        default_factory=lambda: {
-            "input_ids": -1,
-            "labels": -1,
-            "pixel_values": 0,
-            "pixel_values_videos": 0,
-        },
-        metadata={"help": "features to slice sequence dimension."},
-    )
 
-    # features to padding sequence dimension
-    padding_features: dict[str, int] = field(
-        default_factory=lambda: {
-            "pixel_values": 0,
-        },
-        metadata={"help": "features to padding sequence dimension."},
-    )
+def sp_padding(
+    feature: torch.Tensor,
+    dim: int = -1,
+    pad_value: int = 0,
+    pad_scale: int = 1,
+) -> torch.Tensor:
+    seq_length = feature.size(dim)
 
-    # padding scale for padding features
-    padding_scale: dict[str, int] = field(
-        default_factory=lambda: {"pixel_values": 4}, metadata={"help": "padding scale for padding features."}
-    )
+    sp_size = parallel_state.get_parallel_state().sp_size
+    scale_sp_size = sp_size * pad_scale
+    sp_chunk_size = (seq_length + scale_sp_size - 1) // scale_sp_size
+    pad_size = sp_chunk_size * scale_sp_size - seq_length
+    if pad_size == 0:
+        return feature
 
-    def __post_init__(self):
-        self.sp_size = parallel_state.get_parallel_state().sp_size
-        self.sp_rank = parallel_state.get_parallel_state().sp_rank
-
-    def sp_slice(self, feature: torch.Tensor, dim: int = -1) -> dict[str, "torch.Tensor"]:
-        seq_length = feature.size(dim)
-        sp_chunk_size = (seq_length + self.sp_size - 1) // self.sp_size
-        return feature.narrow(dim, self.sp_rank * sp_chunk_size, sp_chunk_size)
-
-    def sp_padding(
-        self, tensor: "torch.Tensor", dim: int = -1, pad_value: int = 0, pad_scale: int = 1
-    ) -> "torch.Tensor":
-        """
-        Pads a tensor with pad_length to aligns tensor with sp size.
-        """
-        seq_length = tensor.size(dim)
-        scale_sp_size = self.sp_size * pad_scale
-
-        sp_chunk_size = (seq_length + scale_sp_size - 1) // scale_sp_size
-        pad_size = sp_chunk_size * scale_sp_size - seq_length
-        if pad_size == 0:
-            return tensor
-
-        pad_shape = list(tensor.shape)
-        pad_shape[dim] = pad_size
-        pad = torch.full(pad_shape, fill_value=pad_value, dtype=tensor.dtype, device=tensor.device)
-        return torch.cat((tensor, pad), dim=dim)
-
-    def __call__(self, batch: Sequence[dict[str, "torch.Tensor"]]) -> dict[str, "torch.Tensor"]:
-        for key in batch.keys():
-            if key in self.padding_features.keys():
-                batch[key] = self.sp_padding(
-                    batch[key],
-                    dim=self.sp_slice_features.get(key, -1),
-                    pad_value=self.padding_features[key],
-                    pad_scale=self.padding_scale.get(key, 1),
-                )
-
-        # sp slice
-        for key in batch.keys():
-            if key in self.sp_slice_features.keys():
-                batch[key] = self.sp_slice(batch[key], dim=self.sp_slice_features[key])
-
-        return batch
+    pad_shape = list(feature.shape)
+    pad_shape[dim] = pad_size
+    pad = torch.full(pad_shape, fill_value=pad_value, dtype=feature.dtype, device=feature.device)
+    return torch.cat((feature, pad), dim=dim)
 
 
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
-        # TODO: Cannot work properly for qwen_vl ulysses
+        """
+        Process model inputs according to VeOmni SequenceParallelCollator.
+
+        This method extends the parent class's prepare_model_inputs method, primarily used for input processing
+        in sequence parallel training scenarios:
+        1. Precompute parameters required for flash attention
+        2. Slice position_ids
+        3. Slice input_ids for VLM models
+        4. Pad and slice pixel_values
+
+        Args:
+            micro_batch (TensorDict): Micro batch data containing model inputs
+
+        Returns:
+            Tuple[Dict, Dict]: Processed model inputs and output arguments
+        """
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
-        input_ids_rmpad = model_inputs["input_ids"]
-        if self.module.config.model_type in VL_TYPE2INDEX.keys():
-            image_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["IMAGE_INPUT_INDEX"]
-            video_mask = input_ids_rmpad == VL_TYPE2INDEX[self.module.config.model_type]["VIDEO_INPUT_INDEX"]
+
+        is_vlm_model = hasattr(getattr(self.module, "module", self.module).config, "vision_config")
+        if is_vlm_model:
+            image_mask = model_inputs["input_ids"] == self.module.config.image_token_id
+            video_mask = model_inputs["input_ids"] == self.module.config.video_token_id
             model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
 
-            if parallel_state.get_parallel_state().sp_enabled:
-                omni_sequence_shard_collator = OmniSequenceShardCollator()
-                omni_sequence_shard_collator(model_inputs)
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
 
+        if use_remove_padding and parallel_state.get_parallel_state().sp_enabled:
+            # precompute flash attention kwargs
+            position_ids = model_inputs["position_ids"]
+            if position_ids.dim() == 3:
+                position_ids = position_ids[0]
+            (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = prepare_fa_kwargs_from_position_ids(
+                position_ids
+            )
+            model_inputs.update(
+                {
+                    "cu_seq_lens_q": cu_seq_lens_q,
+                    "cu_seq_lens_k": cu_seq_lens_k,
+                    "max_length_q": max_length_q,
+                    "max_length_k": max_length_k,
+                }
+            )
+
+            # position_ids has been padded but not slice, so we need to slice it here
+            model_inputs["position_ids"] = sp_slice(model_inputs["position_ids"], dim=-1)
+            if is_vlm_model:
+                # input_ids has been padded but not sliced
+                model_inputs["input_ids"] = sp_slice(model_inputs["input_ids"], dim=-1)
+
+            if "pixel_values" in model_inputs:
+                model_inputs["pixel_values"] = sp_padding(model_inputs["pixel_values"], dim=0, pad_scale=4)
+                model_inputs["pixel_values"] = sp_slice(model_inputs["pixel_values"], dim=0)
+
+            # TODO: support pad and slice pixel_value_videos
         return model_inputs, output_args

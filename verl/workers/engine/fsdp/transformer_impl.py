@@ -915,6 +915,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
 
             # pad and slice the inputs if sp > 1
+            # VeOmniEngine's position_ids will be sliced after precompute fa kwargs
             if self.use_ulysses_sp:
                 is_vlm_model = hasattr(getattr(self.module, "module", self.module).config, "vision_config")
                 if is_vlm_model:

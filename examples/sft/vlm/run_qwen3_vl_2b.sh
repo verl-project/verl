@@ -44,6 +44,18 @@ FSDP_ENGINE_CONFIG="\
     engine.strategy=${FSDP_STRATEGY} \
     engine.fsdp_size=${FSDP_SIZE}"
 
+VEOMNI_ENGINE_CONFIG="\
+    engine=${backend} \
+    optim=${backend} \
+    optim.lr=2e-5 \
+    optim.lr_warmup_steps_ratio=0.01 \
+    optim.weight_decay=0.1 \
+    optim.betas="[0.9,0.95]" \
+    optim.clip_grad=1.0 \
+    optim.lr_min=2e-6 \
+    optim.lr_scheduler_type=cosine \
+    engine.ulysses_parallel_size=${SP_SIZE} \
+    engine.fsdp_size=${FSDP_SIZE}"
 
 MEGATRON_ENGINE_CONFIG="\
     engine=${backend} \
@@ -66,11 +78,15 @@ MEGATRON_ENGINE_CONFIG="\
 if [ "$backend" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
     echo "Using fsdp engine"
-    exp_name=pokemon-qwen3-2b-${backend}-${FSDP_STRATEGY}-sp${SP_SIZE}-fsdp-1202a1
+    exp_name=pokemon-qwen3-vl-2b-${backend}-${FSDP_STRATEGY}-sp${SP_SIZE}-fsdp-1202a1
+elif [ "$backend" = "veomni" ]; then
+    ENGINE_CONFIG="$VEOMNI_ENGINE_CONFIG"
+    echo "Using veomni engine"
+    exp_name=pokemon-qwen3-vl-2b-${backend}-sp${SP_SIZE}-veomni-1202a1
 else
     ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
     echo "Using megatron engine"
-    exp_name=pokemon-qwen3-2b-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-vpp${VPP_SIZE}-cp${CP_SIZE}-megatron-1202a1
+    exp_name=pokemon-qwen3-vl-2b-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-vpp${VPP_SIZE}-cp${CP_SIZE}-megatron-1202a1
 fi
 
 CKPT_HOME=${CKPT_HOME:-$HOME/open_verl/sft/${project_name}/${exp_name}}
