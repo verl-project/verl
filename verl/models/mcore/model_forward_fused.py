@@ -80,6 +80,8 @@ def fused_forward_model_gen(vision_model: bool = False):
             unwrap_model(model).pre_process if not vision_model else False
         )  # vision model does not need pre_process, because we pack the input_ids to thd in the forward function
         post_process: bool = unwrap_model(model).post_process
+        fp8 = unwrap_model(model).config.fp8
+        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
 
         model_kwargs = {}
         if "pixel_values" in multi_modal_inputs:
@@ -92,10 +94,16 @@ def fused_forward_model_gen(vision_model: bool = False):
             model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
 
         batch_size, seq_len = attention_mask.shape[:2]
-        input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=pre_process)
+        input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(
+            input_ids, attention_mask, pre_process=pre_process, use_fp8_padding=use_fp8_padding
+        )
         input_ids_rmpad = input_ids_rmpad.contiguous()
-        labels_rmpad, _ = preprocess_packed_seqs(labels, attention_mask, pre_process=True)
-        labels_mask_rmpad, _ = preprocess_packed_seqs(labels_mask, attention_mask, pre_process=True)
+        labels_rmpad, _ = preprocess_packed_seqs(
+            labels, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+        )
+        labels_mask_rmpad, _ = preprocess_packed_seqs(
+            labels_mask, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+        )
         labels_rmpad = labels_rmpad.contiguous()
         labels_mask_rmpad = labels_mask_rmpad.contiguous()
 
