@@ -28,6 +28,7 @@ import zmq
 from torch.multiprocessing.reductions import reduce_tensor
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.tensor_utils import compute_weight_chunks
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -81,6 +82,7 @@ class BucketedWeightSender:
         zmq_handle: ZMQ IPC socket path (e.g., "ipc:///tmp/rl-colocate-zmq-<uuid>.sock")
         bucket_size_mb: Communication buffer size in MB
         use_shm: Use shared memory instead of CUDA IPC (for NPU compatibility)
+        enable_double_buffer: Enable double buffer optimization for weight transfer
     """
 
     def __init__(
@@ -88,11 +90,13 @@ class BucketedWeightSender:
         zmq_handle: str,
         bucket_size_mb: int = 512,
         use_shm: bool = False,
+        enable_double_buffer: bool = False,
     ):
         self.zmq_handle = zmq_handle
         self.bucket_size_mb = bucket_size_mb
         self.bucket_size = int(bucket_size_mb) << 20
         self.use_shm = use_shm
+        self.enable_double_buffer = enable_double_buffer
 
         self.zmq_context = zmq.Context.instance()
         self.socket = None
@@ -113,8 +117,11 @@ class BucketedWeightSender:
             self._init_buffer()
 
             # send bucket weights
-            offset = 0
+            start_offset, offset = 0, 0
             bucket_meta: dict[str, TensorMetadata] = {}
+            gidx = 0
+            # When double buffer is disabled, start_offset is always 0
+            # When enabled, start_offset alternates between 0 and bucket_size
             # dtype = PrecisionType.to_dtype(self.config.dtype)
             async for name, weight in ensure_async_iterator(weights):
                 # model parameters are in fp32 full precision
@@ -124,19 +131,57 @@ class BucketedWeightSender:
                 # transfer volume.
                 # weight = weight.to(dtype, non_blocking=True)
 
+                # Check if the weight needs to be sliced into chunks
+                # (e.g., large embedding layer that exceeds bucket_size)
+                if weight.nbytes > self.bucket_size:
+                    # Use shared utility to compute chunk info
+                    chunk_infos = compute_weight_chunks(name, weight, self.bucket_size)
+
+                    for info in chunk_infos:
+                        # Extract chunk along first dimension
+                        chunk = weight[info.start_idx : info.end_idx]
+                        chunk_size = chunk.nbytes
+
+                        # Fill bucket with chunk
+                        if offset + chunk_size - start_offset > self.bucket_size:
+                            get_torch_device().synchronize()
+                            self.socket.send_pyobj(
+                                {"bucket_meta": bucket_meta, "is_last": False, "start_offset": start_offset}
+                            )
+                            self.socket.recv()
+                            bucket_meta = {}
+                            offset = 0
+                            if self.enable_double_buffer:
+                                gidx += 1
+                                start_offset = (gidx % 2) * self.bucket_size
+                                offset = 0 + start_offset
+
+                        bucket_meta[f"{name}_chunk_{info.chunk_idx}"] = {
+                            "name": name,
+                            "shape": chunk.shape,
+                            "dtype": chunk.dtype,
+                            "offset": offset,
+                            "chunk_idx": info.chunk_idx,
+                            "total_chunks": info.total_chunks,
+                        }
+                        self.buffer[offset : offset + chunk_size].copy_(
+                            chunk.view(-1).view(torch.uint8), non_blocking=True
+                        )
+                        offset += chunk_size
+
+                    continue
                 # fill the tensor bucket
-                if offset + weight.nbytes > self.bucket_size:
+                if offset + weight.nbytes - start_offset > self.bucket_size:
                     get_torch_device().synchronize()
-                    self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+                    self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False, "start_offset": start_offset})
                     self.socket.recv()
                     bucket_meta = {}
                     offset = 0
+                    if self.enable_double_buffer:
+                        gidx += 1
+                        start_offset = (gidx % 2) * self.bucket_size
+                        offset = 0 + start_offset
 
-                # TODO: slice embedding layer weight into chunks
-                assert offset + weight.nbytes <= self.bucket_size, (
-                    f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-                    f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
-                )
                 bucket_meta[name] = {
                     "name": name,
                     "shape": weight.shape,
@@ -148,7 +193,7 @@ class BucketedWeightSender:
 
             # send the last bucket
             get_torch_device().synchronize()
-            self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
+            self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True, "start_offset": start_offset})
             self.socket.recv()
         finally:
             self._cleanup()
@@ -160,20 +205,22 @@ class BucketedWeightSender:
 
     def _init_buffer(self):
         """build communication buffer"""
+        self.buffer_size = self.bucket_size * 2 if self.enable_double_buffer else self.bucket_size
         buffer, shm = None, None
         if not self.use_shm:
-            buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
+            buffer = torch.empty(self.buffer_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
             handle = reduce_tensor(buffer)
-            self.socket.send_pyobj(handle)
+            comm_metadata = {"handle": handle, "bucket_size": self.bucket_size, "buffer_size": self.buffer_size}
+            self.socket.send_pyobj(comm_metadata)
         else:
             import uuid
 
             # Create unique name for shared memory
             shm_name = f"verl_weights_{uuid.uuid4().hex}"
-            shm = create_shared_memory(self.bucket_size, shm_name)
+            shm = create_shared_memory(self.buffer_size, shm_name)
             buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
 
-            comm_metadata = {"name": shm_name, "size": self.bucket_size}
+            comm_metadata = {"name": shm_name, "bucket_size": self.bucket_size, "buffer_size": self.buffer_size}
             self.socket.send_pyobj(comm_metadata)
 
         self.socket.recv()
@@ -208,6 +255,7 @@ class BucketedWeightReceiver:
         zmq_handle: ZMQ IPC socket path (must match sender)
         device: Target device for received tensors
         use_shm: Use shared memory instead of CUDA IPC
+        enable_double_buffer: Enable double buffer optimization for weight transfer
     """
 
     def __init__(
@@ -215,14 +263,17 @@ class BucketedWeightReceiver:
         zmq_handle: str,
         device: torch.device,
         use_shm: bool = False,
+        enable_double_buffer: bool = False,
     ):
         self.zmq_handle = zmq_handle
         self.device = device
         self.use_shm = use_shm
+        self.enable_double_buffer = enable_double_buffer
 
         self.zmq_context = zmq.Context.instance()
         self.socket = None
         self.buffer = None
+        self.buffer_size = None
         self.shm = None
 
     def receive_weights(self, on_bucket_received: callable):
@@ -236,28 +287,66 @@ class BucketedWeightReceiver:
             self._init_socket()
             self._init_buffer()
 
+            # Buffer to collect chunks for weights that were sliced
+            pending_chunks = {}  # name -> {chunk_idx: tensor, ...}
+
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
+                # When double buffer is disabled, we need to wait until the bucket
+                # is fully processed before sending ACK to avoid data race.
+                # When enabled, we can send ACK immediately since sender uses different buffer region.
+                if self.enable_double_buffer:
+                    self.socket.send(b"")
+
                 weights, tensor = [], None
+                start_offset = metadata["start_offset"]
+                bucket = self.buffer[start_offset : start_offset + self.bucket_size]
                 for name, meta in metadata["bucket_meta"].items():
-                    shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
+                    shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"] - start_offset
                     size = dtype.itemsize * shape.numel()
                     # NOTE: we need to clone the tensor to release CUDA IPC memory
                     # but for shared memory, it's not necessary and if we do clone,
                     # it will cause extra memory copy overhead and slow down the process.
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                    tensor = bucket[offset : offset + size].view(dtype=dtype).view(shape)
                     if not self.use_shm:
                         tensor = tensor.clone()
                     else:
                         tensor = tensor.to(self.device)
-                    weights.append((name, tensor))
+
+                    # Check if this is a chunk of a sliced weight
+                    if "chunk_idx" in meta and "total_chunks" in meta:
+                        # This is a chunk, store it for later merging
+                        original_name = meta["name"]
+                        chunk_idx = meta["chunk_idx"]
+                        if original_name not in pending_chunks:
+                            pending_chunks[original_name] = {}
+                        pending_chunks[original_name][chunk_idx] = tensor
+
+                        # Check if we have all chunks for this weight
+                        if len(pending_chunks[original_name]) == meta["total_chunks"]:
+                            # Merge all chunks back into one tensor
+                            chunks_dict = pending_chunks[original_name]
+                            sorted_chunks = [chunks_dict[i] for i in range(meta["total_chunks"])]
+                            merged_tensor = torch.cat(sorted_chunks, dim=0)
+                            weights.append((original_name, merged_tensor))
+                            del pending_chunks[original_name]
+                    else:
+                        weights.append((name, tensor))
+
                 get_torch_device().synchronize()
-                self.socket.send(b"")
+                if not self.enable_double_buffer:
+                    self.socket.send(b"")
                 on_bucket_received(weights)
-                del weights, tensor
+                del weights, tensor, bucket
                 if metadata["is_last"]:
                     break
+            # Check if there are any remaining chunks that weren't processed
+            if pending_chunks:
+                raise RuntimeError(
+                    f"Received chunks for weights {list(pending_chunks.keys())} "
+                    f"but did not receive all chunks for them."
+                )
         finally:
             self._cleanup()
 
@@ -269,16 +358,23 @@ class BucketedWeightReceiver:
     def _init_buffer(self):
         """Receive and rebuild communication buffer from sender."""
         comm_metadata = self.socket.recv_pyobj()
-        buffer, shm = None, None
+        bucket_size, buffer_size, buffer, shm = None, None, None, None
         if not self.use_shm:
-            handle = comm_metadata
+            handle = comm_metadata["handle"]
+            bucket_size = comm_metadata["bucket_size"]
+            buffer_size = comm_metadata["buffer_size"]
             buffer = rebuild_ipc(handle, self.device.index)
             assert buffer.dtype == torch.uint8
         else:
             shm_name = comm_metadata["name"]
-            shm_size = comm_metadata["size"]
-            buffer, shm = rebuild_shared_memory(shm_name, shm_size, dtype=torch.uint8)
+            bucket_size = comm_metadata["bucket_size"]
+            buffer_size = comm_metadata["buffer_size"]
+            buffer, shm = rebuild_shared_memory(shm_name, buffer_size, dtype=torch.uint8)
+        assert buffer.nbytes == buffer_size
+
         self.socket.send(b"")
+        self.bucket_size = bucket_size
+        self.buffer_size = buffer_size
         self.buffer = buffer
         self.shm = shm
 

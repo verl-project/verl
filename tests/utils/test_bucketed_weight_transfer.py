@@ -61,7 +61,7 @@ def _generate_weights(weight_specs, seed):
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------
-def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
+def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, enable_double_buffer=False):
     """Sender process: generate weights, move to device, send."""
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 
@@ -70,12 +70,17 @@ def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
         zmq_handle=zmq_handle,
         bucket_size_mb=bucket_size_mb,
         use_shm=use_shm,
+        enable_double_buffer=enable_double_buffer,
     )
     asyncio.run(sender.async_send_weights(iter(weights)))
 
 
-def _receiver_fn(zmq_handle, use_shm, result_queue):
-    """Receiver process: receive weights, send back (name, dtype, shape, checksum)."""
+def _receiver_fn(zmq_handle, use_shm, result_queue, enable_double_buffer=False):
+    """Receiver process: receive weights, send back via shared memory."""
+    from multiprocessing import shared_memory
+
+    import numpy as np
+
     from verl.utils.device import get_device_name
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
@@ -84,19 +89,36 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
         zmq_handle=zmq_handle,
         device=device,
         use_shm=use_shm,
+        enable_double_buffer=enable_double_buffer,
     )
     received = []
     receiver.receive_weights(on_bucket_received=lambda w: received.extend(w))
-    # Only send lightweight metadata + checksum back through the queue
-    summaries = [(name, t.dtype, tuple(t.shape), t.float().sum().item()) for name, t in received]
-    result_queue.put(summaries)
+
+    # Put each tensor into shared memory to avoid Queue serialization issues
+    shm_infos = []
+    for name, t in received:
+        t_cpu = t.cpu().contiguous()
+        # Create shared memory for this tensor
+        shm = shared_memory.SharedMemory(create=True, size=t_cpu.nbytes)
+        # Copy tensor data to shared memory (use uint8 view to handle all dtypes including bfloat16)
+        shm_buf = np.ndarray((t_cpu.nbytes,), dtype=np.uint8, buffer=shm.buf)
+        shm_buf[:] = t_cpu.view(torch.uint8).flatten().numpy()
+        # Send metadata: name, shm_name, shape, dtype_str
+        shm_infos.append((name, shm.name, tuple(t_cpu.shape), str(t_cpu.dtype)))
+        shm.close()  # Close but don't unlink - main process needs it
+
+    result_queue.put(shm_infos)
 
 
 # ---------------------------------------------------------------------------
 # Test helper
 # ---------------------------------------------------------------------------
-def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
+def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm, enable_double_buffer=False):
     """Spawn sender + receiver processes, then validate received tensors."""
+    from multiprocessing import shared_memory
+
+    import numpy as np
+
     zmq_handle = _unique_zmq_handle()
     seed = 42
     ctx = mp.get_context("spawn")
@@ -104,11 +126,11 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 
     sender_p = ctx.Process(
         target=_sender_fn,
-        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm),
+        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, enable_double_buffer),
     )
     receiver_p = ctx.Process(
         target=_receiver_fn,
-        args=(zmq_handle, use_shm, result_queue),
+        args=(zmq_handle, use_shm, result_queue, enable_double_buffer),
     )
 
     # Start sender first (it binds), then receiver (it connects)
@@ -121,25 +143,43 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
     assert sender_p.exitcode == 0, f"Sender process failed with exit code {sender_p.exitcode}"
     assert receiver_p.exitcode == 0, f"Receiver process failed with exit code {receiver_p.exitcode}"
 
-    summaries = result_queue.get(timeout=5)
+    shm_infos = result_queue.get(timeout=5)
 
-    # Regenerate expected weights on device with the same seed
-    expected = _generate_weights(weight_specs, seed)
+    # Reconstruct tensors from shared memory
+    received = []
+    for name, shm_name, shape, dtype_str in shm_infos:
+        # dtype_str is like "torch.float32", extract the dtype name
+        dtype_name = dtype_str.split(".")[-1]
+        dtype = getattr(torch, dtype_name)
+        # Calculate size from shape and dtype
+        numel = 1
+        for s in shape:
+            numel *= s
+        size = numel * torch.tensor([], dtype=dtype).element_size()
 
-    assert len(summaries) == len(expected), f"Expected {len(expected)} weights, got {len(summaries)}"
+        shm = shared_memory.SharedMemory(name=shm_name)
+        np_array = np.ndarray((size,), dtype=np.uint8, buffer=shm.buf)
+        t = torch.frombuffer(np_array, dtype=dtype).reshape(shape).clone()
+        received.append((name, t))
+        shm.close()
+        shm.unlink()  # Now we can unlink
 
-    for (exp_name, exp_tensor), (recv_name, recv_dtype, recv_shape, recv_cksum) in zip(
-        expected, summaries, strict=False
-    ):
+    # Regenerate expected weights on device with the same seed, then move to CPU for comparison
+    expected = [(name, t.cpu()) for name, t in _generate_weights(weight_specs, seed)]
+
+    assert len(received) == len(expected), f"Expected {len(expected)} weights, got {len(received)}"
+
+    for (exp_name, exp_tensor), (recv_name, recv_tensor) in zip(expected, received, strict=False):
         assert exp_name == recv_name, f"Name mismatch: expected {exp_name}, got {recv_name}"
-        assert tuple(exp_tensor.shape) == recv_shape, (
-            f"Shape mismatch for {exp_name}: expected {tuple(exp_tensor.shape)}, got {recv_shape}"
+        assert exp_tensor.shape == recv_tensor.shape, (
+            f"Shape mismatch for {exp_name}: expected {exp_tensor.shape}, got {recv_tensor.shape}"
         )
-        assert exp_tensor.dtype == recv_dtype, (
-            f"Dtype mismatch for {exp_name}: expected {exp_tensor.dtype}, got {recv_dtype}"
+        assert exp_tensor.dtype == recv_tensor.dtype, (
+            f"Dtype mismatch for {exp_name}: expected {exp_tensor.dtype}, got {recv_tensor.dtype}"
         )
-        exp_sum = exp_tensor.float().sum().item()
-        assert exp_sum == recv_cksum, f"Data mismatch for {exp_name}"
+        assert torch.allclose(exp_tensor, recv_tensor, equal_nan=True), (
+            f"Data mismatch for {exp_name}: tensors are not equal"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +216,51 @@ class TestBucketedWeightTransferSHM:
 
     def test_empty_weights(self):
         _transfer_and_validate([], bucket_size_mb=1, use_shm=True)
+
+    def test_large_tensor_chunked_single_weight(self):
+        """Test a single tensor larger than bucket_size gets chunked correctly."""
+        # 1 MB bucket; create a tensor that's ~2 MB (needs 2 chunks)
+        # float32 = 4 bytes, so 2MB / 4 = 524288 elements
+        numel = (2 << 20) // 4
+        specs = [("large_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
+    def test_large_tensor_chunked_2d(self):
+        """Test a 2D tensor larger than bucket_size gets chunked correctly."""
+        # 1 MB bucket; create a 2D tensor that's ~2.5 MB
+        # shape (1024, 640) with float32 = 1024 * 640 * 4 = 2.5 MB
+        specs = [("large_2d_weight", (1024, 640), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
+    def test_large_tensor_chunked_multiple_buckets(self):
+        """Test a tensor larger than bucket_size that spans multiple buckets."""
+        # 1 MB bucket; create a tensor that's ~3.5 MB (needs 4 chunks)
+        # float32 = 4 bytes, so 3.5MB / 4 = 917504 elements
+        numel = (int(3.5 * (1 << 20))) // 4
+        specs = [("huge_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
+    def test_mixed_small_and_chunked_weights(self):
+        """Test a mix of normal weights and chunked large weights."""
+        # 1 MB bucket
+        specs = [
+            ("small.weight", (64, 64), torch.float32),  # ~16 KB
+            ("large.weight", (1024, 512), torch.float32),  # ~2 MB (chunked)
+            ("another_small.bias", (128,), torch.float32),  # ~512 bytes
+            ("huge.weight", (2048, 512), torch.float32),  # ~4 MB (chunked)
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+
+    def test_chunked_with_different_dtypes(self):
+        """Test chunked weights with different dtypes."""
+        # 1 MB bucket
+        specs = [
+            # bf16: ~2 MB (chunked), 2 bytes per element
+            ("large_bf16", (1024, 1024), torch.bfloat16),
+            # float32: ~2 MB (chunked), 4 bytes per element
+            ("large_fp32", (1024, 512), torch.float32),
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
 
 
 # ---------------------------------------------------------------------------
@@ -217,3 +302,117 @@ class TestBucketedWeightTransferIPC:
         numel = (1 << 20) // 4
         specs = [("exact_fit", (numel,), torch.float32)]
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_tensor_chunked_single_weight(self):
+        """Test a single tensor larger than bucket_size gets chunked correctly."""
+        # 1 MB bucket; create a tensor that's ~2 MB (needs 2 chunks)
+        # float32 = 4 bytes, so 2MB / 4 = 524288 elements
+        numel = (2 << 20) // 4
+        specs = [("large_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_tensor_chunked_2d(self):
+        """Test a 2D tensor larger than bucket_size gets chunked correctly."""
+        # 1 MB bucket; create a 2D tensor that's ~2.5 MB
+        # shape (1024, 640) with float32 = 1024 * 640 * 4 = 2.5 MB
+        specs = [("large_2d_weight", (1024, 640), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_tensor_chunked_multiple_buckets(self):
+        """Test a tensor larger than bucket_size that spans multiple buckets."""
+        # 1 MB bucket; create a tensor that's ~3.5 MB (needs 4 chunks)
+        # float32 = 4 bytes, so 3.5MB / 4 = 917504 elements
+        numel = (int(3.5 * (1 << 20))) // 4
+        specs = [("huge_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_mixed_small_and_chunked_weights(self):
+        """Test a mix of normal weights and chunked large weights."""
+        # 1 MB bucket
+        specs = [
+            ("small.weight", (64, 64), torch.float32),  # ~16 KB
+            ("large.weight", (1024, 512), torch.float32),  # ~2 MB (chunked)
+            ("another_small.bias", (128,), torch.float32),  # ~512 bytes
+            ("huge.weight", (2048, 512), torch.float32),  # ~4 MB (chunked)
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_chunked_with_different_dtypes(self):
+        """Test chunked weights with different dtypes."""
+        # 1 MB bucket
+        specs = [
+            # bf16: ~2 MB (chunked), 2 bytes per element
+            ("large_bf16", (1024, 1024), torch.bfloat16),
+            # float32: ~2 MB (chunked), 4 bytes per element
+            ("large_fp32", (1024, 512), torch.float32),
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+
+# ---------------------------------------------------------------------------
+# Double buffer tests - Shared memory
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not (HAS_ACCELERATOR and not HAS_CUDA), reason="Requires shm (only tested on non-CUDA)")
+class TestBucketedWeightTransferSHMDoubleBuffer:
+    """Test BucketedWeightSender/Receiver with double buffer enabled via shared memory path."""
+
+    def test_single_small_weight(self):
+        specs = [("layer.weight", (32, 16), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, enable_double_buffer=True)
+
+    def test_multiple_buckets(self):
+        # ~64 KB each x 20 = ~1.25 MB, bucket = 1 MB => spans 2 buckets
+        specs = [(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, enable_double_buffer=True)
+
+    def test_large_tensor_chunked(self):
+        """Test a single tensor larger than bucket_size gets chunked correctly with double buffer."""
+        # 1 MB bucket; create a tensor that's ~3.5 MB (needs 4 chunks)
+        numel = (int(3.5 * (1 << 20))) // 4
+        specs = [("huge_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, enable_double_buffer=True)
+
+    def test_mixed_small_and_chunked_weights(self):
+        """Test a mix of normal weights and chunked large weights with double buffer."""
+        # 1 MB bucket
+        specs = [
+            ("small.weight", (64, 64), torch.float32),  # ~16 KB
+            ("large.weight", (1024, 512), torch.float32),  # ~2 MB (chunked)
+            ("another_small.bias", (128,), torch.float32),  # ~512 bytes
+            ("huge.weight", (2048, 512), torch.float32),  # ~4 MB (chunked)
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, enable_double_buffer=True)
+
+
+# ---------------------------------------------------------------------------
+# Double buffer tests - CUDA IPC
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not is_support_ipc(), reason="Requires IPC support")
+class TestBucketedWeightTransferIPCDoubleBuffer:
+    """Test BucketedWeightSender/Receiver with double buffer enabled via CUDA IPC path."""
+
+    def test_single_small_weight(self):
+        specs = [("layer.weight", (32, 16), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, enable_double_buffer=True)
+
+    def test_multiple_buckets(self):
+        specs = [(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, enable_double_buffer=True)
+
+    def test_large_tensor_chunked(self):
+        """Test a single tensor larger than bucket_size gets chunked correctly with double buffer."""
+        # 1 MB bucket; create a tensor that's ~3.5 MB (needs 4 chunks)
+        numel = (int(3.5 * (1 << 20))) // 4
+        specs = [("huge_weight", (numel,), torch.float32)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, enable_double_buffer=True)
+
+    def test_mixed_small_and_chunked_weights(self):
+        """Test a mix of normal weights and chunked large weights with double buffer."""
+        # 1 MB bucket
+        specs = [
+            ("small.weight", (64, 64), torch.float32),  # ~16 KB
+            ("large.weight", (1024, 512), torch.float32),  # ~2 MB (chunked)
+            ("another_small.bias", (128,), torch.float32),  # ~512 bytes
+            ("huge.weight", (2048, 512), torch.float32),  # ~4 MB (chunked)
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, enable_double_buffer=True)
