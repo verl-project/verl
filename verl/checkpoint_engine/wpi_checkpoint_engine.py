@@ -150,7 +150,7 @@ class WPICheckpointEngine(CheckpointEngine):
             address = f"tcp://{self.ip}:{self.listen_port}"
 
         self.socket.bind(address)
-        logger.info(f"WPI master ZMQ PUB bound to {address}")
+        print(f"WPI master ZMQ PUB bound to {address}", flush=True)
 
     def _connect_zmq_client(self, metadata: WPIMasterMetadata):
         """Connect ZMQ SUB socket on rollout workers to receive tensor metadata."""
@@ -165,7 +165,7 @@ class WPICheckpointEngine(CheckpointEngine):
 
         self.socket.connect(address)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
-        logger.info(f"WPI rollout ZMQ SUB connected to {address}")
+        print(f"WPI rollout ZMQ SUB connected to {address}", flush=True)
 
     def prepare(self) -> dict[str, Any] | None:
         """Stage the VRAM buffer on the local WPI driver and map it into this process.
@@ -185,7 +185,14 @@ class WPICheckpointEngine(CheckpointEngine):
             Metadata dict for topology building (master returns ZMQ info + node IP,
             non-master returns node IP for target discovery).
         """
-        node_ip = ray.util.get_node_ip_address().strip("[]")
+        try:
+            import urllib.request
+            req = urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip', headers={'Metadata-Flavor': 'Google'})
+            node_ip = urllib.request.urlopen(req, timeout=1).read().decode().strip()
+            print(f"WPI: Derived Node IP from metadata server: {node_ip}", flush=True)
+        except Exception as e:
+            print(f"WPI Warning: Failed to get Node IP from metadata server: {e}. Falling back to Ray node IP.", flush=True)
+            node_ip = ray.util.get_node_ip_address().strip("[]")
         gpu_id = int(os.environ.get("LOCAL_RANK", os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]))
 
         if not self._staged:
@@ -204,7 +211,7 @@ class WPICheckpointEngine(CheckpointEngine):
         fd = self.wpi_client.receive_fd(self.buffer_id, gpu_id=gpu_id)
         device_ptr = self.wpi_client.import_cuda_memory(fd, self.bucket_size, device_id=gpu_id)
         self.vram_buffer = self.wpi_client.wrap_as_buffer(device_ptr, self.bucket_size)
-        logger.info(f"WPI: VRAM buffer mapped, shape={self.vram_buffer.shape}, device={self.vram_buffer.device}")
+        print(f"WPI: VRAM buffer mapped, shape={self.vram_buffer.shape}, device={self.vram_buffer.device}", flush=True)
 
         if not self.is_master:
             # Connect to notify socket for READY signals
@@ -296,7 +303,7 @@ class WPICheckpointEngine(CheckpointEngine):
         if rank > 0:
             self._connect_zmq_client(master_metadata)
 
-        logger.info(f"WPI: init_process_group rank={rank}, world_size={world_size}")
+        print(f"WPI: init_process_group rank={rank}, world_size={world_size}", flush=True)
 
     @torch.no_grad()
     async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
@@ -354,7 +361,7 @@ class WPICheckpointEngine(CheckpointEngine):
         metadata = {"bucket_meta": bucket_meta, "total_bytes": offset}
         self.socket.send_string(self.topic, flags=zmq.SNDMORE)
         self.socket.send_pyobj(metadata)
-        logger.info(f"WPI: Metadata broadcast, {len(bucket_meta)} params, {offset} bytes")
+        print(f"WPI: Metadata broadcast, {len(bucket_meta)} params, {offset} bytes", flush=True)
 
         # Trigger WPI driver to NCCL broadcast the buffer to all rollout nodes
         # This is a blocking gRPC call that completes after NCCL bcast + READY notification
@@ -368,9 +375,10 @@ class WPICheckpointEngine(CheckpointEngine):
 
         elapsed = time.time() - start_time
         bandwidth_gbps = (offset / (1024**3)) / elapsed if elapsed > 0 else 0
-        logger.info(
+        print(
             f"WPI: send_weights complete, {len(bucket_meta)} params, "
-            f"{offset / (1024**2):.1f} MB in {elapsed:.2f}s ({bandwidth_gbps:.2f} GB/s)"
+            f"{offset / (1024**2):.1f} MB in {elapsed:.2f}s ({bandwidth_gbps:.2f} GB/s)",
+            flush=True
         )
 
     @torch.no_grad()
@@ -401,7 +409,7 @@ class WPICheckpointEngine(CheckpointEngine):
         bucket_meta = metadata["bucket_meta"]
         total_bytes = metadata.get("total_bytes", 0)
 
-        logger.info(f"WPI: Received metadata, {len(bucket_meta)} params, {total_bytes} bytes")
+        print(f"WPI: Received metadata, {len(bucket_meta)} params, {total_bytes} bytes", flush=True)
 
         # Yield tensors from the VRAM buffer
         for name, meta in bucket_meta.items():
@@ -414,8 +422,9 @@ class WPICheckpointEngine(CheckpointEngine):
             yield name, tensor
 
         elapsed = time.time() - start_time
-        logger.info(
-            f"WPI: receive_weights complete, {len(bucket_meta)} params in {elapsed:.2f}s"
+        print(
+            f"WPI: receive_weights complete, {len(bucket_meta)} params in {elapsed:.2f}s",
+            flush=True
         )
 
     def finalize(self):
@@ -427,7 +436,7 @@ class WPICheckpointEngine(CheckpointEngine):
         # Don't free the VRAM buffer — it's persistent and reused
         # Don't unstage — the buffer stays allocated in the WPI driver
         torch.cuda.empty_cache()
-        logger.info("WPI: finalize() complete (buffer persists for reuse)")
+        print("WPI: finalize() complete (buffer persists for reuse)", flush=True)
 
     def shutdown(self):
         """Full shutdown — release the WPI VRAM buffer and clean up all resources.
@@ -448,4 +457,4 @@ class WPICheckpointEngine(CheckpointEngine):
             self.socket.close()
             self.socket = None
 
-        logger.info("WPI: shutdown() complete")
+        print("WPI: shutdown() complete", flush=True)
