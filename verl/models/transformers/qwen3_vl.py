@@ -217,9 +217,9 @@ def _get_input_embeds(
         image_embeds, dummy_deepstack_image_embeds = unpack_visual_output(
             model.visual(pixel_values, grid_thw=image_grid_thw)
         )
-        inputs_embeds += 0.0 * image_embeds.mean()
+        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
         for emb in dummy_deepstack_image_embeds or []:
-            inputs_embeds += 0.0 * emb.mean()
+            inputs_embeds = inputs_embeds + 0.0 * emb.mean()
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)
