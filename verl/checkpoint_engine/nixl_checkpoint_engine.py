@@ -256,6 +256,16 @@ class NIXLCheckpointEngine(CheckpointEngine):
         self.agent = NixlAgent()
         self.is_master = is_master
 
+    @property
+    def bucket_size(self) -> int:
+        """Return the bucket size in bytes."""
+        return self._bucket_size
+
+    @bucket_size.setter
+    def bucket_size(self, value: int):
+        """Set the bucket size in bytes."""
+        self._bucket_size = value
+
     def prepare(self) -> NixlAgentMetadata:
         """Prepare send and recv bucket.
 
@@ -385,8 +395,54 @@ class NIXLCheckpointEngine(CheckpointEngine):
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         for name, weight in weights:
+            weight_size = weight.nbytes
+            # Check if the weight needs to be sliced into chunks
+            if weight_size > self.bucket_size:
+                # Use base class method to slice weight into chunks
+                chunks = self._slice_weight_into_chunks(name, weight)
+
+                for chunk, chunk_meta in chunks:
+                    chunk_size = chunk.nbytes
+
+                    # Fill bucket with chunk
+                    if offset + chunk_size > self.bucket_size:
+                        torch.cuda.synchronize()
+
+                        # wait previous bucket to be received
+                        if readable_op is not None:
+                            await readable_op.wait_for_complete()
+
+                        # send bucket meta to next agent
+                        readable_op = ReadableOperation(
+                            self.agent,
+                            self.next_agent,
+                            send_descs,
+                            {"bucket_meta": bucket_meta, "is_last": False},
+                        )
+
+                        # swap send and recv buf
+                        send_buf, recv_buf = recv_buf, send_buf
+                        send_descs, recv_descs = recv_descs, send_descs
+                        bucket_meta = {}
+                        offset = 0
+
+                    # Update offset in meta (for key, we use indexed key)
+                    indexed_key = f"{name}_chunk_{chunk_meta['chunk_idx']}"
+                    bucket_meta[indexed_key] = {
+                        "name": chunk_meta["name"],
+                        "shape": chunk_meta["shape"],
+                        "dtype": chunk_meta["dtype"],
+                        "offset": offset,
+                        "chunk_idx": chunk_meta["chunk_idx"],
+                        "total_chunks": chunk_meta["total_chunks"],
+                    }
+                    send_buf[offset : offset + chunk_size].copy_(chunk.view(-1).view(torch.uint8), non_blocking=True)
+                    offset += chunk_size
+
+                continue
+
             # fill the tensor bucket
-            if offset + weight.nbytes > self.bucket_size:
+            if offset + weight_size > self.bucket_size:
                 torch.cuda.synchronize()
 
                 # wait previous bucket to be received
@@ -407,18 +463,14 @@ class NIXLCheckpointEngine(CheckpointEngine):
                 bucket_meta = {}
                 offset = 0
 
-            assert offset + weight.nbytes <= self.bucket_size, (
-                f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-            )
-
             bucket_meta[name] = {
                 "name": name,
                 "shape": weight.shape,
                 "dtype": weight.dtype,
                 "offset": offset,
             }
-            send_buf[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
-            offset += weight.nbytes
+            send_buf[offset : offset + weight_size].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
+            offset += weight_size
 
         # send last bucket meta to next agent
         torch.cuda.synchronize()
@@ -443,6 +495,9 @@ class NIXLCheckpointEngine(CheckpointEngine):
         send_descs, recv_descs = self.send_descs, self.recv_descs
         total_bytes, total_params = 0, 0
 
+        # Buffer to collect chunks for weights that were sliced
+        pending_chunks = {}  # name -> {chunk_idx: tensor, ...}
+
         # receive first bucket from previous agent
         start_time = time.time()
         read_op = ReadOperation(self.agent, self.prev_agent, recv_descs, self.bucket_size)
@@ -450,7 +505,6 @@ class NIXLCheckpointEngine(CheckpointEngine):
         read_op.begin_read()
         await read_op.wait_for_complete()
         total_bytes += self.bucket_size
-        total_params += len(metadata["bucket_meta"])
 
         # swap send and recv buf
         send_buf, recv_buf = recv_buf, send_buf
@@ -472,18 +526,15 @@ class NIXLCheckpointEngine(CheckpointEngine):
             read_op.begin_read()
 
             # 3. yield tensor from send_buf
-            for name, meta in metadata["bucket_meta"].items():
-                dtype, shape = meta["dtype"], meta["shape"]
-                size = dtype.itemsize * shape.numel()
-                tensor = send_buf[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
-                yield name, tensor
+            for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+                total_params += 1
+                yield tensor_tuple
 
             # 4. wait for next agent read complete and read from previous agent complete
             if readable_op is not None:
                 await readable_op.wait_for_complete()
             await read_op.wait_for_complete()
             total_bytes += self.bucket_size
-            total_params += len(next_metadata["bucket_meta"])
 
             # 5. swap send and recv buf
             torch.cuda.synchronize()  # sync non-blocking copy
@@ -502,15 +553,19 @@ class NIXLCheckpointEngine(CheckpointEngine):
             )
 
         # yield tensor from send_buf
-        for name, meta in metadata["bucket_meta"].items():
-            dtype, shape = meta["dtype"], meta["shape"]
-            size = dtype.itemsize * shape.numel()
-            tensor = send_buf[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
-            yield name, tensor
+        for tensor_tuple in self._yield_tensors_from_buffer(send_buf, metadata["bucket_meta"], pending_chunks):
+            total_params += 1
+            yield tensor_tuple
 
         # wait for next agent read complete
         if readable_op is not None:
             await readable_op.wait_for_complete()
+
+        # Check if there are any remaining chunks that weren't processed
+        if pending_chunks:
+            raise RuntimeError(
+                f"Received chunks for weights {list(pending_chunks.keys())} but did not receive all chunks for them."
+            )
         time_cost = time.time() - start_time
         bandwidth = total_bytes / time_cost / (1024 * 1024 * 1024)
         logger.info(
