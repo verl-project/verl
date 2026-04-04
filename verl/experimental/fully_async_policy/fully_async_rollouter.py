@@ -245,6 +245,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # every time param change, reset staleness_samples
             self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
             timing_raw = {}
+
+            # Fix bug: reset idle_start_time if it's stale from a previous step.
+            if self.idle_start_time < self.step_start_time:
+                self.idle_start_time = time.time()
+            
             rollout_active_time = self.idle_start_time - self.step_start_time
             rollout_version_time = time.time() - self.step_start_time
             idle_ratio = 1 - rollout_active_time / rollout_version_time
