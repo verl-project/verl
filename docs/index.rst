@@ -63,7 +63,6 @@ verl is fast with:
    examples/gsm8k_example
    examples/multi_modal_example
    examples/skypilot_examples
-   examples/nemo_gym
 
 .. toctree::
    :maxdepth: 1

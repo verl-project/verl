@@ -1,6 +1,3 @@
 [submodule "recipe"]
 	path = recipe
 	url = https://github.com/verl-project/verl-recipe.git
-[submodule "3rdparty/nemo_gym"]
-	path = 3rdparty/nemo_gym
-	url = https://github.com/NVIDIA-NeMo/Gym
