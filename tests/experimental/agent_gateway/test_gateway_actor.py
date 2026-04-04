@@ -607,10 +607,8 @@ async def test_gateway_actor_session_state_tracks_metadata_flags_and_timestamps(
     ray.get(actor.shutdown.remote())
 
     assert created_state["metadata"] == {"uid": "sample-7", "split": "train"}
-    assert created_state["completed_flag"] is False
-    assert created_state["aborted_flag"] is False
+    assert created_state["phase"] == "ACTIVE"
     assert created_state["created_at"] <= created_state["updated_at"]
-    assert completed_state["completed_flag"] is True
-    assert completed_state["aborted_flag"] is False
+    assert completed_state["phase"] == "COMPLETED"
     assert completed_state["updated_at"] >= created_state["updated_at"]
     assert len(trajectories) == 1

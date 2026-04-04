@@ -20,18 +20,17 @@ def _to_long_tensor(values: Sequence[int]) -> torch.Tensor:
 def _to_float_tensor(values: Sequence[float]) -> torch.Tensor:
     return torch.tensor(list(values), dtype=torch.float32)
 
-
+# TODO: check if this helper function is uncessarily complex.
 class TrajectoryAssembler:
-    def __init__(self, pad_token_id: int = 0, reward_key: str = "reward"):
+    def __init__(self, pad_token_id: int = 0):
         self.pad_token_id = pad_token_id
-        self.reward_key = reward_key
 
     def assemble(self, trajectories: Sequence[Trajectory]) -> DataProto:
         if not trajectories:
             raise ValueError("trajectories must be non-empty")
 
         normalized = [validate_trajectory(trajectory) for trajectory in trajectories]
-        normalized = normalize_trajectory_rewards(normalized, reward_key=self.reward_key)
+        normalized = normalize_trajectory_rewards(normalized)
 
         prompt_width = max(len(trajectory.prompt_ids) for trajectory in normalized)
         response_width = max(len(trajectory.response_ids) for trajectory in normalized)
@@ -111,7 +110,6 @@ class TrajectoryAssembler:
                 key
                 for trajectory in normalized
                 for key in trajectory.reward_info
-                if key != self.reward_key
             )
         )
 

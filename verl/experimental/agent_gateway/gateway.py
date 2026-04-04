@@ -125,6 +125,7 @@ def _is_request_context_prefix(
 ) -> bool:
     if session.request_tools != tools:
         return False
+    #TODO: need to improve the prefix check logic, e.g.,how to handle tool lists and multimodal data
     return _is_message_prefix(session.message_history, messages)
 
 
@@ -149,7 +150,6 @@ class _GatewayActor:
         self._server_port: int | None = None
         self._server_task: asyncio.Task | None = None
         self._server_base_url: str | None = None
-        self._terminal_session_phases: dict[str, SessionPhase] = {}
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -162,7 +162,10 @@ class _GatewayActor:
         async def _complete(session_id: str, request: Request):
             payload = await request.json()
             reward_info = payload.get("reward_info")
-            await self.complete_session(session_id=session_id, reward_info=reward_info)
+            try:
+                await self.complete_session(session_id=session_id, reward_info=reward_info)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
             return JSONResponse({"status": "ok"})
 
     def _require_started(self) -> None:
@@ -175,22 +178,9 @@ class _GatewayActor:
             raise KeyError(f"Unknown session_id: {session_id}")
         return session
 
-    def _get_terminal_phase(self, session_id: str) -> SessionPhase | None:
-        return self._terminal_session_phases.get(session_id)
-
-    def _raise_if_terminal(self, session_id: str) -> None:
-        terminal_phase = self._get_terminal_phase(session_id)
-        if terminal_phase is not None:
-            raise RuntimeError(f"Session {session_id} is {terminal_phase.value.lower()}")
-
     def _set_phase(self, session: GatewaySessionState, phase: SessionPhase) -> None:
         session.phase = phase
-        session.completed_flag = phase == SessionPhase.COMPLETED
-        session.aborted_flag = phase == SessionPhase.ABORTED
         self._touch_session(session)
-
-    def _mark_terminal(self, session_id: str, phase: SessionPhase) -> None:
-        self._terminal_session_phases[session_id] = phase
 
     def _touch_session(self, session: GatewaySessionState) -> None:
         session.updated_at = time.time()
@@ -241,13 +231,9 @@ class _GatewayActor:
         session.active_trajectory = TrajectoryBuffer(prompt_ids=prompt_ids)
 
     async def _handle_chat_completions(self, session_id: str, payload: dict[str, Any]) -> JSONResponse:
-        try:
-            session = self._get_session(session_id)
-        except KeyError as exc:
-            terminal_phase = self._get_terminal_phase(session_id)
-            if terminal_phase is not None:
-                raise HTTPException(status_code=409, detail=f"Session {session_id} is {terminal_phase.value.lower()}") from exc
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
 
         async with session.request_lock:
             if session.phase != SessionPhase.ACTIVE:
@@ -263,6 +249,7 @@ class _GatewayActor:
 
             messages = request_context["messages"]
             tools = request_context["tools"]
+            # TODO: check if tentative trajectories are necessary
             tentative_trajectories = list(session.trajectories)
             tentative_next_trajectory_id = session.next_trajectory_id
 
@@ -275,6 +262,7 @@ class _GatewayActor:
                 incremental_messages = messages[len(session.message_history) :]
                 if incremental_messages:
                     incremental_ids = list(
+                        #TODO: encoding behavior needs to be extended to handle multimodal data and tool calls
                         self._tokenizer.encode_messages(incremental_messages, add_generation_prompt=True)
                     )
                     tentative_active.response_ids.extend(incremental_ids)
@@ -293,8 +281,10 @@ class _GatewayActor:
                     prompt_ids=list(self._tokenizer.encode_messages(messages, add_generation_prompt=True))
                 )
 
+            # TODO: prompt_ids for generate requests are different from those in trajectories, shall we use different variable names?
             prompt_ids = tentative_active.prompt_ids + tentative_active.response_ids
             sampling_params = dict(payload)
+            # TODO: check if there are other fields that need to be popped
             sampling_params.pop("messages", None)
             sampling_params.pop("model", None)
             sampling_params.pop("tools", None)
@@ -312,6 +302,7 @@ class _GatewayActor:
             else:
                 tentative_active.response_logprobs.extend([0.0] * len(response_ids))
 
+            # TODO: decode behavior needs to be extended to handle tool calls (and multimodal data??)
             response_text = self._tokenizer.decode(response_ids)
             session.trajectories = tentative_trajectories
             session.next_trajectory_id = tentative_next_trajectory_id
@@ -334,6 +325,7 @@ class _GatewayActor:
                             "finish_reason": output.stop_reason or "stop",
                         }
                     ],
+                    # TODO: Is this needed?
                     "usage": {
                         "prompt_tokens": len(prompt_ids),
                         "completion_tokens": len(response_ids),
@@ -362,7 +354,7 @@ class _GatewayActor:
 
     async def create_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> SessionHandle:
         self._require_started()
-        if session_id in self._sessions or session_id in self._terminal_session_phases:
+        if session_id in self._sessions:
             raise RuntimeError(f"Session {session_id} already exists")
 
         handle = SessionHandle(
@@ -373,54 +365,35 @@ class _GatewayActor:
         return handle
 
     async def complete_session(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
-        self._raise_if_terminal(session_id)
         session = self._get_session(session_id)
         async with session.request_lock:
-            if session.phase == SessionPhase.COMPLETED:
-                if reward_info is not None:
-                    session.reward_info = dict(reward_info)
-                self._touch_session(session)
-                session.completed.set()
-                return
-            if session.phase != SessionPhase.ACTIVE:
+            # Accommodate retry attempts
+            if session.phase not in {SessionPhase.COMPLETED, SessionPhase.ACTIVE}:
                 raise RuntimeError(f"Session {session_id} is {session.phase.value.lower()}")
 
             if reward_info is not None:
                 session.reward_info = dict(reward_info)
+
             self._set_phase(session, SessionPhase.COMPLETED)
             session.completed.set()
 
     async def wait_for_completion(self, session_id: str, timeout: float | None = None) -> None:
-        terminal_phase = self._get_terminal_phase(session_id)
-        if terminal_phase == SessionPhase.FINALIZED:
+        session = self._sessions.get(session_id)
+        if session is None:
+            # Already finalized or aborted by a concurrent caller — nothing to wait for.
             return
-        if terminal_phase == SessionPhase.ABORTED:
-            raise RuntimeError(f"Session {session_id} is aborted")
-
-        session = self._get_session(session_id)
-        if session.phase in {SessionPhase.COMPLETED, SessionPhase.FINALIZED}:
-            return
-        if session.phase == SessionPhase.ABORTED:
-            raise RuntimeError(f"Session {session_id} is aborted")
-
-        if timeout is None:
-            await session.completed.wait()
-        else:
-            await asyncio.wait_for(session.completed.wait(), timeout=timeout)
-
-        terminal_phase = self._get_terminal_phase(session_id)
-        if terminal_phase == SessionPhase.FINALIZED:
-            return
-        if terminal_phase == SessionPhase.ABORTED:
-            raise RuntimeError(f"Session {session_id} is aborted")
-
         if session.phase == SessionPhase.COMPLETED:
+            # Fast path: agent already called /complete, no need to wait.
             return
+
+        await asyncio.wait_for(session.completed.wait(), timeout=timeout)
+
+        # Post-await: the session may have been aborted during the wait.
+        # The local reference is still valid even if the session was removed from _sessions.
         if session.phase == SessionPhase.ABORTED:
             raise RuntimeError(f"Session {session_id} is aborted")
 
     async def finalize_session(self, session_id: str) -> list[Trajectory]:
-        self._raise_if_terminal(session_id)
         session = self._get_session(session_id)
         async with session.request_lock:
             if session.phase == SessionPhase.ABORTED:
@@ -434,27 +407,21 @@ class _GatewayActor:
             session.completed.set()
             trajectories = [replace(trajectory, reward_info=dict(session.reward_info)) for trajectory in session.trajectories]
             self._sessions.pop(session_id, None)
-            self._mark_terminal(session_id, SessionPhase.FINALIZED)
             return trajectories
 
     async def abort_session(self, session_id: str) -> None:
-        terminal_phase = self._get_terminal_phase(session_id)
-        if terminal_phase == SessionPhase.ABORTED:
-            return
-        if terminal_phase == SessionPhase.FINALIZED:
-            raise RuntimeError(f"Session {session_id} is finalized")
-
-        session = self._get_session(session_id)
+        session = self._sessions.get(session_id)
+        if session is None:
+            return  # Already finalized or aborted — treat as idempotent.
         async with session.request_lock:
             if session.phase == SessionPhase.ABORTED:
-                return
+                return  # Concurrent abort — idempotent.
             if session.phase == SessionPhase.FINALIZED:
                 raise RuntimeError(f"Session {session_id} is finalized")
 
             self._set_phase(session, SessionPhase.ABORTED)
             session.completed.set()
             self._sessions.pop(session_id, None)
-            self._mark_terminal(session_id, SessionPhase.ABORTED)
 
     async def get_session_state(self, session_id: str) -> dict[str, Any]:
         session = self._get_session(session_id)
@@ -462,8 +429,6 @@ class _GatewayActor:
             "session_id": session.handle.session_id,
             "metadata": dict(session.metadata),
             "phase": session.phase.value,
-            "completed_flag": session.completed_flag,
-            "aborted_flag": session.aborted_flag,
             "created_at": session.created_at,
             "updated_at": session.updated_at,
             "num_trajectories": len(session.trajectories),

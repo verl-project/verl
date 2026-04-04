@@ -39,45 +39,6 @@ Not part of this first slice:
 2. Current design baseline: `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-design-v2.md`
 3. Current PR1 implementation plan: `/home/cxb/rl_framework/verl/cxb_dev/docs/plans/2026-04-01-agent-framework-gateway-implementation-plan-v2.md`
 
-Older 2026-03-30 docs are discussion history only, not the current architectural source of truth.
-
-## Frozen Decisions
-
-These are the current maintainer-aligned decisions unless explicitly reopened.
-
-### 1. Thin framework remains the baseline
-
-- `AgentFramework` stays thin.
-- Public trainer-facing contract is `generate_sequences(prompts: DataProto) -> DataProto`.
-- Do not reintroduce thick public framework hooks such as `run_session` or `compute_reward`.
-
-### 2. Gateway ownership stays on the serving side
-
-- Gateway lifecycle belongs to `LLMServerManager` / serving runtime.
-- `GatewayManager` is an internal routing helper, not a top-level framework owner.
-- Do not treat old framework-owned Gateway designs as the baseline.
-
-### 3. First-class ingress is session chat completions
-
-- PR1 path is `/v1/chat/completions`.
-- Token-request ingress is deferred to later work.
-
-### 4. `AgentLoopManager` migration is deferred
-
-- Existing native agent loops are not the first migration target.
-- The first usable path must not depend on moving `AgentLoopManager`.
-
-### 5. Same-session serialization is part of the contract
-
-- Cross-session concurrency remains asynchronous.
-- Same-session operations are serialized through one per-session boundary.
-- This boundary is not only for chat requests; lifecycle operations matter too.
-
-### 6. `/complete` remains optional
-
-- `POST /sessions/{id}/complete` is important for remote / hosted agents.
-- It is not mandatory for every local completion path.
-
 ## Current Code Facts
 
 This branch already contains a substantial experimental implementation.

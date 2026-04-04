@@ -18,10 +18,10 @@ def ray_runtime():
 
 
 @pytest.mark.asyncio
-async def test_llm_server_manager_owns_gateway_lifecycle_and_session_runtime(ray_runtime):
-    from verl.experimental.agent_loop.agent_loop import LLMServerManager
+async def test_async_llm_server_manager_owns_gateway_lifecycle_and_session_runtime(ray_runtime):
+    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
-    manager = LLMServerManager(
+    manager = AsyncLLMServerManager(
         config=None,
         servers=[],
         load_balancer_handle=None,
@@ -57,10 +57,10 @@ async def test_llm_server_manager_owns_gateway_lifecycle_and_session_runtime(ray
     assert trajectories[0].reward_info == {"score": 0.5, "label": "owner"}
 
 
-def test_llm_server_manager_gateway_count_zero_disables_session_runtime(ray_runtime):
-    from verl.experimental.agent_loop.agent_loop import LLMServerManager
+def test_async_llm_server_manager_gateway_count_zero_disables_session_runtime(ray_runtime):
+    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
-    manager = LLMServerManager(
+    manager = AsyncLLMServerManager(
         config=None,
         servers=[],
         load_balancer_handle=None,
@@ -74,10 +74,10 @@ def test_llm_server_manager_gateway_count_zero_disables_session_runtime(ray_runt
         manager.create_session("disabled")
 
 
-def test_llm_server_manager_keeps_gateway_ownership_local(ray_runtime):
-    from verl.experimental.agent_loop.agent_loop import LLMServerManager
+def test_async_llm_server_manager_keeps_gateway_ownership_local(ray_runtime):
+    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
-    manager = LLMServerManager(
+    manager = AsyncLLMServerManager(
         config=None,
         servers=[],
         load_balancer_handle=None,

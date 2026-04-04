@@ -21,16 +21,9 @@ def _resolve_trajectory_value(value: Any, index: int, count: int) -> Any:
     return value
 
 
-def _coerce_reward_score(value: Any) -> float:
-    if isinstance(value, np.generic):
-        value = value.item()
-    return float(value)
-
-
 def normalize_trajectory_rewards(
     trajectories: Sequence[Trajectory],
     reward_info: Mapping[str, Any] | None = None,
-    reward_key: str = "reward",
 ) -> list[Trajectory]:
     normalized: list[Trajectory] = []
     count = len(trajectories)
@@ -41,11 +34,10 @@ def normalize_trajectory_rewards(
             for key, value in reward_info.items():
                 merged_reward_info[key] = _resolve_trajectory_value(value, index=index, count=count)
 
-        reward_score = trajectory.reward_score
-        if reward_key in merged_reward_info and merged_reward_info[reward_key] is not None:
-            reward_score = _coerce_reward_score(merged_reward_info[reward_key])
+        if trajectory.reward_score is None:
+            raise ValueError(f"Trajectory {trajectory.uid} has no reward_score. reward_fn must return a score for every trajectory.")
 
-        normalized.append(replace(trajectory, reward_info=merged_reward_info, reward_score=reward_score))
+        normalized.append(replace(trajectory, reward_info=merged_reward_info))
 
     return normalized
 
@@ -59,7 +51,7 @@ def validate_trajectory(trajectory: Trajectory) -> Trajectory:
 
     if trajectory.num_turns < 0:
         raise ValueError("num_turns must be non-negative")
-
+    # TODO: check if the checks for routed_experts are consistent with existent practices
     if trajectory.routed_experts is not None:
         if isinstance(trajectory.routed_experts, np.ndarray):
             routed_experts = trajectory.routed_experts

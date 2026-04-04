@@ -35,8 +35,6 @@ class GatewaySessionState:
     reward_info: dict[str, Any] = field(default_factory=dict)
     completed: asyncio.Event = field(default_factory=asyncio.Event)
     phase: SessionPhase = SessionPhase.ACTIVE
-    completed_flag: bool = False
-    aborted_flag: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     request_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

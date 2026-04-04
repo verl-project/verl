@@ -42,9 +42,10 @@ def ray_runtime():
 @pytest.mark.asyncio
 async def test_openai_compatible_framework_runs_minimal_remote_style_path(ray_runtime):
     from verl.experimental.agent_framework.openai_compatible_framework import OpenAICompatibleAgentFramework
-    from verl.experimental.agent_loop.agent_loop import LLMServerManager
+    from verl.experimental.agent_framework.types import TrajectoryRewardContext
+    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
-    manager = LLMServerManager(
+    manager = AsyncLLMServerManager(
         config=None,
         servers=[],
         load_balancer_handle=None,
@@ -73,10 +74,14 @@ async def test_openai_compatible_framework_runs_minimal_remote_style_path(ray_ru
             )
             assert complete.status_code == 200
 
+    def reward_fn(contexts: list[TrajectoryRewardContext]) -> list[float]:
+        # Extract score from reward_info injected by the agent via /complete
+        return [float(ctx.trajectory.reward_info.get("score", 0.0)) for ctx in contexts]
+
     framework = OpenAICompatibleAgentFramework(
         session_runtime=session_runtime,
         agent_runner=mock_agent,
-        reward_key="score",
+        reward_fn=reward_fn,
     )
 
     prompts = DataProto(
@@ -105,9 +110,10 @@ async def test_openai_compatible_framework_runs_minimal_remote_style_path(ray_ru
 @pytest.mark.asyncio
 async def test_openai_compatible_framework_does_not_require_complete_signal(ray_runtime):
     from verl.experimental.agent_framework.openai_compatible_framework import OpenAICompatibleAgentFramework
-    from verl.experimental.agent_loop.agent_loop import LLMServerManager
+    from verl.experimental.agent_framework.types import TrajectoryRewardContext
+    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
-    manager = LLMServerManager(
+    manager = AsyncLLMServerManager(
         config=None,
         servers=[],
         load_balancer_handle=None,
@@ -128,10 +134,14 @@ async def test_openai_compatible_framework_does_not_require_complete_signal(ray_
             )
             assert response.status_code == 200
 
+    def reward_fn(contexts: list[TrajectoryRewardContext]) -> list[float]:
+        # Agent did not call /complete, so reward_info is empty; return a default score.
+        return [0.0 for _ in contexts]
+
     framework = OpenAICompatibleAgentFramework(
         session_runtime=session_runtime,
         agent_runner=mock_agent,
-        reward_key="score",
+        reward_fn=reward_fn,
     )
 
     prompts = DataProto(
@@ -150,4 +160,5 @@ async def test_openai_compatible_framework_does_not_require_complete_signal(ray_
 
     assert len(session_runtime.waited_sessions) == 0
     assert len(session_runtime.finalized_sessions) == 1
-    assert "rm_scores" not in output.batch.keys()
+    # reward_fn always runs, so rm_scores is always present
+    assert "rm_scores" in output.batch.keys()
