@@ -219,7 +219,10 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
             raw_inputs = inputs
             raw_outputs = in_outs["outputs"][index]
             if which_type == CODE_TYPE.call_based:
-                inputs = [json.loads(line) for line in inputs.split("\n")]
+                if "\n" in inputs:
+                    inputs = [json.loads(line) for line in inputs.split("\n")]
+                else:
+                    inputs = json.loads(inputs.strip())
                 in_outs["outputs"][index] = json.loads(in_outs["outputs"][index])
 
                 truncate_line_size = 300 // (raw_inputs.count("\n") + 1)
