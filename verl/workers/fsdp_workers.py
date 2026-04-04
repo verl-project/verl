@@ -343,6 +343,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         use_liger=False,
         role="actor",
         enable_activation_offload=False,
+        enable_checkpoint_input_offload=False,
         use_prefix_grouper=False,
         use_tiled_mlp=False,
         tiled_mlp_shards=4,
@@ -507,8 +508,30 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
+            if enable_checkpoint_input_offload:
+                if not enable_gradient_checkpointing:
+                    raise ValueError("enable_checkpoint_input_offload requires enable_gradient_checkpointing=True")
+                if enable_activation_offload:
+                    raise ValueError("enable_checkpoint_input_offload is not compatible with enable_activation_offload")
+
             if enable_gradient_checkpointing:
-                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                gc_kwargs = {"use_reentrant": False}
+                if enable_checkpoint_input_offload and use_prefix_grouper:
+                    raise ValueError(
+                        "enable_checkpoint_input_offload and use_prefix_grouper cannot be enabled simultaneously. "
+                        "PrefixGrouper uses a separate forward path that bypasses the offload context manager, "
+                        "causing enable_checkpoint_input_offload to be silently inactive. "
+                        "Please disable one of them: set model.enable_checkpoint_input_offload=false "
+                        "or set use_prefix_grouper=false."
+                    )
+                if enable_checkpoint_input_offload:
+                    from verl.utils.checkpoint_offload import CheckpointInputOffload
+
+                    self._checkpoint_offloader = CheckpointInputOffload(pin_memory=True)
+                    gc_kwargs["context_fn"] = self._checkpoint_offloader.get_context_fn()
+                else:
+                    self._checkpoint_offloader = None
+                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gc_kwargs)
 
         if self._is_lora:
             print("Applying LoRA to actor module")
@@ -931,6 +954,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 use_liger=self.config.model.get("use_liger", False),
                 role="actor",
                 enable_activation_offload=self.config.model.get("enable_activation_offload", False),
+                enable_checkpoint_input_offload=self.config.model.get("enable_checkpoint_input_offload", False),
                 use_prefix_grouper=self.config.actor.get("use_prefix_grouper", False),
                 use_tiled_mlp=use_tiled_mlp,
                 tiled_mlp_shards=tiled_mlp_shards,
@@ -953,6 +977,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = DataParallelPPOActor(
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )
+            # Pass checkpoint input offloader to actor
+            if hasattr(self, "_checkpoint_offloader") and self._checkpoint_offloader is not None:
+                self.actor._checkpoint_offloader = self._checkpoint_offloader
 
         if self._is_rollout:
             self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))

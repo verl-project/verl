@@ -257,6 +257,7 @@ class FSDPCriticModelCfg(BaseModelConfig):
 
     use_shm: bool = False
     enable_activation_offload: bool = False
+    enable_checkpoint_input_offload: bool = False
     use_remove_padding: bool = False
     enable_gradient_checkpointing: bool = True
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
