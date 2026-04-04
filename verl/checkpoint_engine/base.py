@@ -24,7 +24,8 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
-from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout import BaseRollout, get_rollout_class
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica
 
 
 class TensorMeta(TypedDict):
@@ -395,10 +396,26 @@ class CheckpointEngineManager:
         """Sleep all rollout replicas: free weight and kv_cache device memory."""
         await asyncio.gather(*[r.sleep() for r in self.replicas])
 
-    @auto_await
-    async def wake_up_replicas(self):
-        """Resume all rollout replicas: recover kv_cache and weights device memory."""
+    async def _direct_wake_up_replicas(self):
+        """Directly wake rollout replicas without any fallback weight sync."""
         await asyncio.gather(*[r.wake_up() for r in self.replicas])
+
+    @auto_await
+    async def wake_up_replicas(self, global_steps: int = None):
+        """Resume rollout replicas without forcing a full actor update when possible.
+
+        For colocated and standalone rollout replicas, we can directly wake the inference
+        engines. Hybrid rollout servers recover through ``update_weights()``, so we fall
+        back to that path when needed.
+
+        Args:
+            global_steps: The global steps of the trainer, forwarded when fallback weight
+                update is required.
+        """
+        if any(replica.rollout_mode == RolloutMode.HYBRID for replica in self.replicas):
+            await self.update_weights(global_steps=global_steps)
+            return
+        await self._direct_wake_up_replicas()
 
     @auto_await
     async def update_weights(self, global_steps: int = None):
@@ -439,7 +456,7 @@ class CheckpointEngineManager:
         )
 
         # 7. resume replicas to recover kv_cache (for free_cache_engine scenarios)
-        await self.wake_up_replicas()
+        await self._direct_wake_up_replicas()
 
         # 8. resume all unfinished requests for partial rollout
         await asyncio.gather(*[r.resume_generation() for r in self.replicas])
