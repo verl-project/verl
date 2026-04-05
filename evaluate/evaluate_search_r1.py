@@ -1,5 +1,33 @@
-
+ 
 """
+
+  python -m verl.model_merger merge \
+    --backend fsdp \
+    --local_dir /ocean/projects/med230010p/yji3/BrowseCamp/verl/checkpoints/search_r1_like_async_rl/qwen2.5-7b-checker-guarded-ablation-26-12-57/global_step_377/actor \
+    --target_dir /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_openai_checker_guarded-26-12-57-step-377
+
+CUDA_VISIBLE_DEVICES=3 python evaluate/evaluate_search_r1.py \
+    --repo_root /ocean/projects/med230010p/yji3/BrowseCamp/verl \
+    --model_path merged_models/merged_openai_checker_guarded-26-12-57-step-377 \
+    --test_file /ocean/projects/med230010p/yji3/MedicalRagChecker/verl/searchr1_data/combined__medical/test.parquet \
+    --max_samples 100 \
+    --eval_batch_size 4 \
+    --output_file eval_openai_checker_guarded_step377.json \
+    --tool_count_mode both \
+    --tag_style auto \
+    --prompt_mode explicit_check \
+    --tool_config_path /ocean/projects/med230010p/yji3/BrowseCamp/verl/examples/sglang_multiturn/config/tool_config/medical_search_checker_tool_config.yaml \
+    --multi_turn_format search_r1_with_checker \
+    --tensor_parallel_size 1 --nnodes 1 --n_gpus_per_node 1 \
+    --gpu_memory_utilization 0.4 \
+    --max_model_len 8000 \
+    --max_prompt_length 3072 \
+    --max_response_length 2000 \
+    --max_assistant_turns 7 \
+    --max_tool_response_length 768
+
+    
+
 1. update merge and evaluate March 20
 
   python -m verl.model_merger merge \
@@ -601,6 +629,19 @@ class SearchR1Evaluator:
 
     def extract_tags(self, text: str) -> dict[str, Any]:
         xml_searches = []
+
+        # Parse <tool_call> JSON format (used by Llama and some Qwen configs)
+        import json as _json
+        for tc_match in re.finditer(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL | re.IGNORECASE):
+            try:
+                tc = _json.loads(tc_match.group(1).strip())
+                if tc.get("name") == "search":
+                    queries = tc.get("arguments", {}).get("query_list", [])
+                    for q in queries:
+                        if q and q.strip():
+                            xml_searches.append(q.strip())
+            except Exception:
+                pass
         for match in re.finditer(r"<search(?P<attrs>\s+[^>]*)?>(?P<body>.*?)</search>", text, re.DOTALL | re.IGNORECASE):
             attrs = match.group("attrs") or ""
             body = match.group("body") or ""
@@ -804,7 +845,7 @@ class SearchR1Evaluator:
             f"actor_rollout_ref.rollout.multi_turn.max_parallel_calls={args.max_parallel_calls}",
             f"actor_rollout_ref.rollout.multi_turn.max_tool_response_length={args.max_tool_response_length}",
             f"actor_rollout_ref.rollout.multi_turn.tool_response_truncate_side={args.tool_response_truncate_side}",
-            "actor_rollout_ref.rollout.multi_turn.use_inference_chat_template=False",
+            f"actor_rollout_ref.rollout.multi_turn.use_inference_chat_template={str(args.use_inference_chat_template)}",
             f"actor_rollout_ref.rollout.multi_turn.tool_config_path={self.tool_config_path}",
             f"actor_rollout_ref.rollout.val_kwargs.temperature={args.val_temperature}",
             f"actor_rollout_ref.rollout.val_kwargs.top_p={args.val_top_p}",
@@ -1191,6 +1232,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt_mode", choices=["clean", "force_search", "explicit_check"], default="clean")
     parser.add_argument("--tool_config_path", type=str, default=str(DEFAULT_TOOL_CONFIG))
     parser.add_argument("--multi_turn_format", type=str, default="search_r1_with_checker")
+    parser.add_argument("--use_inference_chat_template", action="store_true", default=False, help="Use model native chat template (needed for Llama)")
     parser.add_argument("--rollout_backend", type=str, default="sglang")
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument("--nnodes", type=int, default=1)
