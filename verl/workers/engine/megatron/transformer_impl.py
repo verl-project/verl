@@ -163,8 +163,6 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
-        if self.enable_routing_replay:
-            override_transformer_config["enable_routing_replay"] = True
 
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
@@ -229,6 +227,9 @@ class MegatronEngine(BaseEngine):
             for key, value in override_transformer_config.items():
                 setattr(provider, key, value)
 
+            if self.enable_routing_replay:
+                provider.enable_routing_replay = True
+
             provider.finalize()
             self.provider = provider
             tf_config = None  # Will be set after model creation
@@ -236,6 +237,13 @@ class MegatronEngine(BaseEngine):
 
         if not self.bridge:
             self.weight_converter = get_mcore_weight_converter(self.model_config.hf_config, self.dtype)
+
+        # Set enable_routing_replay directly on tf_config instead of passing through
+        # override_transformer_config, because dataclass subclasses like MLATransformerConfig
+        # generate their own __init__ and don't inherit the patched TransformerConfig.__init__
+        # that accepts this kwarg.
+        if self.enable_routing_replay and tf_config is not None:
+            tf_config.enable_routing_replay = True
 
         if torch.distributed.get_rank() == 0:
             if tf_config is not None:
