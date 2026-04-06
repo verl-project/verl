@@ -253,10 +253,17 @@ class WPICheckpointEngine(CheckpointEngine):
             Tuple of (trainer_kwargs, rollout_kwargs) dicts for init_process_group().
         """
         master_metadata = metadata[0]  # Trainer rank 0 metadata
+        trainer_node_ip = master_metadata.node_ip
 
-        # Collect unique rollout node IPs for NodePropagate
+        # Collect unique rollout node IPs for NodePropagate,
+        # excluding the trainer's own node to avoid "Duplicate GPU" in NCCL.
+        # When trainer and rollout workers share a node, the trainer's WPI driver
+        # already has the buffer — no need to NCCL broadcast to itself.
         rollout_metadata = metadata[trainer_world_size:]
-        rollout_node_ips = list({m["node_ip"] for m in rollout_metadata if m is not None})
+        rollout_node_ips = list({
+            m["node_ip"] for m in rollout_metadata
+            if m is not None and m["node_ip"] != trainer_node_ip
+        })
 
         trainer_kwargs = {
             "rank": [0] + [-1] * (trainer_world_size - 1),
