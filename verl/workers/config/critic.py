@@ -197,6 +197,10 @@ class FSDPCriticConfig(CriticConfig):
         """Validate FSDP critic configuration parameters."""
         super().__post_init__()
         self.engine = self.fsdp
+        # Sync strategy to engine config so engine_workers can pick the right FSDP version.
+        # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
+        # falls back to FSDP1 even when critic.strategy="fsdp2".
+        object.__setattr__(self.engine, "strategy", self.strategy)
 
         if self.strategy in {"fsdp", "fsdp2"}:
             if self.ulysses_sequence_parallel_size > 1:

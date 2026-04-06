@@ -305,6 +305,10 @@ class FSDPActorConfig(ActorConfig):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
         self.engine = self.fsdp_config
+        # Sync strategy to engine config so engine_workers can pick the right FSDP version.
+        # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
+        # falls back to FSDP1 even when actor.strategy="fsdp2".
+        object.__setattr__(self.engine, "strategy", self.strategy)
 
         # backward compatibility
         if self.ulysses_sequence_parallel_size > 1:
