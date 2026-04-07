@@ -125,16 +125,36 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     non_aborted_sequence_score = sequence_score[non_aborted_mask]
     non_aborted_sequence_reward = sequence_reward[non_aborted_mask]
 
-    score_mean = torch.mean(non_aborted_sequence_score).detach().item()
-    score_max = torch.max(non_aborted_sequence_score).detach().item()
-    score_min = torch.min(non_aborted_sequence_score).detach().item()
+    if non_aborted_sequence_score.numel() > 0:
+        score_mean = torch.mean(non_aborted_sequence_score).detach().item()
+        score_max = torch.max(non_aborted_sequence_score).detach().item()
+        score_min = torch.min(non_aborted_sequence_score).detach().item()
+    else:
+        raise ValueError("All samples are aborted, cannot compute score metrics.")
 
-    reward_mean = torch.mean(non_aborted_sequence_reward).detach().item()
-    reward_max = torch.max(non_aborted_sequence_reward).detach().item()
-    reward_min = torch.min(non_aborted_sequence_reward).detach().item()
+    if non_aborted_sequence_reward.numel() > 0:
+        reward_mean = torch.mean(non_aborted_sequence_reward).detach().item()
+        reward_max = torch.max(non_aborted_sequence_reward).detach().item()
+        reward_min = torch.min(non_aborted_sequence_reward).detach().item()
+    else:
+        raise ValueError("All samples are aborted, cannot compute reward metrics.")
 
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
+
+    if valid_adv.numel() > 0:
+        adv_mean = torch.mean(valid_adv).detach().item()
+        adv_max = torch.max(valid_adv).detach().item()
+        adv_min = torch.min(valid_adv).detach().item()
+    else:
+        raise ValueError("Response mask is all False, cannot compute advantage metrics.")
+
+    if valid_returns.numel() > 0:
+        returns_mean = torch.mean(valid_returns).detach().item()
+        returns_max = torch.max(valid_returns).detach().item()
+        returns_min = torch.min(valid_returns).detach().item()
+    else:
+        raise ValueError("Response mask is all False, cannot compute return metrics.")
 
     if use_critic:
         values = batch.batch["values"]
@@ -167,13 +187,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/rewards/max": reward_max,
         "critic/rewards/min": reward_min,
         # adv
-        "critic/advantages/mean": torch.mean(valid_adv).detach().item(),
-        "critic/advantages/max": torch.max(valid_adv).detach().item(),
-        "critic/advantages/min": torch.min(valid_adv).detach().item(),
+        "critic/advantages/mean": adv_mean,
+        "critic/advantages/max": adv_max,
+        "critic/advantages/min": adv_min,
         # returns
-        "critic/returns/mean": torch.mean(valid_returns).detach().item(),
-        "critic/returns/max": torch.max(valid_returns).detach().item(),
-        "critic/returns/min": torch.min(valid_returns).detach().item(),
+        "critic/returns/mean": returns_mean,
+        "critic/returns/max": returns_max,
+        "critic/returns/min": returns_min,
         **(
             {
                 # values
