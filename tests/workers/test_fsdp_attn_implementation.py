@@ -29,9 +29,8 @@ from transformers import AutoConfig, AutoModelForCausalLM
 # Only run these tests if we can import verl components
 try:
     from verl.workers.config import FSDPEngineConfig  # noqa: F401
-    from verl.workers.fsdp_workers import (
+    from verl.workers.engine_workers import (
         ActorRolloutRefWorker,  # noqa: F401
-        CriticWorker,  # noqa: F401
     )
 
     VERL_AVAILABLE = True

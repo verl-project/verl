@@ -27,7 +27,7 @@ from verl import DataProto
 from verl.workers.config import FSDPCriticConfig, FSDPOptimizerConfig
 from verl.workers.config.critic import FSDPCriticModelCfg
 from verl.workers.config.engine import FSDPEngineConfig
-from verl.workers.fsdp_workers import CriticWorker
+from verl.workers.engine_workers import TrainingWorker as CriticWorker
 
 
 class TestCriticWorker(unittest.TestCase):

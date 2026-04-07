@@ -125,95 +125,32 @@ class TaskRunner:
         """Add actor rollout worker based on the actor strategy."""
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
+        from verl.workers.engine_workers import ActorRolloutRefWorker
 
-        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        actor_rollout_cls = ActorRolloutRefWorker
+        ray_worker_group_cls = RayWorkerGroup
 
-        # use new model engine implementation
-        if use_legacy_worker_impl == "disable":
-            from verl.workers.engine_workers import ActorRolloutRefWorker
-
-            actor_rollout_cls = ActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
-
-            lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-            if lora_rank <= 0:
-                lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-            ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-            # NOTE: In new model engine, ref policy and actor rollout are in same ActorRolloutRefWorker,
-            # while in legacy model engine, ref policy is in a separate ActorRolloutRefWorker.
-            if need_reference_policy(config) and not ref_in_actor:
-                role = Role.ActorRolloutRef
-            else:
-                role = Role.ActorRollout
-            self.role_worker_mapping[role] = ray.remote(actor_rollout_cls)
-            self.mapping[role] = "global_pool"
-            return actor_rollout_cls, ray_worker_group_cls
-
-        # Note: sync mode validation is now handled in RolloutConfig.__post_init__
-        # Always use async worker since sync mode is deprecated and rejected
-        if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
-
-            actor_rollout_cls = AsyncActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
-
-        elif config.actor_rollout_ref.actor.strategy == "megatron":
-            from verl.workers.megatron_workers import AsyncActorRolloutRefWorker
-
-            actor_rollout_cls = AsyncActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
-
-        elif (
-            config.actor_rollout_ref.actor.strategy == "veomni"
-            or config.actor_rollout_ref.actor.strategy == "torchtitan"
-        ):
-            raise NotImplementedError(
-                f"{config.actor_rollout_ref.actor.strategy} does not support legacy worker implementation"
-            )
-
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        # NOTE: In new model engine, ref policy and actor rollout are in same ActorRolloutRefWorker,
+        # while in legacy model engine, ref policy is in a separate ActorRolloutRefWorker.
+        if need_reference_policy(config) and not ref_in_actor:
+            role = Role.ActorRolloutRef
         else:
-            raise NotImplementedError
-
-        self.role_worker_mapping[Role.ActorRollout] = ray.remote(actor_rollout_cls)
-        self.mapping[Role.ActorRollout] = "global_pool"
+            role = Role.ActorRollout
+        self.role_worker_mapping[role] = ray.remote(actor_rollout_cls)
+        self.mapping[role] = "global_pool"
         return actor_rollout_cls, ray_worker_group_cls
 
     def add_critic_worker(self, config):
         """Add critic worker to role mapping."""
-        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-        if config.critic.strategy in {"fsdp", "fsdp2"}:
-            if use_legacy_worker_impl in ["auto", "enable"]:
-                from verl.workers.fsdp_workers import CriticWorker
-            elif use_legacy_worker_impl == "disable":
-                # we don't need to specialize critic worker. Just use TrainingWorker
-                from verl.workers.engine_workers import TrainingWorker
+        from verl.workers.engine_workers import TrainingWorker
 
-                CriticWorker = TrainingWorker
-                print("Using new worker implementation")
-            else:
-                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
+        CriticWorker = TrainingWorker
 
-        elif config.critic.strategy == "megatron":
-            # TODO: switch this to TrainingWorker as well
-            if use_legacy_worker_impl in ["auto", "enable"]:
-                from verl.workers.megatron_workers import CriticWorker
-            elif use_legacy_worker_impl == "disable":
-                from verl.workers.engine_workers import TrainingWorker
-
-                CriticWorker = TrainingWorker
-                print("Using new worker implementation")
-        elif config.critic.strategy == "veomni" or config.critic.strategy == "torchtitan":
-            if use_legacy_worker_impl == "disable":
-                from verl.workers.engine_workers import TrainingWorker
-
-                CriticWorker = TrainingWorker
-                print(f"Using new worker implementation for {config.critic.strategy}")
-            else:
-                raise ValueError(
-                    f"Invalid use_legacy_worker_impl for {config.critic.strategy}: {use_legacy_worker_impl}"
-                )
-
-        else:
+        if config.critic.strategy not in {"fsdp", "fsdp2", "megatron", "veomni", "torchtitan"}:
             raise NotImplementedError
 
         from verl.trainer.ppo.ray_trainer import Role

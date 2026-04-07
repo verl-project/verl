@@ -88,8 +88,6 @@ verl is fast with:
    :caption: PPO Trainer and Workers
 
    workers/ray_trainer
-   workers/fsdp_workers
-   workers/megatron_workers
    workers/automodel_workers
    workers/sglang_worker
    workers/trtllm_worker

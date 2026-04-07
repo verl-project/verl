@@ -138,8 +138,8 @@ verl is fast with:
 - PPO Trainer and Workers
 
   - [PPO Ray Trainer](https://verl.readthedocs.io/en/latest/workers/ray_trainer.html)
-  - [PyTorch FSDP Backend](https://verl.readthedocs.io/en/latest/workers/fsdp_workers.html)
-  - [Megatron-LM Backend](https://verl.readthedocs.io/en/latest/index.html)
+  - [Model Engine Workers](https://verl.readthedocs.io/en/latest/workers/model_engine.html)
+  - [AutoModel Workers](https://verl.readthedocs.io/en/latest/workers/automodel_workers.html)
 
 - Advanced Usage and Extension
   - [Add Models with the FSDP Backend](https://verl.readthedocs.io/en/latest/advance/fsdp_extension.html)

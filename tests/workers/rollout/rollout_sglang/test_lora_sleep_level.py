@@ -182,12 +182,12 @@ class TestSGLangHttpServerSleepTags:
 
 
 # ---------------------------------------------------------------------------
-# fsdp_workers peft_merge config tests
+# engine_workers peft_merge config tests
 # ---------------------------------------------------------------------------
 
 
 class TestFsdpWorkersPeftMerge:
-    """Test that fsdp_workers reads peft_merge from model.lora.merge."""
+    """Test that engine_workers reads peft_merge from model.lora.merge."""
 
     def test_merge_true(self):
         mc = _StubModelConfig(lora_rank=8, lora={"merge": True})

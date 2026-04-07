@@ -24,7 +24,7 @@ from omegaconf import OmegaConf
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils.megatron_utils import get_hf_model_checkpoint_path, load_megatron_model_to_gpu
-from verl.workers.megatron_workers import ActorRolloutRefWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker
 
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"

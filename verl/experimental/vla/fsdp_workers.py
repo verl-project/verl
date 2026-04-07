@@ -41,7 +41,7 @@ from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.profiler import DistProfiler, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.workers.config import HFModelConfig
-from verl.workers.fsdp_workers import ActorRolloutRefWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))

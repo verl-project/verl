@@ -153,7 +153,7 @@ The following steps outline how to set up the environment and run the SPIN recip
 
 * `main_spin.py`: Main entry point using Hydra to load the config and launch the `SpinTrainer`.
 * `spin_trainer.py`: Defines the `SpinTrainer` class, orchestrating the Online DPO training loop.
-* `fsdp_workers.py`: Implements Ray workers (Actor, Reference) potentially using FSDP.
+* `engine_workers.py`: Implements Ray workers (Actor, Reference) via the unified model engine.
 * `dp_actor.py`: Contains the actor class, including the DPO policy update logic.
 * `core_algos.py`: Includes helper functions for `compute_online_dpo_loss` and `compute_onlineDPO_pref`.
 * `config/spin_trainer.yaml` (or similar): Main Hydra configuration file for the recipe.

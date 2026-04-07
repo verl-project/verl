@@ -15,7 +15,7 @@ Motivation and Design
 We use dataflow to represent RL systems. [4]_.
 
 DataFlow
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 
 Dataflow is an abstraction of computations. Neural Network training is a typical dataflow. It can be represented by computational graph. 
 
@@ -49,7 +49,7 @@ In the case of tabular reinforcement learning, each operator is a simple scalar 
 
 
 Design Choices
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 The model size used in DRL before the LLM era is typically small. Thus, the high-level neural network computation can be done in a single process. This enables embedding the computation flow inside the control flow as a single process.
 
 However, in the LLM era, the computation flow (e.g., training neural network) becomes a multi-process program. This naturally leads to two design choices:
@@ -79,7 +79,7 @@ However, in the LLM era, the computation flow (e.g., training neural network) be
 In verl, the latter strategy with separate control flow and computation flow is adopted. verl is designed to decouple the control flow of RL algorithms, and the implementation of computation engines.
 
 Overall Execution Diagram
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Below is a simplified diagram denoting the execution of a reinforcement learning job. In the diagram, the controller runs on a single process, while the generator/actor workers, critic workers run on multiple processes, placed with specific resource groups. For rollout, the controller passes the data to the generator to perform sample generation. When the rollout is done, the data is passed back to controller for the next step of the algorithm. Similar execution is done for other workers. With the hybrid controller design, the data flow and computation is decoupled to provide both efficiency in computation and flexibility in defining algorithm training loops.
 
@@ -90,7 +90,7 @@ Codebase walkthrough (PPO)
 ------------------------------------------------
 
 Entry function
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Code: https://github.com/volcengine/verl/blob/main/verl/trainer/main_ppo.py
 
 In this file, we define a remote function `main_task` that serves as the controller (driver) process as shown in the above figure. We also define a ``RewardManager``, where users can customize their reward function based on the data source in the dataset. Note that `RewardManager` should return the final token-level reward that is optimized by RL algorithms. Note that users can combine model-based rewards and rule-based rewards.
@@ -99,7 +99,7 @@ The ``main_task`` constructs a RayPPOTrainer instance and launch the fit. Note t
 We highly recommend that the ``main_task`` is NOT scheduled on the head of the ray cluster because ``main_task`` will consume a lot of memory but the head usually contains very few resources.
 
 Ray trainer
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 Code: https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/ray_trainer.py
 
 The RayPPOTrainer manages 
@@ -110,7 +110,7 @@ The RayPPOTrainer manages
 Note that, the fit function of RayPPOTrainer **runs as a single process**.
 
 Worker and WorkerGroup construction
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Each workerGroup manages a list of workers that runs remotely. Note that the worker group runs in the process of its constructor.
 Each worker inside the WorkerGroup runs on a GPU. The worker group serves as a proxy for the controller process to interact with a list of workers, in order to perform certain computations. **In order to do so, we have to bind the methods of the worker into the method of the WorkerGroup and define the data dispatch and data collection**. This is done via simple decoration that will be introduced in the Worker definition section.
@@ -124,11 +124,11 @@ For example, in PPO, we define 3 worker groups:
 The worker group will be constructed on the resource pool it designates. The resource pool is a set of GPUs in the ray cluster.
 
 Worker definition
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 
-.. _ActorRolloutRefWorker: https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py
+.. _ActorRolloutRefWorker: https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py
 
-We take `ActorRolloutRefWorker <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py>`_ for an example.
+We take `ActorRolloutRefWorker <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_ for an example.
 The APIs it should expose to the controller process are:
 
 - init_model: build the underlying model
@@ -178,7 +178,7 @@ We decorate the method of the worker with a ``register`` that explicitly defines
 
 
 PPO main loop
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 With the aforementioned APIs, we can implement the main loop of PPO as if it is a single process program
 
 .. code-block:: python
@@ -201,7 +201,7 @@ With the aforementioned APIs, we can implement the main loop of PPO as if it is 
        critic.update_critic(output)
 
 Takeaways
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 - This programming paradigm enables users to use different computation backend without modification of the control process.
 - This programming paradigm enables flexible placement (by changing the mapping of WorkerGroup and ResourcePool) without modification of the control process.
 
@@ -223,14 +223,13 @@ Important code files in the repository are organized as below:
        ppo_trainer.yaml  # configuration template for the RL trainer
      workers
        protocol.py  # the interface of DataProto
-       fsdp_workers.py   # the FSDP worker interfaces: ActorRolloutRefWorker, CriticWorker, RewardModelWorker
-       megatron_workers.py  # the Megatron worker interfaces: ActorRolloutRefWorker, CriticWorker, RewardModelWorker
+       engine_workers.py  # the worker interfaces: ActorRolloutRefWorker, TrainingWorker
        actor
          dp_actor.py  #  data parallel actor with FSDP backend
          megatron_actor.py  # nD parallel actor with Megatron backend
        critic
          dp_critic.py  # data parallel critic with FSDP backend
-         megatron_critic.py  # nD parallel critic with FSDP backend
+         megatron_critic.py  # nD parallel critic with Megatron backend
        reward_model
          megatron
            reward_model.py  # reward model with Megatron backend
