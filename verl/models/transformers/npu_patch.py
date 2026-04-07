@@ -316,8 +316,7 @@ modeling_qwen2.Qwen2MLP.forward = silu_forward_npu
 modeling_qwen2.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
 # Patches for Qwen2.5-VL Model
-from transformers import __version__ as transformers_version
-if transformers_version <= "5.1.0":
+if hasattr(modeling_qwen2_5_vl, "Qwen2RMSNorm"):
     modeling_qwen2_5_vl.Qwen2RMSNorm.forward = rms_norm_forward_npu
 else:
     modeling_qwen2_5_vl.Qwen2_5_VLRMSNorm.forward = rms_norm_forward_npu
