@@ -71,4 +71,3 @@ try:
     __all__ += ["WPICheckpointEngine"]
 except ImportError:
     WPICheckpointEngine = None
-

@@ -123,7 +123,6 @@ ENV/
 
 # data
 *.parquet
-!gsm8k/*.parquet
 
 
 # local logs

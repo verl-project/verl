@@ -65,6 +65,10 @@ ignore = [
     "UP035",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Generated protobuf files contain long serialized descriptor blobs
+"verl/utils/wpi_proto/wpi_pb2*.py" = ["E501"]
+
 # -------------------------------
 # tool.mypy - typechecking config
 # -------------------------------

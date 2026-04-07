@@ -160,33 +160,32 @@ class WPIClient:
             driver_address = os.environ.get("WPI_DRIVER_ADDRESS")
             if driver_address:
                 target = driver_address
-                print(f"WPI: Using configured driver address: {target}", flush=True)
+                logger.info(f"WPI: Using configured driver address: {target}")
             else:
                 # Try UNIX socket first (same-node), fall back to TCP
                 unix_socket_path = os.path.join(self.socket_dir, "wpi-grpc.sock")
-                
-                print(f"WPI DEBUG: checking socket path: {unix_socket_path}", flush=True)
                 socket_exists = os.path.exists(unix_socket_path)
-                print(f"WPI DEBUG: exists: {socket_exists}", flush=True)
-                
+                logger.debug(f"WPI: socket path {unix_socket_path} exists={socket_exists}")
+
                 force_unix = os.environ.get("WPI_FORCE_UNIX_SOCKET", "0") == "1"
                 if socket_exists or force_unix:
                     target = f"unix://{unix_socket_path}"
                     if force_unix and not socket_exists:
-                        logger.warning("WPI WARNING: Forcing UNIX socket even though os.path.exists returned False")
-                        print("WPI WARNING: Forcing UNIX socket even though os.path.exists returned False", flush=True)
+                        logger.warning("WPI: Forcing UNIX socket even though os.path.exists returned False")
                 else:
                     target = f"{self.driver_host}:{self.driver_port}"
                     if self.driver_host == "localhost":
-                        logger.warning(f"WPI WARNING: Socket not found at {unix_socket_path}. Falling back to localhost TCP: {target}. This will fail if driver is not in the same pod.")
-                        print(f"WPI WARNING: Socket not found at {unix_socket_path}. Falling back to localhost TCP: {target}. This will fail if driver is not in the same pod.", flush=True)
+                        logger.warning(
+                            f"WPI: Socket not found at {unix_socket_path}. "
+                            f"Falling back to localhost TCP: {target}. "
+                            "This will fail if driver is not in the same pod."
+                        )
                     else:
-                        logger.warning(f"WPI WARNING: Socket not found, falling back to TCP: {target}")
-                        print(f"WPI WARNING: Socket not found, falling back to TCP: {target}", flush=True)
+                        logger.warning(f"WPI: Socket not found, falling back to TCP: {target}")
 
             self._grpc_channel = grpc.insecure_channel(target)
             self._grpc_stub = wpi_pb2_grpc.NodeServiceStub(self._grpc_channel)
-            print(f"WPI gRPC connected to {target}", flush=True)
+            logger.info(f"WPI: gRPC connected to {target}")
         return self._grpc_stub
 
     def stage_weight(
@@ -230,7 +229,7 @@ class WPIClient:
                 )
             else:
                 raise
-        print(f"WPI: Staged weight buffer '{buffer_id}' ({size_bytes} bytes)", flush=True)
+        logger.info(f"WPI: Staged weight buffer '{buffer_id}' ({size_bytes} bytes)")
 
     def propagate(self, buffer_id: str, target_node_ids: list[str]):
         """Call NodePropagate to NCCL broadcast the buffer to target nodes.
@@ -251,9 +250,9 @@ class WPIClient:
             buffer_id=buffer_id,
             target_node_ids=target_node_ids,
         )
-        print(f"WPI: Propagating '{buffer_id}' to {len(target_node_ids)} target nodes: {target_node_ids}...", flush=True)
+        logger.info(f"WPI: Propagating '{buffer_id}' to {len(target_node_ids)} target nodes: {target_node_ids}...")
         stub.NodePropagate(request)
-        print(f"WPI: Propagation complete for '{buffer_id}'", flush=True)
+        logger.info(f"WPI: Propagation complete for '{buffer_id}'")
 
     def unstage_weight(self, claim_id: str):
         """Call NodeUnstageWeight to release the VRAM buffer.
@@ -266,7 +265,7 @@ class WPIClient:
         stub = self._get_grpc_stub()
         request = wpi_pb2.NodeUnstageWeightRequest(claim_id=claim_id)
         stub.NodeUnstageWeight(request)
-        print(f"WPI: Unstaged weight for claim '{claim_id}'", flush=True)
+        logger.info(f"WPI: Unstaged weight for claim '{claim_id}'")
 
     def receive_fd(self, buffer_id: str, gpu_id: int = 0) -> int:
         """Connect to the WPI FD-passing UNIX socket and receive a file descriptor.
@@ -291,7 +290,7 @@ class WPIClient:
             time.sleep(1)
             waited += 1
             if waited % 10 == 0:
-                print(f"WPI: Waiting for FD socket {sock_path} ({waited}s)...", flush=True)
+                logger.debug(f"WPI: Waiting for FD socket {sock_path} ({waited}s)...")
 
         if not os.path.exists(sock_path):
             raise TimeoutError(f"WPI FD socket {sock_path} not found after {max_wait}s")
@@ -309,12 +308,13 @@ class WPIClient:
                     raise
                 time.sleep(1)
                 if attempt % 5 == 4:
-                    print(f"WPI: Retrying FD socket connect to {sock_path} ({attempt+1}/{max_connect_retries}): {e}", flush=True)
+                    logger.debug(
+                        f"WPI: Retrying FD socket connect to {sock_path} ({attempt + 1}/{max_connect_retries}): {e}"
+                    )
 
         # Send GPU metadata so driver knows which GPU to target
-        # HACK: Force GPU 0 to bypass daemon relocation failure (cuMemCreate failed due to vLLM pre-alloc VRAM)
-        logger.warning(f"WPI HACK: Forcing GPU=0 instead of requested GPU={gpu_id} to bypass daemon relocation failure")
-        gpu_metadata = f"GPU=0\n"
+        logger.warning(f"WPI: Forcing GPU=0 instead of requested GPU={gpu_id} to bypass daemon relocation failure")
+        gpu_metadata = "GPU=0\n"
         client.sendall(gpu_metadata.encode("utf-8"))
 
         # Receive FD via SCM_RIGHTS
@@ -332,7 +332,7 @@ class WPIClient:
         if fd is None:
             raise RuntimeError(f"WPI: Failed to receive FD from {sock_path}")
 
-        print(f"WPI: Received FD {fd} for buffer '{buffer_id}' on GPU {gpu_id}", flush=True)
+        logger.info(f"WPI: Received FD {fd} for buffer '{buffer_id}' on GPU {gpu_id}")
         return fd
 
     def _init_cuda_context(self, device_id: int = 0):
@@ -340,10 +340,10 @@ class WPIClient:
         if self._libcuda is not None:
             return
 
-        print(f"WPI: _init_cuda_context called for device {device_id}", flush=True)
-        print(f"WPI: torch.cuda.is_initialized() = {torch.cuda.is_initialized()}", flush=True)
+        logger.debug(f"WPI: _init_cuda_context called for device {device_id}")
+        logger.debug(f"WPI: torch.cuda.is_initialized() = {torch.cuda.is_initialized()}")
         if torch.cuda.is_initialized():
-            print(f"WPI: torch.cuda.current_device() = {torch.cuda.current_device()}", flush=True)
+            logger.debug(f"WPI: torch.cuda.current_device() = {torch.cuda.current_device()}")
 
         self._libcuda = _find_libcuda()
 
@@ -360,10 +360,9 @@ class WPIClient:
         current_ctx = ctypes.c_void_p()
         err = self._libcuda.cuCtxGetCurrent(ctypes.byref(current_ctx))
         if err == 0:
-            print(f"WPI: Current CUDA context BEFORE init: {current_ctx.value}", flush=True)
+            logger.debug(f"WPI: Current CUDA context BEFORE init: {current_ctx.value}")
         else:
             logger.warning(f"WPI: cuCtxGetCurrent failed with error code {err}")
-            print(f"WPI DEBUG: cuCtxGetCurrent failed with error code {err}", flush=True)
 
         err = self._libcuda.cuInit(0)
         if err != 0:
@@ -379,27 +378,27 @@ class WPIClient:
         err = self._libcuda.cuDevicePrimaryCtxRetain(ctypes.byref(ctx), device)
         if err != 0:
             raise RuntimeError(f"cuDevicePrimaryCtxRetain({device_id}) failed with error code {err}")
-        print(f"WPI: Retained primary context: {ctx.value}", flush=True)
+        logger.debug(f"WPI: Retained primary context: {ctx.value}")
 
         current_ctx = ctypes.c_void_p()
         self._libcuda.cuCtxGetCurrent(ctypes.byref(current_ctx))
-        
+
         self.pushed_context = False
         if current_ctx.value != ctx.value:
             err = self._libcuda.cuCtxPushCurrent(ctx)
             if err != 0:
                 raise RuntimeError(f"cuCtxPushCurrent failed with error code {err}")
             self.pushed_context = True
-            print("WPI: Pushed primary context successfully.", flush=True)
+            logger.debug("WPI: Pushed primary context successfully.")
         else:
-            print("WPI: Context is already current, skipping push.", flush=True)
-            
+            logger.debug("WPI: Context is already current, skipping push.")
+
         self._cuda_ctx = ctx
 
         # Check current context again
         err = self._libcuda.cuCtxGetCurrent(ctypes.byref(current_ctx))
         if err == 0:
-            print(f"WPI: Current CUDA context AFTER init: {current_ctx.value}", flush=True)
+            logger.debug(f"WPI: Current CUDA context AFTER init: {current_ctx.value}")
 
     def import_cuda_memory(self, fd: int, size_bytes: int, device_id: int = 0) -> int:
         """Import a POSIX file descriptor as CUDA memory and map it.
@@ -444,8 +443,9 @@ class WPIClient:
             aligned_size = ((size_bytes // gran) + 1) * gran
         else:
             aligned_size = size_bytes
-        print(f"WPI: import_cuda_memory fd={fd} size={size_bytes} aligned={aligned_size} gran={gran} gpu={device_id}", flush=True)
-        print(f"WPI DEBUG: import_cuda_memory fd={fd} size={size_bytes} aligned={aligned_size} gran={gran} gpu={device_id}", flush=True)
+        logger.debug(
+            f"WPI: import_cuda_memory fd={fd} size={size_bytes} aligned={aligned_size} gran={gran} gpu={device_id}"
+        )
 
         # 1. Import the shareable handle
         handle = ctypes.c_ulonglong()
@@ -456,7 +456,7 @@ class WPIClient:
         )
         if err != 0:
             raise RuntimeError(f"cuMemImportFromShareableHandle failed with error code {err}")
-        print(f"WPI: Imported shareable handle, generic handle: {handle.value}", flush=True)
+        logger.debug(f"WPI: Imported shareable handle, generic handle: {handle.value}")
 
         # 2. Reserve virtual address space
         device_ptr = ctypes.c_ulonglong()
@@ -474,10 +474,9 @@ class WPIClient:
         current_ctx = ctypes.c_void_p()
         err = libcuda.cuCtxGetCurrent(ctypes.byref(current_ctx))
         if err == 0:
-            print(f"WPI: Current CUDA context before cuMemMap: {current_ctx.value}", flush=True)
+            logger.debug(f"WPI: Current CUDA context before cuMemMap: {current_ctx.value}")
         else:
             logger.warning(f"WPI: cuCtxGetCurrent failed before cuMemMap with error code {err}")
-            print(f"WPI DEBUG: cuCtxGetCurrent failed before cuMemMap with error code {err}", flush=True)
 
         try:
             err = libcuda.cuMemMap(
@@ -488,14 +487,17 @@ class WPIClient:
                 ctypes.c_ulonglong(0),  # flags
             )
             if err != 0:
-                logger.error(f"WPI ERROR: cuMemMap failed with error code {err}. aligned_size={aligned_size}, handle={handle.value}, device_ptr={device_ptr.value}")
-                print(f"WPI ERROR: cuMemMap failed with error code {err}. aligned_size={aligned_size}, handle={handle.value}, device_ptr={device_ptr.value}", flush=True)
+                logger.error(
+                    f"WPI: cuMemMap failed err={err}, "
+                    f"size={aligned_size}, handle={handle.value}, ptr={device_ptr.value}"
+                )
                 raise RuntimeError(f"cuMemMap failed with error code {err}")
         except Exception as e:
-            logger.error(f"WPI EXCEPTION in cuMemMap: {e}. aligned_size={aligned_size}, handle={handle.value}, device_ptr={device_ptr.value}")
-            print(f"WPI EXCEPTION in cuMemMap: {e}. aligned_size={aligned_size}, handle={handle.value}, device_ptr={device_ptr.value}", flush=True)
+            logger.error(
+                f"WPI: cuMemMap exception: {e}, size={aligned_size}, handle={handle.value}, ptr={device_ptr.value}"
+            )
             raise
-        print(f"WPI DEBUG: cuMemMap succeeded on ptr {device_ptr.value}", flush=True)
+        logger.debug(f"WPI: cuMemMap succeeded on ptr {device_ptr.value}")
 
         # 4. Set access permissions
         desc = CUmemAccessDesc()
@@ -518,9 +520,9 @@ class WPIClient:
             err = libcuda.cuCtxPopCurrent(ctypes.byref(pctx_pop))
             if err != 0:
                 raise RuntimeError(f"cuCtxPopCurrent failed with error code {err}")
-            print("WPI: Popped custom map context successfully.", flush=True)
+            logger.debug("WPI: Popped custom map context successfully.")
 
-        print(f"WPI: CUDA memory mapped at device_ptr {device_ptr.value}, size {aligned_size}", flush=True)
+        logger.info(f"WPI: CUDA memory mapped at device_ptr {device_ptr.value}, size {aligned_size}")
         return device_ptr.value
 
     def wrap_as_buffer(self, device_ptr: int, size_bytes: int) -> torch.Tensor:
@@ -561,7 +563,7 @@ class WPIClient:
 
         self._notify_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._notify_socket.connect(notify_path)
-        print(f"WPI: Connected to notify socket for buffer '{buffer_id}'", flush=True)
+        logger.info(f"WPI: Connected to notify socket for buffer '{buffer_id}'")
 
     def wait_for_ready(self, timeout: float = 300.0):
         """Block until a READY notification is received from the WPI driver.
@@ -581,11 +583,11 @@ class WPIClient:
         try:
             data = self._notify_socket.recv(1024)
             if b"READY" in data:
-                print("WPI: Received READY notification from driver", flush=True)
+                logger.info("WPI: Received READY notification from driver")
             else:
                 logger.warning(f"WPI: Unexpected notification data: {data}")
-        except socket.timeout:
-            raise TimeoutError(f"WPI: Did not receive READY notification within {timeout}s")
+        except TimeoutError:
+            raise TimeoutError(f"WPI: Did not receive READY notification within {timeout}s") from None
 
     def close(self):
         """Clean up connections."""

@@ -14,6 +14,10 @@
 
 """Generated gRPC stubs for the Weight Propagation Interface (WPI) protocol.
 
-Generated from weight-propagation-interface/proto/wpi.proto using:
-    python3 -m grpc_tools.protoc -I<proto_dir> --python_out=<out> --grpc_python_out=<out> wpi.proto
+Source proto: verl/utils/wpi_proto/wpi.proto
+
+To regenerate after modifying the .proto file:
+    cd verl/utils/wpi_proto && ./generate.sh
+
+Requires: pip install grpcio-tools
 """
