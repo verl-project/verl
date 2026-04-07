@@ -667,12 +667,15 @@ class MegatronEngine(BaseEngine):
             forward_only=forward_only,
         )
 
-        if self.model_config.mtp.enable and self.is_mp_src_rank_with_outputs():
-            # add mtp_losses
+        if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
+            # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
+            # because save_loss_to_tracker uses avg_group=DP+CP group.
+            # Only collect metrics on the src rank afterward.
             metrics = get_megatron_mtp_loss(n_micro_batch)
-            if "metrics" not in losses_reduced[0]:
-                losses_reduced[0]["metrics"] = {}
-            losses_reduced[0]["metrics"].update(metrics)
+            if self.is_mp_src_rank_with_outputs():
+                if "metrics" not in losses_reduced[0]:
+                    losses_reduced[0]["metrics"] = {}
+                losses_reduced[0]["metrics"].update(metrics)
 
         if RouterReplayHelper.is_r2_record_action(self.tf_config):
             if self.tf_config.virtual_pipeline_model_parallel_size is not None:
