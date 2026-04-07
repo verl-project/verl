@@ -15,6 +15,7 @@
 Metrics related to the PPO trainer.
 """
 
+import logging
 from collections import defaultdict
 from functools import partial
 from typing import Any, Callable
@@ -25,6 +26,8 @@ import torch
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.utils.import_utils import deprecated
+
+logger = logging.getLogger(__name__)
 
 
 @deprecated("verl.utils.metric.reduce_metrics")
@@ -130,14 +133,16 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         score_max = torch.max(non_aborted_sequence_score).detach().item()
         score_min = torch.min(non_aborted_sequence_score).detach().item()
     else:
-        raise ValueError("All samples are aborted, cannot compute score metrics.")
+        logger.warning("All samples are aborted, returning default score metrics")
+        score_mean = score_max = score_min = float("nan")
 
     if non_aborted_sequence_reward.numel() > 0:
         reward_mean = torch.mean(non_aborted_sequence_reward).detach().item()
         reward_max = torch.max(non_aborted_sequence_reward).detach().item()
         reward_min = torch.min(non_aborted_sequence_reward).detach().item()
     else:
-        raise ValueError("All samples are aborted, cannot compute reward metrics.")
+        logger.warning("All samples are aborted, returning default reward metrics")
+        reward_mean = reward_max = reward_min = float("nan")
 
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
@@ -147,14 +152,16 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         adv_max = torch.max(valid_adv).detach().item()
         adv_min = torch.min(valid_adv).detach().item()
     else:
-        raise ValueError("Response mask is all False, cannot compute advantage metrics.")
+        logger.warning("Response mask is all False, returning default advantage metrics")
+        adv_mean = adv_max = adv_min = float("nan")
 
     if valid_returns.numel() > 0:
         returns_mean = torch.mean(valid_returns).detach().item()
         returns_max = torch.max(valid_returns).detach().item()
         returns_min = torch.min(valid_returns).detach().item()
     else:
-        raise ValueError("Response mask is all False, cannot compute return metrics.")
+        logger.warning("Response mask is all False, returning default return metrics")
+        returns_mean = returns_max = returns_min = float("nan")
 
     if use_critic:
         values = batch.batch["values"]
