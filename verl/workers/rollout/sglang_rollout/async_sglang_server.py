@@ -58,83 +58,54 @@ visible_devices_keyword = get_visible_devices_keyword()
 
 
 def _extract_sglang_prompt_logprobs(output: dict, num_prompt_logprobs: int) -> dict[str, list]:
-    """Extract prompt log probabilities from SGLang generation output.
+    """Convert SGLang prompt logprobs to the teacher manager format.
 
-    Converts SGLang's input_token_logprobs / input_top_logprobs format into the
-    unified ``prompt_ids`` / ``prompt_logprobs`` format consumed by the OPD
-    teacher manager (see ``AsyncTeacherLLMServerManager.compute_teacher_logprobs_single``).
-
-    SGLang format:
-    - ``meta_info["input_token_logprobs"]``: list of ``(logprob, token_id, text)``
-      tuples, one per input token.  The first token has no preceding context so
-      its ``logprob`` field is ``None``.
-    - ``meta_info["input_top_logprobs"]``: list of lists of
-      ``(logprob, token_id, text)`` tuples.  Each inner list holds the top-K
-      alternatives for the corresponding position.  When ``top_logprobs_num==0``
-      this field is empty (``[]``).
-
-    Output format (matching vLLM's ``extract_prompt_logprobs``):
-    - ``prompt_ids``:     list[list[int]]   shape ``[seq_len, K]``
-    - ``prompt_logprobs``: list[list[float]] shape ``[seq_len, K]``
-
-    The last position is always padded with dummy zeros because vLLM does not
-    provide a logprob for the last prompt token (no subsequent token to
-    condition on).  SGLang behaves the same way — ``input_token_logprobs``
-    starts at the *second* token and has length ``len(prompt) - 1``.  We keep
-    a trailing dummy entry so that shapes match expectations in
-    ``_pad_teacher_outputs``.
-
-    Args:
-        output: Raw SGLang generation output dict.
-        num_prompt_logprobs: Number of top-K logprobs requested (``top_logprobs_num``).
-            When 0 only the greedy/sampled token logprob is returned.
-
-    Returns:
-        dict with keys ``"prompt_ids"`` and ``"prompt_logprobs"``.
+    SGLang returns one entry per prompt token, with the first token carrying no
+    valid logprob/top-logprobs. We skip that first position and append one
+    trailing dummy row so the final length matches len(sequence_ids).
     """
     meta_info = output["meta_info"]
 
-    # input_token_logprobs: [(logprob_or_None, token_id, text), ...]
-    # The first entry corresponds to the first input token and has logprob=None
-    # because there is no prefix.  We skip it to align with vLLM's convention.
     raw_token_logprobs = meta_info.get("input_token_logprobs") or []
-    # input_top_logprobs: [[(logprob, token_id, text), ...], ...] or []
     raw_top_logprobs = meta_info.get("input_top_logprobs") or []
 
     prompt_ids_ls: list[list[int]] = []
     prompt_logprobs_ls: list[list[float]] = []
 
+    target_k = max(num_prompt_logprobs, 1)
     use_top = num_prompt_logprobs > 0 and len(raw_top_logprobs) > 0
 
-    # Both lists have length == len(input_ids) - 1 (no logprob for 1st token).
-    # We iterate from the *second* token onwards, mirroring vLLM's behaviour.
-    for i, (logprob, token_id, _) in enumerate(raw_token_logprobs):
+    # Skip the first token: it has no preceding context.
+    for i in range(1, len(raw_token_logprobs)):
+        logprob, token_id, _ = raw_token_logprobs[i]
+
         if use_top:
             top_entries = raw_top_logprobs[i] if i < len(raw_top_logprobs) else []
             ids = [int(tid) for _, tid, _ in top_entries[:num_prompt_logprobs]]
             lps = [float(lp) for lp, _, _ in top_entries[:num_prompt_logprobs]]
-            # Pad to exactly num_prompt_logprobs entries if SGLang returned fewer.
-            while len(ids) < num_prompt_logprobs:
-                ids.append(0)
-                lps.append(0.0)
+
+            if len(ids) == 0:
+                ids = [int(token_id)]
+                lps = [float(logprob) if logprob is not None else 0.0]
         else:
-            # num_prompt_logprobs == 0: only the greedy token logprob is needed.
             ids = [int(token_id)]
             lps = [float(logprob) if logprob is not None else 0.0]
+
+        while len(ids) < target_k:
+            ids.append(0)
+            lps.append(0.0)
 
         prompt_ids_ls.append(ids)
         prompt_logprobs_ls.append(lps)
 
-    # Append a dummy entry for the last prompt token (no logprob available).
-    k = max(num_prompt_logprobs, 1)
-    prompt_ids_ls.append([0] * k)
-    prompt_logprobs_ls.append([0.0] * k)
+    # Dummy row for the last prompt token so total length matches len(sequence_ids).
+    prompt_ids_ls.append([0] * target_k)
+    prompt_logprobs_ls.append([0.0] * target_k)
 
     return {
         "prompt_ids": prompt_ids_ls,
         "prompt_logprobs": prompt_logprobs_ls,
     }
-
 
 class SGLangHttpServer:
     """SGLang http server in single node, this is equivalent to launch server with command line:
