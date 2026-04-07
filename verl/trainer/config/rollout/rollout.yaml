@@ -91,6 +91,9 @@ scheduling_policy: fcfs
 # safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
 load_format: dummy
 
+# for huge model, layered summon can save memory (prevent OOM) but make it slower
+layered_summon: False
+
 # [Will be deprecated, use log_prob_micro_batch_size_per_gpu] The batch size for one forward pass in the computation of log_prob. Global batch size.
 log_prob_micro_batch_size: null
 
@@ -299,14 +302,29 @@ trace:
   # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
   max_samples_per_step_per_worker: null
 
-# When enabled (True), the trainer will attempt to load previously generated rollout data from the specified directory instead of computing new rollouts.
-# If no cached data is found or loading fails, new rollouts will be generated and automatically saved.
-# This feature is useful for debugging or when you want to reuse computation results across multiple runs.
-skip_rollout: False
+# rollout skip config (load/dump rollout data)
+skip:
 
-# Specifies the filesystem path where rollout data should be cached when skip_rollout is enabled.
-# Note: Giving path under /tmp/ray/session* is not recommended as these are temporary Ray cluster directories.
-skip_dump_dir: /tmp/rollout_dump
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.SkipConfig
+
+  # When enabled (True), the trainer will attempt to load previously generated rollout data from the specified directory instead of computing new rollouts.
+  # If no cached data is found or loading fails, new rollouts will be generated and automatically saved.
+  # This feature is useful for debugging or when you want to reuse computation results across multiple runs.
+  enable: False
+
+  # Default ~/.verl/rollout_dump (expanduser+resolve at runtime). Ray/multi-node: prefer absolute dump_dir (relative paths follow each process cwd).
+  # Avoid /tmp/ray/session* (ephemeral).
+  dump_dir: "~/.verl/rollout_dump"
+
+  # Number of training steps (from start) for which dump/load is active. Steps with train_step <= max_dump_step are "dump steps" (try load first, then generate and dump if missing).
+  max_dump_step: 1
+
+  # Action when beyond dump steps (gen_step > max_dump_step):
+  # - "cache": If dumped data exists for current step, use it; otherwise generate and dump.
+  # - "repeat": Reuse dumped data in a round-robin over the first max_dump_step steps.
+  # - "repeat_last": Reuse the last dumped step's data.
+  action: "cache"
 
 # Whether to skip tokenizer initialization for rollout engine
 # When enabled (True), the rollout assume token in token out for generation
@@ -402,4 +420,4 @@ quantization_config_file: null
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 
 # QAT configuration (inherited from actor's engine config)
-qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,null}
+qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}

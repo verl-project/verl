@@ -59,7 +59,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm017.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -83,7 +83,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -105,21 +104,22 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Running vllm generative reward model tests on 8 L20 GPUs
         run: |
-          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py
       - name: Running vllm discriminative reward model tests on 8 L20 GPUs
         run: |
-          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_reward_model_disrm.py
 
       - name: Running vllm agent loop with reward manager tests on 8 L20 GPUs
         run: |
-          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_standalone.py
       - name: Running vllm agent loop with reward model colocate tests on 8 L20 GPUs
         run: |
-          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py
+      - name: Running vllm agent loop with image reward manager tests on 2 L20 GPUs
+        run: |
+          pip3 install python-Levenshtein
+          unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_visual_reward_manager.py
 
   cleanup:
     runs-on: ubuntu-latest

@@ -43,8 +43,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=1 \
     critic.ulysses_sequence_parallel_size=2 \
-    critic.model.fsdp_config.param_offload=True \
-    critic.model.fsdp_config.optimizer_offload=True \
+    critic.fsdp.param_offload=True \
+    critic.fsdp.optimizer_offload=True \
     critic.use_dynamic_bsz=True \
     trainer.critic_warmup=0 \
     trainer.logger=console \
@@ -57,4 +57,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.max_actor_ckpt_to_keep=1 \
     trainer.max_critic_ckpt_to_keep=1 \
-    trainer.total_training_steps=15 2>&1 | tee /root/.cache/ppo_qwen3-8b_fsdp_npu.log
+    trainer.total_training_steps=15 2>&1 | tee /root/.cache/nightly_log/qwen3-8b-ppo/ppo_qwen3-8b_fsdp_npu-$(date +%Y%m%d_%H%M).log

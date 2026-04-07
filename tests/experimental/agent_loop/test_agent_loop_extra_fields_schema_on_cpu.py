@@ -219,7 +219,11 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     )
 
     # Mimic two "worker chunks" and concatenate as in training.
-    dummy_worker = type("_DummyWorker", (), {"reward_loop_worker_handles": None})()
+    dummy_worker = type(
+        "_DummyWorker",
+        (),
+        {"reward_loop_worker_handles": None, "distillation_enabled": False, "stream_teacher_with_rollout": False},
+    )()
     merged = AgentLoopWorker._postprocess(
         dummy_worker,
         inputs=[internal_a],
@@ -254,6 +258,9 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
         _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
         _compute_position_ids = AgentLoopWorker._compute_position_ids
         _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        distillation_enabled = False
+        stream_teacher_with_rollout = False
 
         def __init__(self):
             self.tokenizer = _FakeTokenizer()
@@ -283,6 +290,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
         internal = await AgentLoopWorker._agent_loop_postprocess(
             _DummyWorker(),
             output,
+            validate=False,
             raw_prompt=[{"role": "user", "content": "hi"}],
         )
 

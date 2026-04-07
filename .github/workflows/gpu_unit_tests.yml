@@ -52,6 +52,7 @@ on:
       - "**/*.py"
       # Other entrypoints
       - "!examples/**"
+      - "!tests/special_sanity/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
       # Entrypoints
@@ -95,7 +96,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1"
       HF_HUB_ENABLE_HF_TRANSFER: 1
@@ -117,6 +117,9 @@ jobs:
       - name: Testing LinearCrossEntropyTP Correctness, Computation Time and Memory Consumption
         run: |
           LOW_MEMORY=True torchrun --standalone --nnodes=1 --nproc-per-node=8 tests/utils/test_special_linear_cross_entropy_tp.py
+      - name: Testing Megatron KL Loss TP Correctness
+        run: |
+          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/utils/test_special_megatron_kl_loss_tp.py
       - name: Testing FSDP2 actor functionality
         run: |
           torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/actor/test_special_dp_actor.py

@@ -71,7 +71,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -114,7 +113,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -157,7 +155,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -172,3 +169,54 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen25-vl-3b-instruct_fsdp_npu.sh
+
+  # Test dapo moonlight-16b megatron vllm
+  nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install -r requirements-npu.txt
+          pip install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Preprocess geo3k dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: update mbridge
+        run: |
+          # get mbridge path
+          MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}')
+          # cuda to npu
+          TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py"
+          sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
+      - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
+        run: |
+          ray stop --force
+          bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh

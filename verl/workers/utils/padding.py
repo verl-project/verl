@@ -80,6 +80,19 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         )
         data["routed_experts"] = routed_experts_nested
 
+    # (bsz, seqlen, topk)
+    teacher_logprobs = data.get("teacher_logprobs", None)
+    teacher_ids = data.get("teacher_ids", None)
+    if teacher_logprobs is not None and teacher_ids is not None:
+        teacher_logprobs_rmpad = index_first_axis(teacher_logprobs.unsqueeze(-1).flatten(0, 1), indices)
+        teacher_ids_rmpad = index_first_axis(teacher_ids.unsqueeze(-1).flatten(0, 1), indices)
+        teacher_logprobs_nested = torch.nested.nested_tensor_from_jagged(
+            teacher_logprobs_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
+        teacher_ids_nested = torch.nested.nested_tensor_from_jagged(teacher_ids_rmpad.squeeze(-1), offsets=cu_seqlens)
+        data["teacher_logprobs"] = teacher_logprobs_nested
+        data["teacher_ids"] = teacher_ids_nested
+
     return data
 
 
@@ -87,12 +100,13 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     """Slice response from unpad model output.
 
     Args:
-        tensor: a nested tensor or a 1D tensor in shape (total_nnz,),
+        tensor: a nested tensor or a tensor of shape (total_nnz,*),
             total_nnz is the total number of tokens across all sequences in the batch
+
         data: TensorDict with "prompts", "responses", "attention_mask"
 
     Returns:
-        tensor: sliced response tensor of shape [bsz, max_response_len]
+        tensor: sliced response tensor of shape [bsz, max_response_len, *]
     """
     values = tensor.values() if tensor.is_nested else tensor
     prompt_ids = data["prompts"]
@@ -115,12 +129,55 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
     assert sequence_offsets[-1].item() == values.shape[0]
+    assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
 
     response_list = []
+    # Skip padding dimensions after sequence dimensions, if any.
+    skip_padding = (0, 0) * (values.ndim - 1)
     for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
         pad_size = max_response_len - resp_len
         # left-shift model output by one token for log_probs/values
-        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
+        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (*skip_padding, 0, pad_size)))
 
     output = torch.stack(response_list, dim=0)
     return output
+
+
+def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
+    """
+    Convert TensorDict from prompt embeds with padding to no-padding format.
+    For diffusion model training only.
+
+    Currently we expect the prompt embedding mask to be [1111000...] format,
+    which means the valid tokens are continuous and start from the left.
+
+    Args:
+        data: TensorDict with "prompt_embeds", "prompt_embeds_mask",
+              "negative_prompt_embeds", "negative_prompt_embeds_mask"
+
+    Returns:
+        data: TensorDict with
+        - Tensor includes NestedTensors "prompt_embeds", "prompt_embeds_mask",
+          "negative_prompt_embeds", "negative_prompt_embeds_mask"
+    """
+
+    def _to_nested(embeds: torch.Tensor, mask: torch.Tensor):
+        """Strip padding from (bs, seq_len, dim) embeds using the boolean mask and return nested tensors."""
+        embeds_list, mask_list = [], []
+        for i in range(mask.shape[0]):
+            curr_mask = mask[i].bool()
+            embeds_list.append(embeds[i, curr_mask, :])
+            mask_list.append(curr_mask[curr_mask])
+        return (
+            torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged),
+            torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
+        )
+
+    data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(data["prompt_embeds"], data["prompt_embeds_mask"])
+
+    if isinstance(data.get("negative_prompt_embeds", None), torch.Tensor):
+        data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(
+            data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"]
+        )
+
+    return data
