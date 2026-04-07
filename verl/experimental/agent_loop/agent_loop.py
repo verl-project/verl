@@ -40,6 +40,7 @@ from verl.utils.chat_template import apply_chat_template, initialize_system_prom
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
@@ -180,6 +181,7 @@ class AgentLoopMetrics(BaseModel):
 
     generate_sequences: float = 0.0
     tool_calls: float = 0.0
+    reward: float = 0.0
     num_preempted: int = -1  # -1 means not available
 
 
@@ -709,15 +711,18 @@ class AgentLoopWorker:
 
         multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
         position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
-        await self._compute_score(
-            output,
-            prompts=prompt_output["input_ids"],
-            responses=response_output["input_ids"],
-            attention_mask=attention_mask,
-            input_ids=input_ids,
-            position_ids=position_ids,
-            kwargs=kwargs,
-        )
+        reward_timing = {}
+        with simple_timer("reward", reward_timing):
+            await self._compute_score(
+                output,
+                prompts=prompt_output["input_ids"],
+                responses=response_output["input_ids"],
+                attention_mask=attention_mask,
+                input_ids=input_ids,
+                position_ids=position_ids,
+                kwargs=kwargs,
+            )
+        output.metrics.reward = reward_timing["reward"]
         await self._compute_teacher_logprobs(
             output,
             prompt_ids=output.prompt_ids,
@@ -1175,6 +1180,7 @@ class AgentLoopManager:
         timing = {}
         t_generate_sequences = np.array([metric["generate_sequences"] for chunk in metrics for metric in chunk])
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
+        t_reward = np.array([metric["reward"] for chunk in metrics for metric in chunk])
         num_preempted = np.array([metric["num_preempted"] for chunk in metrics for metric in chunk])
         timing["agent_loop/num_preempted/min"] = num_preempted.min()
         timing["agent_loop/num_preempted/max"] = num_preempted.max()
@@ -1185,12 +1191,16 @@ class AgentLoopManager:
         timing["agent_loop/tool_calls/min"] = t_tool_calls.min()
         timing["agent_loop/tool_calls/max"] = t_tool_calls.max()
         timing["agent_loop/tool_calls/mean"] = t_tool_calls.mean()
+        timing["agent_loop/reward/min"] = t_reward.min()
+        timing["agent_loop/reward/max"] = t_reward.max()
+        timing["agent_loop/reward/mean"] = t_reward.mean()
 
         # batch sequence generation is bounded by the slowest sample
-        slowest = np.argmax(t_generate_sequences + t_tool_calls)
+        slowest = np.argmax(t_generate_sequences + t_tool_calls + t_reward)
         prompt_length = output.batch["prompts"].shape[1]
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
+        timing["agent_loop/slowest/reward"] = t_reward[slowest]
         timing["agent_loop/slowest/num_preempted"] = num_preempted[slowest]
 
         if "attention_mask" in output.batch:
