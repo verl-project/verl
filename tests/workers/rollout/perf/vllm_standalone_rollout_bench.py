@@ -161,13 +161,16 @@ def build_config(args):
     rollout.disable_log_stats = False
     rollout.max_model_len = args.max_model_len
 
-    # Quantization: bypass whitelist by passing through engine_kwargs.vllm
-    # which gets **-unpacked last in launch_server() and overrides the args dict.
+    # fp8 must go through rollout.quantization so verl applies monkey-patches,
+    # MoE gate exclusion, and subprocess env vars. Other methods bypass the
+    # whitelist via engine_kwargs.vllm (**-unpacked last in launch_server()).
     quant_value = args.quantization if args.quantization else None
-    OmegaConf.update(config, "actor_rollout_ref.rollout.quantization", None, force_add=True)
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
 
-    if quant_value is not None:
+    if quant_value is not None and quant_value == "fp8":
+        OmegaConf.update(config, "actor_rollout_ref.rollout.quantization", quant_value, force_add=True)
+    elif quant_value is not None:
+        OmegaConf.update(config, "actor_rollout_ref.rollout.quantization", None, force_add=True)
         OmegaConf.update(
             config,
             "actor_rollout_ref.rollout.engine_kwargs.vllm.quantization",
@@ -180,6 +183,8 @@ def build_config(args):
             {"quantization_config": {"quant_method": quant_value}},
             force_add=True,
         )
+    else:
+        OmegaConf.update(config, "actor_rollout_ref.rollout.quantization", None, force_add=True)
 
     compilation = {"cudagraph_mode": args.cudagraph_mode}
     if args.cudagraph_capture_sizes:
@@ -356,7 +361,7 @@ async def _generate_one(handle, prompt_ids, sampling_params, request_id, save_id
     output_tokens = len(token_output.token_ids)
     success = token_output.stop_reason != "aborted"
 
-    extra = token_output.extra_info or {}
+    extra = token_output.extra_fields or {}
     ftl = extra.get("first_token_latency")
     ttft = ftl if ftl and ftl > 0 else 0.0
 
