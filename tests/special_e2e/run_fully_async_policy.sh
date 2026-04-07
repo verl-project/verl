@@ -201,8 +201,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         critic.strategy=megatron \
         actor_rollout_ref.actor.optim.lr_decay_steps=10000000 \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
         actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \

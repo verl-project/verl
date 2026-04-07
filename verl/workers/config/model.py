@@ -238,7 +238,15 @@ class HFModelConfig(BaseConfig):
 
 @dataclass
 class DiffusionModelConfig(BaseConfig):
-    _mutable_fields = {"tokenizer_path", "tokenizer", "processor", "local_path", "local_tokenizer_path", "architecture"}
+    _mutable_fields = {
+        "model_type",
+        "tokenizer_path",
+        "tokenizer",
+        "processor",
+        "local_path",
+        "local_tokenizer_path",
+        "architecture",
+    }
 
     path: str = MISSING
     # Handler key matched against @DiffusionModelBase.register(name).

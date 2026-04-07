@@ -25,7 +25,7 @@ from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import QwenIma
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
 
-from ..scheduler.scheduling_flow_match_sde_discrete import FlowMatchSDEDiscreteScheduler
+from ..scheduler import FlowMatchSDEDiscreteScheduler
 
 
 def _maybe_to_cpu(v):

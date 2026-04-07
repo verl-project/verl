@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -59,8 +58,8 @@ class CriticConfig(BaseConfig):
         "ppo_micro_batch_size_per_gpu",
         "ppo_mini_batch_size",
         "ppo_micro_batch_size",
-        "model_config",
         "engine",
+        "model_config",
     }
 
     strategy: str = MISSING
@@ -82,25 +81,13 @@ class CriticConfig(BaseConfig):
     ppo_micro_batch_size: Optional[int] = None
     engine: BaseConfig = field(default_factory=BaseConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)
-    # deprecate model to favor model_config
-    model: BaseModelConfig = field(default_factory=BaseModelConfig)
-    model_config: HFModelConfig = None
+    model: HFModelConfig = None
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
 
     def __post_init__(self):
         """Validate critic configuration parameters."""
         assert self.strategy != MISSING
-
-        if self.model_config is None:
-            warnings.warn("using model in Critic Config is deprecated, please use model_config instead", stacklevel=2)
-            self.model_config = HFModelConfig(
-                path=self.model.path,
-                tokenizer_path=self.model.tokenizer_path,
-                override_config=self.model.override_config,
-                external_lib=self.model.external_lib,
-                trust_remote_code=self.model.trust_remote_code,
-            )
 
         if not self.use_dynamic_bsz:
             self._check_mutually_exclusive(self.ppo_micro_batch_size, self.ppo_micro_batch_size_per_gpu, "critic")
@@ -175,6 +162,11 @@ class McoreCriticConfig(CriticConfig):
         """Validate Megatron critic configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size)
 
+    def __post_init__(self):
+        """Validate Megatron critic configuration parameters."""
+        super().__post_init__()
+        self.engine = self.megatron
+
 
 @dataclass
 class FSDPCriticConfig(CriticConfig):
@@ -195,6 +187,7 @@ class FSDPCriticConfig(CriticConfig):
     }
 
     strategy: str = "fsdp"
+    fsdp: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     forward_micro_batch_size: int = 1
     forward_micro_batch_size_per_gpu: int = 1
     ulysses_sequence_parallel_size: int = 1
@@ -203,7 +196,7 @@ class FSDPCriticConfig(CriticConfig):
     def __post_init__(self):
         """Validate FSDP critic configuration parameters."""
         super().__post_init__()
-        self.engine = self.model.fsdp_config
+        self.engine = self.fsdp
 
         if self.strategy in {"fsdp", "fsdp2"}:
             if self.ulysses_sequence_parallel_size > 1:

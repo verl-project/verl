@@ -1,5 +1,5 @@
 # This reference configration yaml is automatically generated via 'scripts/generate_trainer_config.sh'
-# in which it invokes 'python3 scripts/print_cfg.py --cfg job --config-name=ppo_megatron_trainer.yaml' to flatten the 'verl/trainer/config/ppo_megatron_trainer.yaml' config fields into a single file.
+# in which it invokes 'python3 scripts/print_cfg.py --cfg job model_engine=megatron' to flatten the 'verl/trainer/config/ppo_trainer.yaml' config fields into a single file.
 # Do not modify this file directly.
 # The file is usually only for reference and never used.
 
@@ -41,6 +41,8 @@ actor_rollout_ref:
       use_distributed_optimizer: true
       use_dist_checkpointing: false
       dist_checkpointing_path: null
+      dynamic_context_parallel: false
+      max_seqlen_per_dp_cp_rank: null
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
@@ -213,6 +215,8 @@ actor_rollout_ref:
       use_distributed_optimizer: true
       use_dist_checkpointing: false
       dist_checkpointing_path: null
+      dynamic_context_parallel: false
+      max_seqlen_per_dp_cp_rank: null
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
@@ -271,6 +275,7 @@ actor_rollout_ref:
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
+    layered_summon: false
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
@@ -363,9 +368,6 @@ actor_rollout_ref:
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
     qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
-    layer_name_map:
-      qkv_layer_name: qkv
-      gate_proj_layer_name: gate_up
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -375,13 +377,10 @@ actor_rollout_ref:
     trust_remote_code: false
     custom_chat_template: null
     external_lib: null
-    override_config:
-      model_config: {}
-      moe_config:
-        freeze_moe_router: false
+    override_config: {}
     enable_gradient_checkpointing: true
     enable_activation_offload: false
-    use_remove_padding: false
+    use_remove_padding: true
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
@@ -507,6 +506,8 @@ critic:
     use_distributed_optimizer: true
     use_dist_checkpointing: false
     dist_checkpointing_path: null
+    dynamic_context_parallel: false
+    max_seqlen_per_dp_cp_rank: null
     dist_checkpointing_prefix: ''
     dist_ckpt_optim_fully_reshardable: false
     distrib_optim_fully_reshardable_mem_efficient: false
@@ -544,36 +545,6 @@ critic:
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: megatron
   enable: null
-  model:
-    path: ~/models/deepseek-llm-7b-chat
-    tokenizer_path: ${oc.select:actor_rollout_ref.model.path,"~/models/deepseek-llm-7b-chat"}
-    override_config:
-      model_config: {}
-      moe_config:
-        freeze_moe_router: false
-    external_lib: ${oc.select:actor_rollout_ref.model.external_lib,null}
-    trust_remote_code: ${oc.select:actor_rollout_ref.model.trust_remote_code,false}
-    _target_: verl.trainer.config.BaseModelConfig
-    lora:
-      type: lora
-      rank: 0
-      alpha: 32
-      dropout: 0.0
-      target_modules:
-      - linear_qkv
-      - linear_proj
-      - linear_fc1
-      - linear_fc2
-      exclude_modules: []
-      dropout_position: pre
-      lora_A_init_method: xavier
-      lora_B_init_method: zero
-      a2a_experimental: false
-      dtype: null
-      adapter_path: null
-      freeze_vision_model: true
-      freeze_vision_projection: true
-      freeze_language_model: true
   ppo_mini_batch_size: ${oc.select:actor_rollout_ref.actor.ppo_mini_batch_size,256}
   ppo_micro_batch_size: null
   ppo_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size,null}
@@ -621,6 +592,65 @@ critic:
         stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
   nccl_timeout: 600
   load_weight: true
+  model:
+    _target_: verl.workers.config.HFModelConfig
+    path: ~/models/deepseek-llm-7b-chat
+    hf_config_path: null
+    tokenizer_path: null
+    use_shm: false
+    trust_remote_code: false
+    custom_chat_template: null
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: true
+    enable_activation_offload: false
+    use_remove_padding: true
+    lora_rank: 0
+    lora_alpha: 16
+    target_modules: all-linear
+    exclude_modules: null
+    lora_adapter_path: null
+    use_liger: false
+    use_fused_kernels: false
+    fused_kernel_options:
+      impl_backend: torch
+    tiled_mlp:
+      enabled: false
+      num_shards: 4
+    mtp:
+      _target_: verl.workers.config.MtpConfig
+      enable: false
+      enable_train: false
+      enable_rollout: false
+      detach_encoder: false
+      mtp_loss_scaling_factor: 0.1
+      speculative_algorithm: EAGLE
+      speculative_num_steps: 3
+      speculative_eagle_topk: 1
+      speculative_num_draft_tokens: 4
+      method: mtp
+      num_speculative_tokens: 1
+    lora:
+      type: lora
+      merge: false
+      rank: 0
+      alpha: 32
+      dropout: 0.0
+      target_modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+      exclude_modules: []
+      dropout_position: pre
+      lora_A_init_method: xavier
+      lora_B_init_method: zero
+      a2a_experimental: false
+      dtype: null
+      adapter_path: null
+      freeze_vision_model: true
+      freeze_vision_projection: true
+      freeze_language_model: true
 custom_reward_function:
   path: null
   name: null
@@ -793,23 +823,25 @@ trainer:
   - console
   - wandb
   log_val_generations: 0
+  rollout_data_dir: null
+  validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null
-  del_local_ckpt_after_load: false
   val_before_train: true
+  val_only: false
   test_freq: -1
   critic_warmup: 0
   default_hdfs_dir: null
+  del_local_ckpt_after_load: false
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  rollout_data_dir: null
   use_legacy_worker_impl: disable
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
@@ -819,6 +851,7 @@ global_profiler:
   save_path: outputs/profile
   global_tool_config:
     nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
       discrete: false
       controller_nsight_options:
         trace: cuda,nvtx,cublas,ucx
@@ -837,6 +870,14 @@ global_profiler:
       context: all
       stacks: all
       kw_args: {}
+    precision_debugger:
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+      enable: false
+      config_path: null
+      data_dir: outputs/precision_debug
+      steps: null
+      stages: null
+      strict: false
 transfer_queue:
   enable: false
   backend:

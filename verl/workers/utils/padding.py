@@ -143,6 +143,46 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     return output
 
 
+def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
+    """
+    Convert TensorDict from prompt embeds with padding to no-padding format.
+    For diffusion model training only.
+
+    Currently we expect the prompt embedding mask to be [1111000...] format,
+    which means the valid tokens are continuous and start from the left.
+
+    Args:
+        data: TensorDict with "prompt_embeds", "prompt_embeds_mask",
+              "negative_prompt_embeds", "negative_prompt_embeds_mask"
+
+    Returns:
+        data: TensorDict with
+        - Tensor includes NestedTensors "prompt_embeds", "prompt_embeds_mask",
+          "negative_prompt_embeds", "negative_prompt_embeds_mask"
+    """
+
+    def _to_nested(embeds: torch.Tensor, mask: torch.Tensor):
+        """Strip padding from (bs, seq_len, dim) embeds using the boolean mask and return nested tensors."""
+        embeds_list, mask_list = [], []
+        for i in range(mask.shape[0]):
+            curr_mask = mask[i].bool()
+            embeds_list.append(embeds[i, curr_mask, :])
+            mask_list.append(curr_mask[curr_mask])
+        return (
+            torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged),
+            torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
+        )
+
+    data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(data["prompt_embeds"], data["prompt_embeds_mask"])
+
+    if isinstance(data.get("negative_prompt_embeds", None), torch.Tensor):
+        data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(
+            data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"]
+        )
+
+    return data
+
+
 def response_from_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
     """Extract response from nested model output.
 
