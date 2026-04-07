@@ -33,7 +33,25 @@ __all__ = [
     "RolloutConfig",
     "DiffusionRolloutConfig",
     "CheckpointEngineConfig",
+    "SkipConfig",
 ]
+
+
+@dataclass
+class SkipConfig(BaseConfig):
+    """
+    Configuration for rollout skip: load/dump previously generated rollout data
+    instead of computing new rollouts (e.g. for debugging or reuse).
+    """
+
+    enable: bool = False
+    dump_dir: str = "~/.verl/rollout_dump"
+    max_dump_step: int = 1
+    action: str = "cache"  # cache | repeat | repeat_last
+
+    def get(self, key: str, default=None):
+        """Dict-like get for compatibility with code that uses skip.get('enable', False)."""
+        return getattr(self, key, default)
 
 
 @dataclass
@@ -46,9 +64,7 @@ class SamplingConfig(BaseConfig):
 
 
 @dataclass
-class DiffusionSamplingConfig(BaseConfig):
-    do_sample: bool = True
-    n: int = 1
+class DiffusionSamplingConfig(SamplingConfig):
     noise_level: float = 0.0
     num_inference_steps: int = 40
     seed: int = 42
@@ -230,9 +246,8 @@ class RolloutConfig(BaseConfig):
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
 
-    skip_rollout: bool = False
-
-    skip_dump_dir: str = "/tmp/rollout_dump"
+    # Rollout skip config (load/dump rollout data)
+    skip: SkipConfig = field(default_factory=SkipConfig)
 
     profiler: Optional[ProfilerConfig] = None
 
@@ -324,8 +339,6 @@ class DiffusionRolloutConfig(RolloutConfig):
     width: int = 512
 
     num_inference_steps: int = 10
-
-    guidance_scale: float = 4.5
 
     def __post_init__(self):
         """Validate diffusion rollout config"""

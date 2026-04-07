@@ -139,9 +139,9 @@ class DistillationTeacherModelConfig(BaseConfig):
         return configured
 
     def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
-        max_num_batched_tokens = self.inference.max_num_batched_tokens
         student_prompt_length = self.inference.prompt_length
         student_response_length = self.inference.response_length
         required_context_len = student_prompt_length + student_response_length + 1
@@ -151,14 +151,6 @@ class DistillationTeacherModelConfig(BaseConfig):
                 f"response, and one generated token, but got {student_prompt_length=}, "
                 f"{student_response_length=}, {required_context_len=}, {max_model_len=}."
             )
-        if max_num_batched_tokens is not None and required_context_len > max_num_batched_tokens:
-            raise ValueError(
-                "Distillation teacher inference requires room for the student prompt, the full student "
-                f"response, and one generated token within the engine batching budget, but got "
-                f"{student_prompt_length=}, {student_response_length=}, {required_context_len=}, "
-                f"{max_num_batched_tokens=}."
-            )
-
         self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
         self.inference.response_length = 1
         self._validate_topk_logprobs(use_topk=use_topk, topk=topk)

@@ -40,6 +40,12 @@ use_dist_checkpointing: False
 # distributed checkpointing path
 dist_checkpointing_path: null
 
+# Whether to use hybrid context parallelism
+dynamic_context_parallel: False
+
+# Maximum sequence length per DPxCP rank
+max_seqlen_per_dp_cp_rank: null
+
 # distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
 dist_checkpointing_prefix: ''
 

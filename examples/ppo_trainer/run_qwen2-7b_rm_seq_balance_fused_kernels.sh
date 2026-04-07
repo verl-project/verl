@@ -42,8 +42,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.enable_gradient_checkpointing=True \
     critic.use_dynamic_bsz=True \
     critic.ppo_max_token_len_per_gpu=98304 \
-    critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.fsdp.param_offload=False \
+    critic.fsdp.optimizer_offload=False \
     reward.num_workers=8 \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=sfairXC/FsfairX-LLaMA3-RM-v0.1 \

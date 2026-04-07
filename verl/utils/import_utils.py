@@ -69,6 +69,15 @@ def is_trl_available():
     return trl_spec is not None
 
 
+@cache
+def is_msprobe_available():
+    try:
+        msprobe_spec = importlib.util.find_spec("msprobe")
+    except ModuleNotFoundError:
+        msprobe_spec = None
+    return msprobe_spec is not None
+
+
 def import_external_libs(external_libs=None):
     if external_libs is None:
         return
