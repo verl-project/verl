@@ -227,12 +227,8 @@ class TaskRunner:
         """Add reference policy worker if KL loss or KL reward is used."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        # Ref policy has been fused into ActorRolloutRefWorker in new model engine,
-        # we don't need to add a separate ref policy worker group.
-        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-        if use_legacy_worker_impl == "disable":
-            return
-
+        # In the new model engine, ref policy is fused into ActorRolloutRefWorker,
+        # so no separate ref policy worker group is needed.
         if need_reference_policy(config):
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
