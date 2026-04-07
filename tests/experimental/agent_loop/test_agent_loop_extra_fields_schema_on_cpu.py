@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Optional
 
 import numpy as np
@@ -23,6 +24,7 @@ from omegaconf import OmegaConf
 
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopMetrics,
+    AgentLoopOutput,
     AgentLoopWorker,
     DictConfigWrap,
     _InternalAgentLoopOutput,
@@ -63,6 +65,8 @@ class _FakeServerManager:
 
 
 class _FakeTokenizer:
+    padding_side = "right"
+
     def apply_chat_template(
         self,
         messages: list[dict[str, Any]],
@@ -75,6 +79,36 @@ class _FakeTokenizer:
         del messages, tools, add_generation_prompt, tokenize, kwargs
         # Minimal tokenization: return a small prompt.
         return [101, 102]
+
+    def pad(
+        self,
+        encoded_inputs: dict[str, list[int]],
+        *,
+        padding: str,
+        max_length: int,
+        return_tensors: str,
+        return_attention_mask: bool,
+    ) -> dict[str, torch.Tensor]:
+        del padding, return_tensors
+        input_ids = encoded_inputs["input_ids"]
+        if len(input_ids) > max_length:
+            if self.padding_side == "left":
+                input_ids = input_ids[-max_length:]
+            else:
+                input_ids = input_ids[:max_length]
+
+        pad_len = max_length - len(input_ids)
+        if self.padding_side == "left":
+            padded_ids = [0] * pad_len + input_ids
+            attention_mask = [0] * pad_len + [1] * len(input_ids)
+        else:
+            padded_ids = input_ids + [0] * pad_len
+            attention_mask = [1] * len(input_ids) + [0] * pad_len
+
+        output = {"input_ids": torch.tensor([padded_ids], dtype=torch.long)}
+        if return_attention_mask:
+            output["attention_mask"] = torch.tensor([attention_mask], dtype=torch.long)
+        return output
 
     def decode(self, ids: list[int] | torch.Tensor, skip_special_tokens: bool = True) -> str:
         del ids, skip_special_tokens
@@ -185,7 +219,11 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     )
 
     # Mimic two "worker chunks" and concatenate as in training.
-    dummy_worker = type("_DummyWorker", (), {"reward_loop_worker_handles": None})()
+    dummy_worker = type(
+        "_DummyWorker",
+        (),
+        {"reward_loop_worker_handles": None, "distillation_enabled": False, "stream_teacher_with_rollout": False},
+    )()
     merged = AgentLoopWorker._postprocess(
         dummy_worker,
         inputs=[internal_a],
@@ -212,3 +250,53 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     # And the list-typed fields are actually lists (not missing / scalar).
     assert merged.non_tensor_batch["turn_scores"][0] == []
     assert merged.non_tensor_batch["tool_rewards"][0] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
+    class _DummyWorker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        distillation_enabled = False
+        stream_teacher_with_rollout = False
+
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
+            self.processor = None
+            self.reward_loop_worker_handles = None
+
+    routed_experts = np.arange(8, dtype=np.int64).reshape(4, 2, 1)
+    routed_experts.setflags(write=False)
+    assert not routed_experts.flags.writeable
+
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        routed_experts=routed_experts,
+        metrics=AgentLoopMetrics(),
+        extra_fields={},
+    )
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error",
+            message="The given NumPy array is not writable.*",
+            category=UserWarning,
+        )
+        internal = await AgentLoopWorker._agent_loop_postprocess(
+            _DummyWorker(),
+            output,
+            validate=False,
+            raw_prompt=[{"role": "user", "content": "hi"}],
+        )
+
+    expected = torch.tensor(routed_experts.copy()).unsqueeze(0)
+    assert internal.routed_experts is not None
+    assert internal.routed_experts.shape == (1, 8, 2, 1)
+    torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
+    assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
+    assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0

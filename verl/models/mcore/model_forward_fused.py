@@ -29,12 +29,12 @@ from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
 
-from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_no_padding
+from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
-from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_no_padding
+from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
 
 
 def _get_patching_model(model: torch.nn.Module):
@@ -137,8 +137,8 @@ def fused_forward_model_gen(vision_model: bool = False):
     return fused_forward_model
 
 
-def fused_forward_no_padding_gen(vision_model: bool = False):
-    def fused_forward_no_padding(
+def fused_forward_model_engine(vision_model: bool = False):
+    def fused_forward_model_engine_inner(
         model,
         input_ids: Tensor,
         labels: Tensor,
@@ -153,7 +153,7 @@ def fused_forward_no_padding_gen(vision_model: bool = False):
         fp8 = unwrap_model(model).config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
 
-        input_ids_rmpad, packed_seq_params = preprocess_thd_no_padding(
+        input_ids_rmpad, packed_seq_params, _ = preprocess_thd_engine(
             input_ids, pre_process=pre_process, use_fp8_padding=use_fp8_padding
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
@@ -177,7 +177,7 @@ def fused_forward_no_padding_gen(vision_model: bool = False):
                 0
             ) < seqlens_in_batch.unsqueeze(1)
 
-        labels_rmpad, _ = preprocess_thd_no_padding(
+        labels_rmpad, _, _ = preprocess_thd_engine(
             labels, pre_process=True, need_roll=True, use_fp8_padding=use_fp8_padding
         )
         labels_rmpad = labels_rmpad.contiguous()
@@ -197,7 +197,7 @@ def fused_forward_no_padding_gen(vision_model: bool = False):
         log_probs = output_orig.log_probs
         if log_probs.dim() == 1:
             log_probs = log_probs.unsqueeze(0)
-        log_probs = postprocess_thd_no_padding(
+        log_probs = postprocess_thd_engine(
             log_probs, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
         )
 
@@ -207,14 +207,14 @@ def fused_forward_no_padding_gen(vision_model: bool = False):
             entropy = output_orig.entropy
             if entropy.dim() == 1:
                 entropy = entropy.unsqueeze(0)
-            entropy = postprocess_thd_no_padding(
+            entropy = postprocess_thd_engine(
                 entropy, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
             )
             output["entropy"] = entropy
 
         return output
 
-    return fused_forward_no_padding
+    return fused_forward_model_engine_inner
 
 
 def _fused_GPTModel_forward(

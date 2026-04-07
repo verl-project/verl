@@ -26,6 +26,8 @@ from megatron.core import parallel_state as mpu
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from transformers import PretrainedConfig
 
+from verl.utils.megatron_utils import get_hf_rope_theta
+
 T = TypeVar("T", bound=TransformerConfig)
 
 
@@ -120,7 +122,7 @@ def _get_mla_transformer_config(
         "qk_head_dim": hf_config.qk_nope_head_dim,
         "qk_pos_emb_head_dim": hf_config.qk_rope_head_dim,
         "v_head_dim": hf_config.v_head_dim,
-        "rotary_base": hf_config.rope_theta,
+        "rotary_base": get_hf_rope_theta(hf_config),
         "rotary_scaling_factor": mla_rope_config["factor"],
         "rope_type": mla_rope_config["type"],
         "max_position_embeddings": mla_rope_config["original_max_position_embeddings"],

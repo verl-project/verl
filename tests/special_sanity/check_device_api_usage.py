@@ -41,14 +41,18 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/workers/engine/base.py",  # appear in default device_name
     "verl/workers/engine/utils.py",  # appear in enable_full_determinism
     "verl/workers/engine/fsdp/transformer_impl.py",  # appear in default device_name
+    "verl/workers/engine/fsdp/diffusers_impl.py",  # appear in default device_name
     "verl/workers/engine/veomni/transformer_impl.py",  # appear in default device_name
     "verl/workers/engine/torchtitan/transformer_impl.py",  # appear in default device_name
     "verl/workers/engine/torchtitan/utils.py",  # appear in torch.cuda.empty_cache()
+    "verl/workers/engine/automodel/transformer_impl.py",  # appear in default device_name
     "verl/workers/rollout/vllm_rollout/vllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/sglang_rollout/async_sglang_server.py",  # manually set CUDA_VISIBLE_DEVICES
     "verl/workers/rollout/trtllm_rollout/trtllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/replica.py",  # appear in default device_name
     "verl/checkpoint_engine",  # checkpoint engine backend are device specific
+    "verl/utils/modelopt/megatron_qat_patch.py",  # appear in torch.cuda.empty_cache()
+    "verl/models/mcore/patch.py",  # checkpoint patch only on cuda
 ]
 
 # directory or file path must contain keyword "nccl"

@@ -98,6 +98,18 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     actor_probs = torch.exp(actor_old_log_probs)
     rollout_probs = torch.exp(rollout_old_log_probs)
     response_mask_bool = response_mask.bool()
+
+    # check if there are any valid tokens before computing metrics
+    if not response_mask_bool.any():
+        logger.warning("response_mask is all False, returning default metrics")
+        return {
+            "training/rollout_probs_diff_valid": 0,
+            "training/rollout_probs_diff_max": float("nan"),
+            "training/rollout_probs_diff_mean": float("nan"),
+            "training/rollout_probs_diff_std": float("nan"),
+            "training/rollout_actor_probs_pearson_corr": float("nan"),
+        }
+
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
     return {

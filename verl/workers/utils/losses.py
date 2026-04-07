@@ -14,10 +14,10 @@
 
 
 import torch
-import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.diffusion_algos import kl_penalty_image
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
@@ -53,45 +53,6 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         loss = -masked_sum(log_prob, response_mask) / batch_num_tokens * dp_size
 
     return loss, {}
-
-
-def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
-    """Slice response from unpad model output.
-
-    Args:
-        tensor: model output tensor of shape [bsz, 1]
-        data: TensorDict with "prompt_ids", "response_ids", "attention_mask"
-
-    Returns:
-        tensor: sliced response tensor of shape [bsz, max_response_len]
-    """
-    values = tensor.values() if tensor.is_nested else tensor
-    prompt_ids = data["prompts"]
-    response_ids = data["responses"]
-    attention_mask = data["attention_mask"]
-
-    if prompt_ids.is_nested:
-        prompt_lens = prompt_ids.offsets().diff()
-        response_lens = response_ids.offsets().diff()
-        max_response_len = response_ids.offsets().max().item()
-    else:
-        assert not attention_mask.is_nested
-        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
-        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
-        max_response_len = response_ids.shape[1]
-
-    sequence_lens = prompt_lens + response_lens
-    sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0]
-
-    response_list = []
-    for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
-        pad_size = max_response_len - resp_len
-        # left-shift model output by one token for log_probs/values
-        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
-
-    output = torch.stack(response_list, dim=0)
-    return output
 
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -188,7 +149,7 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     Returns:
         value loss
     """
-    vpreds = _slice_response_from_unpad_output(model_output["values"], data)  # (bsz, response_length)
+    vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
 
     values = data["values"]
     returns = data["returns"]
@@ -214,3 +175,55 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     )
 
     return vf_loss, metrics
+
+
+def diffusion_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute loss for diffusion model"""
+    log_prob = model_output["log_probs"]
+
+    config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+
+    metrics = {}
+
+    response_mask = data["response_mask"].to(bool)
+    # compute policy loss
+    old_log_prob = data["old_log_probs"]
+    advantages = data["advantages"]
+
+    loss_agg_mode = config.loss_agg_mode
+
+    loss_mode = config.policy_loss.get("loss_mode", "flow_grpo")
+
+    policy_loss_fn = get_policy_loss_fn(loss_mode)
+    pg_loss, pg_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=None,
+    )
+
+    pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+
+    metrics.update(pg_metrics)
+    metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=AggregationType.MEAN)
+    policy_loss = pg_loss
+
+    if config.use_kl_loss:
+        ref_prev_sample_mean = data["ref_prev_sample_mean"]
+        prev_sample_mean = model_output["prev_sample_mean"]
+        std_dev_t = model_output["std_dev_t"]
+        kl_loss = kl_penalty_image(
+            prev_sample_mean=prev_sample_mean, ref_prev_sample_mean=ref_prev_sample_mean, std_dev_t=std_dev_t
+        )
+
+        policy_loss += kl_loss * config.kl_loss_coef
+        metrics["kl_loss"] = Metric(value=kl_loss, aggregation=AggregationType.MEAN)
+        metrics["kl_coef"] = config.kl_loss_coef
+
+    gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
+    policy_loss = policy_loss / gradient_accumulation_steps
+
+    return policy_loss, metrics

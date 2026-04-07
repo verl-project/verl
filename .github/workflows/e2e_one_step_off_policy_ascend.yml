@@ -68,7 +68,7 @@ on:
       # Entrypoints
       - ".github/workflows/e2e_one_step_off_policy_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
-      - "tests/special_npu/run_one_step_off_policy.sh"
+      - "tests/special_e2e/run_one_step_off_policy.sh"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -83,16 +83,17 @@ jobs:
   # Test FSDP2 strategy
   e2e_one_step_off_policy_fsdp2_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2-8
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       ACTOR_STRATEGY: "fsdp2"
+      device_name: "npu"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -108,7 +109,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -122,21 +122,22 @@ jobs:
       - name: Running the E2E test with one_step_off_policy algorithm (FSDP2)
         run: |
           ray stop --force
-          bash tests/special_npu/run_one_step_off_policy.sh
+          bash tests/special_e2e/run_one_step_off_policy.sh
 
   # Test Megatron strategy
   e2e_one_step_off_policy_megatron_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2-8
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       ACTOR_STRATEGY: "megatron"
+      device_name: "npu"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -152,7 +153,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -167,4 +167,4 @@ jobs:
         run: |
           ray stop --force
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          bash tests/special_npu/run_one_step_off_policy.sh
+          bash tests/special_e2e/run_one_step_off_policy.sh

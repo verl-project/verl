@@ -29,7 +29,7 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -204,13 +204,25 @@ class TRTLLMHttpServer:
             )
 
         self.llm = await AsyncLLM(**llm_kwargs)
-        trtllm_server = OpenAIServer(
-            generator=self.llm,
-            model=self.model_config.local_path,
-            tool_parser=None,
-            server_role=None,
-            metadata_server_cfg=None,
-        )
+        import inspect
+
+        init_params = inspect.signature(OpenAIServer.__init__).parameters
+        if "generator" in init_params:
+            trtllm_server = OpenAIServer(
+                generator=self.llm,
+                model=self.model_config.local_path,
+                tool_parser=None,
+                server_role=None,
+                metadata_server_cfg=None,
+            )
+        else:
+            trtllm_server = OpenAIServer(
+                llm=self.llm,
+                model=self.model_config.local_path,
+                tool_parser=None,
+                server_role=None,
+                metadata_server_cfg=None,
+            )
 
         app = trtllm_server.app
         self._server_port, self._server_task = await run_uvicorn(app, None, self._server_address)
@@ -234,7 +246,8 @@ class TRTLLMHttpServer:
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
         if self.is_vlm_model and (image_data or video_data):
-            org_prompt = self.llm.tokenizer.decode(prompt_ids)
+            deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+            org_prompt = self.llm.tokenizer.decode(deduped_ids)
             input_dict = {
                 "prompt": org_prompt,
                 "multi_modal_data": {},
@@ -307,8 +320,11 @@ class TRTLLMReplica(RolloutReplica):
         model_config: DictConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
     ) -> None:
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        if is_teacher_model:
+            raise NotImplementedError("TRTLLMReplica doesn't support teacher model yet.")
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model)
         self.node_ip = ray.util.get_node_ip_address().strip("[]")
 
     def rollout_worker_use_gpu(self) -> bool:

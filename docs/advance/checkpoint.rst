@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 06/25/2025.
+Last updated: 03/22/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -139,6 +139,35 @@ HuggingFace to Megatron DistCheckpoint details
 
 Through ``mbridge``, we can directly save the mcore model to huggingface format during training.
 No need to convert the model to Megatron dist-checkpoint format.
+
+.. note::
+
+    Megatron provides multiple optimizer checkpoint formats controlled by:
+
+    - ``dist_ckpt_optim_fully_reshardable``:
+
+      - ``False`` (default, dp-reshardable):
+        The optimizer checkpoint supports resuming with different data parallel sizes.
+        This format is faster and has lower memory overhead during checkpoint saving.
+
+      - ``True`` (fully-reshardable):
+        The optimizer checkpoint supports resuming with arbitrary parallelism configurations.
+        However, this format is slower and introduces additional memory overhead.
+
+    - ``distrib_optim_fully_reshardable_mem_efficient``:
+
+      When using fully-reshardable format, enabling this option switches communication
+      from NCCL to Gloo to reduce CUDA memory usage, at the cost of performance.
+
+.. warning::
+
+    When ``dist_ckpt_optim_fully_reshardable=True``, saving optimizer checkpoints requires
+    gathering optimizer states on data parallel rank 0. Although the final checkpoint is
+    sharded, this introduces a temporary aggregation step during saving.
+
+    This may increase CPU memory usage and lead to OOM issues for large models.
+    We recommend using the default dp-reshardable format in most cases.
+
 
 Original Checkpoint Utils
 -------------------------

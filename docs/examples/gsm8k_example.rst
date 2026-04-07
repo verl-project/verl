@@ -88,10 +88,9 @@ We also provide various training scripts for SFT on GSM8K dataset in `gsm8k sft 
    torchrun -m verl.trainer.sft_trainer \
        data.train_files=$HOME/data/gsm8k/train.parquet \
        data.val_files=$HOME/data/gsm8k/test.parquet \
-       data.prompt_key=question \
-       data.response_key=answer \
+       data.messages_key=messages \
        data.micro_batch_size_per_gpu=8 \
-       model.partial_pretrain=deepseek-ai/deepseek-coder-6.7b-instruct \
+       model.path=deepseek-ai/deepseek-coder-6.7b-instruct \
        trainer.project_name=gsm8k-sft \
        trainer.experiment_name=gsm8k-sft-deepseek-coder-6.7b-instruct \
        trainer.total_epochs=4 \
@@ -165,8 +164,8 @@ The script of run_deepseek7b_llm.sh
       critic.model.path=deepseek-ai/deepseek-llm-7b-chat \
       critic.model.enable_gradient_checkpointing=True \
       critic.ppo_micro_batch_size_per_gpu=32 \
-      critic.model.fsdp_config.param_offload=False \
-      critic.model.fsdp_config.optimizer_offload=False \
+      critic.fsdp.param_offload=False \
+      critic.fsdp.optimizer_offload=False \
       algorithm.kl_ctrl.kl_coef=0.001 \
       trainer.critic_warmup=0 \
       trainer.logger='["console","wandb"]' \

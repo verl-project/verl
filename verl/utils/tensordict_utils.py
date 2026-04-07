@@ -277,8 +277,8 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     """Split a TensorDict into equal-sized chunks with special nested tensor handling.
 
     Divides a TensorDict into the specified number of chunks along the batch
-    dimension. Handles 3D+ nested tensors specially since torch.chunk() doesn't
-    support jagged tensors with 3 or more dimensions.
+    dimension. Handles NestedTensors specially since TensorDict.chunk() doesn't
+    support jagged tensors.
 
     Args:
         td: The TensorDict to split.
@@ -292,20 +292,51 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             evenly divisible by chunks.
 
     Note:
-        This is a workaround for PyTorch issue #153238 where torch.chunk()
-        doesn't support 3D jagged tensors (e.g., MRoPE position_ids).
-        See: https://github.com/pytorch/pytorch/issues/153238
+        PyTorch ``unbind(dim=0)`` on 3D+ jagged NestedTensors has a bug where
+        ``split_with_sizes`` is applied to the wrong dimension of the internal
+        ``_values`` tensor.  For example, mRoPE ``position_ids`` with per-sample
+        shape ``(4, seq_len)`` becomes a 3D jagged NestedTensor
+        ``[B, *(ragged=4), seq_len]``; ``_values`` is ``[B*4, seq_len]`` and
+        ``unbind`` erroneously splits dimension 1 (``seq_len``) instead of
+        dimension 0, causing::
+
+            RuntimeError: split_with_sizes expects split_sizes to sum exactly
+            to <seq_len>, but got split_sizes=[4, 4, ...]
+
+        2D jagged NestedTensors (e.g. ``input_ids``, ``loss_mask``) are
+        unaffected — ``unbind(dim=0)`` works correctly for them.
+
+        The workaround: try ``unbind`` first (fast path for 2D); on failure,
+        fall back to ``to_padded_tensor`` → ``chunk`` → reconstruct per-chunk
+        NestedTensors using the original ragged lengths from ``offsets``.
+
+        See https://github.com/pytorch/pytorch/issues/153238
     """
     assert isinstance(td, TensorDict) and len(td) % chunks == 0, (
         f"expecting td with length divisible by chunks, but got {len(td)} and {chunks}"
     )
     chunk_size = len(td) // chunks
-    keys = {key for key, val in td.items() if isinstance(val, torch.Tensor) and val.is_nested and val.dim() >= 3}
-    new_td = TensorDict({k: v for k, v in td.items() if k not in keys}, batch_size=td.batch_size, device=td.device)
+    nested_keys = {key for key, val in td.items() if isinstance(val, torch.Tensor) and val.is_nested}
+    new_td = TensorDict(
+        {k: v for k, v in td.items() if k not in nested_keys}, batch_size=td.batch_size, device=td.device
+    )
 
     tds = new_td.chunk(chunks=chunks)
-    for key in keys:
-        tensors = td[key].unbind(dim=0)
+    for key in nested_keys:
+        nt = td[key]
+        try:
+            tensors = nt.unbind(dim=0)
+        except RuntimeError:
+            padded = nt.to_padded_tensor(0)
+            padded_chunks = padded.chunk(chunks, dim=0)
+            offsets = nt.offsets()
+            lengths = offsets.diff().tolist()
+            for i, chunk_td in enumerate(tds):
+                chunk_lengths = lengths[i * chunk_size : (i + 1) * chunk_size]
+                chunk_tensors = [padded_chunks[i][j, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
+                chunk_td[key] = torch.nested.as_nested_tensor(chunk_tensors, layout=torch.jagged)
+            continue
+
         for i, chunk_td in enumerate(tds):
             chunk_td[key] = torch.nested.as_nested_tensor(
                 tensors[i * chunk_size : (i + 1) * chunk_size], layout=torch.jagged
@@ -370,7 +401,7 @@ def get_tensordict(tensor_dict: dict[str, torch.Tensor | list], non_tensor_dict:
             # Convert to NonTensorStack to handle nested structures
             tensor_dict[key] = NonTensorStack.from_list([NonTensorData(item) for item in val])
 
-        assert isinstance(val, torch.Tensor | list)
+        assert isinstance(val, torch.Tensor | list), f"{key} -> {type(val)} isn't of 'torch.Tensor | list' type"
 
         if batch_size is None:
             batch_size = val.size(0) if isinstance(val, torch.Tensor) else len(val)

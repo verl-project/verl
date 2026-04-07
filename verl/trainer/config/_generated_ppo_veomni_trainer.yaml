@@ -120,6 +120,16 @@ actor_rollout_ref:
       mode: disabled
       record_file: null
       replay_file: null
+    qat:
+      enable: false
+      mode: w4a16
+      group_size: 16
+      ignore_patterns:
+      - lm_head
+      - embed_tokens
+      - re:.*mlp.gate$
+      activation_observer: static_minmax
+      quantization_config_path: null
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -211,6 +221,7 @@ actor_rollout_ref:
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
+    layered_summon: false
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
@@ -267,8 +278,12 @@ actor_rollout_ref:
       backend: null
       token2text: false
       max_samples_per_step_per_worker: null
-    skip_rollout: false
-    skip_dump_dir: /tmp/rollout_dump
+    skip:
+      _target_: verl.workers.config.SkipConfig
+      enable: false
+      dump_dir: ~/.verl/rollout_dump
+      max_dump_step: 1
+      action: cache
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
     profiler:
@@ -298,8 +313,7 @@ actor_rollout_ref:
     quantization: null
     quantization_config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,null}
-    layered_summon: false
+    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -338,6 +352,27 @@ actor_rollout_ref:
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
+    lora:
+      type: lora
+      merge: false
+      rank: 0
+      alpha: 32
+      dropout: 0.0
+      target_modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+      exclude_modules: []
+      dropout_position: pre
+      lora_A_init_method: xavier
+      lora_B_init_method: zero
+      a2a_experimental: false
+      dtype: null
+      adapter_path: null
+      freeze_vision_model: true
+      freeze_vision_projection: true
+      freeze_language_model: true
   hybrid_engine: true
   nccl_timeout: 600
 data:
@@ -425,13 +460,6 @@ critic:
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: veomni
   enable: null
-  model:
-    path: ~/models/deepseek-llm-7b-chat
-    tokenizer_path: ${oc.select:actor_rollout_ref.model.path,"~/models/deepseek-llm-7b-chat"}
-    override_config: {}
-    external_lib: ${oc.select:actor_rollout_ref.model.external_lib,null}
-    trust_remote_code: ${oc.select:actor_rollout_ref.model.trust_remote_code,false}
-    _target_: verl.trainer.config.BaseModelConfig
   ppo_mini_batch_size: ${oc.select:actor_rollout_ref.actor.ppo_mini_batch_size,256}
   ppo_micro_batch_size: null
   ppo_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size,null}
@@ -477,6 +505,65 @@ critic:
         _target_: verl.utils.profiler.config.TorchMemoryToolConfig
         trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
         stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+  model:
+    _target_: verl.workers.config.HFModelConfig
+    path: ~/models/deepseek-llm-7b-chat
+    hf_config_path: null
+    tokenizer_path: null
+    use_shm: false
+    trust_remote_code: false
+    custom_chat_template: null
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: true
+    enable_activation_offload: false
+    use_remove_padding: true
+    lora_rank: 0
+    lora_alpha: 16
+    target_modules: all-linear
+    exclude_modules: null
+    lora_adapter_path: null
+    use_liger: false
+    use_fused_kernels: false
+    fused_kernel_options:
+      impl_backend: torch
+    tiled_mlp:
+      enabled: false
+      num_shards: 4
+    mtp:
+      _target_: verl.workers.config.MtpConfig
+      enable: false
+      enable_train: false
+      enable_rollout: false
+      detach_encoder: false
+      mtp_loss_scaling_factor: 0.1
+      speculative_algorithm: EAGLE
+      speculative_num_steps: 3
+      speculative_eagle_topk: 1
+      speculative_num_draft_tokens: 4
+      method: mtp
+      num_speculative_tokens: 1
+    lora:
+      type: lora
+      merge: false
+      rank: 0
+      alpha: 32
+      dropout: 0.0
+      target_modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+      exclude_modules: []
+      dropout_position: pre
+      lora_A_init_method: xavier
+      lora_B_init_method: zero
+      a2a_experimental: false
+      dtype: null
+      adapter_path: null
+      freeze_vision_model: true
+      freeze_vision_projection: true
+      freeze_language_model: true
 custom_reward_function:
   path: null
   name: null
@@ -592,6 +679,53 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
+distillation:
+  _target_: verl.workers.config.DistillationConfig
+  enabled: false
+  num_workers: 8
+  distillation_loss:
+    _target_: verl.workers.config.DistillationLossConfig
+    loss_mode: k3
+    topk: 32
+    use_task_rewards: true
+    distillation_loss_coef: 1.0
+    loss_max_clamp: null
+    log_prob_min_clamp: null
+    use_policy_gradient: false
+    policy_loss_mode: vanilla
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+  teacher_model:
+    _target_: verl.workers.config.DistillationTeacherModelConfig
+    enable_resource_pool: false
+    n_gpus_per_node: 8
+    nnodes: 0
+    model_path: null
+    inference:
+      _target_: verl.workers.config.RolloutConfig
+      name: ${oc.select:actor_rollout_ref.rollout.name}
+      dtype: ${oc.select:actor_rollout_ref.rollout.dtype}
+      gpu_memory_utilization: 0.5
+      enforce_eager: true
+      cudagraph_capture_sizes: null
+      free_cache_engine: true
+      data_parallel_size: 1
+      expert_parallel_size: 1
+      tensor_model_parallel_size: 2
+      max_num_batched_tokens: 8192
+      max_model_len: null
+      max_num_seqs: 1024
+      load_format: auto
+      engine_kwargs: {}
+      limit_images: null
+      enable_chunked_prefill: true
+      enable_prefix_caching: true
+      disable_log_stats: true
+      skip_tokenizer_init: false
+      prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
+      response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
+      temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -621,7 +755,7 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_legacy_worker_impl: auto
+  use_legacy_worker_impl: disable
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
@@ -649,6 +783,14 @@ global_profiler:
       context: all
       stacks: all
       kw_args: {}
+    precision_debugger:
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+      enable: false
+      config_path: null
+      data_dir: outputs/precision_debug
+      steps: null
+      stages: null
+      strict: false
 transfer_queue:
   enable: false
 ray_kwargs:

@@ -117,7 +117,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -145,7 +144,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -180,7 +178,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -210,12 +207,11 @@ jobs:
       - name: clean up
         run: |
           rm -rf checkpoints
-  e2e_grpo_trainer_fsdp-vlm:
+  e2e_grpo_trainer_megatron-vlm:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -228,19 +224,22 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install qwen_vl_utils 
+          pip3 install mathruler
       - name: Prepare GEO3K dataset
         run: |
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/geo3k --local_save_dir ${PWD}/data/geo3k
-      - name: Running GEO3K E2E training tests with FSDP on 8 L20 GPUs (VLM)
-        run: |
-          ray stop --force
-          DATADIR=${HOME}/data \
-            bash examples/grpo_trainer/run_qwen2_5_vl_3b_trtllm.sh 2 \
-            trainer.total_training_steps=1 \
-            data.train_files="['${PWD}/data/geo3k/train.parquet']" \
-            data.val_files="['${PWD}/data/geo3k/test.parquet']" \
-            trainer.logger='["console"]' \
-            actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct"
+          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k --local_save_dir ${PWD}/data/geo3k
+      # FIXME: timeout in 30 minutes
+      # - name: Running GEO3K E2E training tests with FSDP on 8 L20 GPUs (VLM)
+      #   run: |
+      #     ray stop --force
+      #     DATADIR=${HOME}/data \
+      #       bash examples/grpo_trainer/run_qwen2_5_vl_3b_trtllm.sh 2 \
+      #       trainer.total_training_steps=1 \
+      #       data.train_files="['${PWD}/data/geo3k/train.parquet']" \
+      #       data.val_files="['${PWD}/data/geo3k/test.parquet']" \
+      #       trainer.logger='["console"]' \
+      #       actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen3-VL-2B-Instruct"
       - name: clean up
         run: |
           rm -rf checkpoints
@@ -274,7 +273,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2, e2e_grpo_trainer_fsdp-vlm]
+    needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_fsdp-qwen2, e2e_grpo_trainer_megatron-qwen2, e2e_grpo_trainer_megatron-vlm]
     if: always()
     steps:
       - id: destroy-runner

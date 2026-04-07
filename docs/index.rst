@@ -90,6 +90,7 @@ verl is fast with:
    workers/ray_trainer
    workers/fsdp_workers
    workers/megatron_workers
+   workers/automodel_workers
    workers/sglang_worker
    workers/trtllm_worker
    workers/model_engine
@@ -107,6 +108,7 @@ verl is fast with:
    perf/verl_profiler_system.md
    perf/nsight_profiling.md
    perf/torch_profiling.md
+   ascend_tutorial/profiling/precision_debugger.md
 
 .. toctree::
    :maxdepth: 1
@@ -137,29 +139,31 @@ verl is fast with:
    data/transfer_queue.md
    advance/grafana_prometheus.md
    advance/fp8.md
+   advance/nvfp4_qat.md
    advance/async-on-policy-distill
    advance/mtp.md
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Hardware Support
 
    amd_tutorial/amd_build_dockerfile_page.rst
    amd_tutorial/amd_vllm_page.rst
-   ascend_tutorial/ascend_ci_guide_zh.rst
-   ascend_tutorial/ascend_quick_start.rst
-   ascend_tutorial/ascend_consistency.rst
-   ascend_tutorial/ascend_profiling_zh.rst
-   ascend_tutorial/ascend_profiling_en.rst
-   ascend_tutorial/dockerfile_build_guidance.rst
-   ascend_tutorial/ascend_sglang_quick_start.rst
+   ascend_tutorial/contribution_guide/ascend_ci_guide_zh.rst
+   ascend_tutorial/quick_start/ascend_quick_start.rst
+   ascend_tutorial/quick_start/dockerfile_build_guidance.rst
+   ascend_tutorial/quick_start/ascend_sglang_quick_start.rst
+   ascend_tutorial/features/ascend_consistency.rst
+   ascend_tutorial/features/ascend_backend_features.md
+   ascend_tutorial/profiling/ascend_profiling_zh.rst
+   ascend_tutorial/profiling/ascend_profiling_en.rst
    ascend_tutorial/examples/gspo_optimization_practice.md
    ascend_tutorial/examples/ascend_performance_analysis_guide.md
    ascend_tutorial/examples/dapo_multi_model_optimization_practice.md
    ascend_tutorial/examples/ascend_sglang_best_practices.rst
    ascend_tutorial/examples/ascend_retool_best_pratice.rst
-   ascend_tutorial/features/ascend_backend_features.md
    ascend_tutorial/examples/run_qwen3_32B_megatron_1k_256k_npu.md
+   ascend_tutorial/faq/faq.rst
 
 .. toctree::
    :maxdepth: 1
@@ -181,6 +185,12 @@ verl is fast with:
    :caption: FAQ
 
    faq/faq
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Contributing
+
+   contributing/editing-agent-instructions.md
 
 .. toctree::
    :maxdepth: 1
