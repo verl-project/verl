@@ -46,6 +46,21 @@ except ImportError:
     class KVBatchMeta:
         pass
 
+    # Mock transfer_queue module when not installed
+    class _MockTQ:
+        """Mock transfer_queue module that raises RuntimeError on any access."""
+
+        def __getattr__(self, name: str) -> Any:
+            def _raise(*args, **kwargs):
+                raise RuntimeError(
+                    f"transfer_queue is not installed. Cannot use tq.{name}(). "
+                    "Please install it by calling `pip install TransferQueue==0.1.6`"
+                )
+
+            return _raise
+
+    tq = _MockTQ()
+
 
 from verl.utils import tensordict_utils as tu
 

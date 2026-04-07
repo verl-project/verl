@@ -36,12 +36,18 @@ import hydra
 import numpy as np
 import ray
 import torch
-import transfer_queue as tq
+
+try:
+    import transfer_queue as tq
+    from transfer_queue import KVBatchMeta
+except ImportError:
+    print("Please install TQ by calling `pip install TransferQueue==0.1.6` and try again.")
+    from verl.utils.transferqueue_utils import KVBatchMeta, tq
+
 from omegaconf import DictConfig, OmegaConf, open_dict
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
-from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
