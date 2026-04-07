@@ -57,6 +57,85 @@ logger.setLevel(logging.INFO)
 visible_devices_keyword = get_visible_devices_keyword()
 
 
+def _extract_sglang_prompt_logprobs(output: dict, num_prompt_logprobs: int) -> dict[str, list]:
+    """Extract prompt log probabilities from SGLang generation output.
+
+    Converts SGLang's input_token_logprobs / input_top_logprobs format into the
+    unified ``prompt_ids`` / ``prompt_logprobs`` format consumed by the OPD
+    teacher manager (see ``AsyncTeacherLLMServerManager.compute_teacher_logprobs_single``).
+
+    SGLang format:
+    - ``meta_info["input_token_logprobs"]``: list of ``(logprob, token_id, text)``
+      tuples, one per input token.  The first token has no preceding context so
+      its ``logprob`` field is ``None``.
+    - ``meta_info["input_top_logprobs"]``: list of lists of
+      ``(logprob, token_id, text)`` tuples.  Each inner list holds the top-K
+      alternatives for the corresponding position.  When ``top_logprobs_num==0``
+      this field is empty (``[]``).
+
+    Output format (matching vLLM's ``extract_prompt_logprobs``):
+    - ``prompt_ids``:     list[list[int]]   shape ``[seq_len, K]``
+    - ``prompt_logprobs``: list[list[float]] shape ``[seq_len, K]``
+
+    The last position is always padded with dummy zeros because vLLM does not
+    provide a logprob for the last prompt token (no subsequent token to
+    condition on).  SGLang behaves the same way — ``input_token_logprobs``
+    starts at the *second* token and has length ``len(prompt) - 1``.  We keep
+    a trailing dummy entry so that shapes match expectations in
+    ``_pad_teacher_outputs``.
+
+    Args:
+        output: Raw SGLang generation output dict.
+        num_prompt_logprobs: Number of top-K logprobs requested (``top_logprobs_num``).
+            When 0 only the greedy/sampled token logprob is returned.
+
+    Returns:
+        dict with keys ``"prompt_ids"`` and ``"prompt_logprobs"``.
+    """
+    meta_info = output["meta_info"]
+
+    # input_token_logprobs: [(logprob_or_None, token_id, text), ...]
+    # The first entry corresponds to the first input token and has logprob=None
+    # because there is no prefix.  We skip it to align with vLLM's convention.
+    raw_token_logprobs = meta_info.get("input_token_logprobs") or []
+    # input_top_logprobs: [[(logprob, token_id, text), ...], ...] or []
+    raw_top_logprobs = meta_info.get("input_top_logprobs") or []
+
+    prompt_ids_ls: list[list[int]] = []
+    prompt_logprobs_ls: list[list[float]] = []
+
+    use_top = num_prompt_logprobs > 0 and len(raw_top_logprobs) > 0
+
+    # Both lists have length == len(input_ids) - 1 (no logprob for 1st token).
+    # We iterate from the *second* token onwards, mirroring vLLM's behaviour.
+    for i, (logprob, token_id, _) in enumerate(raw_token_logprobs):
+        if use_top:
+            top_entries = raw_top_logprobs[i] if i < len(raw_top_logprobs) else []
+            ids = [int(tid) for _, tid, _ in top_entries[:num_prompt_logprobs]]
+            lps = [float(lp) for lp, _, _ in top_entries[:num_prompt_logprobs]]
+            # Pad to exactly num_prompt_logprobs entries if SGLang returned fewer.
+            while len(ids) < num_prompt_logprobs:
+                ids.append(0)
+                lps.append(0.0)
+        else:
+            # num_prompt_logprobs == 0: only the greedy token logprob is needed.
+            ids = [int(token_id)]
+            lps = [float(logprob) if logprob is not None else 0.0]
+
+        prompt_ids_ls.append(ids)
+        prompt_logprobs_ls.append(lps)
+
+    # Append a dummy entry for the last prompt token (no logprob available).
+    k = max(num_prompt_logprobs, 1)
+    prompt_ids_ls.append([0] * k)
+    prompt_logprobs_ls.append([0.0] * k)
+
+    return {
+        "prompt_ids": prompt_ids_ls,
+        "prompt_logprobs": prompt_logprobs_ls,
+    }
+
+
 class SGLangHttpServer:
     """SGLang http server in single node, this is equivalent to launch server with command line:
     ```
@@ -393,15 +472,31 @@ class SGLangHttpServer:
         sampling_params["max_new_tokens"] = max_new_tokens
         return_logprob = sampling_params.pop("logprobs", False)
 
+        # prompt_logprobs: number of top-K token logprobs to return for each input token position.
+        # This is used by the OPD (Online Policy Distillation) teacher server to provide
+        # per-token distributions to the student model.
+        # SGLang uses return_logprob=True + logprob_start_len=0 to get input token logprobs,
+        # and top_logprobs_num=K for top-K logprobs at each position.
+        num_prompt_logprobs = sampling_params.pop("prompt_logprobs", None)
+        return_prompt_logprob = num_prompt_logprobs is not None
+
         request = {
             "rid": request_id,
             "input_ids": prompt_ids,
             "sampling_params": sampling_params,
-            "return_logprob": return_logprob,
+            "return_logprob": return_logprob or return_prompt_logprob,
             "image_data": image_data,
             # TODO: support video input for sglang
             # video_data=video_data,
         }
+
+        if return_prompt_logprob:
+            # logprob_start_len=0 instructs SGLang to return logprobs for all input tokens.
+            request["logprob_start_len"] = 0
+            # top_logprobs_num=K requests the top-K token logprobs at each input position.
+            # When num_prompt_logprobs==0, we only need the greedy (sampled) token logprob,
+            # which is provided by top_logprobs_num=0 in SGLang (returns the actual token logprob).
+            request["top_logprobs_num"] = num_prompt_logprobs
 
         if self.config.enable_rollout_routing_replay:
             request.update({"return_routed_experts": True})
@@ -442,12 +537,22 @@ class SGLangHttpServer:
                     -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
                 )
 
+        extra_fields = {"global_steps": self.global_steps}
+
+        if return_prompt_logprob:
+            extra_fields.update(
+                _extract_sglang_prompt_logprobs(
+                    output=output,
+                    num_prompt_logprobs=num_prompt_logprobs,
+                )
+            )
+
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
             stop_reason=finish_reason,
-            extra_fields={"global_steps": self.global_steps},
+            extra_fields=extra_fields,
         )
 
     async def set_global_steps(self, global_steps: int):

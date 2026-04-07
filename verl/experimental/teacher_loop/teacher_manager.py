@@ -32,10 +32,18 @@ def _get_teacher_sampling_params(
     distillation_config: DistillationConfig,
     distillation_loss_config: DistillationLossConfig,
 ) -> dict[str, Any]:
-    """Get sampling parameters for teacher model when computing log probabilities for distillation."""
-    if distillation_config.teacher_model.inference.temperature != 1.0:
-        raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
+    """Get sampling parameters for teacher model when computing log probabilities for distillation.
 
+    The returned dict uses the ``prompt_logprobs`` key which is understood by both
+    the vLLM and SGLang async server backends:
+
+    * **vLLM** (``vLLMHttpServer.generate``): passes ``prompt_logprobs`` directly
+      to the vLLM ``SamplingParams``, which triggers prompt-token log-prob
+      collection.
+    * **SGLang** (``SGLangHttpServer.generate``): ``prompt_logprobs`` is intercepted
+      and converted to ``return_logprob=True`` / ``logprob_start_len=0`` /
+      ``top_logprobs_num=K`` before forwarding the request to the SGLang engine.
+    """
     num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
     return {
         "max_tokens": 1,
