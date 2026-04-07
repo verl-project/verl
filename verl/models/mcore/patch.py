@@ -383,3 +383,169 @@ def apply_patch_mbridge():
             return tp_group
 
         megatron.core.utils.get_tensor_model_parallel_group_if_none = get_tensor_model_parallel_group_if_none
+
+
+def apply_patch_megatron_v012_with_torch_v28():
+    # Error due to missing serialization_format in _write_item of megatron v012;
+    # resolved by using megatron v013's implementation.
+    import inspect
+    import logging
+    import os
+    from pathlib import Path
+
+    import megatron.core
+    import torch
+    from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
+    from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
+    from packaging import version
+    from torch import multiprocessing as mp
+    from torch.distributed.checkpoint.filesystem import _write_item
+
+    if (
+        version.parse(torch.__version__).base_version != "2.8.0"
+        or version.parse(megatron.core.__version__).base_version != "0.12.1"
+    ):
+        return
+
+    WriteBucket = tuple[Path, str, tuple[list, list]]
+
+    @staticmethod
+    @_disable_gc()
+    def write_preloaded_data_patch(
+        transform_list,
+        local_proc_idx: int,
+        write_bucket: WriteBucket,
+        results_queue: mp.SimpleQueue,
+        count_queue: mp.JoinableQueue,
+        use_fsync: bool,
+        **kwargs,
+    ) -> None:
+        """
+        Performs actual data saving to storage.
+
+        Args:
+            local_proc_idx (int): index of a local process that performs writing
+            write_bucket (WriteBucket): data to write to storage
+            results_queue (mp.Queue): queue to return the write results
+                to the proxy checkpoint process.
+            count_queue (mp.JoinableQueue): queue to marks worker task as completed
+            use_fsync (bool): if True, calls os.fsync at the end of saving
+
+        Returns: None, the write result are put into the `queue`
+        """
+        logger = logging.getLogger(__name__)
+        logger.debug(f"{local_proc_idx} started")
+        mem_before = _process_memory()
+        use_msc = kwargs.get("use_msc", False)
+        local_results = []
+        try:
+            file_name, storage_key, (bytes_data, tensor_data) = write_bucket
+            extra_kwargs = {}
+            if "serialization_format" in inspect.signature(_write_item).parameters:
+                from torch.distributed.checkpoint.filesystem import SerializationFormat
+
+                extra_kwargs["serialization_format"] = SerializationFormat.TORCH_SAVE
+            if use_msc:
+                import multistorageclient as msc
+
+                open_file = msc.open
+            else:
+                open_file = open
+            with open_file(file_name, "wb") as stream:
+                for write_item, data in bytes_data:
+                    local_results.append(
+                        _write_item(*transform_list, stream, data, write_item, storage_key, **extra_kwargs)
+                    )
+
+                for write_item, tensor in tensor_data:
+                    assert tensor.is_cpu
+                    local_results.append(
+                        _write_item(*transform_list, stream, tensor, write_item, storage_key, **extra_kwargs)
+                    )
+
+                if use_fsync:
+                    if use_msc:
+                        stream.fsync()
+                    else:
+                        os.fsync(stream.fileno())
+            local_output = (local_proc_idx, local_results)
+        except Exception as e:
+            logger.debug(f"{local_proc_idx} failed")
+            local_output = (local_proc_idx, e)  # type: ignore[assignment]
+
+        results_queue.put(local_output)
+        # Signal this process is done.
+        count_queue.get()
+        count_queue.task_done()
+
+        mem_after = _process_memory()
+        logger.debug(f"{local_proc_idx} consumed: {mem_after - mem_before}, before: {mem_before}, after: {mem_after}")
+
+    from megatron.core.dist_checkpointing.strategies.filesystem_async import FileSystemWriterAsync
+
+    FileSystemWriterAsync.write_preloaded_data = write_preloaded_data_patch
+
+
+# When using checkpoint + MoE models (like Qwen3-30B-A3B and Qwen3-VL-30B-A3B),
+# input tensors and their grads will stay in gpu memory after forward_backward completes.
+# see https://github.com/NVIDIA/Megatron-LM/pull/3267
+def apply_patch_megatron_recomputation_backward():
+    import megatron.core.tensor_parallel.random as rd
+    import torch
+
+    _fork_rng = rd._fork_rng
+    _set_all_rng_states = rd._set_all_rng_states
+    detach_variable = rd.detach_variable
+    gather_split_1d_tensor = rd.gather_split_1d_tensor
+    safely_set_viewless_tensor_data = rd.safely_set_viewless_tensor_data
+
+    @staticmethod
+    def patch_backward(ctx, *args):
+        """Backward pass."""
+        if not torch.autograd._is_checkpoint_valid():
+            raise RuntimeError("Checkpointing is not compatible with .grad(), please use .backward() if possible")
+        inputs = ctx.saved_tensors
+        if ctx.distribute_saved_activations:
+            safely_set_viewless_tensor_data(inputs[0], gather_split_1d_tensor(inputs[0].data).view(ctx.input_0_shape))
+
+        with _fork_rng():
+            # Set the states to what it used to be before the forward pass.
+            _set_all_rng_states(*ctx.rng_states)
+
+            # Compute the forward pass.
+            detached_inputs = detach_variable(inputs)
+
+            with torch.enable_grad():
+                outputs = ctx.run_function(*detached_inputs)
+
+        if isinstance(outputs, torch.Tensor):
+            outputs = (outputs,)
+
+        # filter out non tensor outputs for backward pass
+        outputs, args = zip(
+            *filter(lambda x: torch.is_tensor(x[0]) and x[0].requires_grad, zip(outputs, args, strict=False)),
+            strict=False,
+        )
+        torch.autograd.backward(outputs, args)
+        # Clone grads to return
+        grads = tuple(
+            inp.grad.clone()
+            if isinstance(inp, torch.Tensor) and inp.grad is not None
+            else inp.grad
+            if isinstance(inp, torch.Tensor)
+            else inp
+            for inp in detached_inputs
+        )
+        cur_stream = torch.cuda.current_stream()
+        # Release original input and grad tensors
+        for t in detached_inputs:
+            if isinstance(t, torch.Tensor) and t.requires_grad:
+                t.record_stream(cur_stream)
+                t.untyped_storage().resize_(0)
+                if t.grad is not None:
+                    t.grad.record_stream(cur_stream)
+                    t.grad.untyped_storage().resize_(0)
+        # ctx.saved_tensors = None
+        return (None, None) + grads
+
+    rd.CheckpointFunction.backward = patch_backward

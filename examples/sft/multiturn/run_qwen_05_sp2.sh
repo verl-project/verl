@@ -16,14 +16,13 @@ torchrun --nnodes=1 --nproc_per_node=$nproc_per_node \
      -m verl.trainer.sft_trainer \
     data.train_files=$HOME/data/multiturn/train.parquet \
     data.val_files=$HOME/data/multiturn/test.parquet \
-    data.multiturn.enable=true \
-    data.multiturn.messages_key=messages \
-    data.micro_batch_size=4 \
-    model.partial_pretrain=Qwen/Qwen2.5-0.5B-Instruct \
+    data.messages_key=messages \
+    data.micro_batch_size_per_gpu=4 \
+    model.path=Qwen/Qwen2.5-0.5B-Instruct \
+    model.use_remove_padding=true \
+    engine.ulysses_sequence_parallel_size=2 \
     trainer.default_local_dir=$save_path \
     trainer.project_name=multiturn-sft \
     trainer.experiment_name=multiturn-sft-qwen-2.5-0.5b-instruct-sp2 \
     trainer.logger=console \
-    trainer.total_training_steps=1 $@ \
-    ulysses_sequence_parallel_size=2 \
-    use_remove_padding=true
+    trainer.total_training_steps=1 $@

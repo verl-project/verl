@@ -20,7 +20,7 @@ import os
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
-from typing import cast
+from typing import Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -38,7 +38,8 @@ from verl.utils.model import check_exclude_modules, check_target_modules
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
     from torch.distributed.fsdp._fully_shard._fsdp_init import _get_post_forward_mesh_info
-    from torch.distributed.tensor import Shard
+    from torch.distributed.tensor import DTensor, Shard
+    from torch.distributed.tensor._dtensor_spec import DTensorSpec
 
     fully_shard_module = torch.distributed.fsdp._fully_shard._fully_shard
 elif version.parse(torch.__version__) >= version.parse("2.4"):
@@ -506,6 +507,30 @@ def maybe_patch_fsdp_module(model):
         fully_shard_module.FSDPModule = orig_fsdp_module
 
 
+def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
+    """Select modules to wrap individually with fully_shard in FSDP2.
+
+    Matches transformer layers by class name, and embed_tokens/lm_head by name
+    (with isinstance fallback). Name-based matching is needed because peft wraps
+    embed_tokens in ModulesToSaveWrapper, breaking isinstance(module, nn.Embedding).
+    When tie_word_embeddings is True, embed_tokens and lm_head share weights and
+    must not be wrapped separately.
+    """
+    _tie = getattr(model.config, "tie_word_embeddings", False)
+    _wrap_by_name = set() if _tie else {"embed_tokens", "lm_head"}
+
+    modules = []
+    for name, module in model.named_modules():
+        leaf_name = name.rsplit(".", 1)[-1] if "." in name else name
+        if (
+            module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap
+            or (isinstance(module, nn.Embedding) and not _tie)
+            or (leaf_name in _wrap_by_name and hasattr(module, "weight"))
+        ):
+            modules.append(module)
+    return modules
+
+
 def apply_fsdp2(model, fsdp_kwargs, config):
     """model: AutoModelForCausalLM"""
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
@@ -518,14 +543,11 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
 
+    if isinstance(fsdp_transformer_layer_cls_to_wrap, set):
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
-    modules = []
-    for name, module in model.named_modules():
-        if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap or (
-            isinstance(module, nn.Embedding) and not model.config.tie_word_embeddings
-        ):
-            modules.append(module)
+    modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
 
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
@@ -568,7 +590,7 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     return total_norm
 
 
-def layered_summon_lora_params(fsdp_module) -> OrderedDict:
+def layered_summon_lora_params(fsdp_module, is_diffusers=False) -> OrderedDict:
     from peft.utils.save_and_load import get_peft_model_state_dict
 
     def __prefix_submodules(module, prefix):
@@ -577,22 +599,33 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
                 yield name, submodule
 
     lora_params = OrderedDict()
-    prefix_list = [
-        # fsdp
-        "_fsdp_wrapped_module.base_model.model.",
-        "_fsdp_wrapped_module.base_model.model.model.",
-        "_fsdp_wrapped_module.base_model.model.model.layers.",
-        "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
-        # fsdp2
-        "base_model.model.",
-        "base_model.model.model.",
-        "base_model.model.model.layers.",
-        "base_model.model.model.language_model.layers.",
-    ]
+    if is_diffusers:
+        prefix_list = [
+            # fsdp
+            "_fsdp_wrapped_module.transformer_blocks.",
+            # fsdp2
+            "transformer_blocks.",
+        ]
+    else:
+        prefix_list = [
+            # fsdp
+            "_fsdp_wrapped_module.base_model.model.",
+            "_fsdp_wrapped_module.base_model.model.model.",
+            "_fsdp_wrapped_module.base_model.model.model.layers.",
+            "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
+            # fsdp2
+            "base_model.model.",
+            "base_model.model.model.",
+            "base_model.model.model.layers.",
+            "base_model.model.model.language_model.layers.",
+        ]
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for prefix in prefix_list:
         for name, submodule in __prefix_submodules(fsdp_module, prefix):
-            prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
+            if is_diffusers:
+                prefix = name.replace("_fsdp_wrapped_module.", "")
+            else:
+                prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
             if name.endswith(".model") or name.endswith(".layers"):
                 continue
             if fsdp_version(submodule) > 0:
@@ -610,7 +643,9 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     return lora_params
 
 
-def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool) -> OrderedDict:
+def collect_lora_params(
+    module: FSDP, layered_summon: bool, base_sync_done: bool, is_diffusers: bool = False
+) -> OrderedDict:
     """
     collect lora params or full params if base model is not ready in vllm
     work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
@@ -626,7 +661,7 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                     "To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let "
                     "rollout.load_format=safetensors"
                 )
-            lora_params = layered_summon_lora_params(module)
+            lora_params = layered_summon_lora_params(module, is_diffusers=is_diffusers)
         else:
             with FSDP.summon_full_params(module, writeback=False):
                 if base_sync_done:
@@ -810,6 +845,94 @@ def fsdp_merge_unmerge(module: nn.Module, do_merge: bool):
                     _merge_or_unmerge_lora_(submodule, merge=do_merge)
 
 
+def collect_merged_lora_params(module: nn.Module) -> OrderedDict:
+    """Merge LoRA into base weights and extract full state dict with HF key names.
+
+    For rollout backends (e.g. SGLang) whose load_weights() expects standard
+    HuggingFace parameter names and handles QKV/gate_up fusion internally.
+    Sending LoRA delta keys to these backends fails with KeyError.
+
+    This function:
+    1. Merges LoRA adapters into base weights (layer-by-layer for FSDP2)
+    2. Extracts the full merged state dict with clean HF key names
+    3. Unmerges LoRA adapters to restore training state
+
+    For FSDP2, extraction is done layer-by-layer to avoid OOM from
+    all-gathering the entire model at once.
+
+    Args:
+        module: The FSDP-wrapped PeftModel to extract merged weights from.
+
+    Returns:
+        OrderedDict mapping HF parameter names to CPU tensors.
+    """
+    ver = fsdp_version(module)
+    assert ver in [1, 2], f"collect_merged_lora_params requires FSDP module, got version {ver}"
+
+    merged_params = OrderedDict()
+    peft_model = getattr(module, "_fsdp_wrapped_module", module)
+
+    from peft.tuners.lora import LoraLayer
+
+    def _backup_base_weights(mod):
+        """Clone base weights of LoRA target modules before merge."""
+        backups = {}
+        for mname, m in mod.named_modules():
+            if isinstance(m, LoraLayer):
+                base = m.get_base_layer()
+                backups[mname] = base.weight.data.clone()
+        return backups
+
+    def _restore_base_weights(mod, backups):
+        """Restore base weights from backup, avoiding merge/unmerge drift."""
+        for mname, m in mod.named_modules():
+            if isinstance(m, LoraLayer) and mname in backups:
+                base = m.get_base_layer()
+                base.weight.data.copy_(backups[mname])
+        _clean_merged_lora_(mod)
+
+    def _clean_key(key):
+        key = key.replace("_fsdp_wrapped_module.", "")
+        key = key.replace("base_model.model.", "")
+        key = key.replace(".base_layer", "")
+        return key
+
+    if ver == 1:
+        with FSDP.summon_full_params(module, writeback=True, with_grads=False):
+            backups = _backup_base_weights(module)
+            _merge_or_unmerge_lora_(module, merge=True)
+            model = peft_model.base_model.model
+            for name, param in model.state_dict().items():
+                if any(x in name for x in ["_flat_param", "lora_"]):
+                    continue
+                name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
+                merged_params[name] = (
+                    param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+                )
+            _restore_base_weights(module, backups)
+        get_torch_device().empty_cache()
+    else:
+        # FSDP2: backup sharded weights, merge per-leaf, extract via full_tensor(), restore.
+        # We use backup_base_model_weights (which works with DTensor shards) instead of
+        # extracting inside summon_full_params, because submodule.state_dict() inside summon
+        # can return local shards instead of full tensors for some parameters.
+        base_weights_backup = backup_base_model_weights(module)
+        fsdp_merge_unmerge(module, do_merge=True)
+
+        for pname, param in module.named_parameters():
+            if any(x in pname for x in ["_flat_param", "lora_"]):
+                continue
+            clean_key = _clean_key(pname)
+            val = param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+            merged_params[clean_key] = val
+
+        restore_base_model_weights(module, base_weights_backup)
+        _clean_merged_lora_(module)
+        get_torch_device().empty_cache()
+
+    return merged_params
+
+
 def backup_base_model_weights(module):
     """Backup base model weights to CPU with LoRA temporarily disabled.
 
@@ -891,3 +1014,103 @@ def merged_lora_context(actor, backup_adapters=False):
         else:
             # Fall back to unmerge if no backup was made
             fsdp_merge_unmerge(actor, do_merge=False)
+
+
+def fsdp2_sharded_save_to_cpu(
+    model: torch.nn.Module,
+) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:
+    """
+    Sharded Save: Each process only saves the local DTensor shard from its own GPU to CPU memory.
+
+    Args:
+        model: FSDP2-wrapped model whose parameters are of DTensor type.
+
+    Returns:
+        cpu_sharded_state: Dictionary of CPU shards for the current process.
+                          Key = parameter name, Value = (CPU shard tensor, original DTensorSpec)
+        global_spec: DTensorSpec of the first parameter (used to verify global rules during loading)
+    """
+    cpu_sharded_state = {}
+    global_spec = None  # Record global sharding rules (all parameters follow the same spec)
+
+    for param_name, param in model.named_parameters():
+        # Only process sharded parameters of DTensor type (core parameters of FSDP2)
+        if not isinstance(param, DTensor):
+            # Save non-sharded parameters (e.g., running_mean of BatchNorm) as local data
+            cpu_tensor = param.detach().cpu()
+            cpu_sharded_state[param_name] = (cpu_tensor, None)
+            continue
+
+        # Record global sharding rules (take spec of the first DTensor to ensure consistency)
+        if global_spec is None:
+            global_spec = param._spec
+            assert hasattr(global_spec, "device_mesh"), "DTensorSpec must contain 'device_mesh' attribute"
+            assert hasattr(global_spec, "placements"), "DTensorSpec must contain 'placements' attribute"
+
+        # 1. Extract local shard data from the current GPU (_local_tensor)
+        local_gpu_tensor = param._local_tensor  # Local shard attribute defined in your DTensor class
+        # 2. Move to CPU memory and detach from computation graph
+        local_cpu_tensor = local_gpu_tensor.detach().cpu()
+        # 3. Save CPU shard + original DTensorSpec (ensure sharding rules remain unchanged)
+        cpu_sharded_state[param_name] = (local_cpu_tensor, param._spec)
+
+    assert global_spec is not None, "No DTensor-type parameters found in the model. FSDP2 sharding may not be enabled."
+    return cpu_sharded_state, global_spec
+
+
+def fsdp2_sharded_load_from_cpu(
+    model: torch.nn.Module,
+    cpu_sharded_state: dict[str, tuple[torch.Tensor, Optional[DTensorSpec]]],
+    target_spec: DTensorSpec,
+) -> None:
+    """
+    Sharded Load: Each process only loads the CPU shard it is responsible for to the GPU,
+                  keeping sharding rules unchanged.
+
+    Args:
+        model: FSDP2 model to be restored (must have the same structure as when saved)
+        cpu_sharded_state: Shard data read from CPU memory by the current process
+                          (from fsdp2_sharded_save_to_cpu)
+        target_spec: Global DTensorSpec from saving (used to verify sharding rule consistency)
+    """
+    # Verify device_mesh consistency (core: ensure loaded shards map to original GPUs)
+    current_device_mesh = None
+    for param in model.parameters():
+        if isinstance(param, DTensor):
+            current_device_mesh = param._spec.device_mesh
+            break
+    assert current_device_mesh is not None, "DTensor parameters not initialized in the model to be loaded"
+    assert current_device_mesh == target_spec.device_mesh, (
+        f"device_mesh mismatch during loading! Original: {target_spec.device_mesh}, Current: {current_device_mesh}"
+    )
+
+    for param_name, param in model.named_parameters():
+        # Skip parameters not in the saved state (e.g., newly added parameters)
+        if param_name not in cpu_sharded_state:
+            continue
+
+        # Extract CPU shard data and original Spec
+        local_cpu_tensor, saved_spec = cpu_sharded_state[param_name]
+
+        # Handle different parameter types: DTensor sharded parameters vs. regular parameters
+        if isinstance(param, DTensor):
+            # 1. Verify sharding rule consistency (placements must match original Spec)
+            assert saved_spec is not None, f"DTensorSpec missing in saved state for parameter {param_name}"
+            assert saved_spec.placements == target_spec.placements, (
+                f"Sharding strategy mismatch for parameter {param_name} (conflicts with global rules)!"
+            )
+
+            # 2. Move CPU shard data to the current GPU (device of param._local_tensor)
+            target_device = param._local_tensor.device
+            local_gpu_tensor = local_cpu_tensor.to(target_device)
+
+            # 3. Restore to DTensor's local shard (directly copy to _local_tensor, keep spec unchanged)
+            param._local_tensor.copy_(local_gpu_tensor)
+
+        else:
+            # Regular parameters: load directly to original device
+            target_device = param.device
+            param.data.copy_(local_cpu_tensor.to(target_device))
+
+    # Process synchronization: ensure all processes complete loading before proceeding
+    dist.barrier()

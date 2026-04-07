@@ -58,9 +58,10 @@ n_resp_per_prompt=16
 train_prompt_mini_bsz=16
 total_rollout_steps=$(((128)))
 test_freq=-1
-staleness_threshold=0.1
+staleness_threshold=0.5
 trigger_parameter_sync_step=4
 partial_rollout=True
+use_trainer_do_validate=False
 
 exp_name="$(basename "${MODEL_ID,,}")-fully-async-policy-${ACTOR_STRATEGY}-minimal"
 
@@ -127,15 +128,22 @@ common_params=(
     rollout.nnodes=1
     rollout.n_gpus_per_node=${n_gpus_rollout}
     rollout.total_rollout_steps=${total_rollout_steps}
-    rollout.total_epochs=2
-    rollout.test_freq=${test_freq}
+    trainer.total_epochs=2
+    trainer.test_freq=${test_freq}
     # Fully async specific configurations
     async_training.staleness_threshold=${staleness_threshold}
     async_training.partial_rollout="${partial_rollout}"
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
-    # GPU specific configurations
+    async_training.use_trainer_do_validate=${use_trainer_do_validate}
     actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+)
+
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
 )
 
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
@@ -147,6 +155,14 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
+    if [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+        )
+        actor_offload=True
+    fi
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         "${common_params[@]}" \
         actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -169,10 +185,13 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running fully async training with Megatron strategy..."
     # Megatron specific parameters
     gen_tp=2
-    train_tp=1
+    train_tp=2
     train_pp=2
     ref_offload=True
-    actor_offload=False
+    actor_offload=True
+    common_params+=(
+        actor_rollout_ref.rollout.gpu_memory_utilization=0.60
+    )
 
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         --config-path=config \
@@ -182,8 +201,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         critic.strategy=megatron \
         actor_rollout_ref.actor.optim.lr_decay_steps=10000000 \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
         actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \

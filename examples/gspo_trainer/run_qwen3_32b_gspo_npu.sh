@@ -169,7 +169,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0
-    +actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
 )
 
 # Trainer Configuration

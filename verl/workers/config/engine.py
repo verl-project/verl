@@ -20,7 +20,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 
 from ...utils.profiler import ProfilerConfig
-from .model import HFModelConfig
+from .model import DiffusionModelConfig, HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
@@ -29,6 +29,7 @@ __all__ = [
     "TrainingWorkerConfig",
     "TorchtitanEngineConfig",
     "VeOmniEngineConfig",
+    "AutomodelEngineConfig",
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
@@ -118,6 +119,27 @@ class EngineConfig(BaseConfig):
 
 
 @dataclass
+class QATEngineConfig(BaseConfig):
+    """Configuration for QAT (Quantization-Aware Training) within an engine.
+
+    Args:
+        enable (bool): Whether to enable QAT, default False
+        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
+        group_size (int): Group size for blockwise quantization, default 16
+        ignore_patterns (list[str]): Module name patterns to exclude from quantization
+        activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
+        quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
+    """
+
+    enable: bool = False
+    mode: str = "w4a16"
+    group_size: int = 16
+    ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
+    activation_observer: str = "static_minmax"
+    quantization_config_path: Optional[str] = None
+
+
+@dataclass
 class McoreEngineConfig(EngineConfig):
     """Configuration for Megatron parallelism.
 
@@ -134,6 +156,8 @@ class McoreEngineConfig(EngineConfig):
         virtual_pipeline_model_parallel_size (Optional[int]): Virtual pipeline model parallel size
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
+        dynamic_context_parallel (bool): Whether to enable hybrid context parallelism.
+        max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
         use_dist_checkpointing (bool): Whether to use distributed checkpointing.
@@ -156,6 +180,8 @@ class McoreEngineConfig(EngineConfig):
     pipeline_model_parallel_size: int = 1
     virtual_pipeline_model_parallel_size: Optional[int] = None
     context_parallel_size: int = 1
+    dynamic_context_parallel: bool = False
+    max_seqlen_per_dp_cp_rank: Optional[int] = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
     use_dist_checkpointing: bool = False
@@ -169,6 +195,7 @@ class McoreEngineConfig(EngineConfig):
     use_mbridge: bool = True
     vanilla_mbridge: bool = True
     strategy: str = "megatron"
+    qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -178,27 +205,6 @@ class McoreEngineConfig(EngineConfig):
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
-
-
-@dataclass
-class QATEngineConfig(BaseConfig):
-    """Configuration for QAT (Quantization-Aware Training) within an engine.
-
-    Args:
-        enable (bool): Whether to enable QAT, default False
-        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
-        group_size (int): Group size for blockwise quantization, default 16
-        ignore_patterns (list[str]): Module name patterns to exclude from quantization
-        activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
-        quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
-    """
-
-    enable: bool = False
-    mode: str = "w4a16"
-    group_size: int = 16
-    ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
-    activation_observer: str = "static_minmax"
-    quantization_config_path: Optional[str] = None
 
 
 @dataclass
@@ -397,9 +403,130 @@ class TorchtitanEngineConfig(EngineConfig):
 
 
 @dataclass
+class AutomodelEngineConfig(EngineConfig):
+    """Configuration for Automodel (nemo_automodel) backend.
+
+    The Automodel backend uses NeMoAutoModelForCausalLM for model loading and
+    supports FSDP2, MegatronFSDP, and DDP distributed strategies with optional
+    TP, CP, and EP parallelism.
+
+    Args:
+        strategy (str): Backend strategy identifier, must be "automodel".
+        distributed_strategy (str): Distributed training strategy: "fsdp2", "megatron_fsdp", or "ddp".
+        tp_size (int): Tensor parallel size.
+        pp_size (int): Pipeline parallel size (only pp_size=1 supported initially).
+        cp_size (int): Context parallel size.
+        ep_size (int): Expert parallel size for MoE models.
+        dp_replicate_size (int): Data-parallel replicate size for HSDP. 1 = pure sharding.
+        sequence_parallel (bool): Enable sequence parallelism in the TP plan.
+        defer_fsdp_grad_sync (bool): Defer FSDP gradient sync to the final micro-batch.
+        activation_checkpointing (bool): Whether to enable activation checkpointing.
+        enable_fp8 (bool): Whether to enable FP8 training.
+        enable_compile (bool): Whether to enable torch.compile for the model.
+        model_dtype (str): Model data type for loading weights. "fp32" loads in float32
+            (matching FSDP golden), "auto" uses the dtype from the model config.
+        attn_implementation (str): Attention implementation to use ("sdpa", "flash_attention_2", "eager", "te").
+
+    Backend settings (nemo_automodel BackendConfig):
+        backend_config (dict): Dict of kwargs passed directly to
+            nemo_automodel.components.models.common.BackendConfig(**backend_config).
+            Controls how model layers are implemented (TE vs PyTorch) and MoE dispatch.
+            See automodel.yaml for all predefined keys with defaults.
+            Key fields:
+                attn (str): Attention backend. "te" = TransformerEngine fused attention,
+                    "sdpa" = PyTorch scaled dot-product attention. Default: "sdpa".
+                linear (str): Linear layer backend. "te" = TE fused linear (with FP8 support),
+                    "torch" = standard PyTorch linear. Default: "te".
+                rms_norm (str): RMSNorm backend. "te" = TE fused RMSNorm, "torch" = PyTorch,
+                    "torch_fp32" = PyTorch in FP32 (better numerical stability for MoE).
+                    Default: "torch_fp32".
+                rope_fusion (bool): Enable fused RoPE kernel (requires CP=1). Default: true.
+                experts (str): MoE expert computation backend.
+                    "gmm" = grouped_gemm (requires pip install grouped_gemm),
+                    "torch_mm" = torch._grouped_mm (no external dependency),
+                    "te" = TE GroupedLinear. Default: "gmm".
+                dispatcher (str): MoE token dispatch strategy.
+                    "torch" = standard all-gather + local compute,
+                    "deepep" = DeepEP optimized all-to-all (higher throughput).
+                    Default: "torch".
+                    Note: "deepep" with experts="gmm" matches the legacy enable_deepep=True behavior.
+                enable_fsdp_optimizations (bool): Enable FSDP-specific optimizations in Automodel.
+                    Default: false.
+                enable_hf_state_dict_adapter (bool): Enable HuggingFace state dict adapter for
+                    checkpoint compatibility. Default: true.
+                fake_balanced_gate (bool): Use fake balanced gating for debugging. Default: false.
+                fake_gate_noise (float): Noise added to fake balanced gate. Default: 0.0.
+                gate_precision: Gate computation precision. Default: null (auto).
+            Full reference: nemo_automodel/components/models/common/backend_config.py
+
+    MoE / Expert Parallelism settings:
+        moe_config (dict): Dict of kwargs passed directly to
+            nemo_automodel.components.moe.parallelizer.MoEParallelizerConfig(**moe_config).
+            Controls MoE parallelization behavior within FSDP2.
+            See automodel.yaml for all predefined keys with defaults.
+            Key fields:
+                ignore_router_for_ac (bool): Exclude router from activation checkpointing.
+                    Default: false.
+                reshard_after_forward (bool): Reshard expert params after forward pass
+                    (trades compute for memory). Default: false.
+                lm_head_precision: Precision for the LM head. Default: null (auto).
+                wrap_outer_model (bool): Whether to FSDP-wrap the outermost model module.
+                    Default: true.
+            Full reference: nemo_automodel/components/moe/parallelizer.py
+
+    Mixed precision policy (FSDP2):
+        mp_param_dtype (str): Parameter dtype for FSDP2 mixed precision policy.
+        mp_reduce_dtype (str): Reduce dtype for FSDP2 mixed precision policy.
+        mp_output_dtype (str): Output dtype for FSDP2 mixed precision policy.
+
+    Entropy computation:
+        entropy_from_logits_with_chunking (bool): Whether to use chunked entropy computation.
+        use_torch_compile (bool): Whether to use torch.compile for entropy computation.
+        entropy_checkpointing (bool): Whether to use checkpointing for entropy computation.
+    """
+
+    strategy: str = "automodel"
+    distributed_strategy: str = "fsdp2"
+    # Parallelism sizes
+    tp_size: int = 1
+    pp_size: int = 1
+    cp_size: int = 1
+    ep_size: int = 1
+    dp_replicate_size: int = 1
+    sequence_parallel: bool = False
+    defer_fsdp_grad_sync: bool = True
+    # Model settings
+    activation_checkpointing: bool = False
+    enable_fp8: bool = False
+    enable_compile: bool = False
+    model_dtype: str = "fp32"
+    attn_implementation: str = "flash_attention_2"
+    # Backend settings
+    backend_config: dict = field(default_factory=dict)
+    # MoE settings
+    moe_config: dict = field(default_factory=dict)
+    # Mixed precision policy
+    mp_param_dtype: str = "bf16"
+    mp_reduce_dtype: str = "fp32"
+    mp_output_dtype: str = "bf16"
+    # Entropy computation
+    entropy_from_logits_with_chunking: bool = False
+    use_torch_compile: bool = True
+    entropy_checkpointing: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.strategy == "automodel", f"strategy must be 'automodel', got {self.strategy}"
+        assert self.distributed_strategy in ["fsdp2", "megatron_fsdp", "ddp"], (
+            f"distributed_strategy {self.distributed_strategy} not supported"
+        )
+        assert self.pp_size == 1, "Pipeline parallelism (pp_size > 1) is not yet supported for automodel backend"
+
+
+@dataclass
 class TrainingWorkerConfig(BaseConfig):
     model_type: str = None  # model type (language_model/value_model)
-    model_config: HFModelConfig = None
+    model_config: HFModelConfig | DiffusionModelConfig = None
     engine_config: EngineConfig = None
     optimizer_config: OptimizerConfig = None
     checkpoint_config: CheckpointConfig = None

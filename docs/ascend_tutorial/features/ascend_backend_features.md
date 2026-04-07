@@ -43,7 +43,7 @@ Last updated: 03/03/2026.
 ### 2. sglang:
 
 对于sglang推理后端，昇腾通过直接向sglang社区进行持续建设与维护来支持相关功能。
-此外在verl中使用sglang还涉及以下组件, 我们在[quick start](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/ascend_sglang_quick_start.rst)中提供详细说明与一键安装脚本。
+此外在verl中使用sglang还涉及以下组件, 我们在[quick start](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_sglang_quick_start.rst)中提供详细说明与一键安装脚本。
 
 | 组件| 描述|
 | --- | --- |
@@ -272,3 +272,5 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu` |是否使用融合swiglu，默认值为False|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage` |第一个pipeline stage 的层数，默认值为none|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage` |最后一个pipeline stage 的层数，默认值为none|
+
+注：`actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) 暂不支持同时开启。由于 verl 默认开启 mbridge, 使用 VPP 参数时请手动将 `actor_rollout_ref.actor.megatron.use_mbridge` 置为 False。

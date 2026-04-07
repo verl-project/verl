@@ -81,7 +81,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -105,7 +105,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -130,11 +129,11 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with veomni engine (FSDP_SIZE=4, USP=2)
         run: |
           ray stop --force
-          VAL_BEFORE_TRAIN=True NUM_GPUS=8 FSDP_SIZE=4 SP_SIZE=2 EP_SIZE=1 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size4" bash tests/special_e2e/run_ppo_trainer_veomni.sh
+          FSDP_SIZE=4 SP_SIZE=2 bash tests/special_e2e/run_ppo_trainer_veomni.sh
       - name: Running GEO3K E2E training tests on 8 L20 GPUs with veomni engine (FSDP_SIZE=8, USP=1)
         run: |
           ray stop --force
-          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct TRAIN_FILES=${HOME}/data/geo3k/train.parquet VAL_FILES=${HOME}/data/gsm8k/test.parquet VAL_BEFORE_TRAIN=True NUM_GPUS=8 FSDP_SIZE=4 SP_SIZE=2 EP_SIZE=1 VERL_EXP_NAME="qwen3-2b-vl-function-reward-minimal-fsdp-size8" bash tests/special_e2e/run_ppo_trainer_veomni.sh
+          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct TRAIN_FILES=${HOME}/data/geo3k/train.parquet VAL_FILES=${HOME}/data/gsm8k/test.parquet FSDP_SIZE=8 SP_SIZE=1 bash tests/special_e2e/run_ppo_trainer_veomni.sh
 
   cleanup:
     runs-on: ubuntu-latest

@@ -87,8 +87,6 @@ class MooncakeCheckpointEngine(CheckpointEngine):
 
     def prepare(self) -> dict[str, Any]:
         """Prepare send and recv buckets"""
-        # self.buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device=self.device)
-        # self.engine.register_memory(self.buf.data_ptr(), self.bucket_size)
         logger.info(
             f"prepare ptr={self.buf.data_ptr():#x} len={2 * self.bucket_size} "
             f"magic_buf_ptr={self.magic_buf.data_ptr():#x}"

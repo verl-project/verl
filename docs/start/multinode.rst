@@ -796,8 +796,8 @@ slurm_script.sh
         critic.model.path=$MODEL_PATH \
         critic.model.enable_gradient_checkpointing=False \
         critic.ppo_micro_batch_size_per_gpu=8 \
-        critic.model.fsdp_config.param_offload=False \
-        critic.model.fsdp_config.optimizer_offload=False \
+        critic.fsdp.param_offload=False \
+        critic.fsdp.optimizer_offload=False \
         algorithm.kl_ctrl.kl_coef=0.0001 \
         trainer.critic_warmup=0 \
         trainer.logger='["console","wandb"]' \
