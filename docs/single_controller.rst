@@ -62,13 +62,13 @@ across distributed workers.
 --------------
 
 Step 1: Register with a Decorator
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The first step is to define the ``generate_sequences`` and decorate it
 with ``@register`` as it will be called in driver script.
 
 **Source:**
-`fsdp_workers.py <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/workers/fsdp_workers.py#L528>`__
+`engine_workers.py <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`__
 
 .. code:: python
 
@@ -109,7 +109,7 @@ As the code shows, values of ``dispatch_mode``, ``execute_mode`` and
 --------------
 
 Step 2: Binding During Initialization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 These attached attributes are extracted and utilized when
 ``ActorRolloutRefWorker``, wrapped in a ``RayClassWithArgs``, is passed
@@ -289,7 +289,7 @@ This makes the method invocable via the ``WorkerGroup`` interface.
 --------------
 
 Step 3: Call Chain
-~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~
 
 All the machinery above ensures that distributed calls feel identical to
 single-process ones. In the original single-process script, the code

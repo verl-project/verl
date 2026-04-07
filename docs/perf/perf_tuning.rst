@@ -90,10 +90,10 @@ users may need to tune the ``*micro_batch_size_per_gpu`` for different computati
 In verl, the core principle for setting batch sizes is:
 
 - **Algorithmic metrics** (train batch size, PPO mini-batch size) are *global* (from a single-controller perspective), 
-  normalized in each worker. See the `normalization code <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py#L120-L122>`_.
+  normalized in each worker. See the `normalization code <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_.
 
 - **Performance-related parameters** (micro batch size, max token length for dynamic batch size) are *local* parameters that define the per-GPU data allocations. 
-  See the `normalization code <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py#L127>`_.
+  See the `normalization code <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_.
 
 .. note:: In your training script, please use ``*micro_batch_size_per_gpu`` instead of ``*micro_batch_size``. 
   So that you don't need to consider the normalization of the ``micro_batch_size`` and ``micro_batch_size`` will be deprecated.

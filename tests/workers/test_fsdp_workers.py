@@ -15,7 +15,7 @@ import os
 
 from omegaconf import OmegaConf
 
-from verl.workers.fsdp_workers import ActorRolloutRefWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker
 
 
 def test_actor_rollout_ref_worker_actor_ref_model():

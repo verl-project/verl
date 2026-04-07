@@ -48,20 +48,11 @@ Define worker classes
 
 .. code:: python
 
-   if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}: # for FSDP backend
-       assert config.critic.strategy in {"fsdp", "fsdp2"}
-       from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
-       from verl.single_controller.ray import RayWorkerGroup
-       ray_worker_group_cls = RayWorkerGroup
+   from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker
+   from verl.single_controller.ray import RayWorkerGroup
 
-   elif config.actor_rollout_ref.actor.strategy == 'megatron': # for Megatron backend
-       assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-       from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
-       from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
-       ray_worker_group_cls = NVMegatronRayWorkerGroup # Ray worker class for Megatron-LM
-
-   else:
-       raise NotImplementedError
+   ray_worker_group_cls = RayWorkerGroup
+   CriticWorker = TrainingWorker
 
    from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
@@ -82,7 +73,7 @@ Define worker classes
    }
 
 Step 1: Construct the mapping between roles and workers
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A role represents a group of workers in the same process. We have
 pre-defined several roles in `ray_trainer.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/ray_trainer.py#L38>`_.
@@ -102,21 +93,19 @@ pre-defined several roles in `ray_trainer.py <https://github.com/volcengine/verl
        ActorRolloutRef = 6 # This worker contains actor, rollout and reference policy simultaneously 
 
 Step 2: Define the worker class corresponding to this role
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - We have pre-implemented the ``ActorRolloutRefWorker``. Through
   different configs, it can be a standalone actor, a standalone rollout,
   an ActorRollout HybridEngine, or an ActorRolloutRef HybridEngine
 - We also pre-implemented workers for ``Actor``, ``Rollout``,
-  ``Critic``, ``Reward Model`` and ``Reference model`` on two different
-  backend: PyTorch FSDP
-  and Megatron-LM.
-  See `FSDP Workers <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py>`_ 
-  and `Megatron-LM Workers <https://github.com/volcengine/verl/blob/main/verl/workers/megatron_workers.py>`_
+  ``Critic``, ``Reward Model`` and ``Reference model`` supporting both FSDP
+  and Megatron-LM backends.
+  See `engine_workers.py <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_
   for more information.
 
 Step 3: Define resource pool id and resource pool spec
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - Resource pool is a division of global GPU resources,
   ``resource_pool_spec`` is a dict, mapping from id to # of GPUs
@@ -141,7 +130,7 @@ Defining reward model/function
    # - finally, we combine all the rewards together
    # - The reward type depends on the tag of the data
    if config.reward_model.enable:
-       from verl.workers.fsdp_workers import RewardModelWorker
+       from verl.workers.engine_workers import TrainingWorker as RewardModelWorker
        role_worker_mapping[Role.RewardModel] = RewardModelWorker
        mapping[Role.RewardModel] = global_pool_id
     
@@ -161,8 +150,8 @@ whether it's a model-based RM or a function-based RM
   - Note that the pre-defined ``RewardModelWorker`` only supports models
     with the structure of huggingface
     ``AutoModelForSequenceClassification``. If it's not this model, you
-    need to define your own RewardModelWorker in `FSDP Workers <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py>`_ 
-    and `Megatron-LM Workers <https://github.com/volcengine/verl/blob/main/verl/workers/megatron_workers.py>`_.
+    need to define your own RewardModelWorker in
+    `engine_workers.py <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_.
 
 - If it's a function-based RM, the users are required to classified the
   reward function for each datasets.
