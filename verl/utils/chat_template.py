@@ -140,7 +140,7 @@ def apply_chat_template(
                 user_len = len(two_users) - len(one_user)
                 result = output[:-user_len]
                 if one_user_with_gen is not None:
-                    result = result + one_user_with_gen[len(one_user):]
+                    result = result + one_user_with_gen[len(one_user) :]
                 return result
             elif not return_dict:  # tokenize=True and return_dict=False
                 if isinstance(output[0], list):  # transformers>=5
@@ -152,10 +152,11 @@ def apply_chat_template(
                 user_len = len(two_users) - len(one_user)
                 result = output[:-user_len]
                 if one_user_with_gen is not None:
-                    result = result + one_user_with_gen[len(one_user):]
+                    result = result + one_user_with_gen[len(one_user) :]
                 return result
             else:  # tokenize=True and return_dict=True and return_tensors="pt"
                 import torch
+
                 one_user = dict(one_user)
                 two_users = dict(two_users)
                 output = dict(output)
