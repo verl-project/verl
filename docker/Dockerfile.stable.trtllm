@@ -1,9 +1,13 @@
 # Base image from NGC TensorRT-LLM, which includes a pre-installed TensorRT-LLM.
 # For available images, visit: https://nvidia.github.io/TensorRT-LLM/installation/containers.html
 # Use TRTLLM_BASE_IMAGE to specify the base image (default: release:1.2.0rc6)
-ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc4
+ARG TRTLLM_BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 FROM ${TRTLLM_BASE_IMAGE}
 
+# Clear TORCH_CUDA_ARCH_LIST inherited from the base image so that
+# FlashInfer's check_cuda_arch() queries the actual GPU at runtime
+# instead of rejecting GPUs not in the build-time arch list.
+ENV TORCH_CUDA_ARCH_LIST=""
 
 # ==============================================================================
 # Install Megatron dependencies
@@ -22,18 +26,17 @@ RUN git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
     pushd ${NVSHMEM_DIR}/lib && \
     ln -s libnvshmem_host.so.3 libnvshmem_host.so && \
     popd && \
-    git clone -b v1.2.1 https://github.com/deepseek-ai/DeepEP.git && \
+    git clone -b hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
     pushd DeepEP && \
-    wget https://raw.githubusercontent.com/NVIDIA/Megatron-LM/refs/tags/core_v0.15.0/docker/patches/deepep.patch && \
-    patch -p1 < deepep.patch && \
+    export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:$CPATH && \
     TORCH_CUDA_ARCH_LIST="9.0 10.0 12.0" python setup.py install && \
     popd && rm -rf deepep
 
 # Install Python dependencies
-RUN pip3 install --no-cache-dir --no-deps trl && \
+RUN pip3 install --no-cache-dir --no-deps trl==0.27.0 && \
     pip3 install --no-cache-dir nvtx matplotlib liger_kernel cachetools && \
     pip install --no-cache-dir -U git+https://github.com/ISEEKYAN/mbridge.git && \
-    pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.15.0
+    pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0
 
 
 # ==============================================================================
