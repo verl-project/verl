@@ -142,7 +142,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         reward_min = torch.min(non_aborted_sequence_reward).detach().item()
     else:
         logger.warning("All samples are aborted, returning default reward metrics")
-        reward_mean = reward_max = reward_min = float("nan")
+        reward_mean = float("nan")
+        reward_max = float("nan")
+        reward_min = float("nan")
 
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
@@ -182,7 +184,11 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
             torch.mean(torch.eq(non_aborted_response_length, max_response_length).float()).detach().item()
         )
     else:
-        raise ValueError("All samples are aborted, this should not happen.")
+        logger.warning("All samples are aborted, returning default response length metrics")
+        non_aborted_response_length_mean = float("nan")
+        non_aborted_response_length_max = float("nan")
+        non_aborted_response_length_min = float("nan")
+        non_aborted_response_length_clip_ratio = float("nan")
 
     metrics = {
         # score
