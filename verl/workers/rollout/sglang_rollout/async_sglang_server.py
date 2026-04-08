@@ -69,11 +69,18 @@ def _extract_sglang_prompt_logprobs(output: dict, num_prompt_logprobs: int) -> d
     raw_token_logprobs = meta_info.get("input_token_logprobs") or []
     raw_top_logprobs = meta_info.get("input_top_logprobs") or []
 
+    target_k = max(num_prompt_logprobs, 1)
+    use_top = num_prompt_logprobs > 0
+
+    # If the distillation loss requests top-k, SGLang must return input_top_logprobs.
+    if use_top and len(raw_top_logprobs) == 0:
+        raise ValueError(
+            "SGLang did not return input_top_logprobs, but prompt_logprobs > 0 was requested. "
+            "Please ensure return_logprob is enabled and top_logprobs_num is set correctly."
+        )
+
     prompt_ids_ls: list[list[int]] = []
     prompt_logprobs_ls: list[list[float]] = []
-
-    target_k = max(num_prompt_logprobs, 1)
-    use_top = num_prompt_logprobs > 0 and len(raw_top_logprobs) > 0
 
     # Skip the first token: it has no preceding context.
     for i in range(1, len(raw_token_logprobs)):
@@ -81,19 +88,27 @@ def _extract_sglang_prompt_logprobs(output: dict, num_prompt_logprobs: int) -> d
 
         if use_top:
             top_entries = raw_top_logprobs[i] if i < len(raw_top_logprobs) else []
+            if len(top_entries) == 0:
+                # Fail fast instead of silently falling back to greedy for top-k distillation.
+                raise ValueError(
+                    f"SGLang returned empty input_top_logprobs at position {i} "
+                    f"while prompt_logprobs={num_prompt_logprobs} was requested."
+                )
+
             ids = [int(tid) for _, tid, _ in top_entries[:num_prompt_logprobs]]
             lps = [float(lp) for lp, _, _ in top_entries[:num_prompt_logprobs]]
 
-            if len(ids) == 0:
-                ids = [int(token_id)]
-                lps = [float(logprob) if logprob is not None else 0.0]
+            # Pad to fixed width (some positions may return fewer than K entries).
+            while len(ids) < target_k:
+                ids.append(0)
+                lps.append(0.0)
         else:
+            # Non-topk: keep only greedy token logprob.
             ids = [int(token_id)]
             lps = [float(logprob) if logprob is not None else 0.0]
-
-        while len(ids) < target_k:
-            ids.append(0)
-            lps.append(0.0)
+            while len(ids) < target_k:
+                ids.append(0)
+                lps.append(0.0)
 
         prompt_ids_ls.append(ids)
         prompt_logprobs_ls.append(lps)
@@ -444,7 +459,7 @@ class SGLangHttpServer:
         return_logprob = sampling_params.pop("logprobs", False)
 
         # prompt_logprobs: number of top-K token logprobs to return for each input token position.
-        # This is used by the OPD (Online Policy Distillation) teacher server to provide
+        # This is used by the OPD (On-Policy Distillation) teacher server to provide
         # per-token distributions to the student model.
         # SGLang uses return_logprob=True + logprob_start_len=0 to get input token logprobs,
         # and top_logprobs_num=K for top-K logprobs at each position.

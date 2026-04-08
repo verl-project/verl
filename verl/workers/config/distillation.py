@@ -194,6 +194,20 @@ class DistillationConfig(BaseConfig):
                         f"({self.distillation_loss.topk}) to enable distillation loss computation."
                     )
                 engine_kwargs["vllm"] = vllm_engine_kwargs
+
+            case "sglang":
+                sglang_engine_kwargs = dict(engine_kwargs.get("sglang", {}))
+                max_logprobs = sglang_engine_kwargs.get("max_logprobs")
+                if max_logprobs is None:
+                    sglang_engine_kwargs["max_logprobs"] = self.distillation_loss.topk
+                    max_logprobs = self.distillation_loss.topk
+                if max_logprobs < self.distillation_loss.topk:
+                    raise ValueError(
+                        f"SGLang max_logprobs ({max_logprobs}) must be >= distillation_loss topk "
+                        f"({self.distillation_loss.topk}) to enable distillation loss computation."
+                    )
+                engine_kwargs["sglang"] = sglang_engine_kwargs
+
             case _:
                 raise NotImplementedError(
                     f"DistillationTeacherModelConfig does not support inference engine {engine_name}"

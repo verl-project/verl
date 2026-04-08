@@ -34,23 +34,28 @@ def _get_teacher_sampling_params(
 ) -> dict[str, Any]:
     """Get sampling parameters for teacher model when computing log probabilities for distillation.
 
-    The returned dict uses the ``prompt_logprobs`` key which is understood by both
-    the vLLM and SGLang async server backends:
-
-    * **vLLM** (``vLLMHttpServer.generate``): passes ``prompt_logprobs`` directly
-      to the vLLM ``SamplingParams``, which triggers prompt-token log-prob
-      collection.
-    * **SGLang** (``SGLangHttpServer.generate``): ``prompt_logprobs`` is intercepted
-      and converted to ``return_logprob=True`` / ``logprob_start_len=0`` /
-      ``top_logprobs_num=K`` before forwarding the request to the SGLang engine.
+    Notes on temperature:
+      - For vLLM, temperature is applied to *decoded* token logits; prompt_logprobs
+        for the input tokens may not be affected (implementation-dependent).
+      - For SGLang, temperature is forwarded in sampling_params; prompt logprobs
+        behavior depends on the backend implementation.
     """
+    engine_name = distillation_config.teacher_model.inference.name
+    temperature = distillation_config.teacher_model.inference.temperature
+
+    # Do not block non-default temperature; just warn for known backend behavior.
+    if engine_name == "vllm" and temperature != 1.0:
+        print(
+            "WARNING: vLLM temperature may not affect prompt_logprobs for input tokens "
+            "(it is typically applied to decoded-token logits)."
+        )
+
     num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
     return {
         "max_tokens": 1,
-        "temperature": distillation_config.teacher_model.inference.temperature,
+        "temperature": temperature,
         "prompt_logprobs": num_logprobs,
     }
-
 
 def _pad_teacher_outputs(
     teacher_ids: torch.Tensor,
