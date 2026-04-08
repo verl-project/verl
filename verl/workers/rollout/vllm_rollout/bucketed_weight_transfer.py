@@ -239,7 +239,7 @@ class BucketedWeightReceiver:
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
-                weights, tensor = [], None
+                weights = []
                 for name, meta in metadata["bucket_meta"].items():
                     shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
                     size = dtype.itemsize * shape.numel()
@@ -255,7 +255,7 @@ class BucketedWeightReceiver:
                 get_torch_device().synchronize()
                 self.socket.send(b"")
                 on_bucket_received(weights)
-                del weights, tensor
+                del weights
                 if metadata["is_last"]:
                     break
         finally:
