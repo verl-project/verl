@@ -85,6 +85,12 @@ trainer:
   nnodes: 1
   n_gpus_per_node: 1
 
+  # GC frequency: Disabling automatic GC avoids periodic spikes in step time.
+  #   -1: Default Python GC behavior (backward compatible).
+  #    0: Disable GC entirely.
+  #   N>0: Disable automatic GC and manually collect every N steps.
+  gc_freq: -1
+
   profile_interval: [-1, -1]
 
 global_profiler:
