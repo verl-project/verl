@@ -69,27 +69,27 @@ last_layer=5
 
 # Data Configuration
 DATA_ARGS=(
-     data.train_files="${TRAIN_FILE}"
-     data.val_files="${TEST_FILE}"
-     data.prompt_key=prompt
-     data.train_batch_size=${train_prompt_bsz}
-     data.max_prompt_length=${max_prompt_length}
-     data.max_response_length=${max_response_length}
-     data.filter_overlong_prompts=False
-     data.truncation='left'
+    data.train_files="${TRAIN_FILE}"
+    data.val_files="${TEST_FILE}"
+    data.prompt_key=prompt
+    data.train_batch_size=${train_prompt_bsz}
+    data.max_prompt_length=${max_prompt_length}
+    data.max_response_length=${max_response_length}
+    data.filter_overlong_prompts=False
+    data.truncation='left'
 )
 
 # Model Configuration
 MODEL_ARGS=(
-     actor_rollout_ref.model.path="${MODEL_PATH}"
-     actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.path="${MODEL_PATH}"
+    actor_rollout_ref.model.use_remove_padding=True
 )
 
 # RL Algorithm Configuration
 ALGORITHM_ARGS=(
-     algorithm.adv_estimator=${adv_estimator}
-     algorithm.use_kl_in_reward=${use_kl_in_reward}
-     algorithm.kl_ctrl.kl_coef=${kl_coef}
+    algorithm.adv_estimator=${adv_estimator}
+    algorithm.use_kl_in_reward=${use_kl_in_reward}
+    algorithm.kl_ctrl.kl_coef=${kl_coef}
 )
 
 # Actor Model Configuration
@@ -182,27 +182,27 @@ ROLLOUT_ARGS=(
 
 # Trainer Configuration
 TRAINER_ARGS=(
-     trainer.logger='["console","tensorboard"]'
-     trainer.project_name="${project_name}"
-     trainer.experiment_name="${exp_name}"
-     trainer.nnodes="${NNODES}"
-     trainer.n_gpus_per_node="${NPUS_PER_NODE}"
-     trainer.device='npu'
-     trainer.total_epochs=15
-     trainer.val_before_train=False
-     trainer.test_freq=-1
-     trainer.save_freq=-1
-     trainer.default_local_dir="${CKPTS_DIR}"
+    trainer.logger='["console","tensorboard"]'
+    trainer.project_name="${project_name}"
+    trainer.experiment_name="${exp_name}"
+    trainer.nnodes="${NNODES}"
+    trainer.n_gpus_per_node="${NPUS_PER_NODE}"
+    trainer.device='npu'
+    trainer.total_epochs=15
+    trainer.val_before_train=False
+    trainer.test_freq=-1
+    trainer.save_freq=-1
+    trainer.default_local_dir="${CKPTS_DIR}"
 )
 
 python3 -m verl.trainer.main_ppo \
-     --config-path=config \
-     --config-name='ppo_megatron_trainer.yaml' \
-     "${DATA_ARGS[@]}" \
-     "${MODEL_ARGS[@]}" \
-     "${ACTOR_ARGS[@]}" \
-     "${REF_ARGS[@]}" \
-     "${ROLLOUT_ARGS[@]}" \
-     "${ALGORITHM_ARGS[@]}" \
-     "${TRAINER_ARGS[@]}" \
-     "$@" | tee logs/run_qwen3moe-wy_235b_grpo_megatron_vllm_npu_$(date +%Y%m%d_%H%M%S).log
+    --config-path=config \
+    --config-name='ppo_megatron_trainer.yaml' \
+    "${DATA_ARGS[@]}" \
+    "${MODEL_ARGS[@]}" \
+    "${ACTOR_ARGS[@]}" \
+    "${REF_ARGS[@]}" \
+    "${ROLLOUT_ARGS[@]}" \
+    "${ALGORITHM_ARGS[@]}" \
+    "${TRAINER_ARGS[@]}" \
+    "$@" | tee logs/run_qwen3moe-wy_235b_grpo_megatron_vllm_npu_$(date +%Y%m%d_%H%M%S).log
