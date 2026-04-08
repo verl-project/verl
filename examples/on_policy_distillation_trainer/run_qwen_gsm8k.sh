@@ -3,7 +3,12 @@ set -xeuo pipefail
 
 ############################ Quick Config ############################
 
-ROLLOUT_NAME="vllm" # sglang or vllm
+ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"  # vllm or sglang
+
+if [[ "$ROLLOUT_NAME" != "vllm" && "$ROLLOUT_NAME" != "sglang" ]]; then
+  echo "Invalid ROLLOUT_NAME=$ROLLOUT_NAME (expected vllm or sglang)" >&2
+  exit 1
+fi
 
 FAMILY="Qwen"
 STUDENT_MODEL=Qwen2.5-0.5B
@@ -38,7 +43,7 @@ TEACHER_WORLD_SIZE=4
 
 SP=1
 
-EXP_NAME="fsdp/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
+EXP_NAME="fsdp/student-${STUDENT_MODEL}/teacher-${TEACHER_MODEL}/engine-${ROLLOUT_NAME}/loss-${DISTILLATION_LOSS_MODE}/pg-${USE_POLICY_GRADIENT}"
 
 ENFORCE_EAGER=True # true for faster debugging
 
@@ -138,8 +143,6 @@ TRAINER=(
     trainer.resume_mode=disable
     trainer.log_val_generations=5
 )
-
-
 
 ############################ Launch ############################
 
