@@ -3254,3 +3254,352 @@ class RayZOTrainer:
 
 
 
+class RayRiskAverseTrainer(RayMAPPOTrainer):
+    """MAPPO variant with shared discussion prompts and an adversarial agent."""
+
+    def _shared_discussion_prompt(self) -> str:
+        """Use a unified discussion prompt for all agents."""
+        ma = OmegaConf.select(self.config, "multi_agent", default={}) or {}
+        return ma.get("discussion_prompt", "The discussion history is as follows:")
+    def _apply_kl_penalty(self, data: DataProto, data_ref: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
+        """Apply KL penalty to the token-level rewards.
+
+        This function computes the KL divergence between the reference policy and current policy,
+        then applies a penalty to the token-level rewards based on this divergence.
+
+        Args:
+            data (DataProto): The data containing batched model outputs and inputs.
+            kl_ctrl (core_algos.AdaptiveKLController): Controller for adaptive KL penalty.
+            kl_penalty (str, optional): Type of KL penalty to apply. Defaults to "kl".
+
+        Returns:
+            tuple: A tuple containing:
+                - The updated data with token-level rewards adjusted by KL penalty
+                - A dictionary of metrics related to the KL penalty
+        """
+        response_mask = data.batch["response_mask"]
+        token_level_scores = data.batch["token_level_scores"]
+        batch_size = data.batch.batch_size[0]
+
+        # compute kl between ref_policy and current policy
+        # When apply_kl_penalty, algorithm.use_kl_in_reward=True, so the reference model has been enabled.
+        kld = core_algos.kl_penalty(
+            data.batch["old_log_probs"], data_ref.batch["old_log_probs"], kl_penalty=kl_penalty
+        )  # (batch_size, response_length)
+        kld = kld * response_mask
+        beta = kl_ctrl.value
+
+        token_level_rewards = token_level_scores - beta * kld
+
+        current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
+        current_kl = torch.mean(current_kl, dim=0).item()
+
+        # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
+        kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
+        data.batch["token_level_rewards"] = token_level_rewards
+
+        metrics = {"actor/reward_kl_penalty": current_kl, "actor/reward_kl_penalty_coeff": beta}
+
+        return data, metrics
+    def _build_input_ids_from_histories(
+        self,
+        system_prompt,
+        discussion_prompt,
+        questions,
+        histories,
+        batch: DataProto,
+        agent_key,
+        max_history_tokens,
+    ):
+        shared_prompt = self._shared_discussion_prompt()
+        return super()._build_input_ids_from_histories(
+            system_prompt, shared_prompt, questions, histories, batch, agent_key, max_history_tokens
+        )
+
+    def mappo_fit(self):
+        """Run multi-agent PPO with adversarial agent and shared discussion prompts."""
+        from verl.utils.tracking import Tracking
+
+        def _with_prefix(prefix: str, metric_dict: dict) -> dict:
+            """Prefix metrics with agent identifier to avoid collisions."""
+            return {f"{prefix}/{k}": v for k, v in metric_dict.items()}
+
+        ma = OmegaConf.select(self.config, "multi_agent", default={}) or {}
+        num_agents = int(ma.get("num_agents", 1))
+        num_rounds = int(ma.get("num_rounds", 1))
+        risk_coef = float(ma.get("risk_coef", 1.0))
+        agent_keys = list(self.train_dataloaders.keys())
+
+        logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
+
+        self.global_steps = 0
+
+        # load checkpoint before doing anything
+        self._load_checkpoint()
+
+        # perform validation before training
+        if self.val_reward_fns is not None and self.config.trainer.get("val_before_train", True):
+            val_metrics = self._multi_agent_validate()
+            assert val_metrics, f"{val_metrics=}"
+            pprint(f"Initial validation metrics: {val_metrics}")
+            logger.log(data=val_metrics, step=self.global_steps)
+            if self.config.trainer.get("val_only", False):
+                return
+
+        # add tqdm
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+        self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
+
+        # we start from step 1
+        self.global_steps += 1
+        last_val_metrics = None
+        self.max_steps_duration = 0
+
+        prev_step_profile = False
+        curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        next_step_profile = False
+
+        for epoch in range(self.config.trainer.total_epochs):
+            for batch_tuple in zip(*(self.train_dataloaders[k] for k in agent_keys)):
+                round_agent_batches = [[None for _ in range(num_agents)] for _ in range(num_rounds)]
+                metrics = {}
+                timing_raw = {}
+                round_agent_metrics = [[{} for _ in range(num_agents)] for _ in range(num_rounds)]
+
+                with marked_timer("start_profile", timing_raw):
+                    self._start_profiling(
+                        not prev_step_profile and curr_step_profile
+                        if self.config.global_profiler.profile_continuous_steps
+                        else curr_step_profile
+                    )
+                is_last_step = self.global_steps >= self.total_training_steps
+                step_durations = []
+
+                batch_size = self.config.data.train_batch_size
+                histories = [""] * batch_size
+                for r in range(num_rounds):
+                    this_round = [""] * batch_size
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    futures = []
+                    with ThreadPoolExecutor(max_workers=num_agents) as executor:
+                        for agent_idx, agent_key in enumerate(agent_keys):
+                            batch_dict = batch_tuple[agent_idx]
+                            futures.append(
+                                executor.submit(
+                                    self._single_agent_rollout,
+                                    agent_idx,
+                                    agent_key,
+                                    batch_dict,
+                                    histories,
+                                    r,
+                                    timing_raw,
+                                    round_agent_metrics,
+                                )
+                            )
+                    results = [f.result() for f in futures]
+                    for agent_idx, (resp_texts, batch) in enumerate(results):
+                        this_round = [
+                            old + f"\nAgent {agent_idx}: {new}" for old, new in zip(this_round, resp_texts)
+                        ]
+                        round_agent_batches[r][agent_idx] = batch
+
+                    histories[:] = this_round
+                for r in range(num_rounds):
+                    round_agent_batches[r][0].batch["token_level_scores"] = - round_agent_batches[r][1].batch["token_level_scores"]
+                    round_agent_batches[r][0],kl_metrics=self._apply_kl_penalty(round_agent_batches[r][0],round_agent_batches[r][1], self.kl_ctrl_in_reward, self.config.algorithm.kl_penalty)
+                    round_agent_metrics[r][0].update(kl_metrics)
+
+                if self.config.algorithm.use_kl_in_reward:
+                    for r in range(num_rounds):
+                        non_adv_agents = [idx for idx in range(num_agents) if idx != 0]
+                        futures = []
+                        from concurrent.futures import ThreadPoolExecutor
+
+                        with ThreadPoolExecutor(max_workers=num_agents) as executor:
+                            for agent_idx in non_adv_agents:
+                                batch = round_agent_batches[r][agent_idx]
+                                futures.append(
+                                    executor.submit(
+                                        apply_kl_penalty,
+                                        batch,
+                                        self.kl_ctrl_in_reward,
+                                        self.config.algorithm.kl_penalty,
+                                    )
+                                )
+                        results = [f.result() for f in futures]
+                        for agent_idx, (batch, kl_metrics) in zip(non_adv_agents, results):
+                            round_agent_batches[r][agent_idx] = batch
+                            round_agent_metrics[r][agent_idx].update(kl_metrics)
+                else:
+                    for r in range(num_rounds):
+                        for agent_idx in range(num_agents):
+                            batch = round_agent_batches[r][agent_idx]
+                            if agent_idx == 0 and "token_level_rewards" in batch.batch:
+                                continue
+                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)
+                for r in range(num_rounds):
+                    futures = []
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    with ThreadPoolExecutor(max_workers=num_agents) as executor:
+                        for agent_idx in range(num_agents):
+                            batch = round_agent_batches[r][agent_idx]
+                            futures.append(
+                                executor.submit(
+                                    compute_advantage,
+                                    batch,
+                                    self.config.algorithm.adv_estimator,
+                                    self.config.algorithm.gamma,
+                                    self.config.algorithm.lam,
+                                    self.config.actor_rollout_ref.rollout.n,
+                                    norm_adv_by_std_in_grpo,
+                                    self.config.algorithm,
+                                )
+                            )
+                    results = [f.result() for f in futures]
+                    for agent_idx, batch in enumerate(results):
+                        round_agent_batches[r][agent_idx] = batch
+
+                if self.use_critic:
+                    for r in range(num_rounds):
+                        futures = []
+                        from concurrent.futures import ThreadPoolExecutor
+
+                        with ThreadPoolExecutor(max_workers=num_agents) as executor:
+                            for agent_idx, agent_key in enumerate(agent_keys):
+                                futures.append(
+                                    executor.submit(
+                                        self._update_critic,
+                                        r,
+                                        agent_idx,
+                                        agent_key,
+                                        round_agent_batches,
+                                        timing_raw,
+                                        round_agent_metrics,
+                                    )
+                                )
+                        results = [f.result() for f in futures]
+
+                if self.config.trainer.critic_warmup <= self.global_steps:
+                    for r in range(num_rounds):
+                        futures = []
+                        from concurrent.futures import ThreadPoolExecutor
+
+                        with ThreadPoolExecutor(max_workers=num_agents) as executor:
+                            for agent_idx, agent_key in enumerate(agent_keys):
+                                futures.append(
+                                    executor.submit(
+                                        self._update_actor,
+                                        r,
+                                        agent_idx,
+                                        agent_key,
+                                        round_agent_batches,
+                                        timing_raw,
+                                        round_agent_metrics,
+                                    )
+                                )
+                        results = [f.result() for f in futures]
+
+                for r in range(num_rounds):
+                    futures = []
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    with ThreadPoolExecutor(max_workers=num_agents) as executor:
+                        for agent_idx in range(num_agents):
+                            futures.append(
+                                executor.submit(
+                                    self._update_metrics,
+                                    r,
+                                    agent_idx,
+                                    round_agent_batches,
+                                    round_agent_metrics,
+                                    timing_raw,
+                                    metrics,
+                                )
+                            )
+                        results = [f.result() for f in futures]
+
+                if (
+                    self.val_reward_fns is not None
+                    and self.config.trainer.test_freq > 0
+                    and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                ):
+                    with marked_timer("testing", timing_raw, color="green"):
+                        val_metrics: dict = self._multi_agent_validate()
+                        if is_last_step:
+                            last_val_metrics = val_metrics
+                    metrics.update(val_metrics)
+
+                esi_close_to_expiration = should_save_ckpt_esi(
+                    max_steps_duration=self.max_steps_duration,
+                    redundant_time=self.config.trainer.esi_redundant_time,
+                )
+
+                if self.config.trainer.save_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
+                ):
+                    if esi_close_to_expiration:
+                        print("Force saving checkpoint: ESI instance expiration approaching.")
+                    with marked_timer("save_checkpoint", timing_raw, color="green"):
+                        self._save_checkpoint()
+
+                with marked_timer("stop_profile", timing_raw):
+                    next_step_profile = (
+                        self.global_steps + 1 in self.config.global_profiler.steps
+                        if self.config.global_profiler.steps is not None
+                        else False
+                    )
+                    self._stop_profiling(
+                        curr_step_profile and not next_step_profile
+                        if self.config.global_profiler.profile_continuous_steps
+                        else curr_step_profile
+                    )
+                    prev_step_profile = curr_step_profile
+                    curr_step_profile = next_step_profile
+
+                if step_durations:
+                    steps_duration = max(step_durations)
+                    self.max_steps_duration = max(self.max_steps_duration, steps_duration)
+
+                metrics.update(
+                    {
+                        "training/global_step": self.global_steps,
+                        "training/epoch": epoch,
+                    }
+                )
+                logger.log(data=metrics, step=self.global_steps)
+
+                progress_bar.update(1)
+                self.global_steps += 1
+
+                if (
+                    hasattr(self.config.actor_rollout_ref.actor, "profiler")
+                    and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
+                ):
+                    for agent_key in agent_keys:
+                        self.actor_rollout_wgs[agent_key].dump_memory_snapshot(
+                            tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
+                        )
+
+                if is_last_step:
+                    pprint(f"Final validation metrics: {last_val_metrics}")
+                    progress_bar.close()
+                    return
+
+                for agent_idx, agent_key in enumerate(agent_keys):
+                    train_dataset = self.train_datasets.get(agent_key, None)
+                    if hasattr(train_dataset, "on_batch_end"):
+                        train_dataset.on_batch_end(batch=round_agent_batches[0][agent_idx])
+
