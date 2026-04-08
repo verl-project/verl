@@ -148,7 +148,6 @@ PROFILE_RANKS_ALL=${PROFILE_RANKS_ALL:-True}
 PROFILE_RANKS=${PROFILE_RANKS:-[0,1,2,3]}
 DISCRETE=${DISCRETE:-True}  # or True
 
-USE_LEGACY_WORKER_IMPL=${USE_LEGACY_WORKER_IMPL:-"enable"}
 USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-False}
 ROUTING_REPLAY_MODE=${ROUTING_REPLAY_MODE:-"disabled"}
 
@@ -277,7 +276,6 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.total_epochs=2 \
     trainer.total_training_steps="${TOTAL_TRAIN_STEPS}" \
-    trainer.use_legacy_worker_impl=${USE_LEGACY_WORKER_IMPL} \
     global_profiler.profile_continuous_steps=True \
     global_profiler.tool=nsys \
     global_profiler.steps=$PROFILE_STEPS \
