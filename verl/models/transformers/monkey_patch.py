@@ -486,21 +486,29 @@ def apply_monkey_patch(
         return
     elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
         # Step 1: patch model to support image-text mixed data
+        from transformers.models.qwen3_5 import modeling_qwen3_5
         from transformers.models.qwen3_5.modeling_qwen3_5 import (
             Qwen3_5ForConditionalGeneration,
+            Qwen3_5GatedDeltaNet,
             Qwen3_5Model,
+            Qwen3_5TextModel,
             Qwen3_5VisionModel,
         )
+        from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
         from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
             Qwen3_5MoeForConditionalGeneration,
+            Qwen3_5MoeGatedDeltaNet,
             Qwen3_5MoeModel,
+            Qwen3_5MoeTextModel,
             Qwen3_5MoeVisionModel,
         )
 
         from verl.models.transformers.qwen3_5 import (
             fast_pos_embed_interpolate,
             forward_with_normal_backend,
+            qwen3_5_apply_mask_to_padding_states,
             qwen3_5_base_forward,
+            qwen3_5_gated_deltanet_forward_patched,
         )
 
         Qwen3_5Model.forward = qwen3_5_base_forward
@@ -512,6 +520,15 @@ def apply_monkey_patch(
         # Step 2: patch vision model to fix fsdp2 cpu_offload bug.
         Qwen3_5VisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
         Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+
+        # Step 3: patch input for multimodal sequence parallelism
+        if ulysses_sp_size > 1:
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
+            modeling_qwen3_5.apply_mask_to_padding_states = qwen3_5_apply_mask_to_padding_states
+            modeling_qwen3_5_moe.apply_mask_to_padding_states = qwen3_5_apply_mask_to_padding_states
+            Qwen3_5GatedDeltaNet.forward = qwen3_5_gated_deltanet_forward_patched
+            Qwen3_5MoeGatedDeltaNet.forward = qwen3_5_gated_deltanet_forward_patched
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
