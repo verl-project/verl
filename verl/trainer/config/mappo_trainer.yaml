@@ -1,0 +1,41 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+defaults:
+  - ppo_trainer
+
+  - _self_
+
+# Multi-agent training configuration for MAPPO.
+# num_agents and agents list are required; all other PPO fields are inherited above.
+multi_agent:
+
+  # Number of agents participating in the multi-agent rollout.
+  num_agents: 2
+
+  # Number of discussion rounds per training step.
+  num_rounds: 3
+
+  # Risk coefficient used by RayRiskAverseTrainer.
+  risk_coef: 1.0
+
+  # Prompt prepended to discussion history for each agent turn.
+  discussion_prompt: "The discussion history is as follows:"
+
+  # Per-agent resource and model overrides.
+  # Length must equal num_agents. Each entry can override actor.model.path,
+  # n_gpus_per_node, nnodes, and any actor/critic sub-config.
+  agents:
+    - actor:
+        model:
+          path: ???
+      n_gpus_per_node: 8
+      nnodes: 1
+    - actor:
+        model:
+          path: ???
+      n_gpus_per_node: 8
+      nnodes: 1
