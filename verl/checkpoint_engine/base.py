@@ -346,6 +346,7 @@ class CheckpointEngineManager:
     ) -> None:
         self.config = config
         self.backend = config.backend
+        import_external_libs(self.config.custom_backend_module or None)
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.trainer = trainer
         self.replicas = replicas
