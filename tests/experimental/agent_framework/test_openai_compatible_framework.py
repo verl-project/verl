@@ -41,8 +41,8 @@ def ray_runtime():
 
 @pytest.mark.asyncio
 async def test_openai_compatible_framework_runs_minimal_remote_style_path(ray_runtime):
-    from verl.experimental.agent_framework.openai_compatible_framework import OpenAICompatibleAgentFramework
-    from verl.experimental.agent_framework.types import TrajectoryRewardContext
+    from verl.experimental.agent_framework.framework import OpenAICompatibleAgentFramework
+    from verl.experimental.agent_framework.types import SessionRewardContext
     from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
     manager = AsyncLLMServerManager(
@@ -74,9 +74,9 @@ async def test_openai_compatible_framework_runs_minimal_remote_style_path(ray_ru
             )
             assert complete.status_code == 200
 
-    def reward_fn(contexts: list[TrajectoryRewardContext]) -> list[float]:
+    def reward_fn(ctx: SessionRewardContext) -> list[float]:
         # Extract score from reward_info injected by the agent via /complete
-        return [float(ctx.trajectory.reward_info.get("score", 0.0)) for ctx in contexts]
+        return [float(t.reward_info.get("score", 0.0)) for t in ctx.trajectories]
 
     framework = OpenAICompatibleAgentFramework(
         session_runtime=session_runtime,
@@ -109,8 +109,8 @@ async def test_openai_compatible_framework_runs_minimal_remote_style_path(ray_ru
 
 @pytest.mark.asyncio
 async def test_openai_compatible_framework_does_not_require_complete_signal(ray_runtime):
-    from verl.experimental.agent_framework.openai_compatible_framework import OpenAICompatibleAgentFramework
-    from verl.experimental.agent_framework.types import TrajectoryRewardContext
+    from verl.experimental.agent_framework.framework import OpenAICompatibleAgentFramework
+    from verl.experimental.agent_framework.types import SessionRewardContext
     from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
     manager = AsyncLLMServerManager(
@@ -134,9 +134,9 @@ async def test_openai_compatible_framework_does_not_require_complete_signal(ray_
             )
             assert response.status_code == 200
 
-    def reward_fn(contexts: list[TrajectoryRewardContext]) -> list[float]:
+    def reward_fn(ctx: SessionRewardContext) -> list[float]:
         # Agent did not call /complete, so reward_info is empty; return a default score.
-        return [0.0 for _ in contexts]
+        return [0.0] * len(ctx.trajectories)
 
     framework = OpenAICompatibleAgentFramework(
         session_runtime=session_runtime,

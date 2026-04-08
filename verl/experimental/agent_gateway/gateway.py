@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from dataclasses import replace
 from typing import Any
@@ -13,6 +12,9 @@ from fastapi.responses import JSONResponse
 
 from verl.experimental.agent_framework.types import SessionHandle, Trajectory
 from verl.experimental.agent_gateway.types import GatewaySessionState, SessionPhase, TrajectoryBuffer
+from verl.experimental.agent_loop.tool_parser import ToolParser
+from verl.utils.chat_template import apply_chat_template as _apply_chat_template, initialize_system_prompt
+from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.utils import run_uvicorn
 
 
@@ -20,94 +22,74 @@ class MalformedRequestError(ValueError):
     pass
 
 
-class UnsupportedRequestError(ValueError):
-    pass
-
-
-def _canonicalize_json_like(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _canonicalize_json_like(value[key]) for key in sorted(value)}
-    if isinstance(value, list):
-        return [_canonicalize_json_like(item) for item in value]
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    raise MalformedRequestError(f"Unsupported JSON-like value: {type(value).__name__}")
-
-
+# TODO: double-check if all these validations/normalization are necessary
+# Make sure they don't alter messages in unexpected ways.
 def _normalize_message_content(content: Any) -> Any:
-    if isinstance(content, list):
-        return [_canonicalize_json_like(part) for part in content]
-    if isinstance(content, dict):
-        return _canonicalize_json_like(content)
-    if content is None or isinstance(content, str):
-        return "" if content is None else content
+    """Normalize message content: coerce None to empty string, validate type."""
+    if isinstance(content, list | dict | str):
+        return content
+    if content is None:
+        return ""
     raise MalformedRequestError(f"Unsupported content type: {type(content).__name__}")
 
 
-def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
+def _validate_tool_calls(tool_calls: Any) -> None:
+    """Validate tool_calls structure. Does not modify content."""
     if not isinstance(tool_calls, list):
         raise MalformedRequestError("tool_calls must be a list")
-
-    normalized_tool_calls: list[dict[str, Any]] = []
     for tool_call in tool_calls:
         if not isinstance(tool_call, dict):
             raise MalformedRequestError("tool_calls entries must be objects")
         function = tool_call.get("function")
         if not isinstance(function, dict):
             raise MalformedRequestError("tool_call.function must be an object")
-        arguments = function.get("arguments", "")
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError as exc:
-                raise MalformedRequestError("tool_call.function.arguments must decode to a JSON object") from exc
-        if not isinstance(arguments, dict):
-            raise MalformedRequestError("tool_call.function.arguments must decode to a JSON object")
-        normalized_tool_calls.append(
-            {
-                "id": str(tool_call.get("id", "")),
-                "type": str(tool_call.get("type", "")),
-                "function": {
-                    "name": str(function.get("name", "")),
-                    "arguments": _canonicalize_json_like(arguments),
-                },
-            }
-        )
-    return normalized_tool_calls
 
 
 def _normalize_message(message: Any) -> dict[str, Any]:
+    """Normalize a single message: validate structure, coerce types, filter to known fields.
+
+    Constructs a new dict with only role/content/tool_calls/tool_call_id.
+    This ensures prefix comparison is not affected by extraneous fields.
+    """
     if not isinstance(message, dict):
         raise MalformedRequestError("messages entries must be objects")
     if "name" in message:
-        raise UnsupportedRequestError("message.name is not supported in PR1")
+        raise MalformedRequestError("message.name is not supported in PR1")
 
-    normalized_message: dict[str, Any] = {
-        "role": str(message.get("role", "")),
+    role = message.get("role")
+    if not isinstance(role, str) or not role:
+        raise MalformedRequestError("message.role must be a non-empty string")
+
+    normalized: dict[str, Any] = {
+        "role": role,
         "content": _normalize_message_content(message.get("content", "")),
     }
     if "tool_calls" in message:
-        normalized_message["tool_calls"] = _normalize_tool_calls(message["tool_calls"])
+        _validate_tool_calls(message["tool_calls"])
+        normalized["tool_calls"] = list(message["tool_calls"])
     if "tool_call_id" in message:
-        normalized_message["tool_call_id"] = str(message["tool_call_id"])
-    return normalized_message
+        normalized["tool_call_id"] = str(message["tool_call_id"])
+    return normalized
 
 
-def _normalize_tools(tools: Any) -> list[dict[str, Any]] | None:
+def _validate_tools(tools: Any) -> list[dict[str, Any]] | None:
+    """Validate tools structure. Does not modify content."""
     if tools is None:
         return None
     if not isinstance(tools, list):
         raise MalformedRequestError("tools must be a list")
-    return [_canonicalize_json_like(tool) for tool in tools]
+    return tools
 
 
 def _normalize_request_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize and validate the request payload, extracting messages and tools.
+    """
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise MalformedRequestError("messages must be non-empty")
     return {
         "messages": [_normalize_message(message) for message in messages],
-        "tools": _normalize_tools(payload.get("tools")),
+        "tools": _validate_tools(payload.get("tools")),
     }
 
 
@@ -141,10 +123,23 @@ def _copy_trajectory_buffer(buffer: TrajectoryBuffer | None) -> TrajectoryBuffer
 
 
 class _GatewayActor:
-    def __init__(self, tokenizer, backend, host: str = "127.0.0.1"):
+    def __init__(
+        self,
+        tokenizer,
+        backend,
+        host: str = "127.0.0.1",
+        *,
+        tool_parser_name: str | None = None,
+        apply_chat_template_kwargs: dict[str, Any] | None = None,
+    ):
         self._tokenizer = tokenizer
         self._backend = backend
         self._host = host
+        self._apply_chat_template_kwargs = apply_chat_template_kwargs or {}
+        self._system_prompt = initialize_system_prompt(tokenizer, **self._apply_chat_template_kwargs)
+        self._tool_parser = (
+            ToolParser.get_tool_parser(tool_parser_name, tokenizer) if tool_parser_name else None
+        )
         self._sessions: dict[str, GatewaySessionState] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -226,9 +221,68 @@ class _GatewayActor:
             num_turns=len(session.message_history),
         )
 
-    def _start_new_trajectory(self, session: GatewaySessionState, messages: list[dict[str, Any]]) -> None:
-        prompt_ids = list(self._tokenizer.encode_messages(messages, add_generation_prompt=True))
-        session.active_trajectory = TrajectoryBuffer(prompt_ids=prompt_ids)
+    def _encode_full(self, messages: list[dict[str, Any]],
+                     tools: list[dict[str, Any]] | None = None) -> list[int]:
+        """Encode a full conversation for a new trajectory (includes system prompt + generation prompt)."""
+        return normalize_token_ids(
+            _apply_chat_template(
+                self._tokenizer, messages, tools=tools, add_generation_prompt=True,
+                **self._apply_chat_template_kwargs,
+            )
+        )
+    # TODO: check if delta tokenization is better than remove_system_prompt
+    def _encode_incremental(self, messages: list[dict[str, Any]]) -> list[int]:
+        """Encode incremental messages (tool results, user follow-ups) for a continuation turn.
+
+        Uses the remove_system_prompt pattern from ToolAgentLoop: encode the new messages
+        alone (which prepends a system prompt), then strip the known system_prompt prefix.
+        No tools parameter — tool schema is already in the initial prompt_ids.
+        """
+        ids = normalize_token_ids(
+            _apply_chat_template(
+                self._tokenizer, messages, add_generation_prompt=True,
+                **self._apply_chat_template_kwargs,
+            )
+        )
+        return ids[len(self._system_prompt):]
+
+    async def _decode_response(
+        self, response_ids: list[int], *, tools: list[dict[str, Any]] | None = None,
+        stop_reason: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Decode model output tokens into an OpenAI-compatible assistant message.
+
+        The returned message is used both for the HTTP response and stored
+        as-is in session.message_history.  Prefix comparison uses direct
+        equality, so any format drift by the agent is treated as a context
+        change — consistent with vLLM's token-level prefix matching.
+
+        Returns:
+            message: OpenAI-compatible assistant message.
+            finish_reason: "tool_calls" when tool calls are present, else stop_reason or "stop".
+        """
+        if self._tool_parser is not None and tools:
+            content, function_calls = await self._tool_parser.extract_tool_calls(response_ids)
+            if function_calls:
+                tool_calls = [
+                    {
+                        "id": f"call_{uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {"name": fc.name, "arguments": fc.arguments},
+                    }
+                    for fc in function_calls
+                ]
+                message = {
+                    "role": "assistant",
+                    # Use "" instead of None so that prefix comparison with
+                    # _normalize_message_content (which also coerces None → "")
+                    # stays consistent.  Both must agree on the None policy.
+                    "content": content or "",
+                    "tool_calls": tool_calls,
+                }
+                return message, "tool_calls"
+        response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
+        return {"role": "assistant", "content": response_text}, stop_reason or "stop"
 
     async def _handle_chat_completions(self, session_id: str, payload: dict[str, Any]) -> JSONResponse:
         session = self._sessions.get(session_id)
@@ -244,45 +298,37 @@ class _GatewayActor:
                 request_context = _normalize_request_context(payload)
             except MalformedRequestError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except UnsupportedRequestError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
 
             messages = request_context["messages"]
             tools = request_context["tools"]
-            # TODO: check if tentative trajectories are necessary
-            tentative_trajectories = list(session.trajectories)
-            tentative_next_trajectory_id = session.next_trajectory_id
+            next_trajectory_id = session.next_trajectory_id
+            materialized_trajectory = None
 
             if session.active_trajectory is None:
-                tentative_active = TrajectoryBuffer(
-                    prompt_ids=list(self._tokenizer.encode_messages(messages, add_generation_prompt=True))
+                active_trajectory = TrajectoryBuffer(
+                    prompt_ids=self._encode_full(messages, tools=tools)
                 )
             elif _is_request_context_prefix(session=session, messages=messages, tools=tools):
-                tentative_active = _copy_trajectory_buffer(session.active_trajectory)
+                active_trajectory = _copy_trajectory_buffer(session.active_trajectory)
                 incremental_messages = messages[len(session.message_history) :]
                 if incremental_messages:
-                    incremental_ids = list(
-                        #TODO: encoding behavior needs to be extended to handle multimodal data and tool calls
-                        self._tokenizer.encode_messages(incremental_messages, add_generation_prompt=True)
-                    )
-                    tentative_active.response_ids.extend(incremental_ids)
-                    tentative_active.response_mask.extend([0] * len(incremental_ids))
-                    tentative_active.response_logprobs.extend([0.0] * len(incremental_ids))
+                    incremental_ids = self._encode_incremental(incremental_messages)
+                    active_trajectory.response_ids.extend(incremental_ids)
+                    active_trajectory.response_mask.extend([0] * len(incremental_ids))
+                    active_trajectory.response_logprobs.extend([0.0] * len(incremental_ids))
             else:
-                tentative_trajectories.append(
-                    self._build_materialized_trajectory(
-                        session=session,
-                        active=session.active_trajectory,
-                        trajectory_id=tentative_next_trajectory_id,
-                    )
+                materialized_trajectory = self._build_materialized_trajectory(
+                    session=session,
+                    active=session.active_trajectory,
+                    trajectory_id=next_trajectory_id,
                 )
-                tentative_next_trajectory_id += 1
-                tentative_active = TrajectoryBuffer(
-                    prompt_ids=list(self._tokenizer.encode_messages(messages, add_generation_prompt=True))
+                next_trajectory_id += 1
+                active_trajectory = TrajectoryBuffer(
+                    prompt_ids=self._encode_full(messages, tools=tools)
                 )
 
             # TODO: prompt_ids for generate requests are different from those in trajectories, shall we use different variable names?
-            prompt_ids = tentative_active.prompt_ids + tentative_active.response_ids
+            generation_context_ids = active_trajectory.prompt_ids + active_trajectory.response_ids
             sampling_params = dict(payload)
             # TODO: check if there are other fields that need to be popped
             sampling_params.pop("messages", None)
@@ -290,24 +336,26 @@ class _GatewayActor:
             sampling_params.pop("tools", None)
             output = await self._backend.generate(
                 request_id=session_id,
-                prompt_ids=prompt_ids,
+                prompt_ids=generation_context_ids,
                 sampling_params=sampling_params,
             )
 
             response_ids = list(output.token_ids)
-            tentative_active.response_ids.extend(response_ids)
-            tentative_active.response_mask.extend([1] * len(response_ids))
+            active_trajectory.response_ids.extend(response_ids)
+            active_trajectory.response_mask.extend([1] * len(response_ids))
             if output.log_probs is not None:
-                tentative_active.response_logprobs.extend(list(output.log_probs))
+                active_trajectory.response_logprobs.extend(list(output.log_probs))
             else:
-                tentative_active.response_logprobs.extend([0.0] * len(response_ids))
+                active_trajectory.response_logprobs.extend([0.0] * len(response_ids))
 
-            # TODO: decode behavior needs to be extended to handle tool calls (and multimodal data??)
-            response_text = self._tokenizer.decode(response_ids)
-            session.trajectories = tentative_trajectories
-            session.next_trajectory_id = tentative_next_trajectory_id
-            session.active_trajectory = tentative_active
-            session.message_history = messages + [{"role": "assistant", "content": response_text}]
+            assistant_msg, finish_reason = await self._decode_response(
+                response_ids, tools=tools, stop_reason=output.stop_reason,
+            )
+            if materialized_trajectory is not None:
+                session.trajectories.append(materialized_trajectory)
+            session.next_trajectory_id = next_trajectory_id
+            session.active_trajectory = active_trajectory
+            session.message_history = messages + [assistant_msg]
             session.request_tools = tools
             self._touch_session(session)
 
@@ -318,18 +366,14 @@ class _GatewayActor:
                     "choices": [
                         {
                             "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": response_text,
-                            },
-                            "finish_reason": output.stop_reason or "stop",
+                            "message": assistant_msg,
+                            "finish_reason": finish_reason,
                         }
                     ],
-                    # TODO: Is this needed?
                     "usage": {
-                        "prompt_tokens": len(prompt_ids),
+                        "prompt_tokens": len(generation_context_ids),
                         "completion_tokens": len(response_ids),
-                        "total_tokens": len(prompt_ids) + len(response_ids),
+                        "total_tokens": len(generation_context_ids) + len(response_ids),
                     },
                 }
             )

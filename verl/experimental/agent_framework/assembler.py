@@ -20,7 +20,6 @@ def _to_long_tensor(values: Sequence[int]) -> torch.Tensor:
 def _to_float_tensor(values: Sequence[float]) -> torch.Tensor:
     return torch.tensor(list(values), dtype=torch.float32)
 
-# TODO: check if this helper function is uncessarily complex.
 class TrajectoryAssembler:
     def __init__(self, pad_token_id: int = 0):
         self.pad_token_id = pad_token_id

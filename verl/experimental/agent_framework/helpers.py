@@ -51,7 +51,6 @@ def validate_trajectory(trajectory: Trajectory) -> Trajectory:
 
     if trajectory.num_turns < 0:
         raise ValueError("num_turns must be non-negative")
-    # TODO: check if the checks for routed_experts are consistent with existent practices
     if trajectory.routed_experts is not None:
         if isinstance(trajectory.routed_experts, np.ndarray):
             routed_experts = trajectory.routed_experts

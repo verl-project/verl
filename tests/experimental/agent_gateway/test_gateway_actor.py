@@ -78,7 +78,13 @@ def test_normalize_request_context_rejects_unsupported_name_field():
         )
 
 
-def test_normalize_request_context_canonicalizes_tool_argument_strings():
+def test_normalize_request_context_preserves_tool_argument_strings():
+    """Validate that tool_calls arguments are preserved as-is (no canonicalization).
+
+    This is intentional: prefix comparison uses direct equality, consistent
+    with vLLM's token-level prefix matching.  Any format drift (e.g. JSON key
+    reorder by the agent) is treated as a context change.
+    """
     from verl.experimental.agent_gateway.gateway import _normalize_request_context
 
     context = _normalize_request_context(
@@ -102,33 +108,8 @@ def test_normalize_request_context_canonicalizes_tool_argument_strings():
         }
     )
 
-    assert context["messages"][0]["tool_calls"][0]["function"]["arguments"] == {"a": 1, "b": 2}
-
-
-def test_normalize_request_context_rejects_non_object_tool_arguments():
-    from verl.experimental.agent_gateway.gateway import _normalize_request_context
-
-    with pytest.raises(ValueError, match="JSON object"):
-        _normalize_request_context(
-            {
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
-                            {
-                                "id": "call-1",
-                                "type": "function",
-                                "function": {
-                                    "name": "search",
-                                    "arguments": '["bad"]',
-                                },
-                            }
-                        ],
-                    }
-                ]
-            }
-        )
+    # Arguments preserved as original JSON string, not parsed/canonicalized
+    assert context["messages"][0]["tool_calls"][0]["function"]["arguments"] == '{"b": 2, "a": 1}'
 
 
 @pytest.mark.asyncio
@@ -394,7 +375,7 @@ async def test_gateway_actor_wait_for_completion_times_out_for_active_session(ra
     ray.get(actor.shutdown.remote())
 
 
-def test_gateway_actor_wait_for_completion_fails_after_abort(ray_runtime):
+def test_gateway_actor_wait_for_completion_returns_after_abort(ray_runtime):
     from verl.experimental.agent_gateway.gateway import GatewayActor
 
     actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
@@ -402,8 +383,7 @@ def test_gateway_actor_wait_for_completion_fails_after_abort(ray_runtime):
     ray.get(actor.create_session.remote("session-aborted-wait"))
     ray.get(actor.abort_session.remote("session-aborted-wait"))
 
-    with pytest.raises(ray.exceptions.RayTaskError, match="aborted"):
-        ray.get(actor.wait_for_completion.remote("session-aborted-wait", timeout=0.1))
+    ray.get(actor.wait_for_completion.remote("session-aborted-wait", timeout=0.1))
 
     ray.get(actor.shutdown.remote())
 
@@ -429,7 +409,7 @@ async def test_gateway_actor_rejects_chat_after_complete(ray_runtime):
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_distinguishes_malformed_and_unsupported_requests(ray_runtime):
+async def test_gateway_actor_rejects_invalid_requests_with_bad_request(ray_runtime):
     from verl.experimental.agent_gateway.gateway import GatewayActor
 
     actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
@@ -449,7 +429,7 @@ async def test_gateway_actor_distinguishes_malformed_and_unsupported_requests(ra
     ray.get(actor.shutdown.remote())
 
     assert malformed.status_code == 400
-    assert unsupported.status_code == 422
+    assert unsupported.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -551,7 +531,7 @@ async def test_gateway_actor_complete_does_not_materialize_trajectory(ray_runtim
     assert len(trajectories) == 1
 
 
-def test_gateway_actor_rejects_finalize_after_abort(ray_runtime):
+def test_gateway_actor_rejects_finalize_after_abort_with_unknown_session(ray_runtime):
     from verl.experimental.agent_gateway.gateway import GatewayActor
 
     actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
@@ -559,13 +539,13 @@ def test_gateway_actor_rejects_finalize_after_abort(ray_runtime):
     ray.get(actor.create_session.remote("session-finalize-after-abort"))
     ray.get(actor.abort_session.remote("session-finalize-after-abort"))
 
-    with pytest.raises(ray.exceptions.RayTaskError, match="aborted"):
+    with pytest.raises(ray.exceptions.RayTaskError, match="session-finalize-after-abort"):
         ray.get(actor.finalize_session.remote("session-finalize-after-abort"))
 
     ray.get(actor.shutdown.remote())
 
 
-def test_gateway_actor_rejects_complete_after_abort(ray_runtime):
+def test_gateway_actor_rejects_complete_after_abort_with_unknown_session(ray_runtime):
     from verl.experimental.agent_gateway.gateway import GatewayActor
 
     actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
@@ -573,7 +553,7 @@ def test_gateway_actor_rejects_complete_after_abort(ray_runtime):
     ray.get(actor.create_session.remote("session-complete-after-abort"))
     ray.get(actor.abort_session.remote("session-complete-after-abort"))
 
-    with pytest.raises(ray.exceptions.RayTaskError, match="aborted"):
+    with pytest.raises(ray.exceptions.RayTaskError, match="session-complete-after-abort"):
         ray.get(actor.complete_session.remote("session-complete-after-abort"))
 
     ray.get(actor.shutdown.remote())
@@ -612,3 +592,66 @@ async def test_gateway_actor_session_state_tracks_metadata_flags_and_timestamps(
     assert completed_state["phase"] == "COMPLETED"
     assert completed_state["updated_at"] >= created_state["updated_at"]
     assert len(trajectories) == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime):
+    """When tool_parser_name is set and model outputs tool call tokens,
+    the HTTP response should contain tool_calls in OpenAI format."""
+    from verl.experimental.agent_gateway.gateway import GatewayActor
+
+    tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
+    actor = GatewayActor.remote(
+        tokenizer=FakeTokenizer(),
+        backend=QueuedBackend([tool_call_text, "sunny today"]),
+        host="127.0.0.1",
+        tool_parser_name="hermes",
+    )
+    ray.get(actor.start.remote())
+    session = ray.get(actor.create_session.remote("session-tool-call"))
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        # First request: model returns a tool call
+        first = await client.post(
+            f"{session.base_url}/chat/completions",
+            json={
+                "model": "dummy-model",
+                "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
+                "messages": [{"role": "user", "content": "what is the weather?"}],
+            },
+        )
+        assert first.status_code == 200
+        first_data = first.json()
+        assert first_data["choices"][0]["finish_reason"] == "tool_calls"
+        tool_calls = first_data["choices"][0]["message"].get("tool_calls")
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "search"
+        assert tool_calls[0]["type"] == "function"
+        assert "id" in tool_calls[0]
+        # HTTP response arguments should be a JSON string (OpenAI compatible)
+        assert isinstance(tool_calls[0]["function"]["arguments"], str)
+
+        # Second request: agent sends back tool result as continuation
+        second = await client.post(
+            f"{session.base_url}/chat/completions",
+            json={
+                "model": "dummy-model",
+                "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
+                "messages": [
+                    {"role": "user", "content": "what is the weather?"},
+                    {"role": "assistant", "content": None, "tool_calls": tool_calls},
+                    {"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "sunny and warm"},
+                ],
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["choices"][0]["message"]["content"] == "sunny today"
+
+    trajectories = ray.get(actor.finalize_session.remote("session-tool-call"))
+    ray.get(actor.shutdown.remote())
+
+    assert len(trajectories) == 1
+    # Should have both mask=0 (incremental) and mask=1 (model output) tokens
+    assert 0 in trajectories[0].response_mask
+    assert 1 in trajectories[0].response_mask

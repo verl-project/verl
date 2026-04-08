@@ -7,17 +7,22 @@ from verl.workers.rollout.replica import TokenOutput
 
 
 class FakeTokenizer:
-    def encode_messages(self, messages, add_generation_prompt=True):
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, tools=None, **kwargs):
         parts = []
         for message in messages:
             parts.append(f"{message['role']}:{self._normalize_content(message.get('content', ''))}\n")
         if add_generation_prompt:
             parts.append("assistant:")
         text = "".join(parts)
-        return [ord(char) for char in text]
+        if tokenize:
+            return [ord(char) for char in text]
+        return text
 
-    def decode(self, token_ids):
+    def decode(self, token_ids, skip_special_tokens=True):
         return "".join(chr(token_id) for token_id in token_ids)
+
+    def encode(self, text, add_special_tokens=False):
+        return [ord(char) for char in text]
 
     def _normalize_content(self, content):
         if isinstance(content, list):

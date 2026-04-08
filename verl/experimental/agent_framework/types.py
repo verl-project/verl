@@ -31,27 +31,31 @@ class Trajectory:
 
 
 @dataclass
-# TODO: is this class necessary?
-class TrajectoryRewardContext:
-    """Per-trajectory context passed to reward_fn.
+class SessionRewardContext:
+    """Context passed to ``reward_fn`` after a session is finalized.
 
-    trajectory holds the raw token sequences and any reward_info injected by the
-    agent via the /complete endpoint (e.g. pass rate, format check results).
-    prompt_context holds fields from the original prompts.non_tensor_batch for this
-    sample (e.g. data_source, ground_truth) — whatever the dataset provides.
+    A single session may produce multiple trajectories (e.g. when the agent
+    switches conversation context mid-session).  ``reward_fn`` receives all of
+    them together so the implementor can decide whether to:
+
+    * assign a shared score derived from ``reward_info`` (injected via
+      ``/complete``) to every trajectory, or
+    * score each trajectory independently.
+
+    ``sample_fields`` carries per-sample dataset fields (``data_source``,
+    ``reward_model.ground_truth``, ``extra_info``, …) — the same dict that
+    ``AgentLoopWorker._compute_score`` forwards as ``kwargs`` to the reward
+    worker.
     """
 
-    trajectory: Trajectory
-    prompt_context: dict[str, Any] = field(default_factory=dict)
+    trajectories: list[Trajectory]
+    sample_fields: dict[str, Any] = field(default_factory=dict)
 
 
-# reward_fn receives all trajectory contexts from one generate_sequences call (across all
-# sessions in the batch) and returns one float score per trajectory.  Implementors decide
-# whether to score each trajectory independently or apply group-level normalization (e.g.
-# GRPO requires all rollouts for the same prompt to be scored together).
-
-# TODO: check if this is consistent with VERL's reward manager and other example implementations.
-RewardFn = Callable[[list[TrajectoryRewardContext]], Awaitable[list[float]] | list[float]]
+# ``reward_fn`` scores one session's trajectories immediately after
+# finalization, consistent with VERL's per-sample reward path
+# (``NaiveRewardManager.run_single``).  It returns one float per trajectory.
+RewardFn = Callable[[SessionRewardContext], Awaitable[list[float]] | list[float]]
 
 
 class SessionRuntime(Protocol):
