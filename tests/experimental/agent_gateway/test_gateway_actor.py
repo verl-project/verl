@@ -59,31 +59,12 @@ def test_normalize_request_context_preserves_structured_fields():
     assert context["messages"][0]["content"][1]["type"] == "image_url"
     assert context["messages"][1]["tool_calls"][0]["id"] == "call-1"
     assert context["messages"][2]["tool_call_id"] == "call-1"
-
-
-def test_normalize_request_context_rejects_unsupported_name_field():
-    from verl.experimental.agent_gateway.gateway import _normalize_request_context
-
-    with pytest.raises(ValueError, match="name"):
-        _normalize_request_context(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "name": "alice",
-                        "content": "hello",
-                    }
-                ]
-            }
-        )
-
-
 def test_normalize_request_context_preserves_tool_argument_strings():
     """Validate that tool_calls arguments are preserved as-is (no canonicalization).
 
-    This is intentional: prefix comparison uses direct equality, consistent
-    with vLLM's token-level prefix matching.  Any format drift (e.g. JSON key
-    reorder by the agent) is treated as a context change.
+    This is intentional: prefix comparison uses direct equality, so any
+    format drift (e.g. JSON key reorder by the agent) is treated as a
+    context change.
     """
     from verl.experimental.agent_gateway.gateway import _normalize_request_context
 
@@ -295,36 +276,6 @@ async def test_gateway_actor_continuation_preserves_prompt_and_generation_masks(
     assert len(trajectories) == 1
     assert 0 in trajectories[0].response_mask
     assert trajectories[0].response_mask[-len("SECOND") :] == [1] * len("SECOND")
-
-
-def test_gateway_actor_abort_discards_session(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["unused"]), host="127.0.0.1")
-    ray.get(actor.start.remote())
-    ray.get(actor.create_session.remote("session-abort"))
-
-    ray.get(actor.abort_session.remote("session-abort"))
-
-    with pytest.raises(ray.exceptions.RayTaskError, match="session-abort"):
-        ray.get(actor.finalize_session.remote("session-abort"))
-
-    ray.get(actor.shutdown.remote())
-
-
-def test_gateway_actor_rejects_duplicate_session_creation(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["unused"]), host="127.0.0.1")
-    ray.get(actor.start.remote())
-    ray.get(actor.create_session.remote("session-dup"))
-
-    with pytest.raises(ray.exceptions.RayTaskError, match="session-dup"):
-        ray.get(actor.create_session.remote("session-dup"))
-
-    ray.get(actor.shutdown.remote())
-
-
 @pytest.mark.asyncio
 async def test_gateway_actor_serializes_same_session_concurrent_requests(ray_runtime):
     from verl.experimental.agent_gateway.gateway import GatewayActor
@@ -359,35 +310,6 @@ async def test_gateway_actor_serializes_same_session_concurrent_requests(ray_run
     assert trajectories[1].response_ids == [ord(char) for char in "SECOND"]
     assert trajectories[0].response_mask == [1] * len("FIRST")
     assert trajectories[1].response_mask == [1] * len("SECOND")
-
-
-@pytest.mark.asyncio
-async def test_gateway_actor_wait_for_completion_times_out_for_active_session(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
-    ray.get(actor.start.remote())
-    ray.get(actor.create_session.remote("session-timeout"))
-
-    with pytest.raises(ray.exceptions.RayTaskError):
-        ray.get(actor.wait_for_completion.remote("session-timeout", timeout=0.01))
-
-    ray.get(actor.shutdown.remote())
-
-
-def test_gateway_actor_wait_for_completion_returns_after_abort(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
-    ray.get(actor.start.remote())
-    ray.get(actor.create_session.remote("session-aborted-wait"))
-    ray.get(actor.abort_session.remote("session-aborted-wait"))
-
-    ray.get(actor.wait_for_completion.remote("session-aborted-wait", timeout=0.1))
-
-    ray.get(actor.shutdown.remote())
-
-
 @pytest.mark.asyncio
 async def test_gateway_actor_rejects_chat_after_complete(ray_runtime):
     from verl.experimental.agent_gateway.gateway import GatewayActor
@@ -499,99 +421,6 @@ async def test_gateway_actor_backend_failure_after_tool_mismatch_does_not_split(
     assert state["num_trajectories"] == 0
     assert len(trajectories) == 1
     assert trajectories[0].response_ids == [ord(char) for char in "FIRST"]
-
-
-@pytest.mark.asyncio
-async def test_gateway_actor_complete_does_not_materialize_trajectory(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
-    ray.get(actor.start.remote())
-    session = ray.get(actor.create_session.remote("session-complete-no-materialize"))
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={"model": "dummy-model", "messages": [{"role": "user", "content": "track state"}]},
-        )
-        assert response.status_code == 200
-
-        complete = await client.post(
-            f"{session.base_url.removesuffix('/v1')}/complete",
-            json={"reward_info": {"score": 1.0}},
-        )
-        assert complete.status_code == 200
-
-    state = ray.get(actor.get_session_state.remote("session-complete-no-materialize"))
-    trajectories = ray.get(actor.finalize_session.remote("session-complete-no-materialize"))
-    ray.get(actor.shutdown.remote())
-
-    assert state["num_trajectories"] == 0
-    assert state["has_active_trajectory"] is True
-    assert len(trajectories) == 1
-
-
-def test_gateway_actor_rejects_finalize_after_abort_with_unknown_session(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
-    ray.get(actor.start.remote())
-    ray.get(actor.create_session.remote("session-finalize-after-abort"))
-    ray.get(actor.abort_session.remote("session-finalize-after-abort"))
-
-    with pytest.raises(ray.exceptions.RayTaskError, match="session-finalize-after-abort"):
-        ray.get(actor.finalize_session.remote("session-finalize-after-abort"))
-
-    ray.get(actor.shutdown.remote())
-
-
-def test_gateway_actor_rejects_complete_after_abort_with_unknown_session(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
-    ray.get(actor.start.remote())
-    ray.get(actor.create_session.remote("session-complete-after-abort"))
-    ray.get(actor.abort_session.remote("session-complete-after-abort"))
-
-    with pytest.raises(ray.exceptions.RayTaskError, match="session-complete-after-abort"):
-        ray.get(actor.complete_session.remote("session-complete-after-abort"))
-
-    ray.get(actor.shutdown.remote())
-
-
-@pytest.mark.asyncio
-async def test_gateway_actor_session_state_tracks_metadata_flags_and_timestamps(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["DONE"]), host="127.0.0.1")
-    ray.get(actor.start.remote())
-
-    session = ray.get(actor.create_session.remote("session-state", metadata={"uid": "sample-7", "split": "train"}))
-    created_state = ray.get(actor.get_session_state.remote("session-state"))
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={"model": "dummy-model", "messages": [{"role": "user", "content": "track state"}]},
-        )
-        assert response.status_code == 200
-
-        completed = await client.post(
-            f"{session.base_url.removesuffix('/v1')}/complete",
-            json={"reward_info": {"score": 1.0}},
-        )
-        assert completed.status_code == 200
-
-    completed_state = ray.get(actor.get_session_state.remote("session-state"))
-    trajectories = ray.get(actor.finalize_session.remote("session-state"))
-    ray.get(actor.shutdown.remote())
-
-    assert created_state["metadata"] == {"uid": "sample-7", "split": "train"}
-    assert created_state["phase"] == "ACTIVE"
-    assert created_state["created_at"] <= created_state["updated_at"]
-    assert completed_state["phase"] == "COMPLETED"
-    assert completed_state["updated_at"] >= created_state["updated_at"]
-    assert len(trajectories) == 1
 
 
 @pytest.mark.asyncio

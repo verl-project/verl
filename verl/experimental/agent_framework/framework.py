@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import replace
 from uuid import uuid4
 
+import numpy as np
+
 from verl.protocol import DataProto
 
 from .assembler import TrajectoryAssembler
@@ -17,6 +19,15 @@ class AgentFramework(ABC):
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Process a trainer batch and return a training-ready DataProto."""
         ...
+
+
+def _broadcast_sample_non_tensor_fields(sample_fields: dict[str, object], repeat_count: int) -> dict[str, np.ndarray]:
+    broadcasted: dict[str, np.ndarray] = {}
+    for key, value in sample_fields.items():
+        values = np.empty(repeat_count, dtype=object)
+        values[:] = [value] * repeat_count
+        broadcasted[key] = values
+    return broadcasted
 
 
 class OpenAICompatibleAgentFramework(AgentFramework):
@@ -59,13 +70,31 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             for i in range(len(prompts))
         ]
         nested = await asyncio.gather(*tasks)
-        all_trajectories: list[Trajectory] = [traj for session_trajs in nested for traj in session_trajs]
+        all_trajectories: list[Trajectory] = []
+        expanded_non_tensor_batch: dict[str, list[object]] = {}
 
-        return self.assembler.assemble(all_trajectories)
+        for session_trajectories, sample_fields in nested:
+            all_trajectories.extend(session_trajectories)
+            if not session_trajectories:
+                continue
+            for key, values in _broadcast_sample_non_tensor_fields(sample_fields, len(session_trajectories)).items():
+                expanded_non_tensor_batch.setdefault(key, []).extend(values.tolist())
+
+        assembled = self.assembler.assemble(all_trajectories)
+        merged_non_tensor_batch = {
+            key: np.array(values, dtype=object)
+            for key, values in expanded_non_tensor_batch.items()
+        }
+        merged_non_tensor_batch.update(assembled.non_tensor_batch)
+        return DataProto(
+            batch=assembled.batch,
+            non_tensor_batch=merged_non_tensor_batch,
+            meta_info=assembled.meta_info,
+        )
 
     async def _run_session(
         self, *, prompts: DataProto, raw_prompt, sample_index: int,
-    ) -> list[Trajectory]:
+    ) -> tuple[list[Trajectory], dict[str, object]]:
         session_id = self._build_session_id(prompts=prompts, sample_index=sample_index)
         sample_fields = {k: v[sample_index] for k, v in prompts.non_tensor_batch.items()}
         session = await self.session_runtime.create_session(session_id)
@@ -92,13 +121,20 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             raise ValueError(
                 f"reward_fn returned {len(scores)} scores for {len(session_trajectories)} trajectories"
             )
-        return [
-            replace(traj, reward_score=float(score))
-            for traj, score in zip(session_trajectories, scores, strict=True)
-        ]
+        normalized_scores: list[float] = []
+        for trajectory, score in zip(session_trajectories, scores, strict=True):
+            if score is None:
+                raise ValueError(
+                    f"reward_fn must return a score for every trajectory; got None for trajectory {trajectory.uid}"
+                )
+            normalized_scores.append(float(score))
+        return (
+            [
+                replace(traj, reward_score=score)
+                for traj, score in zip(session_trajectories, normalized_scores, strict=True)
+            ],
+            sample_fields,
+        )
 
     def _build_session_id(self, prompts: DataProto, sample_index: int) -> str:
-        uid_batch = prompts.non_tensor_batch.get("uid")
-        if uid_batch is not None:
-            return str(uid_batch[sample_index])
         return f"session-{sample_index}-{uuid4().hex}"

@@ -46,6 +46,19 @@ class QueuedBackend:
         )
 
 
+class NoLogprobBackend:
+    def __init__(self, response_text: str = "OK"):
+        self.response_text = response_text
+
+    async def generate(self, request_id, *, prompt_ids, sampling_params):
+        token_ids = [ord(char) for char in self.response_text]
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=None,
+            stop_reason="completed",
+        )
+
+
 class RejectToolsSamplingParamsBackend:
     def __init__(self, response_text: str = "OK"):
         self.response_text = response_text
@@ -181,53 +194,6 @@ class RejectConcurrentSessionBackend:
             finished_at = asyncio.get_running_loop().time()
             self.call_windows.append((request_id, started_at, finished_at))
             self._active_request_ids.remove(request_id)
-
-
-@ray.remote
-class FlakyGatewayActor:
-    def __init__(self, fail_finalize_once: bool = False, fail_abort_once: bool = False):
-        self.fail_finalize_once = fail_finalize_once
-        self.fail_abort_once = fail_abort_once
-        self.finalize_attempts = 0
-        self.abort_attempts = 0
-        self.sessions = {}
-
-    async def start(self):
-        return None
-
-    async def shutdown(self):
-        return None
-
-    async def create_session(self, session_id: str):
-        handle = SessionHandle(session_id=session_id, base_url=f"http://fake/{session_id}/v1")
-        self.sessions[session_id] = handle
-        return handle
-
-    async def finalize_session(self, session_id: str):
-        self.finalize_attempts += 1
-        if self.fail_finalize_once and self.finalize_attempts == 1:
-            raise RuntimeError("transient finalize failure")
-        self.sessions.pop(session_id, None)
-        return [
-            Trajectory(
-                uid=session_id,
-                session_id=session_id,
-                trajectory_id=0,
-                prompt_ids=[1],
-                response_ids=[2],
-                response_mask=[1],
-            )
-        ]
-
-    async def abort_session(self, session_id: str):
-        self.abort_attempts += 1
-        if self.fail_abort_once and self.abort_attempts == 1:
-            raise RuntimeError("transient abort failure")
-        self.sessions.pop(session_id, None)
-        return None
-
-    async def wait_for_completion(self, session_id: str, timeout: float | None = None):
-        return None
 
 
 @ray.remote

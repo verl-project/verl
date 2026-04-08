@@ -16,6 +16,7 @@ def test_trajectory_assembler_matches_training_batch_contract():
             response_mask=[1, 1, 0],
             response_logprobs=[-0.1, -0.2, 0.0],
             reward_info={"score": 0.5, "label": "alpha"},
+            reward_score=0.5,
             num_turns=2,
             routed_experts=torch.tensor(
                 [
@@ -37,6 +38,7 @@ def test_trajectory_assembler_matches_training_batch_contract():
             response_mask=[1, 1],
             response_logprobs=[-0.3, -0.4],
             reward_info={"score": 1.5, "label": "beta"},
+            reward_score=1.5,
             num_turns=3,
             routed_experts=torch.tensor(
                 [
@@ -49,7 +51,7 @@ def test_trajectory_assembler_matches_training_batch_contract():
         ),
     ]
 
-    output = TrajectoryAssembler(pad_token_id=0, reward_key="score").assemble(trajectories)
+    output = TrajectoryAssembler(pad_token_id=0).assemble(trajectories)
 
     assert tuple(output.batch["prompts"].shape) == (2, 2)
     assert tuple(output.batch["responses"].shape) == (2, 3)
@@ -146,4 +148,4 @@ def test_trajectory_assembler_matches_training_batch_contract():
 
     assert np.array_equal(output.non_tensor_batch["__num_turns__"], np.array([2, 3], dtype=np.int32))
     assert np.array_equal(output.non_tensor_batch["label"], np.array(["alpha", "beta"], dtype=object))
-    assert output.meta_info["reward_extra_keys"] == ["label"]
+    assert output.meta_info["reward_extra_keys"] == ["score", "label"]

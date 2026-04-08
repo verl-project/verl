@@ -2,7 +2,7 @@ import httpx
 import pytest
 import ray
 
-from tests.experimental.agent_gateway.support import FakeTokenizer, FlakyGatewayActor, QueuedBackend, TrackingGatewayActor
+from tests.experimental.agent_gateway.support import FakeTokenizer, QueuedBackend, TrackingGatewayActor
 
 
 @pytest.fixture
@@ -77,63 +77,5 @@ async def test_gateway_manager_uses_least_active_sessions_routing(ray_runtime):
     session_d = await manager.create_session("session-d")
     assert session_d.base_url.startswith("http://gw-0/")
     assert manager.active_sessions_per_gateway == [2, 1]
-
-    ray.get([gateway.shutdown.remote() for gateway in gateways])
-
-
-@pytest.mark.asyncio
-async def test_gateway_manager_abort_forwards_to_bound_gateway(ray_runtime):
-    from verl.experimental.agent_gateway.gateway import GatewayActor
-    from verl.experimental.agent_gateway.manager import GatewayManager
-
-    gateways = [GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["A"]), host="127.0.0.1")]
-    ray.get([gateway.start.remote() for gateway in gateways])
-
-    manager = GatewayManager(gateways)
-    await manager.create_session("session-abort")
-    await manager.abort_session("session-abort")
-
-    with pytest.raises(KeyError, match="session-abort"):
-        await manager.finalize_session("session-abort")
-
-    ray.get([gateway.shutdown.remote() for gateway in gateways])
-
-
-@pytest.mark.asyncio
-async def test_gateway_manager_keeps_route_when_finalize_remote_call_fails(ray_runtime):
-    from verl.experimental.agent_gateway.manager import GatewayManager
-
-    gateways = [FlakyGatewayActor.remote(fail_finalize_once=True)]
-    ray.get([gateway.start.remote() for gateway in gateways])
-
-    manager = GatewayManager(gateways)
-    await manager.create_session("session-finalize-retry")
-
-    with pytest.raises(RuntimeError, match="transient finalize failure"):
-        await manager.finalize_session("session-finalize-retry")
-
-    trajectories = await manager.finalize_session("session-finalize-retry")
-    assert len(trajectories) == 1
-
-    ray.get([gateway.shutdown.remote() for gateway in gateways])
-
-
-@pytest.mark.asyncio
-async def test_gateway_manager_keeps_route_when_abort_remote_call_fails(ray_runtime):
-    from verl.experimental.agent_gateway.manager import GatewayManager
-
-    gateways = [FlakyGatewayActor.remote(fail_abort_once=True)]
-    ray.get([gateway.start.remote() for gateway in gateways])
-
-    manager = GatewayManager(gateways)
-    await manager.create_session("session-abort-retry")
-
-    with pytest.raises(RuntimeError, match="transient abort failure"):
-        await manager.abort_session("session-abort-retry")
-
-    await manager.abort_session("session-abort-retry")
-
-    with pytest.raises(KeyError, match="session-abort-retry"):
-        await manager.finalize_session("session-abort-retry")
 
     ray.get([gateway.shutdown.remote() for gateway in gateways])

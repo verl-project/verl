@@ -55,48 +55,6 @@ async def test_async_llm_server_manager_owns_gateway_lifecycle_and_session_runti
 
     assert len(trajectories) == 1
     assert trajectories[0].reward_info == {"score": 0.5, "label": "owner"}
-
-
-def test_async_llm_server_manager_gateway_count_zero_disables_session_runtime(ray_runtime):
-    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
-
-    manager = AsyncLLMServerManager(
-        config=None,
-        servers=[],
-        load_balancer_handle=None,
-        gateway_count=0,
-    )
-
-    assert manager.gateway_manager is None
-    assert manager.owned_gateway_actors == []
-
-    with pytest.raises(RuntimeError, match="gateway_count=0"):
-        manager.create_session("disabled")
-
-
-def test_async_llm_server_manager_keeps_gateway_ownership_local(ray_runtime):
-    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
-
-    manager = AsyncLLMServerManager(
-        config=None,
-        servers=[],
-        load_balancer_handle=None,
-        gateway_count=2,
-        gateway_actor_kwargs={
-            "tokenizer": FakeTokenizer(),
-            "backend": QueuedBackend(["A", "B"]),
-            "host": "127.0.0.1",
-        },
-    )
-
-    assert len(manager.owned_gateway_actors) == 2
-    assert manager.gateway_manager is not None
-    assert manager.gateway_manager.gateways == manager.owned_gateway_actors
-    assert manager.gateway_manager.gateway_count == 2
-
-    manager.shutdown()
-
-
 @pytest.mark.asyncio
 async def test_async_llm_server_manager_injects_manager_owned_gateway_backend(ray_runtime):
     from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager

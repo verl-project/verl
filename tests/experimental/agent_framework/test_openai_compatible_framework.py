@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 import ray
 
-from tests.experimental.agent_gateway.support import FakeTokenizer, QueuedBackend
+from tests.experimental.agent_gateway.support import FakeTokenizer, NoLogprobBackend, QueuedBackend
 from verl.protocol import DataProto
 
 
@@ -162,3 +162,124 @@ async def test_openai_compatible_framework_does_not_require_complete_signal(ray_
     assert len(session_runtime.finalized_sessions) == 1
     # reward_fn always runs, so rm_scores is always present
     assert "rm_scores" in output.batch.keys()
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_framework_preserves_and_broadcasts_sample_non_tensor_fields(ray_runtime):
+    from verl.experimental.agent_framework.framework import OpenAICompatibleAgentFramework
+    from verl.experimental.agent_framework.types import SessionRewardContext
+    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+
+    manager = AsyncLLMServerManager(
+        config=None,
+        servers=[],
+        load_balancer_handle=None,
+        gateway_count=1,
+        gateway_actor_kwargs={
+            "tokenizer": FakeTokenizer(),
+            "backend": QueuedBackend(["FIRST", "SECOND"]),
+            "host": "127.0.0.1",
+        },
+    )
+
+    async def mock_agent(*, raw_prompt, session, sample_index):
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            first = await client.post(
+                f"{session.base_url}/chat/completions",
+                json={"model": "dummy-model", "messages": list(raw_prompt)},
+            )
+            assert first.status_code == 200
+
+            second = await client.post(
+                f"{session.base_url}/chat/completions",
+                json={
+                    "model": "dummy-model",
+                    "messages": [{"role": "user", "content": f"replacement-{sample_index}"}],
+                },
+            )
+            assert second.status_code == 200
+
+    def reward_fn(ctx: SessionRewardContext) -> list[float]:
+        return [1.0 + index for index, _ in enumerate(ctx.trajectories)]
+
+    framework = OpenAICompatibleAgentFramework(
+        session_runtime=manager,
+        agent_runner=mock_agent,
+        reward_fn=reward_fn,
+    )
+
+    prompts = DataProto(
+        non_tensor_batch={
+            "raw_prompt": np.array(
+                [
+                    [{"role": "user", "content": "Return two trajectories"}],
+                ],
+                dtype=object,
+            ),
+            "uid": np.array(["sample-uid"], dtype=object),
+            "data_source": np.array(["openai/gsm8k"], dtype=object),
+            "reward_model": np.array([{"ground_truth": "42"}], dtype=object),
+            "extra_info": np.array([{"split": "train"}], dtype=object),
+        }
+    )
+
+    output = await framework.generate_sequences(prompts)
+    await manager.shutdown()
+
+    assert len(output) == 2
+    assert output.non_tensor_batch["uid"].tolist() == ["sample-uid", "sample-uid"]
+    assert output.non_tensor_batch["data_source"].tolist() == ["openai/gsm8k", "openai/gsm8k"]
+    assert output.non_tensor_batch["reward_model"].tolist() == [{"ground_truth": "42"}, {"ground_truth": "42"}]
+    assert output.non_tensor_batch["extra_info"].tolist() == [{"split": "train"}, {"split": "train"}]
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_framework_omits_rollout_log_probs_when_backend_does_not_return_them(ray_runtime):
+    from verl.experimental.agent_framework.framework import OpenAICompatibleAgentFramework
+    from verl.experimental.agent_framework.types import SessionRewardContext
+    from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+
+    manager = AsyncLLMServerManager(
+        config=None,
+        servers=[],
+        load_balancer_handle=None,
+        gateway_count=1,
+        gateway_actor_kwargs={
+            "tokenizer": FakeTokenizer(),
+            "backend": NoLogprobBackend(),
+            "host": "127.0.0.1",
+        },
+    )
+
+    async def mock_agent(*, raw_prompt, session, sample_index):
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{session.base_url}/chat/completions",
+                json={"model": "dummy-model", "messages": list(raw_prompt)},
+            )
+            assert response.status_code == 200
+
+    def reward_fn(ctx: SessionRewardContext) -> list[float]:
+        return [1.0] * len(ctx.trajectories)
+
+    framework = OpenAICompatibleAgentFramework(
+        session_runtime=manager,
+        agent_runner=mock_agent,
+        reward_fn=reward_fn,
+    )
+
+    prompts = DataProto(
+        non_tensor_batch={
+            "raw_prompt": np.array(
+                [
+                    [{"role": "user", "content": "No logprobs expected"}],
+                ],
+                dtype=object,
+            ),
+        }
+    )
+
+    output = await framework.generate_sequences(prompts)
+    await manager.shutdown()
+
+    assert "rollout_log_probs" not in output.batch.keys()

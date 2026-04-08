@@ -107,6 +107,10 @@ def _is_request_context_prefix(
 ) -> bool:
     if session.request_tools != tools:
         return False
+    # TODO: dict equality is not token-level equivalent — two tool schemas with
+    # different key order compare equal in Python but may tokenize differently.
+    # This could cause a false prefix match on the tools path.  Low practical
+    # risk (same agent rarely reorders keys within a session), but worth noting.
     #TODO: need to improve the prefix check logic, e.g.,how to handle tool lists and multimodal data
     return _is_message_prefix(session.message_history, messages)
 
@@ -122,19 +126,37 @@ def _copy_trajectory_buffer(buffer: TrajectoryBuffer | None) -> TrajectoryBuffer
     )
 
 
+def _count_chat_turns(message_history: list[dict[str, Any]]) -> int:
+    """Count chat turns consistent with ToolAgentLoop semantics.
+
+    ToolAgentLoop computes: user_turns + assistant_turns + 1 (the +1 accounts
+    for the initial prompt).  We count user + assistant role messages and add 1.
+    System and tool messages are excluded.
+    """
+    return sum(1 for m in message_history if m.get("role") in ("user", "assistant")) + 1
+
+
+def _materialize_response_logprobs(buffer: TrajectoryBuffer) -> list[float] | None:
+    if not buffer.response_logprobs:
+        return None
+    return list(buffer.response_logprobs)
+
+
 class _GatewayActor:
     def __init__(
         self,
         tokenizer,
         backend,
-        host: str = "127.0.0.1",
+        host: str | None = None,
         *,
         tool_parser_name: str | None = None,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
     ):
+        # Same pattern as vllm_async_server.py / async_sglang_server.py:
+        # use the node's routable IP for both bind and URL by default.
+        self._server_address = host if host is not None else ray.util.get_node_ip_address()
         self._tokenizer = tokenizer
         self._backend = backend
-        self._host = host
         self._apply_chat_template_kwargs = apply_chat_template_kwargs or {}
         self._system_prompt = initialize_system_prompt(tokenizer, **self._apply_chat_template_kwargs)
         self._tool_parser = (
@@ -187,16 +209,10 @@ class _GatewayActor:
 
         self._touch_session(session)
         session.trajectories.append(
-            Trajectory(
-                uid=session.handle.session_id,
-                session_id=session.handle.session_id,
-                trajectory_id=session.next_trajectory_id,
-                prompt_ids=list(active.prompt_ids),
-                response_ids=list(active.response_ids),
-                response_mask=list(active.response_mask),
-                response_logprobs=list(active.response_logprobs),
-                reward_info={},
-                num_turns=len(session.message_history),
+            self._build_materialized_trajectory(
+            session=session,
+            active=active,
+            trajectory_id=session.next_trajectory_id,
             )
         )
         session.next_trajectory_id += 1
@@ -216,9 +232,9 @@ class _GatewayActor:
             prompt_ids=list(active.prompt_ids),
             response_ids=list(active.response_ids),
             response_mask=list(active.response_mask),
-            response_logprobs=list(active.response_logprobs),
+            response_logprobs=_materialize_response_logprobs(active),
             reward_info={},
-            num_turns=len(session.message_history),
+            num_turns=_count_chat_turns(session.message_history),
         )
 
     def _encode_full(self, messages: list[dict[str, Any]],
@@ -251,11 +267,6 @@ class _GatewayActor:
         stop_reason: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an OpenAI-compatible assistant message.
-
-        The returned message is used both for the HTTP response and stored
-        as-is in session.message_history.  Prefix comparison uses direct
-        equality, so any format drift by the agent is treated as a context
-        change — consistent with vLLM's token-level prefix matching.
 
         Returns:
             message: OpenAI-compatible assistant message.
@@ -315,7 +326,8 @@ class _GatewayActor:
                     incremental_ids = self._encode_incremental(incremental_messages)
                     active_trajectory.response_ids.extend(incremental_ids)
                     active_trajectory.response_mask.extend([0] * len(incremental_ids))
-                    active_trajectory.response_logprobs.extend([0.0] * len(incremental_ids))
+                    if active_trajectory.response_logprobs:
+                        active_trajectory.response_logprobs.extend([0.0] * len(incremental_ids))
             else:
                 materialized_trajectory = self._build_materialized_trajectory(
                     session=session,
@@ -345,8 +357,6 @@ class _GatewayActor:
             active_trajectory.response_mask.extend([1] * len(response_ids))
             if output.log_probs is not None:
                 active_trajectory.response_logprobs.extend(list(output.log_probs))
-            else:
-                active_trajectory.response_logprobs.extend([0.0] * len(response_ids))
 
             assistant_msg, finish_reason = await self._decode_response(
                 response_ids, tools=tools, stop_reason=output.stop_reason,
@@ -381,8 +391,8 @@ class _GatewayActor:
     async def start(self) -> None:
         if self._server_task is not None:
             return
-        self._server_port, self._server_task = await run_uvicorn(self._app, None, self._host)
-        self._server_base_url = f"http://{self._host}:{self._server_port}"
+        self._server_port, self._server_task = await run_uvicorn(self._app, None, self._server_address)
+        self._server_base_url = f"http://{self._server_address}:{self._server_port}"
 
     async def shutdown(self) -> None:
         if self._server_task is None:
