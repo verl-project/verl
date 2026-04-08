@@ -18,6 +18,7 @@ from .base import (
     RayWorkerGroup,
     ResourcePoolManager,
     SubRayResourcePool,
+    check_resource_available,
     create_colocated_worker_cls,
     create_colocated_worker_cls_fused,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "SubRayResourcePool",
     "RayWorkerGroup",
     "ResourcePoolManager",
+    "check_resource_available",
     "create_colocated_worker_cls",
     "create_colocated_worker_cls_fused",
 ]
