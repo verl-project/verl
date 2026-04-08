@@ -4,8 +4,13 @@ FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_NO_CACHE_DIR=1
+ARG APT_MIRROR=""
 # PEP 668: Ubuntu 24.04 blocks system-wide pip installs; override for Docker
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+RUN if [ -n "${APT_MIRROR}" ]; then \
+    sed -i "s@http://.*archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list.d/ubuntu.sources; \
+    fi
 
 RUN apt-get update && apt-get install -y \
     git \

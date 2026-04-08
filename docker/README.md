@@ -31,6 +31,22 @@ You can find the latest images used for development and ci in our github workflo
 - [.github/workflows/sgl.yml](https://github.com/volcengine/verl/blob/main/.github/workflows/sgl.yml)
 
 
+## Building Locally
+
+To build an image from source:
+
+```sh
+docker build -f docker/Dockerfile.stable.vllm -t verl:vllm-local .
+```
+
+For users in China who need an apt mirror to speed up package downloads, pass `APT_MIRROR`:
+
+```sh
+docker build -f docker/Dockerfile.stable.vllm \
+    --build-arg APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn \
+    -t verl:vllm-local .
+```
+
 ## Installation from Docker
 
 After pulling the desired Docker image and installing desired inference and training frameworks, you can run it with the following steps:
