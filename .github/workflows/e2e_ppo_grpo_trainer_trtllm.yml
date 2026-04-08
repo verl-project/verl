@@ -93,7 +93,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc4"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm1.3.0rc10"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -121,10 +121,15 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.9;9.0;10.0;12.0+PTX"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Reinstall FlashInfer for runtime GPU arch
+        run: |
+          unset TORCH_CUDA_ARCH_LIST
+          pip3 install --force-reinstall --no-deps flashinfer-python
       - name: Install the current repository
         run: |
           pip3 install pytest-asyncio
@@ -132,6 +137,8 @@ jobs:
           pip3 install --no-deps -e .
       - name: Run TRTLLM unit tests
         run: |
+          unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
+          export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           export TRTLLM_TEST_MODEL_PATH_ROOT="${HOME}/models"
           ray stop --force
           pytest -v -s --durations=20 \
@@ -148,10 +155,15 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.9;9.0;10.0;12.0+PTX"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Reinstall FlashInfer for runtime GPU arch
+        run: |
+          unset TORCH_CUDA_ARCH_LIST
+          pip3 install --force-reinstall --no-deps flashinfer-python
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
@@ -161,6 +173,8 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_save_dir ${PWD}/data/gsm8k
       - name: Running GSM8K E2E training tests with FSDP on 8 L20 GPUs (Qwen)
         run: |
+          unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
+          export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
           DATADIR=${HOME}/data \
             bash examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh 2 \
@@ -193,10 +207,15 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.9;9.0;10.0;12.0+PTX"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Reinstall FlashInfer for runtime GPU arch
+        run: |
+          unset TORCH_CUDA_ARCH_LIST
+          pip3 install --force-reinstall --no-deps flashinfer-python
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
@@ -206,6 +225,8 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_save_dir ${PWD}/data/gsm8k
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (Qwen)
         run: |
+          unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
+          export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
           DATADIR=${HOME}/data \
           ACTOR_TP=2 \
@@ -235,10 +256,15 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.9;9.0;10.0;12.0+PTX"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Reinstall FlashInfer for runtime GPU arch
+        run: |
+          unset TORCH_CUDA_ARCH_LIST
+          pip3 install --force-reinstall --no-deps flashinfer-python
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
@@ -268,9 +294,11 @@ jobs:
           python3 examples/data_preprocess/aime2024_multiturn_w_tool.py --local_save_dir ${PWD}/data/aime-2024
       - name: Running DAPO E2E with FP8 TRT-LLM rollout (Qwen3-0.6B)
         run: |
+          unset TORCH_CUDA_ARCH_LIST  # Let TRT-LLM CUTLASS DSL auto-detect runtime GPU arch
+          export TRTLLM_ENABLE_PDL=0  # Disable Programmatic Dependent Launch (uses SM 9.0 griddepcontrol)
           ray stop --force
           export INFER_TP=2 ACTOR_TP=2 ACTOR_PP=2 ACTOR_VPP=2 ACTOR_EP=1 ACTOR_CP=2 REF_TP=2 REF_PP=2 REF_VPP=2 REF_EP=1 REF_CP=2 GEN_MOE_TP=null GEN_MOE_EP=null
-          export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=CUTLASS
+          export NNODES=1 GPUS_PER_NODE=8 TRTLLM_MOE_BACKEND=TRITON
           export DATA_DIR=${PWD} DAPO_MATH_TRAIN=${PWD}/data/dapo-math-17k/train.parquet AIME_VAL=${PWD}/data/aime-2024/train.parquet MODEL_PATH=${HOME}/models/Qwen/Qwen3-0.6B
           bash examples/grpo_trainer/run_qwen3-30b_dapo_megatron_fp8_trtllm.sh \
             reward_model.reward_kwargs.overlong_buffer_cfg.len=258 \
