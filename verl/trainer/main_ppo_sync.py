@@ -1334,18 +1334,18 @@ class PPOTrainer:
                 self._start_profiling()
                 with marked_timer("step", timing_raw):
                     batch = self.step(batch_dict, metrics, timing_raw)
+
+                    # 2. save checkpoint
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
+                        with marked_timer("save_checkpoint", timing_raw, color="green"):
+                            self._save_checkpoint()
+
+                    # 3. update weights from trainer to rollout
+                    with marked_timer("update_weights", timing_raw, color="red"):
+                        self.checkpoint_manager.update_weights()
                 self._stop_profiling()
-
-                # 2. save checkpoint
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
-                ):
-                    with marked_timer("save_checkpoint", timing_raw, color="green"):
-                        self._save_checkpoint()
-
-                # 3. update weights from trainer to rollout
-                with marked_timer("update_weights", timing_raw, color="red"):
-                    self.checkpoint_manager.update_weights()
 
                 # 4. validate
                 if self.config.trainer.test_freq > 0 and (
