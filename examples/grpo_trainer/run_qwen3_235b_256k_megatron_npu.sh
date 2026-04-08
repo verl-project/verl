@@ -94,7 +94,6 @@ ALGORITHM_ARGS=(
 
 # Actor Model Configuration
 ACTOR_ARGS=(
-#     actor_rollout_ref.actor.strategy=megatron
     actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz}
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss}
