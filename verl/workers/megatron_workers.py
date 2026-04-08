@@ -311,6 +311,21 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                     expert_tensor_parallel_size=self.config.actor.megatron.expert_tensor_parallel_size,
                     nccl_communicator_config_path=None,
                 )
+                # DEBUG PROBE: Log parallel group info after initialize_model_parallel
+                import sys
+                _rank = torch.distributed.get_rank()
+                _pp_group = mpu.get_pipeline_model_parallel_group()
+                _pp_size = mpu.get_pipeline_model_parallel_world_size()
+                _pp_ranks = torch.distributed.get_process_group_ranks(_pp_group)
+                _tp_size = mpu.get_tensor_model_parallel_world_size()
+                print(f"RAY_EXECUTOR_DEBUG: _build_model(actor/ref) rank={_rank}: PP_size={_pp_size}, PP_ranks={_pp_ranks}, TP_size={_tp_size}", file=sys.stderr, flush=True)
+                try:
+                    _ep_group = mpu.get_expert_model_parallel_group()
+                    _ep_size = mpu.get_expert_model_parallel_world_size()
+                    _ep_ranks = torch.distributed.get_process_group_ranks(_ep_group)
+                    print(f"RAY_EXECUTOR_DEBUG: _build_model(actor/ref) rank={_rank}: EP_size={_ep_size}, EP_ranks={_ep_ranks}", file=sys.stderr, flush=True)
+                except Exception as _e:
+                    print(f"RAY_EXECUTOR_DEBUG: _build_model(actor/ref) rank={_rank}: EP group not available: {_e}", file=sys.stderr, flush=True)
 
         if self._is_actor or self._is_ref:
             is_collect = (
@@ -544,9 +559,23 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         assert self.world_size % infer_world_size == 0, (
             f"rollout world_size: {self.world_size} is not divisible by infer_world_size: {infer_world_size}"
         )
+        # DEBUG PROBE: Log mesh_shape and count new_group calls during init_device_mesh
+        import sys
+        _rank = torch.distributed.get_rank()
+        _mesh_shape = (dp, infer_tp, infer_pp)
+        print(f"RAY_EXECUTOR_DEBUG: _build_rollout rank={_rank}: mesh_shape={_mesh_shape} (dp={dp}, infer_tp={infer_tp}, infer_pp={infer_pp})", file=sys.stderr, flush=True)
+        _orig_new_group = torch.distributed.new_group
+        _new_group_count = 0
+        def _counting_new_group(*args, **kwargs):
+            nonlocal _new_group_count
+            _new_group_count += 1
+            return _orig_new_group(*args, **kwargs)
+        torch.distributed.new_group = _counting_new_group
         rollout_device_mesh = init_device_mesh(
             get_device_name(), mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
         )
+        torch.distributed.new_group = _orig_new_group
+        print(f"RAY_EXECUTOR_DEBUG: _build_rollout rank={_rank}: init_device_mesh created {_new_group_count} new groups", file=sys.stderr, flush=True)
 
         self.rollout_device_mesh = rollout_device_mesh
 
@@ -1063,6 +1092,21 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
                 expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
                 nccl_communicator_config_path=None,
             )
+            # DEBUG PROBE: Log parallel group info after critic initialize_model_parallel
+            import sys
+            _rank = torch.distributed.get_rank()
+            _pp_group = mpu.get_pipeline_model_parallel_group()
+            _pp_size = mpu.get_pipeline_model_parallel_world_size()
+            _pp_ranks = torch.distributed.get_process_group_ranks(_pp_group)
+            _tp_size = mpu.get_tensor_model_parallel_world_size()
+            print(f"RAY_EXECUTOR_DEBUG: _build_model(critic) rank={_rank}: PP_size={_pp_size}, PP_ranks={_pp_ranks}, TP_size={_tp_size}", file=sys.stderr, flush=True)
+            try:
+                _ep_group = mpu.get_expert_model_parallel_group()
+                _ep_size = mpu.get_expert_model_parallel_world_size()
+                _ep_ranks = torch.distributed.get_process_group_ranks(_ep_group)
+                print(f"RAY_EXECUTOR_DEBUG: _build_model(critic) rank={_rank}: EP_size={_ep_size}, EP_ranks={_ep_ranks}", file=sys.stderr, flush=True)
+            except Exception as _e:
+                print(f"RAY_EXECUTOR_DEBUG: _build_model(critic) rank={_rank}: EP group not available: {_e}", file=sys.stderr, flush=True)
 
         is_collect = (
             mpu.get_tensor_model_parallel_rank() == 0

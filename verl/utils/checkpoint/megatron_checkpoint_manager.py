@@ -738,6 +738,12 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                             log_only_rank_0=True,
                         )
 
+        # Reclaim host memory leaked by dist_checkpointing's write_buckets.
+        # Must run AFTER all saves (dist checkpoint + bridge HF weights) finish.
+        from verl.utils.checkpoint.memory_reclaim import reclaim_checkpoint_memory
+
+        reclaim_checkpoint_memory(rank=self.rank)
+
         def finalize_save_fn():
             # Rank 0 uploads checkpoint to HDFS if hdfs_path is provided
             log_with_rank(
