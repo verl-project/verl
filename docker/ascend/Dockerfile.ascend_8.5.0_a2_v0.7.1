@@ -49,18 +49,24 @@ RUN ARCH=$(uname -m) && \
     # Remove existing triton installed by some third-party packages
     pip uninstall -y triton && \
     # Install mbridge
-    pip install mbridge torch_npu==2.8.0 && \
+    pip install mbridge==0.15.1 torch_npu==2.8.0 && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
 
 
-# Prepare and install verl (update frequently)
-RUN git clone -b release/v0.7.1 --recursive https://github.com/verl-project/verl.git && \
-    cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
+# Prepare and install verl (recipe update frequently, verl is release/v0.7.1)
+RUN git clone -b release/v0.7.1 https://github.com/verl-project/verl.git && cd verl && \
+    git submodule update --init --recursive --remote && \
+    pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
+
+# get mbridge path and cuda to npu for deepseek model
+RUN MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}') && \
+    TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py" && \
+    sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
 
 # Show install results
 RUN pip list
