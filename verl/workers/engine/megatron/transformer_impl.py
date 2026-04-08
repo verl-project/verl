@@ -707,16 +707,20 @@ class MegatronEngine(BaseEngine):
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
         adapter_only = base_sync_done and non_merge_lora_sync
+        if non_merge_lora_sync:
+            peft_config = build_peft_config_for_vllm(self.model_config.lora)
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
         load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
-            # Only export adapter weights
-            peft_config = build_peft_config_for_vllm(self.model_config.lora)
             per_tensor_param = self.bridge.export_adapter_weights(self.module)
         else:
-            per_tensor_param = self.bridge.export_hf_weights(self.module)
+            per_tensor_param = (
+                self.bridge.export_hf_weights(self.module, merge_adapter_weights=False)
+                if non_merge_lora_sync
+                else self.bridge.export_hf_weights(self.module)
+            )
             if non_merge_lora_sync:
                 per_tensor_param = add_base_layer_suffix(
                     per_tensor_param, model_type=self.model_config.hf_config.model_type
