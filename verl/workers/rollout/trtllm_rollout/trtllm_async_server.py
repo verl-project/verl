@@ -101,10 +101,10 @@ class TRTLLMHttpServer:
         logger.info(f"TRTLLMHttpServer, replica_rank: {self.replica_rank}")
 
         self.sampling_args = {
-            "detokenize": False,
-            "end_id": -1,
+            # TorchSampler: use end_id for hard stop on EOS
+            "detokenize": True,
+            "end_id": self.model_config.hf_config.eos_token_id,
             "pad_id": self.model_config.hf_config.pad_token_id,
-            "stop_token_ids": [self.model_config.hf_config.eos_token_id],
             "include_stop_str_in_output": True,
         }
 
@@ -183,7 +183,7 @@ class TRTLLMHttpServer:
             if self.config.enable_sleep_mode and SleepConfig is not None
             else None,
             "allreduce_strategy": "NCCL",
-            "sampler_type": "TRTLLMSampler",
+            "sampler_type": "TorchSampler",
             **engine_kwargs,
         }
 
@@ -254,9 +254,13 @@ class TRTLLMHttpServer:
     ) -> TokenOutput:
         from tensorrt_llm.llmapi import SamplingParams
 
-        max_tokens = min(self.config.response_length, self.config.max_model_len - len(prompt_ids))
+        max_tokens = min(
+            self.config.response_length,
+            self.config.prompt_length + self.config.response_length - len(prompt_ids),
+        )
+        max_tokens = max(0, min(max_tokens, self.config.max_model_len - len(prompt_ids)))
         sampling_params["max_tokens"] = max_tokens
-        sampling_params["logprobs"] = 1 if sampling_params.pop("logprobs", False) else None
+        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None  # TorchSampler
         if sampling_params["top_k"] == -1:
             sampling_params["top_k"] = 0
         sampling_params.update(self.sampling_args)
