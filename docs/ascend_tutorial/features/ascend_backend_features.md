@@ -30,7 +30,7 @@ Last updated: 03/03/2026.
 | `ep_size`| `actor_rollout_ref.rollout.expert_parallel_size`|EP并行度|
 | `node_rank`| `无，根据实际实例和卡数自动计算` |实例中的节点排序|
 | `load_format`|  `actor_rollout_ref.rollout.load_format` |要加载的模型权重格式|
-| `disable_log_stats`|  `actor_rollout_ref.rollout.disable_log_stats`|记录抢占请求的累积数量 |
+| `disable_log_stats`|  `actor_rollout_ref.rollout.disable_log_stats`|控制是否记录 rollout 统计日志 |
 | `nnodes `|  `无，根据实际实例和卡数自动计算` | 每个实例包含的节点数量` |
 | `trust_remote_code`| `actor_rollout_ref.model.trust_remote_code`|是否允许在 Hub 上定义自定义模型，并将其写入自己的建模文件中|
 | `max_num_seqs` | `actor_rollout_ref.rollout.max_num_seqs` |正在运行的请求的最大数量|

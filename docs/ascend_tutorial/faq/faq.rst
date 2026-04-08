@@ -33,11 +33,11 @@ Last updated: 03/26/2026.
 
 使用 VERL 内置的 profiler：
 
-.. code-block:: python
+.. code-block:: shell
 
-   actor_rollout_ref.actor.profiler.tool_config.npu.discrete=true
-   actor_rollout_ref.actor.profiler.tool_config.npu.contents=npu,cpu
-   actor_rollout_ref.actor.profiler.tool_config.npu.level=1
+   actor_rollout_ref.actor.profiler.tool_config.npu.discrete=true \
+   actor_rollout_ref.actor.profiler.tool_config.npu.contents=npu,cpu \
+   actor_rollout_ref.actor.profiler.tool_config.npu.level=1 \
    actor_rollout_ref.actor.profiler.tool_config.npu.analysis=true
 
 ### Q2: 如何排查 NPU 训练失败的问题？

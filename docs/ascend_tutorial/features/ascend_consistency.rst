@@ -29,8 +29,6 @@ Last updated: 11/17/2025.
 
 在单卡无通信情况下：
 
-- HCCL和LCCL通信下:
- 
   -  export CLOSE_MATMUL_K_SHIFT=1
   -  export ATB_MATMUL_SHUFFLE_K_ENABLE=0
   -  export VLLM_ENABLE_V1_MULTIPROCESSING=0

@@ -26,10 +26,10 @@ Atlas 800T A3
 -----------------------------------
 
 
-DockerFile镜像构建 & 获取 & 使用 
+Dockerfile镜像构建 & 获取 & 使用 
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-如需要通过 DockerFile 构建镜像，或希望使用基于 verl 构建的镜像，请参考 `文档 <https://github.com/volcengine/verl/tree/main/docs/ascend_tutorial/quick_start/dockerfile_build_guidance.rst>`_ 
+如需要通过 Dockerfile 构建镜像，或希望使用基于 verl 构建的镜像，请参考 `文档 <https://github.com/volcengine/verl/tree/main/docs/ascend_tutorial/quick_start/dockerfile_build_guidance.rst>`_ 
 如果想直接获取镜像，请前往`quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 进行获取，镜像中已包含基础环境和依赖软件包。
 
 安装基础环境
@@ -100,7 +100,7 @@ DockerFile镜像构建 & 获取 & 使用
 
         git clone --depth 1 --branch v0.13.0 https://github.com/vllm-project/vllm.git
         cd vllm && pip install -r requirements/build.txt
-        VLLM_TARGET_DEVICE=empty pip install -v -e. && cd ..
+        VLLM_TARGET_DEVICE=empty pip install -v -e . && cd ..
 
 3. vllm-ascend 源码安装指令：
 

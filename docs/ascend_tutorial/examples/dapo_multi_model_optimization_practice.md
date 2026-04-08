@@ -64,16 +64,16 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 
 ## 安装基础环境
 
-| software | version|
-| --- | --- |
-| Python| >= 3.10, <3.12 |
-| CANN | == 8.3.RC1 |
-| torch | == 2.7.1 |
-| torch_npu | == 2.7.1 |
-| verl | main分支 commitId=252d76908b903ad8fb6969eb3a5e5f873c95ea2b |
-| vllm | 	v0.11.0 |
-| vllm-ascend | v0.11.0-dev|
-| transformers | 	4.57.3|
+| software     | version                                                    |
+| ------------ | ---------------------------------------------------------- |
+| Python       | >=3.10, <3.12                                              |
+| CANN         | ==8.3.RC1                                                  |
+| torch        | ==2.7.1                                                    |
+| torch_npu    | ==2.7.1                                                    |
+| verl         | main分支 commitId=252d76908b903ad8fb6969eb3a5e5f873c95ea2b |
+| vllm         | v0.11.0                                                    |
+| vllm-ascend  | v0.11.0-dev                                                |
+| transformers | 4.57.3                                                     |
 
 在本实践中, 我们通过指定 verl 的commit id 以避免引入其他问题
 ```
@@ -91,7 +91,7 @@ git checkout main
 
 Geometry3k 数据集是由加利福尼亚大学洛杉矶分校与浙江大学联合研发的几何领域专用数据集，核心面向视觉问答（VQA）任务展开研究与模型训练。该数据集总计包含 3002 个样本，采用图像和文本两种模态数据形式构建，其中文本模态涵盖各类几何问题描述，图像则以可视化图表呈现问题中的几何图形信息，包括三角形、圆形、四边形等基础几何形状，以及不同图形间的位置、嵌套、相交等关联关系。可以从Hugging Face库下载对应的原始数据集：[Geometry3k ](https://huggingface.co/datasets/hiyouga/geometry3k)
 
-```python
+```shell
 # 下载原始数据并预处理
 python ./examples/data_preprocess/geo3k.py --local_dir=./data/geo3k
 ```
@@ -124,7 +124,7 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
 #### OpenEuler 操作系统
 
-执行如下命令重操作系统源安装jemalloc
+执行如下命令通过操作系统源安装jemalloc
 
 ```shell
 yum install jemalloc
