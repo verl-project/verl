@@ -47,6 +47,14 @@ docker build -f docker/Dockerfile.stable.vllm \
     -t verl:vllm-local .
 ```
 
+### GB200 / aarch64
+
+Pre-built images for GB200 (aarch64) are not yet published. Users should build locally on an aarch64 machine. Pre-built images will be added once available.
+
+```sh
+docker build -f docker/Dockerfile.stable.vllm -t verl:vllm-arm64 .
+```
+
 ## Installation from Docker
 
 After pulling the desired Docker image and installing desired inference and training frameworks, you can run it with the following steps:

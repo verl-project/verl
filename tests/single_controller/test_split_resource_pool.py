@@ -29,6 +29,10 @@ from verl.single_controller.ray.base import (
 from verl.utils.device import get_device_name, get_nccl_backend
 
 
+def get_local_gpus_num(division=1):
+    return max(1, torch.cuda.device_count() // division)
+
+
 @ray.remote
 class Actor(Worker):
     def __init__(self, worker_id) -> None:
@@ -50,7 +54,7 @@ class Actor(Worker):
 def test_split_resource_pool_with_split_size():
     ray.init()
     ngpus = torch.cuda.device_count()
-    half = ngpus // 2
+    half = get_local_gpus_num(2)
     # simulate 2 nodes of half GPUs each
     global_resource_pool = RayResourcePool(process_on_nodes=[half, half])
     global_resource_pool.get_placement_groups(device_name=get_device_name())
@@ -78,8 +82,7 @@ def test_split_resource_pool_with_split_size():
 
 def test_split_resource_pool_with_split_size_list():
     ray.init()
-    ngpus = torch.cuda.device_count()
-    quarter = max(1, ngpus // 4)
+    quarter = get_local_gpus_num(4)
     # simulate 4 nodes of quarter GPUs each
     global_resource_pool = RayResourcePool(process_on_nodes=[quarter] * 4)
     global_resource_pool.get_placement_groups(device_name=get_device_name())
@@ -113,9 +116,8 @@ def test_split_resource_pool_with_split_size_list():
 
 def test_split_resource_pool_with_split_size_list_cross_nodes():
     ray.init()
-    ngpus = torch.cuda.device_count()
-    half = ngpus // 2
-    quarter = max(1, ngpus // 4)
+    half = get_local_gpus_num(2)
+    quarter = get_local_gpus_num(4)
     # simulate 2 nodes of half GPUs each (cross-node split)
     global_resource_pool = RayResourcePool(process_on_nodes=[half, half])
     global_resource_pool.get_placement_groups(device_name=get_device_name())
@@ -151,7 +153,7 @@ def test_split_resource_pool_with_split_size_list_cross_nodes():
 def test_split_resource_pool_with_split_twice():
     ray.init()
     ngpus = torch.cuda.device_count()
-    quarter = max(1, ngpus // 4)
+    quarter = get_local_gpus_num(4)
     mid = ngpus - 2 * quarter  # middle pool size
     # simulate ngpus//2 nodes of 2 GPUs each
     global_resource_pool = RayResourcePool(process_on_nodes=[2] * (ngpus // 2))
