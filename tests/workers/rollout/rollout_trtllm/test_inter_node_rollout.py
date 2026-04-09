@@ -22,10 +22,10 @@ from verl.workers.rollout.trtllm_rollout.trtllm_async_server import TRTLLMReplic
 
 class TestInterNodeTRTLLMRollout:
     def test_inter_node_trtllm_rollout(self):
-        """Test TRT-LLM rollout with TP=8 spanning 2 simulated nodes (4 GPUs each).
+        """Test TRT-LLM rollout with TP=2 spanning 2 simulated nodes (1 GPU each).
 
-        On CI with 8 GPUs on 1 node, we set gpus_per_node=4 so init_standalone()
-        creates resource_pool_spec=[4, 4] (2 placement groups), exercising the
+        On CI with 2+ GPUs on 1 node, we set gpus_per_node=1 so init_standalone()
+        creates resource_pool_spec=[1, 1] (2 placement groups), exercising the
         inter-node code path in get_pgs_and_bundle_indices() and launch_servers().
         """
         from hydra import compose, initialize_config_dir
@@ -44,38 +44,38 @@ class TestInterNodeTRTLLMRollout:
             with initialize_config_dir(config_dir=config_dir, version_base=None):
                 config = compose(config_name="ppo_trainer")
 
-            # Inter-node settings: 8 GPUs split as 2 "nodes" x 4 GPUs
-            config.trainer.n_gpus_per_node = 4
+            # Inter-node settings: 2 GPUs split as 2 "nodes" x 1 GPU
+            config.trainer.n_gpus_per_node = 1
             config.trainer.nnodes = 2
             model_root = os.path.expanduser(os.getenv("TRTLLM_TEST_MODEL_PATH_ROOT", "~/models"))
             config.actor_rollout_ref.model.path = os.path.join(model_root, "Qwen/Qwen2.5-0.5B-Instruct")
             config.actor_rollout_ref.rollout.name = "trtllm"
             config.actor_rollout_ref.rollout.mode = "async"
-            config.actor_rollout_ref.rollout.tensor_model_parallel_size = 8  # spans 2 "nodes"
+            config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2  # spans 2 "nodes"
 
             replica = TRTLLMReplica(
                 replica_rank=0,
                 config=config.actor_rollout_ref.rollout,
                 model_config=config.actor_rollout_ref.model,
-                gpus_per_node=4,  # key: 4 not 8, so nnodes=2 inside replica
+                gpus_per_node=1,  # key: 1 not 2, so nnodes=2 inside replica
             )
 
             asyncio.run(replica.init_standalone())
 
-            # Verify inter-node setup: 8 workers across 2 PGs
-            assert len(replica.workers) == 8
+            # Verify inter-node setup: 2 workers across 2 PGs
+            assert len(replica.workers) == 2
             assert replica._server_address is not None
 
             # Verify leader rank
             worker0 = replica.workers[0]
-            worker7 = replica.workers[7]
+            worker1 = replica.workers[1]
             replica_rank = ray.get(worker0.get_replica_rank.remote())
             is_leader_0 = ray.get(worker0.is_leader_rank.remote())
-            is_leader_7 = ray.get(worker7.is_leader_rank.remote())
+            is_leader_1 = ray.get(worker1.is_leader_rank.remote())
 
             assert replica_rank == 0
             assert is_leader_0 is True
-            assert is_leader_7 is False
+            assert is_leader_1 is False
 
             # Verify token generation
             prompt_ids = [1, 2, 3, 4, 5]
