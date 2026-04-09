@@ -144,6 +144,7 @@ jobs:
           pytest -v -s --durations=20 \
             tests/workers/rollout/rollout_trtllm/test_adapter.py \
             tests/workers/rollout/rollout_trtllm/test_async_server.py \
+            tests/workers/rollout/rollout_trtllm/test_inter_node_rollout.py \
             tests/workers/rollout/rollout_trtllm/test_trtllm_rollout_utils.py
 
   e2e_grpo_trainer_fsdp-qwen2:
