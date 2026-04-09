@@ -56,6 +56,83 @@ def run_generation(config) -> None:
     ray.get(main_task.remote(config))
 
 
+def prepare_inputs(tokenizer, prompts, config):
+    if config.model.no_chat is True:
+        if not prompts:
+            return None
+        
+        first_item = prompts[0]
+        is_messages_format = (
+            isinstance(first_item, list) and len(first_item) > 0 and 
+            isinstance(first_item[0], dict) and 'role' in first_item[0]
+        )
+
+        if is_messages_format:
+            # formatted_texts = []
+            # for messages in prompts:
+            #     text_parts = []
+            #     for msg in messages:
+            #         role = msg.get('role', '')
+            #         content = msg.get('content', '')
+            #         if role == 'system':
+            #             text_parts.append(f"System: {content}\n")
+            #         elif role == 'user':
+            #             text_parts.append(f"User: {content}\n")
+            #         elif role == 'assistant':
+            #             text_parts.append(f"Assistant: {content}\n")
+            #     # Guidance for base model
+            #     text_parts.append("Assistant:")
+            #     formatted_texts.append("".join(text_parts))
+            
+            # inputs = tokenizer(
+            #     formatted_texts,
+            #     padding=True,
+            #     truncation=True,
+            #     max_length=config.rollout.prompt_length,
+            #     return_tensors="pt",
+            # )
+
+            tokenizer.chat_template = """{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}
+            {% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}
+            {% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}
+            {% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}
+            {% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ '<s>[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' ' + content.strip() + ' </s>' }}{% endif %}{% endfor %}"""
+
+            inputs = tokenizer.apply_chat_template(
+                prompts,
+                add_generation_prompt=True,
+                padding=True,
+                truncation=True,
+                max_length=config.rollout.prompt_length,
+                return_tensors="pt",
+                return_dict=True,
+                tokenize=True,
+            )
+
+        else:
+            inputs = tokenizer(
+                prompts,
+                padding=True,
+                truncation=True,
+                max_length=config.rollout.prompt_length,
+                return_tensors="pt",
+            )
+        
+    else:
+        inputs = tokenizer.apply_chat_template(
+            prompts,
+            add_generation_prompt=True,
+            padding=True,
+            truncation=True,
+            max_length=config.rollout.prompt_length,
+            return_tensors="pt",
+            return_dict=True,
+            tokenize=True,
+        )
+    
+    return inputs
+
+
 @ray.remote(num_cpus=1)
 def main_task(config):
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
@@ -96,16 +173,17 @@ def main_task(config):
     for batch_idx in range(num_batch):
         print(f"[{batch_idx + 1}/{num_batch}] Start to process.")
         batch_chat_lst = chat_lst[batch_idx * config_batch_size : (batch_idx + 1) * config_batch_size]
-        inputs = tokenizer.apply_chat_template(
-            batch_chat_lst,
-            add_generation_prompt=True,
-            padding=True,
-            truncation=True,
-            max_length=config.rollout.prompt_length,
-            return_tensors="pt",
-            return_dict=True,
-            tokenize=True,
-        )
+        # inputs = tokenizer.apply_chat_template(
+        #     batch_chat_lst,
+        #     add_generation_prompt=True,
+        #     padding=True,
+        #     truncation=True,
+        #     max_length=config.rollout.prompt_length,
+        #     return_tensors="pt",
+        #     return_dict=True,
+        #     tokenize=True,
+        # )
+        inputs = prepare_inputs(tokenizer, batch_chat_lst, config)
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
         position_ids = compute_position_id_with_mask(attention_mask)
@@ -117,6 +195,13 @@ def main_task(config):
         # START TO GENERATE FOR n_samples TIMES
         print(f"[{batch_idx + 1}/{num_batch}] Start to generate.")
         for n_sample in range(config.data.n_samples):
+            if config.rollout.get('seed') is not None:
+                current_seed = config.rollout.seed + n_sample
+            else:
+                current_seed = None  # Use dynamic random seed from vLLM
+
+            data_padded.meta_info['seed'] = current_seed
+
             output_padded = wg.generate_sequences(data_padded)
             output = unpad_dataproto(output_padded, pad_size=pad_size)
 

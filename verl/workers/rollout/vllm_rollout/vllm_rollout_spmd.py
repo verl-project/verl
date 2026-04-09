@@ -273,6 +273,11 @@ class vLLMRollout(BaseRollout):
                 "n": 1,  # if validate, already repeat in ray_trainer
             }
 
+        # Set seed
+        seed = prompts.meta_info.get('seed', None)
+        if seed is not None:
+            kwargs['seed'] = seed
+
         lora_requests = None
         if self.lora_kwargs:
             lora_int_ids = list(self.inference_engine.llm_engine.list_loras())

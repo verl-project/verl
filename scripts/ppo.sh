@@ -2,14 +2,15 @@
 # set -x
 
 # ============================ Configurations ===========================
-PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save checkpoints & logs!!!!!
+PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save logs!!!!!
+STORE_DIR="/data/hjw"               # !!!!! Change this to where you want to save checkpoints!!!!!
 
 MODEL_NAME="Qwen2.5-0.5B"
 DATA_NAME="gsm8k"
 DATA_DIR="/data/open_datasets/GSM8K"
-SFT_CHECKPOINT="${PROJECT_DIR}/outputs/${MODEL_NAME}--${DATA_NAME}--sft/checkpoint-last"    # SFT后的模型路径
+SFT_CHECKPOINT="${STORE_DIR}/outputs/${MODEL_NAME}--${DATA_NAME}--sft/checkpoint-last"  # SFT后的模型路径
 
-PPO_OUTPUT_DIR="${PROJECT_DIR}/outputs/${MODEL_NAME}--${DATA_NAME}--ppo"
+PPO_OUTPUT_DIR="${STORE_DIR}/outputs/${MODEL_NAME}--${DATA_NAME}--ppo"
 LOG_PATH="${PROJECT_DIR}/wandb_logs"
 LOG_NAME="${MODEL_NAME}--${DATA_NAME}--ppo--$(date +%Y%m%d-%H%M%S)"
 # =======================================================================

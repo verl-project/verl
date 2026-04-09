@@ -2,8 +2,8 @@
 # set -x
 
 # ============================ Configurations ===========================
-MODEL_NAME="Qwen2.5-0.5B-Instruct"
-MODEL_ID="Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME="Qwen2.5-Math-7B"
+MODEL_ID="Qwen/Qwen2.5-Math-7B"
 
 MODEL_PATH="/data/pretrain_models/${MODEL_NAME}"
 
@@ -22,7 +22,8 @@ mkdir -p "${REPO_DIR}/snapshots/${FAKE_HASH}"
 echo -n "${FAKE_HASH}" > "${REPO_DIR}/refs/main"
 
 # Copy the model files to snapshots/<hash>/
-cp -r "${MODEL_PATH}/"* "${REPO_DIR}/snapshots/${FAKE_HASH}/"
+# Now use symlink to avoid storage problems
+ln -s "${MODEL_PATH}/"* "${REPO_DIR}/snapshots/${FAKE_HASH}/"
 
 echo "Model stored in HF cache format: ${REPO_DIR}"
 echo "Commit hash: ${FAKE_HASH}"

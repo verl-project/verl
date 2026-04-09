@@ -651,6 +651,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         assert self._is_rollout
 
+        # Set torch seed
+        if prompts.meta_info.get('seed') is not None:
+            torch.manual_seed(prompts.meta_info['seed'])
+
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
             "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,

@@ -20,7 +20,7 @@ except ImportError:
     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
 
 
-def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0) -> bool:
+def compute_score(model_output: str, ground_truth: str, method="strict", score=1.0, format_score=0.0, timeout_score: float = 0) -> float:
     verify_func = math_metric(
         gold_extraction_target=(LatexExtractionConfig(),),
         pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
@@ -37,3 +37,15 @@ def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0
         ret_score = timeout_score
 
     return ret_score
+
+
+from verl.utils.reward_score.math import last_boxed_only_string, remove_boxed
+
+def extract_pred(solution_str: str) -> str:
+    answer = ''
+
+    string_in_last_boxed = last_boxed_only_string(solution_str)
+    if string_in_last_boxed is not None:
+        answer = remove_boxed(string_in_last_boxed)
+
+    return answer

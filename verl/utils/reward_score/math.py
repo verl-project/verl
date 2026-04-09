@@ -14,14 +14,18 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 
 
-def compute_score(solution_str, ground_truth) -> float:
+def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0) -> float:
+    assert method in ["strict", "flexible"]
+    
     retval = 0.0
     try:
         string_in_last_boxed = last_boxed_only_string(solution_str)
         if string_in_last_boxed is not None:
             answer = remove_boxed(string_in_last_boxed)
             if is_equiv(answer, ground_truth):
-                retval = 1.0
+                retval = score
+            else:
+                retval = format_score
     except Exception as e:
         print(e)
 

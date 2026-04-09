@@ -2,14 +2,15 @@
 # set -x
 
 # ============================ Configurations ===========================
-PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save checkpoints & logs!!!!!
+PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save logs!!!!!
+STORE_DIR="/data/hjw"               # !!!!! Change this to where you want to save checkpoints!!!!!
 
 MODEL_NAME="Qwen2.5-0.5B"
 MODEL_ID="Qwen/Qwen2.5-0.5B"
 DATA_NAME="gsm8k"
 DATA_DIR="/data/open_datasets/GSM8K"
 
-SAVE_PATH="${PROJECT_DIR}/outputs/${MODEL_NAME}--${DATA_NAME}--sft"
+SAVE_PATH="${STORE_DIR}/outputs/${MODEL_NAME}--${DATA_NAME}--sft"
 LOG_PATH="${PROJECT_DIR}/wandb_logs"
 LOG_NAME="${MODEL_NAME}--${DATA_NAME}--sft--$(date +%Y%m%d-%H%M%S)"
 # =======================================================================
