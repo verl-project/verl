@@ -59,7 +59,9 @@ def test_split_resource_pool_with_split_size():
     global_resource_pool = RayResourcePool(process_on_nodes=[half, half])
     global_resource_pool.get_placement_groups(device_name=get_device_name())
 
-    actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(resource_pool=global_resource_pool, split_size=half)
+    actor_1_resource_pool, actor_2_resource_pool = split_resource_pool(
+        resource_pool=global_resource_pool, split_size=half
+    )
     actor_cls_1 = RayClassWithInitArgs(cls=Actor, worker_id=0)
     actor_cls_2 = RayClassWithInitArgs(cls=Actor, worker_id=100)
     actor_worker_1 = RayWorkerGroup(

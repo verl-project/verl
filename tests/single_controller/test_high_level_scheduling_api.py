@@ -33,6 +33,7 @@ class TestActor(Worker):
 
 def test():
     import torch
+
     ray.init()
     ngpus = torch.cuda.device_count()
     half = ngpus // 2
