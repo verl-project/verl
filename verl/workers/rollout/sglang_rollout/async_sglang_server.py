@@ -424,9 +424,16 @@ class SGLangHttpServer:
             else:
                 # SGLang may return mismatched lengths (e.g. max_new_tokens=0
                 # produces a phantom logprob entry with empty output_ids), or
-                # an abort may leave an empty logprob payload. Fall back to a
-                # neutral value so downstream importance-weight math stays safe.
-                log_probs = [0.0] * len(token_ids)
+                # an abort may leave an empty logprob payload.
+                if token_ids:
+                    logger.warning(
+                        "output_token_logprobs length (%d) != output_ids length (%d) for request %s, "
+                        "logprobs will be empty — expect a downstream error",
+                        len(output_token_logprobs),
+                        len(token_ids),
+                        request_id,
+                    )
+                log_probs = []
         else:
             token_ids = output["output_ids"]
             log_probs = None
