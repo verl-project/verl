@@ -196,7 +196,7 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
-                        messages = self._build_messages(doc)
+                        messages = self._build_messages(doc, key=self.prompt_key)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
                         if self.tool_schemas is not None:
@@ -316,9 +316,9 @@ class RLHFDataset(Dataset):
             messages: List of messages with replaced placeholder.
         """
         messages: list = example[key]
-        # When concatenating image and video datasets, pop will return None for image or video sample
-        images = example.pop(self.image_key, None) or []
-        videos = example.pop(self.video_key, None) or []
+        # When concatenating image and video datasets, get will return None for image or video sample
+        images = example.get(self.image_key, None) or []
+        videos = example.get(self.video_key, None) or []
 
         image_offset, video_offset = 0, 0
         for message in messages:
