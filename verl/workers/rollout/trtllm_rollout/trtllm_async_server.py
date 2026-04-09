@@ -375,9 +375,7 @@ class TRTLLMReplica(RolloutReplica):
                 "Subgroup world size must be equal to world size"
             )
             local_bundle_index = self.resource_pool.start_bundle_index
-            logger.debug(
-                f"get_pgs_and_bundle_indices: SubRayResourcePool, start_bundle_index={local_bundle_index}"
-            )
+            logger.debug(f"get_pgs_and_bundle_indices: SubRayResourcePool, start_bundle_index={local_bundle_index}")
         # For RayResourcePool, the replica is assigned to entire resource pool.
         # We need to find start pg index and local bundle index based on replica rank.
         else:
@@ -387,10 +385,15 @@ class TRTLLMReplica(RolloutReplica):
                 f"world_size={self.world_size}, initial local_bundle_index={local_bundle_index}"
             )
 
-        while start_pg_index < len(self.resource_pool.pgs) and local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
+        while (
+            start_pg_index < len(self.resource_pool.pgs)
+            and local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count
+        ):
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
             start_pg_index += 1
-        logger.debug(f"get_pgs_and_bundle_indices: start_pg_index={start_pg_index}, local_bundle_index={local_bundle_index}")
+        logger.debug(
+            f"get_pgs_and_bundle_indices: start_pg_index={start_pg_index}, local_bundle_index={local_bundle_index}"
+        )
         assert (
             start_pg_index < len(self.resource_pool.pgs)
             and local_bundle_index < self.resource_pool.pgs[start_pg_index].bundle_count

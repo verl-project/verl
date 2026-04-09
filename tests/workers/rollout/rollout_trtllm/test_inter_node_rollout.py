@@ -15,7 +15,6 @@ import asyncio
 import os
 import subprocess
 
-import pytest
 import ray
 
 from verl.workers.rollout.trtllm_rollout.trtllm_async_server import TRTLLMReplica

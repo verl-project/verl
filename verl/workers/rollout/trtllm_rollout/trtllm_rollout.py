@@ -386,7 +386,9 @@ class ServerAdapter(BaseRollout):
         Args:
             tag: weights or kv_cache.
         """
-        logger.debug(f"resume: tags={tags}, is_leader={self.is_leader_rank}, free_cache={self.config.free_cache_engine}")
+        logger.debug(
+            f"resume: tags={tags}, is_leader={self.is_leader_rank}, free_cache={self.config.free_cache_engine}"
+        )
         # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
         # have completed actor offloading to CPU, preventing OOM issue.
         if "kv_cache" in tags and self.config.free_cache_engine:
@@ -435,7 +437,9 @@ class ServerAdapter(BaseRollout):
 
         if self.is_leader_rank:
             all_handles = {k: v for d in gathered_handles for k, v in d.items()}
-            logger.debug(f"update_weights_from_ipc_handles: gathered {len(all_handles)} device handles, sending to server")
+            logger.debug(
+                f"update_weights_from_ipc_handles: gathered {len(all_handles)} device handles, sending to server"
+            )
             await self._adapter.update_weights(all_handles)
 
         logger.debug("update_weights_from_ipc_handles: waiting on barrier")
@@ -459,9 +463,7 @@ class ServerAdapter(BaseRollout):
             await self._init_server_adapter()
 
         total_available_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) * 1024 * 1024
-        logger.debug(
-            f"update_weights: gpu_id={self.gpu_id}, bucket_size={total_available_bytes / 1024 / 1024:.0f}MB"
-        )
+        logger.debug(f"update_weights: gpu_id={self.gpu_id}, bucket_size={total_available_bytes / 1024 / 1024:.0f}MB")
 
         if self.config.get("quantization", None) == "fp8":
             from verl.utils.trtllm.trtllm_fp8_utils import TRTLLMFP8QuantizerHelper
