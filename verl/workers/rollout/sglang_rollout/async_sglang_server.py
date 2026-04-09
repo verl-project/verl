@@ -266,6 +266,7 @@ class SGLangHttpServer:
         # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
         if version.parse(sglang.__version__) >= version.parse("0.5.10"):
             from sglang.srt.entrypoints.http_server import Engine
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
                 server_args=server_args,
                 init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
@@ -274,6 +275,7 @@ class SGLangHttpServer:
             )
         elif version.parse(sglang.__version__) >= version.parse("0.5.7"):
             from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args,
                 init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
@@ -282,6 +284,7 @@ class SGLangHttpServer:
             )
         else:
             from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args
             )
