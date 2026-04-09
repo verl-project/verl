@@ -245,7 +245,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         # Extract prompt data from OmniCustomPrompt in req.prompts[0]
         custom_prompt = req.prompts[0] if req.prompts else {}
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
+            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
