@@ -3,7 +3,7 @@ ENGINE=${1:-vllm}
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
 
 
-HF_MODEL_PATH=${HF_MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen2.5-VL-7B-Instruct"}
+# HF_MODEL_PATH=${HF_MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen2.5-VL-7B-Instruct"}
 
 train_path=$HOME/data/geo3k/train.parquet
 test_path=$HOME/data/geo3k/test.parquet
@@ -49,7 +49,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     data.truncation='error' \
     data.gen_batch_size=${gen_prompt_bsz} \
     data.return_raw_chat=${return_raw_chat} \
-    actor_rollout_ref.model.path=$HF_MODEL_PATH \
+    actor_rollout_ref.model.path=Qwen/Qwen3-VL-8B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_decay_steps=51200 \
     actor_rollout_ref.hybrid_engine=False \
