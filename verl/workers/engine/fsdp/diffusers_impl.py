@@ -447,7 +447,6 @@ class DiffusersFSDPEngine(BaseEngine):
         )
 
         gradient_accumulation_steps = len(micro_batches) * num_timesteps
-        tu.assign_non_tensor(data, gradient_accumulation_steps=gradient_accumulation_steps)
 
         output_lst = []
 
@@ -455,6 +454,7 @@ class DiffusersFSDPEngine(BaseEngine):
 
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
             meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
             # Forward and backward for each timestep
             with ctx:
@@ -779,9 +779,6 @@ class DiffusersFSDPEngine(BaseEngine):
 
     @contextmanager
     def disable_adapter(self):
-        from diffusers.loaders import PeftAdapterMixin
-
-        assert isinstance(self.module, PeftAdapterMixin)
         try:
             self.module.disable_adapters()
             yield

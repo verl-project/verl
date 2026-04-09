@@ -274,8 +274,8 @@ actor_rollout_ref:
       'n': 1
       do_sample: false
       num_inference_steps: 40
-      noise_level: 0.0
       seed: 42
+      extra_configs: {}
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
@@ -352,6 +352,7 @@ actor_rollout_ref:
     height: 512
     width: 512
     num_inference_steps: 10
+    extra_configs: {}
   model:
     _target_: verl.workers.config.DiffusionModelConfig
     path: ~/models/Qwen/Qwen-Image
@@ -371,7 +372,7 @@ actor_rollout_ref:
     height: ${oc.select:actor_rollout_ref.rollout.height,512}
     width: ${oc.select:actor_rollout_ref.rollout.width,512}
     num_inference_steps: ${oc.select:actor_rollout_ref.rollout.num_inference_steps,10}
-    extra_configs: {}
+    extra_configs: ${oc.select:actor_rollout_ref.rollout.extra_configs,{}}
     model_type: diffusion_model
   hybrid_engine: true
   nccl_timeout: 600
@@ -415,7 +416,6 @@ data:
     path: null
     name: null
   apply_chat_template_kwargs: {}
-  data_source: prompt
 critic:
   optim:
     _target_: verl.workers.config.FSDPOptimizerConfig
@@ -619,8 +619,10 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
-  _target_: verl.trainer.config.AlgoConfig
+  _target_: verl.trainer.config.DiffusionAlgoConfig
+  adv_estimator: flow_grpo
   norm_adv_by_std_in_grpo: true
+  global_std: true
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -650,7 +652,7 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_legacy_worker_impl: auto
+  use_legacy_worker_impl: disable
 ray_kwargs:
   ray_init:
     num_cpus: null

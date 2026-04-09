@@ -34,6 +34,10 @@ def _maybe_to_cpu(v):
     return v
 
 
+def _coalesce_not_none(value, default):
+    return default if value is None else value
+
+
 # Custom pipeline class for QwenImage that returns log probabilities during the diffusion process.
 # This is compatible with API of vllm-omni custom pipeline
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
@@ -226,6 +230,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 generator=generator,
                 noise_level=cur_noise_level,
                 sde_type=sde_type,
+                return_logprobs=logprobs,
                 return_dict=False,
             )
 
@@ -290,16 +295,16 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         num_inference_steps = sp.num_inference_steps or num_inference_steps
         max_sequence_length = sp.max_sequence_length or max_sequence_length
 
-        noise_level = sp.extra_args.get("noise_level", None) or noise_level
-        sde_window_size = sp.extra_args.get("sde_window_size", None) or sde_window_size
-        sde_window_range = sp.extra_args.get("sde_window_range", None) or sde_window_range
-        sde_type = sp.extra_args.get("sde_type", None) or sde_type
-        logprobs = sp.extra_args.get("logprobs", None)
+        noise_level = _coalesce_not_none(sp.extra_args.get("noise_level", None), noise_level)
+        sde_window_size = _coalesce_not_none(sp.extra_args.get("sde_window_size", None), sde_window_size)
+        sde_window_range = _coalesce_not_none(sp.extra_args.get("sde_window_range", None), sde_window_range)
+        sde_type = _coalesce_not_none(sp.extra_args.get("sde_type", None), sde_type)
+        logprobs = _coalesce_not_none(sp.extra_args.get("logprobs", None), logprobs)
 
         generator = sp.generator or generator
         if generator is None and sp.seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(sp.seed)
-        true_cfg_scale = sp.true_cfg_scale or true_cfg_scale
+        true_cfg_scale = _coalesce_not_none(sp.true_cfg_scale, true_cfg_scale)
         req_num_outputs = getattr(sp, "num_outputs_per_prompt", None)
         if req_num_outputs and req_num_outputs > 0:
             num_images_per_prompt = req_num_outputs

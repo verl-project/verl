@@ -58,8 +58,4 @@ width: ${oc.select:actor_rollout_ref.rollout.width,512}
 num_inference_steps: ${oc.select:actor_rollout_ref.rollout.num_inference_steps,10}
 
 # extra configs for algorithm specific features.
-# Model-specific diffusion sampling params (e.g. true_cfg_scale, guidance_scale,
-# max_sequence_length, noise_level) should be placed here so the agent loop stays
-# backend-neutral.  The rollout server's backend translation layer will promote
-# matching keys to direct OmniDiffusionSamplingParams fields automatically.
-extra_configs: {}
+extra_configs: ${oc.select:actor_rollout_ref.rollout.extra_configs,{}}

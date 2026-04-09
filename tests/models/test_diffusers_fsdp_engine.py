@@ -140,7 +140,6 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
     data.meta_info["height"] = height
     data.meta_info["width"] = width
     data.meta_info["vae_scale_factor"] = vae_scale_factor
-    data.meta_info["gradient_accumulation_steps"] = 1
 
     return data
 

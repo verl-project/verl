@@ -242,6 +242,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             extra_fields=extra_fields,
         )
 
+    async def wait_for_requests_to_drain(self):
+        # currently we do not need a extra handle
+        pass
+
 
 class vLLMOmniReplica(vLLMReplica):
     def __init__(

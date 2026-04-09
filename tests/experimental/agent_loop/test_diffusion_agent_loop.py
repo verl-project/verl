@@ -46,12 +46,12 @@ def init_config() -> DictConfig:
     prompt_template_encode_start_idx = 34
     max_length = tokenizer_max_length + prompt_template_encode_start_idx
 
-    with open_dict(config.actor_rollout_ref.model.extra_configs):
-        config.actor_rollout_ref.model.extra_configs.true_cfg_scale = 4.0
-        config.actor_rollout_ref.model.extra_configs.max_sequence_length = max_length
-        config.actor_rollout_ref.model.extra_configs.noise_level = 1.0
-        config.actor_rollout_ref.model.extra_configs.sde_window_size = 2
-        config.actor_rollout_ref.model.extra_configs.sde_window_range = [0, 5]
+    with open_dict(config.actor_rollout_ref.rollout.extra_configs):
+        config.actor_rollout_ref.rollout.extra_configs.true_cfg_scale = 4.0
+        config.actor_rollout_ref.rollout.extra_configs.max_sequence_length = max_length
+        config.actor_rollout_ref.rollout.extra_configs.noise_level = 1.0
+        config.actor_rollout_ref.rollout.extra_configs.sde_window_size = 2
+        config.actor_rollout_ref.rollout.extra_configs.sde_window_range = [0, 5]
 
     config.actor_rollout_ref.rollout.nnodes = 1
 
