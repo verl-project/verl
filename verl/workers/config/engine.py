@@ -205,6 +205,12 @@ class McoreEngineConfig(EngineConfig):
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
+        if self.dynamic_context_parallel:
+            assert self.context_parallel_size == 1, (
+                "dynamic_context_parallel requires context_parallel_size=1 "
+                "because CP groups are formed dynamically at runtime, "
+                "not through Megatron's static CP initialization."
+            )
 
 
 @dataclass
