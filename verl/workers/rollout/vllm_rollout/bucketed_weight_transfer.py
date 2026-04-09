@@ -247,9 +247,9 @@ class BucketedWeightReceiver:
                     if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
+                on_bucket_received(weights)
                 get_torch_device().synchronize()
                 self.socket.send(b"")
-                on_bucket_received(weights)
                 del weights, tensor
                 if metadata["is_last"]:
                     break
