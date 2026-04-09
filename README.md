@@ -104,7 +104,7 @@ verl is fast with:
 ## Upcoming Features and Changes
 
 - Q3 Roadmap https://github.com/volcengine/verl/issues/2388
-- DeepSeek 671b optimizations with Megatron https://github.com/volcengine/verl/issues/1033
+- DeepSeek 671b optimizations with Megatron https://github.com/verl-project/verl/issues/1033
 - Multi-turn rollout and tools using optimizations https://github.com/volcengine/verl/issues/1882
 - [Agent integration](https://github.com/volcengine/verl/tree/main/verl/experimental/agent_loop)
 - Async and off-policy architecture https://github.com/volcengine/verl/pull/2231
