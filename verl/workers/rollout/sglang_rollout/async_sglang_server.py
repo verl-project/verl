@@ -26,11 +26,11 @@ import torch
 from packaging import version
 from ray.actor import ActorHandle
 from sglang.srt.entrypoints.http_server import (
-        ServerArgs,
-        _GlobalState,
-        app,
-        set_global_state,
-    )
+    ServerArgs,
+    _GlobalState,
+    app,
+    set_global_state,
+)
 try:
     # For SGLang main branch or version >= 0.5.10
     # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
