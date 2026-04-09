@@ -56,16 +56,67 @@ is_npu_available = is_torch_npu_available()
 is_xpu_available = is_torch_xpu_available()
 
 
+def _xpu_fa2_kernel_available() -> bool:
+    """Check if the XPU FlashAttention2 kernel is loadable via the HF kernels runtime."""
+    try:
+        from kernels import get_kernel
+
+        get_kernel("kernels-community/flash-attn2")
+        return True
+    except Exception:
+        return False
+
+
 def get_default_attention_implementation() -> str:
     """Get default attention implementation for current device.
 
+    On XPU the priority is:
+      1. ``flash_attention_2`` — if ``kernels-community/flash-attn2`` is loadable
+         (routes through HF Transformers kernel dispatch, ~2-3x faster than SDPA).
+      2. ``sdpa`` — PyTorch-native scaled-dot-product attention (dispatches to
+         Intel SYCL-TLA Flash kernel internally).
+
     Returns:
-        str: "eager" for XPU (flash_attn unavailable), "flash_attention_2" otherwise
+        str: chosen attention implementation name
     """
     if is_xpu_available:
-        return "eager"  # XPU doesn't support flash_attn
+        if _xpu_fa2_kernel_available():
+            logger.info(
+                "[XPU] kernels-community/flash-attn2 available — defaulting to flash_attention_2"
+            )
+            return "flash_attention_2"
+        logger.info("[XPU] flash-attn2 kernel not available — defaulting to sdpa")
+        return "sdpa"
     else:
         return "flash_attention_2"  # Default for CUDA/NPU
+
+
+def resolve_xpu_attn_implementation(attn_implementation: str, model_config=None) -> str:
+    """Apply XPU-specific safety guards to the chosen attention implementation.
+
+    On XPU:
+      - ``flash_attention_2`` with sliding-window models is unsupported; falls back to ``sdpa``.
+
+    Args:
+        attn_implementation: the requested implementation name.
+        model_config: a HF ``PretrainedConfig`` (optional) — used to check ``sliding_window``.
+
+    Returns:
+        str: the (possibly adjusted) attention implementation name.
+    """
+    if not is_xpu_available:
+        return attn_implementation
+
+    if attn_implementation == "flash_attention_2" and model_config is not None:
+        sw = getattr(model_config, "sliding_window", None)
+        if sw is not None and sw > 0:
+            logger.warning(
+                f"[XPU] Model has sliding_window={sw} which is unsupported with flash_attention_2 on XPU. "
+                "Falling back to sdpa."
+            )
+            return "sdpa"
+
+    return attn_implementation
 
 
 def get_resource_name() -> str:
