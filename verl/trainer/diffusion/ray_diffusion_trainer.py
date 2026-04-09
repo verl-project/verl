@@ -1046,19 +1046,18 @@ class RayFlowGRPOTrainer:
                 )
                 # collect metrics
                 metrics.update(compute_data_metrics_diffusion(batch=batch))
-                metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw))
                 n_gpus = self.resource_pool_manager.get_n_gpus()
+                num_images = batch.batch["advantages"].shape[0]
+                metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
-                # Note: mismatch metrics (KL, PPL, etc.) are collected at line 1179 after advantage computation
 
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
                     self.train_dataloader.sampler.update(batch=batch)
 
-                # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)

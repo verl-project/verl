@@ -82,18 +82,30 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     return metrics
 
 
-def compute_timing_metrics_diffusion(timing_raw: dict[str, float]) -> dict[str, Any]:
+def compute_timing_metrics_diffusion(timing_raw: dict[str, float], num_images: int) -> dict[str, Any]:
     """
     Computes timing metrics for diffusion training.
 
     Args:
         timing_raw: A dictionary mapping stage names to their execution times in seconds.
+        num_images: Total number of images processed in the batch, used to compute per-image timing.
 
     Returns:
         A dictionary containing:
             - timing_s/{name}: Raw timing in seconds for each stage
+            - timing_per_image_ms/{name}: Per-image timing in milliseconds for core compute stages
+              (gen, ref, old_log_prob, adv, update_actor). Non-compute stages such as
+              save_checkpoint, update_weights, and testing are excluded.
     """
-    return {f"timing_s/{name}": value for name, value in timing_raw.items()}
+    num_images_of_section = {name: num_images for name in ["gen", "ref", "old_log_prob", "adv", "update_actor"]}
+
+    return {
+        **{f"timing_s/{name}": value for name, value in timing_raw.items()},
+        **{
+            f"timing_per_image_ms/{name}": timing_raw[name] * 1000 / num_images_of_section[name]
+            for name in set(num_images_of_section.keys()) & set(timing_raw.keys())
+        },
+    }
 
 
 def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str, float], n_gpus: int) -> dict[str, Any]:
@@ -114,12 +126,12 @@ def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str,
         A dictionary containing:
             - perf/total_num_images: Number of images processed in the batch
             - perf/time_per_step: Time taken for the step in seconds
-            - perf/throughput: Images generated per second (across all GPUs)
+            - perf/throughput: Images generated per second per GPU
     """
     batch_size = batch.batch["advantages"].shape[0]
     time = timing_raw["step"]
     return {
         "perf/total_num_images": batch_size,
         "perf/time_per_step": time,
-        "perf/throughput": batch_size / time,
+        "perf/throughput": batch_size / (time * n_gpus),
     }
