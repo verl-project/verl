@@ -17,9 +17,7 @@ dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
 
 ENGINE=vllm_omni
-
-# 34 chat-template prefix tokens + user prompt (match diffusion example max length logic)
-max_prompt_length=1058
+max_prompt_length=256
 
 if [ ! -f "${dummy_train_path}" ] || [ ! -f "${dummy_test_path}" ]; then
     python3 tests/special_e2e/create_dummy_diffusion_data.py \
@@ -40,10 +38,6 @@ python3 -m verl.trainer.main_flowgrpo \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \
     data.max_prompt_length=${max_prompt_length} \
-    data.filter_overlong_prompts=True \
-    +data.apply_chat_template_kwargs.max_length=${max_prompt_length} \
-    +data.apply_chat_template_kwargs.padding=True \
-    +data.apply_chat_template_kwargs.truncation=True \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
     actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers.qwen_image" \
