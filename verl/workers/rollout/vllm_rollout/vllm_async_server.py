@@ -860,9 +860,8 @@ class vLLMHttpServer:
         else:
             sleep_level = 2
         await self.engine.collective_rpc("sleep", kwargs={"level": sleep_level})
-
-        # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
-        # await self.engine.reset_encoder_cache()
+        if _VLLM_VERSION >= version.parse("0.17.0"):
+            await self.engine.reset_encoder_cache()
 
 
 class vLLMReplica(RolloutReplica):
