@@ -29,7 +29,7 @@ NUM_GPUS=${NUM_GPUS:-8}
 FSDP_SIZE=${FSDP_SIZE:-2}
 SP_SIZE=${SP_SIZE:-2}
 EP_SIZE=${EP_SIZE:-2}
-VERL_EXP_NAME=${VERL_EXP_NAME:function-reward-minimal-fsdp-size${FSDP_SIZE}}
+VERL_EXP_NAME=${VERL_EXP_NAME:-function-reward-minimal-fsdp-size${FSDP_SIZE}}
 
 python3 -m verl.trainer.main_ppo \
     model_engine=veomni \
