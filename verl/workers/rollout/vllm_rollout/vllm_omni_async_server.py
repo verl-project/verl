@@ -243,7 +243,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         )
 
     async def wait_for_requests_to_drain(self):
-        # currently we do not need a extra handle
+        # TODO (mike): implement this once DP is supported.
         pass
 
 
