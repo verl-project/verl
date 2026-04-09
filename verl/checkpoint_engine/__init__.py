@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import warnings
+
 from .base import (
     CheckpointEngine,
     CheckpointEngineManager,
@@ -20,6 +23,8 @@ from .base import (
     ColocatedCheckpointEngine,
     TensorMeta,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CheckpointEngine",
@@ -34,33 +39,38 @@ try:
     from .nccl_checkpoint_engine import NCCLCheckpointEngine
 
     __all__ += ["NCCLCheckpointEngine"]
-except ImportError:
+except Exception as e:
+    warnings.warn(f"NCCLCheckpointEngine not available: {e}")
     NCCLCheckpointEngine = None
 
 try:
     from .hccl_checkpoint_engine import HCCLCheckpointEngine
 
     __all__ += ["HCCLCheckpointEngine"]
-except ImportError:
+except Exception as e:
+    logger.debug("HCCLCheckpointEngine not available: %s", e)
     HCCLCheckpointEngine = None
 
 try:
     from .nixl_checkpoint_engine import NIXLCheckpointEngine
 
     __all__ += ["NIXLCheckpointEngine"]
-except ImportError:
+except Exception as e:
+    logger.debug("NIXLCheckpointEngine not available: %s", e)
     NIXLCheckpointEngine = None
 
 try:
     from .kimi_checkpoint_engine import KIMICheckpointEngine
 
     __all__ += ["KIMICheckpointEngine"]
-except ImportError:
+except Exception as e:
+    logger.debug("KIMICheckpointEngine not available: %s", e)
     KIMICheckpointEngine = None
 
 try:
     from .mooncake_checkpoint_engine import MooncakeCheckpointEngine
 
     __all__ += ["MooncakeCheckpointEngine"]
-except ImportError:
+except Exception as e:
+    logger.debug("MooncakeCheckpointEngine not available: %s", e)
     MooncakeCheckpointEngine = None

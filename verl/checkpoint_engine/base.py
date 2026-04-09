@@ -89,7 +89,13 @@ class CheckpointEngineRegistry:
             A new checkpoint engine instance.
         """
         if backend not in cls._registry:
-            raise ValueError(f"Checkpoint engine {backend} not registered")
+            available = list(cls._registry.keys()) or ["(none)"]
+            raise ValueError(
+                f"Checkpoint engine '{backend}' not registered. "
+                f"Available backends: {available}. "
+                f"This usually means the required dependency for '{backend}' backend "
+                f"failed to import. Check warnings above for details."
+            )
         return cls._registry[backend](*args, **kwargs)
 
 
