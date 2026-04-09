@@ -241,6 +241,8 @@ class RolloutConfig(BaseConfig):
 
     enable_sleep_mode: bool = True
 
+    enable_decoupled_spec: bool = False
+
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     qat: Optional[dict] = None

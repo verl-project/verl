@@ -950,6 +950,16 @@ class AgentLoopManager:
         return instance
 
     async def _initialize_llm_servers(self):
+        draft_server_handles = []
+        if self.rollout_config.get("enable_decoupled_spec", False):
+            from verl.experimental.decoupled_spec.initializer import initialize_draft_servers
+
+            draft_server_handles = initialize_draft_servers(
+                config=self.config,
+                rollout_config=self.rollout_config,
+                model_config=self.model_config,
+            )
+
         rollout_world_size = (
             self.rollout_config.tensor_model_parallel_size
             * self.rollout_config.data_parallel_size
@@ -971,6 +981,9 @@ class AgentLoopManager:
             )
             for replica_rank in range(num_replicas)
         ]
+        if draft_server_handles:
+            for replica in self.rollout_replicas:
+                setattr(replica, "draft_server_handles", draft_server_handles)
 
         if self.worker_group and self.rollout_config.name != "trtllm":
             await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
