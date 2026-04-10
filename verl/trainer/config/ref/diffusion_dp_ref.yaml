@@ -1,0 +1,33 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Lean FSDP reference model config for diffusion training (does NOT inherit from ref.yaml).
+# Only includes fields relevant to diffusion reference model inference.
+defaults:
+
+  # fsdp engine config (lean, no QAT/entropy/SP)
+  - ../engine@fsdp_config: diffusion_fsdp
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl.workers.config.FSDPDiffusersActorConfig
+
+# Number of rollouts per update
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# Strategy follows actor
+strategy: ${actor_rollout_ref.actor.strategy}
+
+# fsdp config
+fsdp_config:
+
+  # ref model is forward only
+  forward_only: True
+
+# The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
+log_prob_micro_batch_size_per_gpu: null

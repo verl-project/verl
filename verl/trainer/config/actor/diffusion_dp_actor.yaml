@@ -1,0 +1,105 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Lean FSDP actor config for diffusion model training (does NOT inherit from actor.yaml).
+# Only includes fields relevant to diffusion training.
+defaults:
+
+  # fsdp optimizer config
+  - ../optim@optim: fsdp
+
+  # fsdp engine config (lean, no QAT/entropy/SP)
+  - ../engine@fsdp_config: diffusion_fsdp
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl.workers.config.FSDPDiffusersActorConfig
+
+# Training strategy: fsdp
+strategy: fsdp
+
+# Number of rollouts per update
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# Split each sample into sub-batches of this size for PPO
+ppo_mini_batch_size: 256
+
+# Local per-GPU micro batch size for gradient accumulation
+ppo_micro_batch_size_per_gpu: null
+
+# PPO clip ratio (FlowGRPO-style; tighter than default 0.2)
+clip_ratio: 0.0001
+
+# Maximum value to clamp advantages before computing policy loss
+adv_clip_max: 5.0
+
+# policy loss config
+policy_loss:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.PolicyLossConfig
+
+  # Loss function mode for diffusion: vanilla (overridden to flow_grpo in examples)
+  loss_mode: "vanilla"
+
+# Whether to use KL loss
+use_kl_loss: false
+
+# KL loss coefficient when use_kl_loss is enabled
+kl_loss_coef: 0.001
+
+# Loss aggregation mode: token-mean, seq-mean-token-sum, etc.
+loss_agg_mode: token-mean
+
+# Number of PPO epochs per batch
+ppo_epochs: 1
+
+# Shuffle training data across PPO epochs
+shuffle: false
+
+# The seed used to construct mini-batch
+data_loader_seed: 42
+
+# checkpoint configs
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.trainer.config.CheckpointConfig
+
+  # What to include in saved checkpoints
+  save_contents: ['model', 'optimizer', 'extra']
+
+  # For more flexibility, you can specify the contents to load from the checkpoint.
+  load_contents: ${.save_contents}
+
+  # Whether to save checkpoints asynchronously.
+  async_save: False
+
+  # Mbridge config extension.
+  mbridge_config: {}
+
+# optimizer configs
+optim:
+
+  # Learning rate
+  lr: 1e-6
+
+  # Warmup steps ratio
+  lr_warmup_steps_ratio: 0.0
+
+  # Total training steps
+  total_training_steps: -1
+
+  # Weight decay
+  weight_decay: 0.01
+
+  # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
+  lr_warmup_steps: -1
+
+# Gradient clipping for actor updates
+grad_clip: 1.0

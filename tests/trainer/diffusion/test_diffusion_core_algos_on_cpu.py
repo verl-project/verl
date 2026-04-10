@@ -45,7 +45,7 @@ def test_compute_policy_loss_flow_grpo() -> None:
     from hydra import compose, initialize_config_dir
 
     from verl.utils.config import omega_conf_to_dataclass
-    from verl.workers.config.actor import FSDPActorConfig
+    from verl.workers.config.diffusion_actor import FSDPDiffusersActorConfig
 
     batch_size = 8
     steps = 10
@@ -56,15 +56,15 @@ def test_compute_policy_loss_flow_grpo() -> None:
 
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor"), version_base=None):
         cfg = compose(
-            config_name="dp_actor",
+            config_name="diffusion_dp_actor",
             overrides=[
                 "strategy=fsdp",
                 "clip_ratio=0.0001",
-                "clip_ratio_high=5.0",
+                "adv_clip_max=5.0",
                 "ppo_micro_batch_size_per_gpu=8",
             ],
         )
-    actor_config: FSDPActorConfig = omega_conf_to_dataclass(cfg)
+    actor_config: FSDPDiffusersActorConfig = omega_conf_to_dataclass(cfg)
 
     for step in range(steps):
         pg_loss, pg_metrics = diffusion_algos.compute_policy_loss_flow_grpo(

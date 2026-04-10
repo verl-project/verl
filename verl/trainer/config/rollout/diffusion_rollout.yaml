@@ -4,15 +4,125 @@
 # 3. Inline comments (after a field on the same line) are not allowed.
 # 4. Indentation level is respected for nested fields.
 
-# Hydra defaults: compose base rollout then apply overrides from this file
-defaults:
-
-  - rollout
-
-  - _self_
+# Standalone diffusion rollout config (does NOT inherit from rollout.yaml).
+# Only includes fields relevant to diffusion model training.
 
 # Target class for this configuration
 _target_: verl.workers.config.DiffusionRolloutConfig
+
+# actor_rollout_ref.rollout.name: vllm_omni. The default value will be removed in the future
+name: ???
+
+# Rollout mode. Only async is supported.
+mode: async
+
+# Number of nodes for standalone rollout server, must be > 0 in one-step-off/fully async training.
+nnodes: 0
+
+# Number of GPUs per node for rollout server.
+n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
+
+# Number of samples per prompt
+n: 1
+
+# Rollout model parameters type.
+dtype: bfloat16
+
+# Fraction of GPU memory used by the inference engine.
+gpu_memory_utilization: 0.5
+
+# Whether to disable CUDA graph. Default False for best performance.
+enforce_eager: False
+
+# Whether to free engine cache after generation.
+free_cache_engine: True
+
+# TP size for rollout
+tensor_model_parallel_size: 2
+
+# DP size for rollout
+data_parallel_size: 1
+
+# max number of tokens in a batch
+max_num_batched_tokens: 8192
+
+# max length for rollout
+max_model_len: null
+
+# max number of sequences
+max_num_seqs: 1024
+
+# Which loader to use for rollout model weights: dummy, safetensors, etc.
+load_format: dummy
+
+# for huge model, layered summon can save memory (prevent OOM) but make it slower
+layered_summon: False
+
+# Do not sample from text tokenizer
+skip_tokenizer_init: True
+
+# Disable inferring engine stats logging
+disable_log_stats: True
+
+# Whether to sample (required by some inference engines)
+do_sample: True
+
+# Whether to compute log probs during rollout
+calculate_log_probs: False
+
+# The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
+log_prob_micro_batch_size_per_gpu: null
+
+# Extra inference engine arguments
+engine_kwargs:
+
+  # vLLM-Omni engine options for diffusion rollout (empty dict uses defaults)
+  vllm_omni: {}
+
+# Agent loop config for diffusion rollout
+agent:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.AgentLoopConfig
+
+  # Number of parallel agent workers
+  num_workers: 8
+
+  # Default agent loop for diffusion model
+  default_agent_loop: single_turn_agent
+
+# Checkpoint Engine config for update weights from trainer to rollout
+checkpoint_engine:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.CheckpointEngineConfig
+
+  # Backend for checkpoint engine
+  backend: naive
+
+  # Bucket size in MB to transfer multiple weights at one time
+  update_weights_bucket_megabytes: 2048
+
+  # Additional keyword arguments for checkpoint engine
+  engine_kwargs: {}
+
+# Sampling parameters used during validation (diffusion-specific).
+val_kwargs:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.DiffusionSamplingConfig
+
+  # whether to repeat n times for validation
+  n: 1
+
+  # number of inference steps for diffusion model validation
+  num_inference_steps: 40
+
+  # random seed for validation
+  seed: 42
+
+  # extra configs for validation
+  extra_configs: {}
 
 # image height for diffusion model rollout
 height: 512
@@ -27,27 +137,3 @@ num_inference_steps: 10
 # Model-specific diffusion sampling params (e.g. true_cfg_scale, guidance_scale,
 # max_sequence_length, noise_level)
 extra_configs: {}
-
-# Extra inference engine arguments: add vllm_omni for diffusion
-engine_kwargs:
-
-  # vLLM-Omni engine options for diffusion rollout (empty dict uses defaults)
-  vllm_omni: {}
-
-# Sampling parameters used during validation (diffusion-specific).
-val_kwargs:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.DiffusionSamplingConfig
-
-  # whether to repeat n times for validation
-  n: 1
-
-  # number of inference steps for diffusion model rollout
-  num_inference_steps: 40
-
-  # random seed for validation
-  seed: 42
-
-  # extra configs for algorithm specific features during validation.
-  extra_configs: {}

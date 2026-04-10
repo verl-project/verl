@@ -23,6 +23,7 @@ from omegaconf import DictConfig
 
 from verl.trainer.ppo.core_algos import register_adv_est, register_policy_loss
 from verl.workers.config import ActorConfig
+from verl.workers.config.diffusion_actor import DiffusionActorConfig
 
 
 class DiffusionAdvantageEstimator(str, Enum):
@@ -145,11 +146,11 @@ def compute_policy_loss_flow_grpo(
             Not used currently.
     """
     assert config is not None
-    assert isinstance(config, ActorConfig)
+    assert isinstance(config, DiffusionActorConfig)
     advantages = torch.clamp(
         advantages,
-        -config.clip_ratio_high,
-        config.clip_ratio_high,
+        -config.adv_clip_max,
+        config.adv_clip_max,
     )
     log_ratio = log_prob - old_log_prob
     ratio = torch.exp(log_ratio)

@@ -22,7 +22,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
-from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.config import ActorConfig, CriticConfig, DiffusionActorConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
 
@@ -177,7 +177,7 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     return vf_loss, metrics
 
 
-def diffusion_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
     """Compute loss for diffusion model"""
     log_prob = model_output["log_probs"]
 

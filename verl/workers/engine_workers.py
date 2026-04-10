@@ -44,6 +44,7 @@ from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.workers.config import (
     ActorConfig,
+    DiffusionModelConfig,
     DistillationConfig,
     HFModelConfig,
     MtpConfig,
@@ -492,19 +493,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
+        model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
+        is_diffusion = model_config.get("model_type", "language_model") == "diffusion_model"
 
         # 1. build reference model
         if "ref" in self.role:
             # TODO: align ref config with actor config
             with open_dict(self.config.ref):
                 self.config.ref.ppo_mini_batch_size = self.config.actor.ppo_mini_batch_size
-                self.config.ref.ppo_micro_batch_size = self.config.ref.pop("log_prob_micro_batch_size", None)
+                if not is_diffusion:
+                    self.config.ref.ppo_micro_batch_size = self.config.ref.pop("log_prob_micro_batch_size", None)
                 self.config.ref.ppo_micro_batch_size_per_gpu = self.config.ref.pop(
                     "log_prob_micro_batch_size_per_gpu", None
                 )
-                self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
-                self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
+                if not is_diffusion:
+                    self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
+                    self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop(
+                        "log_prob_max_token_len_per_gpu", None
+                    )
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
 
             # The ref model does not need to enable MTP; force it to false.
@@ -521,8 +527,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # assign engine configs
-            ref_training_config.engine_config.use_dynamic_bsz = self.config.ref.use_dynamic_bsz
-            ref_training_config.engine_config.infer_max_token_len_per_gpu = self.config.ref.ppo_max_token_len_per_gpu
+            if not is_diffusion:
+                ref_training_config.engine_config.use_dynamic_bsz = self.config.ref.use_dynamic_bsz
+                ref_training_config.engine_config.infer_max_token_len_per_gpu = (
+                    self.config.ref.ppo_max_token_len_per_gpu
+                )
             ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
                 self.config.ref.ppo_micro_batch_size_per_gpu
             )
@@ -548,28 +557,39 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 checkpoint_config=actor_config.checkpoint,
             )
 
-            assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
-
-            # assign engine configs
-            actor_training_config.engine_config.use_dynamic_bsz = self.config.actor.use_dynamic_bsz
-            actor_training_config.engine_config.infer_max_token_len_per_gpu = (
-                self.config.rollout.log_prob_max_token_len_per_gpu
-            )
-            actor_training_config.engine_config.infer_micro_batch_size_per_gpu = (
-                self.config.rollout.log_prob_micro_batch_size_per_gpu
-            )
-            actor_training_config.engine_config.max_token_len_per_gpu = self.config.actor.ppo_max_token_len_per_gpu
-            actor_training_config.engine_config.micro_batch_size_per_gpu = (
-                self.config.actor.ppo_micro_batch_size_per_gpu
-            )
-            actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
-
-            if self.config.actor.use_dynamic_bsz:
-                assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
-                assert self.config.actor.ppo_max_token_len_per_gpu is not None
+            if is_diffusion:
+                # Diffusion models don't use dynamic batching or token packing.
+                # Only micro_batch_size_per_gpu is needed.
+                actor_training_config.engine_config.micro_batch_size_per_gpu = (
+                    self.config.actor.ppo_micro_batch_size_per_gpu
+                )
             else:
-                assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
-                assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
+                actor_use_dynamic_bsz = self.config.actor.get("use_dynamic_bsz", False)
+                rollout_log_prob_use_dynamic_bsz = self.config.rollout.get("log_prob_use_dynamic_bsz", False)
+                assert actor_use_dynamic_bsz == rollout_log_prob_use_dynamic_bsz
+
+                # assign engine configs
+                actor_training_config.engine_config.use_dynamic_bsz = actor_use_dynamic_bsz
+                actor_training_config.engine_config.infer_max_token_len_per_gpu = self.config.rollout.get(
+                    "log_prob_max_token_len_per_gpu", None
+                )
+                actor_training_config.engine_config.infer_micro_batch_size_per_gpu = self.config.rollout.get(
+                    "log_prob_micro_batch_size_per_gpu", None
+                )
+                actor_training_config.engine_config.max_token_len_per_gpu = self.config.actor.get(
+                    "ppo_max_token_len_per_gpu", None
+                )
+                actor_training_config.engine_config.micro_batch_size_per_gpu = (
+                    self.config.actor.ppo_micro_batch_size_per_gpu
+                )
+                actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
+
+                if actor_use_dynamic_bsz:
+                    assert self.config.rollout.get("log_prob_max_token_len_per_gpu") is not None
+                    assert self.config.actor.get("ppo_max_token_len_per_gpu") is not None
+                else:
+                    assert self.config.rollout.get("log_prob_micro_batch_size_per_gpu") is not None
+                    assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
             if self.distillation_enabled:
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
