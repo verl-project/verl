@@ -187,7 +187,8 @@ class TRTLLMHttpServer:
             **engine_kwargs,
         }
         if self.config.enable_sleep_mode:
-            from tensorrt_llm.llmapi.llm_args import SleepConfig, ExecutorMemoryType
+            from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType, SleepConfig
+
             llm_kwargs["sleep_config"] = SleepConfig(
                 restore_modes={
                     ExecutorMemoryType.MODEL_WEIGHTS_MAIN: "NONE",
