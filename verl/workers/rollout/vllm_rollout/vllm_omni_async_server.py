@@ -132,7 +132,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     async def generate(
         self,
-        prompt_ids: list[int],
+        prompt_token_ids: list[int],
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
@@ -143,7 +143,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         lora_scale: float = 1.0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
-        prompt_ids = normalize_token_ids(prompt_ids)
+        prompt_token_ids = normalize_token_ids(prompt_token_ids)
         default_params_list = self.engine.default_sampling_params_list
 
         multi_modal_data = {}
@@ -161,14 +161,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        # Build OmniCustomPrompt with pre-tokenized IDs.
-        # Multi-stage pipelines (e.g. BAGEL) route through vLLM's input
-        # processor which requires "prompt_token_ids" and "modalities".
-        # Single-stage (e.g. Qwen-Image) reads "prompt_ids" directly.
+        # Build OmniCustomPrompt with pre-tokenized IDs
+        custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_token_ids}
         if len(default_params_list) > 1:
-            custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids, "modalities": ["image"]}
-        else:
-            custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
+            custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
         if multi_modal_data:

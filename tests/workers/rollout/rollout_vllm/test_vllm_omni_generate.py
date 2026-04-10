@@ -149,7 +149,7 @@ def init_server():
 def test_generate(init_server):
     """generate() returns a valid DiffusionOutput with CHW image in [0, 1]."""
     server = init_server
-    prompt_ids = _tokenize_prompt(
+    prompt_token_ids = _tokenize_prompt(
         "a beautiful sunset over the ocean with vibrant orange and purple clouds "
         "reflecting on the calm water surface near a rocky coastline"
     )
@@ -157,7 +157,7 @@ def test_generate(init_server):
     request_id = f"test_{uuid4().hex[:8]}"
     output = ray.get(
         server.generate.remote(
-            prompt_ids=prompt_ids,
+            prompt_token_ids=prompt_token_ids,
             sampling_params={
                 "num_inference_steps": 10,
                 "true_cfg_scale": 4.0,
@@ -184,7 +184,7 @@ def test_generate(init_server):
 def test_generate_with_logprobs(init_server):
     """generate() with logprobs=True returns non-empty log_probs (tensor or sequence)."""
     server = init_server
-    prompt_ids = _tokenize_prompt(
+    prompt_token_ids = _tokenize_prompt(
         "a futuristic city at night with neon lights glowing on tall glass "
         "skyscrapers and flying vehicles soaring between the buildings"
     )
@@ -192,7 +192,7 @@ def test_generate_with_logprobs(init_server):
     request_id = f"test_lp_{uuid4().hex[:8]}"
     output = ray.get(
         server.generate.remote(
-            prompt_ids=prompt_ids,
+            prompt_token_ids=prompt_token_ids,
             sampling_params={
                 "num_inference_steps": 10,
                 "true_cfg_scale": 4.0,
@@ -241,7 +241,7 @@ def test_generate_concurrent(init_server):
     for i in range(n_requests):
         rid = f"concurrent_{i}_{uuid4().hex[:8]}"
         ref = server.generate.remote(
-            prompt_ids=_tokenize_prompt(prompts[i]),
+            prompt_token_ids=_tokenize_prompt(prompts[i]),
             sampling_params={
                 "num_inference_steps": 10,
                 "true_cfg_scale": 4.0,

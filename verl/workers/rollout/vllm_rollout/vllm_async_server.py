@@ -438,7 +438,7 @@ class vLLMHttpServer:
 
     async def generate(
         self,
-        prompt_ids: list[int],
+        prompt_token_ids: list[int],
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
@@ -446,14 +446,14 @@ class vLLMHttpServer:
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
-        prompt_ids = normalize_token_ids(prompt_ids)
+        prompt_token_ids = normalize_token_ids(prompt_token_ids)
 
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound
-        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+        max_possible_tokens = self.config.max_model_len - len(prompt_token_ids)
         if max_possible_tokens < 0:
             raise ValueError(
-                f"Prompt length ({len(prompt_ids)}) exceeds the model's maximum context length "
+                f"Prompt length ({len(prompt_token_ids)}) exceeds the model's maximum context length "
                 f"({self.config.max_model_len})."
             )
 
@@ -468,7 +468,8 @@ class vLLMHttpServer:
             # Cap max_tokens by response_length to ensure tensor alignment,
             # and by remaining budget to prevent OOM in multi-turn rollouts.
             max_tokens = min(
-                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
+                self.config.response_length,
+                self.config.prompt_length + self.config.response_length - len(prompt_token_ids),
             )
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
@@ -480,14 +481,14 @@ class vLLMHttpServer:
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+        prompt_token_ids = qwen2_5_vl_dedup_image_tokens(prompt_token_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
         if video_data is not None:
             multi_modal_data["video"] = video_data
 
-        prompt = TokensPrompt(prompt_token_ids=prompt_ids, multi_modal_data=multi_modal_data)
+        prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, multi_modal_data=multi_modal_data)
 
         # Add lora request
         lora_request = None
