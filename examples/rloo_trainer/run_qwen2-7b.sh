@@ -45,12 +45,13 @@ common_params=(
 
 if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
     common_params+=(
-        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
+        actor_rollout_ref.actor.ppo_mini_batch_size=128
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=40
         actor_rollout_ref.actor.fsdp_config.param_offload=True
         actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
         actor_rollout_ref.actor.fsdp_config.entropy_from_logits_with_chunking=True
-        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
-        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=80
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=80
         trainer.n_gpus_per_node=16
     )
 fi
