@@ -427,13 +427,23 @@ class SGLangHttpServer:
             generate_request.lora_path = SGLANG_LORA_NAME
 
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
-        finish_reason = output["meta_info"]["finish_reason"]
+        meta_info = output.get("meta_info", {})
+        finish_reason = meta_info.get("finish_reason")
         finish_reason = finish_reason["type"] if finish_reason else None
         if return_logprob:
-            output_token_logprobs = output["meta_info"]["output_token_logprobs"]
-            log_probs, token_ids = zip(
-                *[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs], strict=True
-            )
+            token_ids = list(output.get("output_ids", []))
+            output_token_logprobs = meta_info.get("output_token_logprobs") or []
+            if output_token_logprobs and len(output_token_logprobs) == len(token_ids):
+                log_probs = [float(log_prob) for log_prob, _, _ in output_token_logprobs]
+            else:
+                # SGLang may return mismatched lengths (e.g. max_new_tokens=0
+                # produces a phantom logprob entry with empty output_ids), or
+                # an abort may leave an empty logprob payload.
+                assert not token_ids, (
+                    f"output_token_logprobs length ({len(output_token_logprobs)}) != "
+                    f"output_ids length ({len(token_ids)}) for request {request_id}"
+                )
+                log_probs = []
         else:
             token_ids = output["output_ids"]
             log_probs = None

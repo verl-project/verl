@@ -15,7 +15,10 @@
 import logging
 from typing import Any, Iterable
 
+import numpy as np
+import tensordict
 import torch
+from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
@@ -392,7 +395,7 @@ def get_tensordict(tensor_dict: dict[str, torch.Tensor | list], non_tensor_dict:
                 )
             continue
 
-        if isinstance(val, list):
+        if isinstance(val, list | np.ndarray):
             for v in val:
                 assert not isinstance(v, torch.Tensor), (
                     "Passing a list makes the data NonTensorStack, "
@@ -401,7 +404,9 @@ def get_tensordict(tensor_dict: dict[str, torch.Tensor | list], non_tensor_dict:
             # Convert to NonTensorStack to handle nested structures
             tensor_dict[key] = NonTensorStack.from_list([NonTensorData(item) for item in val])
 
-        assert isinstance(val, torch.Tensor | list), f"{key} -> {type(val)} isn't of 'torch.Tensor | list' type"
+        assert isinstance(val, torch.Tensor | list | np.ndarray), (
+            f"{key} -> {type(val)} isn't of 'torch.Tensor | list | np.ndarray' type"
+        )
 
         if batch_size is None:
             batch_size = val.size(0) if isinstance(val, torch.Tensor) else len(val)
@@ -911,3 +916,38 @@ def maybe_fix_3d_position_ids(data: TensorDict):
                 values = values.contiguous().view(batch_num, inferred_rope_dim, seq_len).transpose(0, 1).flatten(1)
 
             data["position_ids"] = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets, jagged_dim=2)
+
+
+def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
+    """
+    Create a TensorDict from a list of dict of tensors and non_tensors.
+    Note that this requires tensordict version at least 0.10
+    """
+    assert parse_version(tensordict.__version__) >= parse_version("0.10"), (
+        "Storing non-tensor data in TensorDict at least requires tensordict version 0.10"
+    )
+
+    assert len(list_of_dicts) > 0
+
+    keys = list_of_dicts[0].keys()
+    dict_of_lists = {key: [d[key] for d in list_of_dicts] for key in keys}
+    batch_size = len(list_of_dicts)
+
+    final_data = {
+        key: (
+            torch.stack(val_list)
+            if val_list
+            and all(isinstance(item, torch.Tensor) for item in val_list)
+            and all(item.shape == val_list[0].shape for item in val_list)
+            else (
+                torch.nested.as_nested_tensor(val_list, layout=torch.jagged)
+                if val_list and all(isinstance(item, torch.Tensor) for item in val_list)
+                else NonTensorStack(*val_list)
+            )
+        )
+        for key, val_list in dict_of_lists.items()
+    }
+
+    td = TensorDict(final_data, batch_size=[batch_size])
+
+    return td
