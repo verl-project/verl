@@ -142,9 +142,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         reward_min = torch.min(non_aborted_sequence_reward).detach().item()
     else:
         logger.warning("All samples are aborted, returning default reward metrics")
-        reward_mean = float("nan")
-        reward_max = float("nan")
-        reward_min = float("nan")
+        reward_mean = reward_max = reward_min = float("nan")
 
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
