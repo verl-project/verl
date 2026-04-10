@@ -313,6 +313,7 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
     """
     # TODO: move to the top
     from verl.single_controller.base.decorator import _check_dispatch_mode
+    from verl.utils.profiler.performance import log_transfer_end
 
     _check_dispatch_mode(dispatch_mode)
 
@@ -336,6 +337,8 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
                 logger.info(
                     f"Task {func.__name__} (pid={pid}) is getting len_samples={batch_meta.size}, cost time: {t2 - t1}"
                 )
+
+                log_transfer_end()
 
                 output = func(*args, **kwargs)
 
@@ -372,6 +375,8 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
                 logger.info(
                     f"Task {func.__name__} (pid={pid}) is getting len_samples={batch_meta.size}, cost time: {t2 - t1}"
                 )
+
+                log_transfer_end()
 
                 output = await func(*args, **kwargs)
 

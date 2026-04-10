@@ -41,6 +41,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import simple_timer
+from verl.utils.profiler.performance import log_transfer_end
 from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
@@ -544,6 +545,7 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        log_transfer_end()
         config = self.rollout_config
         sampling_params = dict(
             temperature=config.temperature,

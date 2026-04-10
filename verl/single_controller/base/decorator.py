@@ -203,6 +203,7 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
     import os
 
     from verl.single_controller.base.worker_group import WorkerGroup
+    from verl.utils.profiler.performance import log_transfer_end
     from verl.utils.ray_utils import parallel_put
 
     assert isinstance(worker_group, WorkerGroup)
@@ -211,6 +212,11 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
 
     args = [parallel_put(arg, max_workers=max_workers) for arg in args]
     kwargs = {k: parallel_put(v, max_workers=max_workers) for k, v in kwargs.items()}
+
+    # When TransferQueue is enabled, this logs the dispatch time of (KV)BatchMeta.
+    # It will not cause inaccurate metric calculation because we use the maximum transfer end time,
+    # which is recorded by the `tqbridge` decorator.
+    log_transfer_end()
 
     all_args = []
     for arg in args:
@@ -293,7 +299,7 @@ def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
 
     # a boolean of whether the dp_rank is used for collect
     collect_mask = worker_group._collect_info[mesh_name]
-    # perform dispatch
+    # perform collect
     return collect_nd_compute_dataproto(collect_mask, worker_group, *args, **kwargs)
 
 

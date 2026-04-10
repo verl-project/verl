@@ -85,6 +85,7 @@ from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
+from verl.utils.profiler.performance import flush_transfer_time, log_transfer_end, log_transfer_start
 from verl.utils.py_functional import rename_dict
 from verl.utils.ray_utils import auto_await
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -275,6 +276,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
+        log_transfer_end()
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
         config = self.config.actor_rollout_ref.rollout
@@ -951,6 +953,7 @@ class PPOTrainer:
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
+        _ = flush_transfer_time()  # Ignore the transfer time metrics during validation
         return metric_dict
 
     def _start_profiling(self) -> None:
@@ -1364,6 +1367,8 @@ class PPOTrainer:
                 tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
                 self.replay_buffer.remove(batch.partition_id, batch.keys)
 
+                metrics.update(flush_transfer_time())
+
                 self.logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
                 self.global_steps += 1
@@ -1377,6 +1382,7 @@ class PPOTrainer:
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         batch = tu.get_tensordict(batch_dict)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        log_transfer_start(task_name="generate_sequences")
         self.async_rollout_manager.generate_sequences(batch)
 
         # 2. sample batch from replay buffer
@@ -1395,16 +1401,19 @@ class PPOTrainer:
 
         # 5. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
+            log_transfer_start(task_name="compute_old_log_prob")
             batch = self._compute_old_log_prob(batch, metrics=metrics)
 
         # 6. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):
+                log_transfer_start(task_name="compute_ref_log_prob")
                 batch = self._compute_ref_log_prob(batch, metrics=metrics)
 
         # 7. [OPTIONAL] compute critic values
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
+                log_transfer_start(task_name="compute_values")
                 batch = self._compute_values(batch, metrics=metrics)
 
         # 8. compute advantage and return
@@ -1414,11 +1423,13 @@ class PPOTrainer:
         # 9. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
+                log_transfer_start(task_name="update_critic")
                 batch = self._update_critic(batch, metrics=metrics)
 
         # 10. update actor
         if self.config.trainer.critic_warmup <= self.global_steps:
             with marked_timer("update_actor", timing_raw, color="red"):
+                log_transfer_start(task_name="update_actor")
                 batch = self._update_actor(batch, metrics=metrics)
 
         return batch
