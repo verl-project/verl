@@ -110,8 +110,9 @@ class ToolAgentLoop(AgentLoopBase):
         self.tool_parser = ToolParser.get_tool_parser(self.rollout_config.multi_turn.format, self.tokenizer)
         self.tool_parser_name = self.rollout_config.multi_turn.format
 
-        self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
+        self.truncation = self.config.data.truncation
+        self.prompt_length = self.config.data.max_prompt_length
 
         # Initialize interactions from config file
         self.interaction_config_file = self.rollout_config.multi_turn.interaction_config_path
@@ -208,6 +209,19 @@ class ToolAgentLoop(AgentLoopBase):
             images=agent_data.image_data,
             videos=agent_data.video_data,
         )
+
+        if len(prompt_ids) > self.prompt_length:
+            if self.truncation == "left":
+                prompt_ids = prompt_ids[-self.prompt_length :]
+            elif self.truncation == "right":
+                prompt_ids = prompt_ids[: self.prompt_length]
+            elif self.truncation == "middle":
+                left_half = self.prompt_length // 2
+                right_half = self.prompt_length - left_half
+                prompt_ids = prompt_ids[:left_half] + prompt_ids[-right_half:]
+            elif self.truncation == "error":
+                raise RuntimeError(f"Prompt length {len(prompt_ids)} is longer than {self.max_prompt_length}.")
+
         agent_data.prompt_ids = prompt_ids
         return AgentState.GENERATING
 
