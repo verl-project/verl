@@ -185,7 +185,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     if use_critic:
         values = batch.batch["values"]
         valid_values = torch.masked_select(values, response_mask)
-        if valid_returns.numel() > 0:
+        if valid_returns.numel() > 0 and valid_values.numel() > 0:
             return_diff_var = torch.var(valid_returns - valid_values)
             return_var = torch.var(valid_returns)
             critic_value_metrics = {
@@ -197,7 +197,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
                 "critic/vf_explained_var": (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
             }
         else:
-            logger.warning("Response mask is all False, returning default return metrics")
+            logger.warning("Response mask is all False, returning default value metrics")
             critic_value_metrics = {
                 "critic/values/mean": float("nan"),
                 "critic/values/max": float("nan"),
