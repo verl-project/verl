@@ -43,10 +43,13 @@ from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
+    KEY_FILTER_ZERO_ADV_CONFIG,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
+    filter_zero_adv_batch,
+    maybe_add_corrected_mfu,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
@@ -1557,6 +1560,26 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
+                    # Filter zero-advantage responses to skip wasted actor compute.
+                    # Responses in all-same-reward groups have advantage≈0 and contribute no policy gradient.
+                    # Keep the unfiltered batch for critic update and metrics; use filtered batch for actor.
+                    actor_batch = batch
+                    if self.config.algorithm.filter_zero_adv.enable:
+                        fza_config = self.config.algorithm.filter_zero_adv
+                        if fza_config.match_loss_curve and fza_config.match_mini_batch_data_split:
+                            # Split-then-filter: send full batch to actor, filter within each mini-batch.
+                            # This preserves baseline's mini-batch data assignment for exact convergence match.
+                            pass
+                        else:
+                            dp_size = self._get_dp_size(self.actor_rollout_wg, "actor")
+                            actor_batch, filter_metrics = filter_zero_adv_batch(
+                                batch,
+                                dp_size,
+                                ppo_mini_batch_size=self.config.actor_rollout_ref.actor.ppo_mini_batch_size,
+                            )
+                            metrics.update(filter_metrics)
+                        actor_batch.meta_info[KEY_FILTER_ZERO_ADV_CONFIG] = fza_config
+
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1571,7 +1594,7 @@ class RayPPOTrainer:
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            actor_output = self._update_actor(batch)
+                            actor_output = self._update_actor(actor_batch)
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(
@@ -1600,6 +1623,7 @@ class RayPPOTrainer:
                             self.checkpoint_manager.update_weights(self.global_steps)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                        maybe_add_corrected_mfu(actor_output_metrics, actor_batch.meta_info)
                         metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled

@@ -26,6 +26,135 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.utils.import_utils import deprecated
 
+KEY_ADVANTAGES = "advantages"
+KEY_ATTENTION_MASK = "attention_mask"
+KEY_FILTER_ZERO_ADV_CONFIG = "filter_zero_adv_config"
+KEY_NUM_SEQS_CORRECTION_FACTOR = "batch_num_seqs_correction_factor"
+KEY_NUM_TOKENS_CORRECTION_FACTOR = "batch_num_tokens_correction_factor"
+KEY_ORIGINAL_BATCH_SIZE_PER_DP_GROUP = "original_batch_size_per_dp_group"
+KEY_RESPONSE_MASK = "response_mask"
+
+
+ZERO_ADV_EPS = 1e-8
+
+
+def ceildiv(a: int, b: int) -> int:
+    return -(-a // b)
+
+
+def maybe_add_corrected_mfu(metrics: dict, meta_info: dict) -> None:
+    """Add corrected MFU metric when filter_zero_adv is active.
+
+    When filter_zero_adv is active, perf/mfu/actor is inflated: the FLOPS
+    numerator still reflects the original (unfiltered) token count while
+    time is reduced from processing fewer samples.  This adds
+    perf/mfu/actor_corrected, which scales MFU by
+    (filtered_tokens / original_tokens) to match the actual tokens
+    processed, roughly matching baseline MFU.
+    """
+    token_correction = meta_info.get(KEY_NUM_TOKENS_CORRECTION_FACTOR, None)
+    if token_correction is not None:
+        metrics["perf/mfu/actor_corrected"] = metrics["perf/mfu/actor"] * token_correction
+
+
+def _select_shortest(batch: DataProto, indices: torch.Tensor, k: int) -> list[int]:
+    """Select the k shortest samples by attention_mask length from the given indices."""
+    seq_lens = batch.batch[KEY_ATTENTION_MASK][indices].sum(dim=-1)
+    _, topk_idx = seq_lens.topk(k, largest=False)
+    return indices[topk_idx].tolist()
+
+
+def filter_zero_adv_batch(batch: DataProto, dp_size: int, ppo_mini_batch_size: int = 0) -> tuple[DataProto, dict]:
+    """Filter out zero-advantage responses to skip wasted actor compute.
+
+    Responses in all-same-reward groups have advantage≈0 and contribute no policy gradient.
+    Pads with shortest zero-adv samples to ensure divisibility by the alignment unit.
+
+    When ppo_mini_batch_size > 0, pads to dp_size * K (K = original mini-batch count)
+    so sequences distribute evenly across DP groups and mini-batches. Otherwise
+    pads to dp_size only.
+
+    When all samples have zero advantage, keeps alignment-unit shortest samples so the
+    optimizer/LR-scheduler still steps (gradients will be ~0).
+
+    Args:
+        batch: Full training batch with "advantages", "response_mask", "attention_mask".
+        dp_size: Data parallel size for alignment.
+        ppo_mini_batch_size: Mini-batch size for K computation. 0 = pad to dp_size only.
+
+    Returns:
+        (filtered_batch, metrics): filtered_batch always has ≥ dp_size samples.
+    """
+    response_mask = batch.batch[KEY_RESPONSE_MASK]
+    max_abs_adv = (batch.batch[KEY_ADVANTAGES].abs() * response_mask).max(dim=-1).values
+    num_total = max_abs_adv.numel()
+    bs_per_dp = ceildiv(num_total, dp_size)
+
+    _nonzero_mask = max_abs_adv >= ZERO_ADV_EPS
+    nonzero_indices = torch.where(_nonzero_mask)[0].tolist()
+    num_nonzero = len(nonzero_indices)
+
+    zero_idx_tensor = torch.where(~_nonzero_mask)[0]
+    num_zeros = zero_idx_tensor.numel()
+
+    # Alignment unit: dp_size * K when distributing evenly across mini-batches,
+    # otherwise dp_size only. Capped by num_nonzero to ensure each mini-batch
+    # gets at least one nonzero sample per DP group.
+    if ppo_mini_batch_size > 0:
+        k_original = ceildiv(bs_per_dp, ppo_mini_batch_size)
+        align_opt_steps = min(k_original, max(1, ceildiv(num_nonzero, dp_size)))
+    else:
+        align_opt_steps = 1
+    align = dp_size * align_opt_steps
+
+    original_num_tokens = response_mask.sum().item()
+    if original_num_tokens == 0:
+        # Empty batch: skip filtering.
+        selected = None
+    elif num_nonzero == 0:
+        # All zero-adv: keep align shortest for LR schedule continuity (~0 gradient).
+        selected = _select_shortest(batch, zero_idx_tensor, align)
+    else:
+        num_pad = (-num_nonzero) % align
+        if num_zeros <= num_pad:
+            # Not enough zero-adv samples to align — skip filtering, use full batch.
+            selected = None
+        elif num_pad > 0:
+            selected = nonzero_indices + _select_shortest(batch, zero_idx_tensor, num_pad)
+        else:
+            selected = nonzero_indices
+
+    if selected is None:
+        num_selected = num_total
+        filtered_batch = batch
+    else:
+        num_selected = len(selected)
+        assert num_selected != num_total, f"Filtering was a no-op but selected is not None: {num_selected=}"
+
+        filtered_batch = batch[selected]
+        filtered_batch.meta_info.update(
+            {
+                KEY_ORIGINAL_BATCH_SIZE_PER_DP_GROUP: bs_per_dp,  # per-GPU (matches ppo_mini_batch_size)
+                # Loss normalization corrections: agg_loss divides by local token/seq count,
+                # but we need to normalize by the original (pre-filter) counts so the
+                # gradient magnitude matches the unfiltered baseline.
+                KEY_NUM_TOKENS_CORRECTION_FACTOR: (
+                    filtered_batch.batch[KEY_RESPONSE_MASK].sum().item() / original_num_tokens
+                ),
+                KEY_NUM_SEQS_CORRECTION_FACTOR: num_selected / num_total,
+            }
+        )
+    num_padded = num_selected - num_nonzero
+
+    metrics = {
+        "actor/filter_zero_adv/num_nonzero": num_nonzero,
+        "actor/filter_zero_adv/num_padded": num_padded,
+        "actor/filter_zero_adv/num_kept": num_selected,
+        "actor/filter_zero_adv/num_total": num_total,
+        "actor/filter_zero_adv/kept_ratio": num_selected / num_total if num_total > 0 else 0.0,
+    }
+    return filtered_batch, metrics
+
 
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
@@ -105,13 +234,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
 
-    advantages = batch.batch["advantages"]
+    advantages = batch.batch[KEY_ADVANTAGES]
     returns = batch.batch["returns"]
 
     max_response_length = batch.batch["responses"].shape[-1]
 
     prompt_mask = batch.batch["attention_mask"][:, :-max_response_length].bool()
-    response_mask = batch.batch["response_mask"].bool()
+    response_mask = batch.batch[KEY_RESPONSE_MASK].bool()
 
     max_prompt_length = prompt_mask.size(-1)
 
@@ -136,6 +265,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
 
+    # Per-response zero-advantage ratio: responses whose advantage is zero contribute no policy gradient.
+    max_abs_adv = (advantages.abs() * response_mask).max(dim=-1).values  # (bs,)
+    num_zero_adv = (max_abs_adv < ZERO_ADV_EPS).sum().item()
+    num_responses = max_abs_adv.numel()
     if use_critic:
         values = batch.batch["values"]
         valid_values = torch.masked_select(values, response_mask)
@@ -170,6 +303,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/advantages/mean": torch.mean(valid_adv).detach().item(),
         "critic/advantages/max": torch.max(valid_adv).detach().item(),
         "critic/advantages/min": torch.min(valid_adv).detach().item(),
+        "critic/advantages/zero_adv_count": num_zero_adv,
+        "critic/advantages/zero_adv_ratio": num_zero_adv / num_responses if num_responses > 0 else 0.0,
         # returns
         "critic/returns/mean": torch.mean(valid_returns).detach().item(),
         "critic/returns/max": torch.max(valid_returns).detach().item(),
@@ -344,7 +479,7 @@ def compute_variance_proxy_metrics(batch: DataProto, gradient_norm: float = None
         # Note: IS weight statistics and mismatch metrics are logged in ray_trainer.py
 
     # Get scalar advantages (mean over timesteps)
-    advantages = batch.batch["advantages"]
+    advantages = batch.batch[KEY_ADVANTAGES]
     # Compute mean advantage per trajectory using masked_mean
     advantages_scalar = verl_F.masked_mean(advantages, response_mask, axis=-1)
 

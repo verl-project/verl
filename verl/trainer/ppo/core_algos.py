@@ -47,6 +47,11 @@ PolicyLossFn = Callable[
     tuple[torch.Tensor, dict[str, Any]],
 ]
 
+LOSS_AGG_SEQ_MEAN_TOKEN_MEAN = "seq-mean-token-mean"
+LOSS_AGG_SEQ_MEAN_TOKEN_SUM = "seq-mean-token-sum"
+LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM = "seq-mean-token-sum-norm"
+LOSS_AGG_TOKEN_MEAN = "token-mean"
+
 POLICY_LOSS_REGISTRY: dict[str, PolicyLossFn] = {}
 
 
@@ -1165,13 +1170,13 @@ def agg_loss(
         loss: `a scalar torch.Tensor`
             aggregated loss
     """
-    if loss_agg_mode == "token-mean":
+    if loss_agg_mode == LOSS_AGG_TOKEN_MEAN:
         if batch_num_tokens is None:
             if dp_size > 1:
                 raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
-    elif loss_agg_mode in ["seq-mean-token-sum", "seq-mean-token-sum-norm"]:
+    elif loss_agg_mode in (LOSS_AGG_SEQ_MEAN_TOKEN_SUM, LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM):
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
@@ -1179,12 +1184,12 @@ def agg_loss(
                 raise ValueError("global_batch_size is required when dp_size > 1")
             global_batch_size = seq_mask.sum()
         loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
-        if loss_agg_mode == "seq-mean-token-sum-norm":
+        if loss_agg_mode == LOSS_AGG_SEQ_MEAN_TOKEN_SUM_NORM:
             if loss_scale_factor is None:
                 horizon = loss_mask.shape[-1]
                 loss_scale_factor = horizon
             loss /= loss_scale_factor
-    elif loss_agg_mode == "seq-mean-token-mean":
+    elif loss_agg_mode == LOSS_AGG_SEQ_MEAN_TOKEN_MEAN:
         seq_mask = torch.sum(loss_mask, dim=-1)  # per-sequence token count
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
         seq_mask = (seq_mask > 0).float()  # exclude fully masked sequences

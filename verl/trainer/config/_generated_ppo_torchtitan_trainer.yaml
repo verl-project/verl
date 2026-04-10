@@ -699,6 +699,10 @@ algorithm:
     kl_coef: 0.001
     horizon: 10000
     target_kl: 0.1
+  filter_zero_adv:
+    enable: false
+    match_loss_curve: true
+    match_mini_batch_data_split: true
   use_pf_ppo: false
   pf_ppo:
     reweight_method: pow

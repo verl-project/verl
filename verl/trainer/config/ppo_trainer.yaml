@@ -97,6 +97,20 @@ algorithm:
     # Target KL divergence (used for adaptive controller)
     target_kl: 0.1
 
+  # Skip zero-advantage responses in actor update to save compute.
+  # Responses in all-same-reward groups contribute no policy gradient.
+  filter_zero_adv:
+
+    # Whether to enable filtering
+    enable: False
+
+    # Whether to add ghost optimizer.step() to match baseline convergence curve
+    match_loss_curve: True
+
+    # Whether to preserve baseline's mini-batch data assignment (split-then-filter).
+    # Only effective when match_loss_curve is True. No-op when match_loss_curve is False.
+    match_mini_batch_data_split: True
+
   # Whether to enable preference feedback PPO
   use_pf_ppo: False
 
