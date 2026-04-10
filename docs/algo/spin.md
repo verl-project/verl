@@ -97,7 +97,7 @@ The following steps outline how to set up the environment and run the SPIN recip
     ```bash
     # Clone the verl repository and checkout the spin branch
     cd ~
-    git clone git@github.com:volcengine/verl.git && cd verl
+    git clone git@github.com:verl-project/verl.git && cd verl
 
     # Install flash-attn (handle potential build issues)
     python3 -m uv pip install wheel packaging

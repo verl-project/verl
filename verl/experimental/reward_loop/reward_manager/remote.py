@@ -42,7 +42,7 @@ class RemoteRewardManager(RewardManagerBase):
     """
     The reward manager.
     Some errors exist when using default thread pool to compute reward score, e.g., math-verify.
-    https://github.com/volcengine/verl/issues/3407
+    https://github.com/verl-project/verl/issues/3407
     To avoid the above issues, we use a separate process to compute reward score.
     Moreover, process may be more suitable for cpu-intensive requests.
     """

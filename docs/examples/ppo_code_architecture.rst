@@ -7,8 +7,8 @@ Let's start with the Proximal Policy Optimization algorithm, which is
 most widely used algorithm in LLM post-training.
 
 The main entry point of the PPO algorithm example is:
-`main_ppo.py <https://github.com/volcengine/verl/blob/main/verl/trainer/main_ppo.py>`_.
-In this tutorial, we will go through the code architecture in `main_ppo.py <https://github.com/volcengine/verl/blob/main/verl/trainer/main_ppo.py>`_.
+`main_ppo.py <https://github.com/verl-project/verl/blob/main/verl/trainer/main_ppo.py>`_.
+In this tutorial, we will go through the code architecture in `main_ppo.py <https://github.com/verl-project/verl/blob/main/verl/trainer/main_ppo.py>`_.
 
 Define the data
 ---------------
@@ -21,7 +21,7 @@ For ``RLHFDataset`` (Default), at least 1 fields are required:
 - ``prompt``: Contains the string prompt
 
 We already provide some examples of processing the datasets to parquet
-files in `data_preprocess directory <https://github.com/volcengine/verl/blob/main/examples/data_preprocess>`_. Currently, we support
+files in `data_preprocess directory <https://github.com/verl-project/verl/blob/main/examples/data_preprocess>`_. Currently, we support
 preprocess of GSM8k, MATH, Hellasage, Full_hh_rlhf datasets. See :doc:`../preparation/prepare_data` for
 more information.
 
@@ -32,8 +32,8 @@ In this main entry point, the users only need to define their own reward
 function based on the datasets (or applications) utilized in PPO
 training.
 
-For example, we already provide reward functions for `GSM8k <https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/gsm8k.py>`_ 
-and `MATH <https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/math.py>`_
+For example, we already provide reward functions for `GSM8k <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/gsm8k.py>`_ 
+and `MATH <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/math.py>`_
 datasets in the ``_select_rm_score_fn``. In the ``RewardManager``, we
 will compute the reward score based on the data_source to select
 corresponding reward functions. For some RLHF datasets (e.g.,
@@ -41,7 +41,7 @@ full_hh_rlhf), the reward model is utilized to assess the responses
 without any reward functions. In this case, the ``RewardManager`` will
 return the ``rm_score`` computed by the reward model directly.
 
-See `reward functions <https://github.com/volcengine/verl/blob/main/verl/utils/reward_score>`_ for detailed implementation.
+See `reward functions <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score>`_ for detailed implementation.
 
 Define worker classes
 ---------------------
@@ -85,7 +85,7 @@ Step 1: Construct the mapping between roles and workers
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A role represents a group of workers in the same process. We have
-pre-defined several roles in `ray_trainer.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/ray_trainer.py#L38>`_.
+pre-defined several roles in `ray_trainer.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py#L38>`_.
 
 .. code:: python
 
@@ -111,8 +111,8 @@ Step 2: Define the worker class corresponding to this role
   ``Critic``, ``Reward Model`` and ``Reference model`` on two different
   backend: PyTorch FSDP
   and Megatron-LM.
-  See `FSDP Workers <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py>`_ 
-  and `Megatron-LM Workers <https://github.com/volcengine/verl/blob/main/verl/workers/megatron_workers.py>`_
+  See `FSDP Workers <https://github.com/verl-project/verl/blob/main/verl/workers/fsdp_workers.py>`_ 
+  and `Megatron-LM Workers <https://github.com/verl-project/verl/blob/main/verl/workers/megatron_workers.py>`_
   for more information.
 
 Step 3: Define resource pool id and resource pool spec
@@ -161,8 +161,8 @@ whether it's a model-based RM or a function-based RM
   - Note that the pre-defined ``RewardModelWorker`` only supports models
     with the structure of huggingface
     ``AutoModelForSequenceClassification``. If it's not this model, you
-    need to define your own RewardModelWorker in `FSDP Workers <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py>`_ 
-    and `Megatron-LM Workers <https://github.com/volcengine/verl/blob/main/verl/workers/megatron_workers.py>`_.
+    need to define your own RewardModelWorker in `FSDP Workers <https://github.com/verl-project/verl/blob/main/verl/workers/fsdp_workers.py>`_ 
+    and `Megatron-LM Workers <https://github.com/verl-project/verl/blob/main/verl/workers/megatron_workers.py>`_.
 
 - If it's a function-based RM, the users are required to classified the
   reward function for each datasets.
@@ -177,7 +177,7 @@ whether it's a model-based RM or a function-based RM
        else:
            raise NotImplementedError
 
-See reward functions implemented in `directory <https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/>`_ 
+See reward functions implemented in `directory <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/>`_ 
 for more information.
 
 Define, init and run the PPO Trainer

@@ -1,4 +1,3 @@
-# # Tests layout
 
 # Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
 # - `tests/trainer` for testing functionality related to `verl/trainer`
