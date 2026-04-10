@@ -97,20 +97,18 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     async def run_server(self, args: argparse.Namespace):
-        engine_args = asdict(OmniEngineArgs.from_cli_args(args))
-
-        # Inject vllm_omni-specific args not covered by CLI
-        vllm_omni_kwargs = self.config.engine_kwargs.get("vllm_omni", {})
-
-        stage_configs_path = vllm_omni_kwargs.get("stage_configs_path")
-        if stage_configs_path is not None:
-            engine_args["stage_configs_path"] = stage_configs_path
+        engine_args = OmniEngineArgs.from_cli_args(args)
+        engine_args = asdict(engine_args)
 
         # TODO (mike): read custom_pipeline from CLI
-        custom_pipeline = vllm_omni_kwargs.get("custom_pipeline")
+        vllm_omni_kwargs = self.config.engine_kwargs.get("vllm_omni", {})
+        custom_pipeline = vllm_omni_kwargs.get("custom_pipeline", None)
         if custom_pipeline is not None:
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": custom_pipeline}
+        stage_configs_path = vllm_omni_kwargs.get("stage_configs_path")
+        if stage_configs_path is not None:
+            engine_args["stage_configs_path"] = stage_configs_path
 
         # TODO (mike): support parsing engine config from CLI
         engine_client = AsyncOmni(**engine_args)
@@ -146,7 +144,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
-        default_params_list = getattr(self.engine, "default_sampling_params_list", [])
+        default_params_list = self.engine.default_sampling_params_list
 
         multi_modal_data = {}
         if image_data is not None:
@@ -191,11 +189,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
 
         # Build sampling params list: multi-stage models use defaults for non-diffusion stages
-        if len(default_params_list) > 1:
-            sampling_params_list = list(default_params_list)
-            sampling_params_list[-1] = diffusion_sampling_params
-        else:
-            sampling_params_list = [diffusion_sampling_params]
+        sampling_params_list = default_params_list[:-1] + [diffusion_sampling_params]
 
         # Call AsyncOmni.generate() with the correct API
         generator = self.engine.generate(
