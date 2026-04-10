@@ -91,7 +91,7 @@ def compute_flow_grpo_outcome_advantage(
             id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
+                id2mean[idx] = id2score[idx][0]
                 if global_std:
                     id2std[idx] = batch_std
                 else:
