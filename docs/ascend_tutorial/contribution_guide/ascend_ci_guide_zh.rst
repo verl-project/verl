@@ -46,7 +46,7 @@ NPU 相关的工作流主要包括：
 
 **Note**
 
-   {HOME}是root
+   ${HOME}是root
 
    gpu用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s /root/.cache/models ~/models``
 

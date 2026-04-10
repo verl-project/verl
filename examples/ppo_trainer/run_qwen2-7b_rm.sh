@@ -51,8 +51,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.path="$HOME/models/Qwen2-7B-Instruct" \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=32 \
-    critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.fsdp.param_offload=False \
+    critic.fsdp.optimizer_offload=False \
     reward.num_workers=8 \
     reward.reward_model.enable=True \
     reward.reward_model.model_path="$HOME/models/FsfairX-LLaMA3-RM-v0.1" \

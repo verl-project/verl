@@ -313,5 +313,50 @@ def test_grpo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+def test_compute_policy_loss_flow_grpo() -> None:
+    """Test flow-GRPO policy loss computation."""
+
+    # prepare input
+    batch_size = 8
+    steps = 10
+    rollout_log_probs = torch.randn((batch_size, steps), dtype=torch.float32)
+    current_log_probs = torch.randn((batch_size, steps), dtype=torch.float32)
+    advantages = torch.randn((batch_size, steps), dtype=torch.float32)
+    response_mask = torch.ones((batch_size, steps), dtype=torch.int32)
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    from verl.trainer.ppo.diffusion_algos import compute_policy_loss_flow_grpo
+    from verl.utils.config import omega_conf_to_dataclass
+    from verl.workers.config.actor import FSDPActorConfig
+
+    with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+        cfg = compose(
+            config_name="dp_actor",
+            overrides=[
+                "strategy=fsdp",
+                "clip_ratio=0.0001",
+                "clip_ratio_high=5.0",
+                "ppo_micro_batch_size_per_gpu=8",
+            ],
+        )
+    actor_config: FSDPActorConfig = omega_conf_to_dataclass(cfg)
+
+    for step in range(steps):
+        pg_loss, pg_metrics = compute_policy_loss_flow_grpo(
+            old_log_prob=rollout_log_probs[:, step],
+            log_prob=current_log_probs[:, step],
+            advantages=advantages[:, step],
+            response_mask=response_mask[:, step],
+            loss_agg_mode="token-mean",
+            config=actor_config,
+        )
+
+        assert pg_loss.shape == ()
+        assert isinstance(pg_loss.item(), float)
+        assert "actor/ppo_kl" in pg_metrics.keys()
+
+
 if __name__ == "__main__":
     unittest.main()

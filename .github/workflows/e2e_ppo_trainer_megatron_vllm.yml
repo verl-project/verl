@@ -87,7 +87,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm017.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -147,7 +147,7 @@ jobs:
           rm -rf checkpoints
           pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@6259ae8 --no-deps --no-build-isolation
           pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@7ca9dc5 --no-deps --no-build-isolation
-          pip3 install "nvidia-modelopt[torch]>=0.37.0" transformers==4.57.1
+          pip3 install "nvidia-modelopt[torch]>=0.37.0"
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge LoRA e2e to pre-load and save (Deepseek)
         run: |
           ray stop --force
@@ -185,16 +185,15 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      # FIXME(@wuxibin): mbridge/megatron-bridge critic model hang with PP=2
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (Qwen3) testing learning rate scheduler
         run: |
           ray stop --force
-          COMMON_PP=1 COMMON_VPP=null ALL_OFFLOAD=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          ALL_OFFLOAD=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with FP8 rollout
         run: |
           ray stop --force
           export VLLM_USE_V1=1
-          COMMON_PP=1 COMMON_VPP=null ROLLOUT_QUANTIZATION=fp8 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          ROLLOUT_QUANTIZATION=fp8 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: clean up
         run: |
           rm -rf checkpoints

@@ -46,9 +46,9 @@ forward_max_token_len_per_gpu=${FWD_MAX_TOKEN_LEN:-4800}
 train_traj_micro_bsz_per_gpu=${MICRO_BSZ:-2} # b
 n_resp_per_prompt=4 # g
 
-train_traj_micro_bsz=$((train_traj_micro_bsz_per_gpu * NUM_GPUS)) # b * n
+train_traj_micro_bsz=$((train_traj_micro_bsz_per_gpu * 1)) # b * n
 train_traj_mini_bsz=$((train_traj_micro_bsz * 2)) # 2 * b * n
-train_prompt_mini_bsz=$((train_traj_mini_bsz * n_resp_per_prompt)) # 2 * b * n / g
+train_prompt_mini_bsz=$((train_traj_mini_bsz * 2)) # 2 * b * n / g
 train_prompt_bsz=$((train_prompt_mini_bsz * 2)) # 4 * b * n / g
 
 LORA_RANK=${LORA_RANK:-0}
@@ -91,7 +91,7 @@ CRITIC_TP=${CRITIC_TP:-$TRAIN_TP}
 CRITIC_EP=${CRITIC_EP:-$COMMON_EP}
 CRITIC_ETP=${CRITIC_ETP:-$COMMON_ETP}
 
-ALL_OFFLOAD=${ALL_OFFLOAD:-False}
+ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 COMMON_PARAM_OFFLOAD=${COMMON_PARAM_OFFLOAD:-$ALL_OFFLOAD}
 COMMON_GRAD_OFFLOAD=${COMMON_GRAD_OFFLOAD:-$ALL_OFFLOAD}
 COMMON_OPTIMIZER_OFFLOAD=${COMMON_OPTIMIZER_OFFLOAD:-$ALL_OFFLOAD}
@@ -148,7 +148,6 @@ PROFILE_RANKS_ALL=${PROFILE_RANKS_ALL:-True}
 PROFILE_RANKS=${PROFILE_RANKS:-[0,1,2,3]}
 DISCRETE=${DISCRETE:-True}  # or True
 
-USE_LEGACY_WORKER_IMPL=${USE_LEGACY_WORKER_IMPL:-"enable"}
 USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-False}
 ROUTING_REPLAY_MODE=${ROUTING_REPLAY_MODE:-"disabled"}
 
@@ -277,7 +276,6 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.total_epochs=2 \
     trainer.total_training_steps="${TOTAL_TRAIN_STEPS}" \
-    trainer.use_legacy_worker_impl=${USE_LEGACY_WORKER_IMPL} \
     global_profiler.profile_continuous_steps=True \
     global_profiler.tool=nsys \
     global_profiler.steps=$PROFILE_STEPS \

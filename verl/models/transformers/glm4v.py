@@ -301,9 +301,16 @@ def glm4v_attn_forward(
 
     # Because the input can be padded, the absolute sequence length depends on the max position id.
     cos, sin = position_embeddings
-    query_states, key_states = apply_multimodal_rotary_pos_emb(
-        query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
-    )
+    if getattr(self, "rope_scaling", None) is not None:
+        # for transformers < 5.0.0
+        mrope_section = self.rope_scaling.get("mrope_section", None)
+    else:
+        # for transformers >= 5.0.0, only rope_parameters present in the config
+        assert getattr(self, "rope_parameter", None) is not None, (
+            "Either rope_scaling or rope_parameter should be defined in the config for GLM4V."
+        )
+        mrope_section = self.rope_parameter.get("mrope_section", None)
+    query_states, key_states = apply_multimodal_rotary_pos_emb(query_states, key_states, cos, sin, mrope_section)
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
     dropout_rate = 0.0 if not self.training else self.attention_dropout
@@ -382,7 +389,7 @@ def _get_input_embeds(
         pixel_values = torch.zeros((16, 1176), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
         image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
         image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
-        inputs_embeds += 0.0 * image_embeds.mean()
+        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)

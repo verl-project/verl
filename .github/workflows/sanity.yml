@@ -76,33 +76,11 @@ jobs:
           pip3 install -r requirements.txt
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+      # Most sanity checks now run via pre-commit (see .pre-commit-config.yaml
+      # and .github/workflows/pre-commit.yml). Only checks that need the full
+      # verl installation or CI-only context remain here.
       - name: Run sanity test
         run: |
           pytest -s -x tests/special_sanity
-      - name: Run license test
-        run: |
-          python3 tests/special_sanity/check_license.py --directories .
-      - name: Assert naming convention
-        run: |
-          if grep -rIn --exclude-dir=.git --exclude-dir=.github --exclude-dir=venv --exclude-dir=__pycache__ 'veRL' .; then
-            echo "Please use verl instead of veRL in the codebase"
-            exit 1
-          fi
-      - name: Assert SGLang naming convention
-        run: |
-          if grep -rIn --exclude-dir=.git --exclude-dir=.github --exclude-dir=venv --exclude-dir=__pycache__ --exclude=ascend_sglang_best_practices.rst -E 'Sglang|sgLang|sglAng|sglaNg|sglanG' .; then
-            echo "Please use SGLang or sglang as the formal name of SGLang rollout engine"
-            exit 1
-          fi
-      - name: Validate test folder structure
-        run: python3 tests/special_sanity/validate_structure.py
       - name: Assert documentation requirement for functions
         run: python3 tests/special_sanity/validate_imported_docs.py
-      - name: Assert device api usage in verl/verl
-        run: python3 tests/special_sanity/check_device_api_usage.py --directory ./verl
-      - name: Assert documentation time info
-        run: python3 tests/special_sanity/check_docs_time_info.py
-      - name: Check docstrings for specified files
-        run: python3 tests/special_sanity/check_docstrings.py
-      - name: Check DataProto for specified folders
-        run: python3 tests/special_sanity/check_dataproto_usage.py -d ./verl/workers/engine

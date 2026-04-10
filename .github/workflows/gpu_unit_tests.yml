@@ -52,6 +52,7 @@ on:
       - "**/*.py"
       # Other entrypoints
       - "!examples/**"
+      - "!tests/special_sanity/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
       # Entrypoints

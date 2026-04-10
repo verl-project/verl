@@ -1,0 +1,18 @@
+# mindspeed actor config, inheriting from trainer/config/actor/actor.yaml
+defaults:
+  - ../optim@optim: megatron
+
+  - ../engine@mindspeed:
+      - megatron
+      - mindspeed
+
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.MindSpeedActorConfig
+
+strategy: mindspeed
+
+load_weight: True

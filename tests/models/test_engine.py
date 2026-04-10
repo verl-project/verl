@@ -33,6 +33,12 @@ from transformers import (
     Qwen3MoeConfig,
 )
 
+try:
+    from transformers.core_model_loading import revert_weight_conversion
+except ImportError:
+    revert_weight_conversion = None
+    pass
+
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.trainer.config import CheckpointConfig
@@ -331,7 +337,7 @@ def test_critic_engine(strategy):
     # update again
     # create critic config
     critic_config = CriticConfig(
-        strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1, model_config=config.model_config
+        strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1, model=config.model_config
     )
     value_loss_ = partial(value_loss, config=critic_config)
     wg.set_loss_fn(value_loss_)
@@ -410,7 +416,10 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
     # get per tensor parameter
     per_tensor_params, _ = engine.get_per_tensor_param()
 
-    ref_state_dict = ref_model.state_dict()
+    if strategy == "megatron" and revert_weight_conversion is not None:
+        ref_state_dict = revert_weight_conversion(ref_model, ref_model.state_dict())
+    else:
+        ref_state_dict = ref_model.state_dict()
 
     # load ground truth and compare
     for key, value in per_tensor_params:

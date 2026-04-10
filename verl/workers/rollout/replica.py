@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional
 
 import ray
 from omegaconf import DictConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorHandle
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
@@ -52,9 +52,11 @@ class TokenOutput(BaseModel):
 
 
 class DiffusionOutput(BaseModel):
-    diffusion_output: list[list[list[float]]] | list[list[list[list[float]]]]
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    diffusion_output: Any
     """generated image tensor (CHW format) / video tensor (TCHW format)"""
-    log_probs: Optional[list[float]] = None
+    log_probs: Optional[Any] = None
     """logprobs of generated image/video"""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
@@ -325,7 +327,10 @@ def _load_vllm():
 
 
 def _load_vllm_omni():
-    from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
+    try:
+        from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
+    except ImportError as err:
+        raise ImportError("vllm-omni rollout requires vllm-omni to be installed.") from err
 
     return vLLMOmniReplica
 

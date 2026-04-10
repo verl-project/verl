@@ -15,12 +15,26 @@ import base64
 import inspect
 from typing import Optional
 
-from tensorrt_llm import serialization
-from tensorrt_llm._ray_utils import control_action_decorator
-from tensorrt_llm._torch.modules.fused_moe.moe_load_balancer import MoeLoadBalancer
-from tensorrt_llm._torch.utils import get_device_uuid
-from tensorrt_llm.llmapi.rlhf_utils import WorkerExtension as TrtllmWorkerExtension
-from tensorrt_llm.logger import logger
+# Defer tensorrt_llm imports to avoid FlashInfer's check_cuda_arch() crash
+# when this module is loaded on CPU-only Ray actors. The module is normally
+# loaded only on GPU workers via string path in trtllm_async_server.py, but
+# guard defensively in case of transitive imports.
+try:
+    from tensorrt_llm import serialization
+    from tensorrt_llm._ray_utils import control_action_decorator
+    from tensorrt_llm._torch.modules.fused_moe.moe_load_balancer import MoeLoadBalancer
+    from tensorrt_llm._torch.utils import get_device_uuid
+    from tensorrt_llm.llmapi.rlhf_utils import WorkerExtension as TrtllmWorkerExtension
+    from tensorrt_llm.logger import logger
+except (ImportError, RuntimeError):
+    # On CPU actors without CUDA, these imports may fail.
+    # The class below won't be usable, but the module can be imported safely.
+    serialization = None
+    control_action_decorator = lambda f: f  # noqa: E731 — identity fallback
+    MoeLoadBalancer = None
+    get_device_uuid = None
+    TrtllmWorkerExtension = object
+    logger = None
 
 
 class WorkerExtension(TrtllmWorkerExtension):

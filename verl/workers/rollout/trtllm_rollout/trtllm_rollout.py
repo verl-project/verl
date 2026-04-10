@@ -29,6 +29,12 @@ import pynvml
 import ray
 import torch
 import torch.distributed as dist
+
+try:
+    from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType
+except (ImportError, RuntimeError):
+    # RuntimeError: FlashInfer's check_cuda_arch() crashes on CPU-only actors
+    ExecutorMemoryType = None
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.multiprocessing.reductions import reduce_tensor
 
@@ -260,16 +266,23 @@ class AsyncTRTLLMHttpAdapter:
 
 
 class ServerAdapter(BaseRollout):
-    _WEIGHTS_TAGS = [
-        "sampler",
-        "drafter",
-        "guided_decoder",
-        "spec_resource_manager",
-        "model_extra",
-        "executor_extra",
-        "model",
-        "draft_model",
-    ]
+    # All releasable/resumable weight tags: every ExecutorMemoryType except kv_cache
+    # (handled separately) and internal tags prefixed with "_".
+    # Fallback to hard-coded list for trtllm versions that don't export ExecutorMemoryType.
+    _WEIGHTS_TAGS = (
+        [t.value for t in ExecutorMemoryType if t is not ExecutorMemoryType.KV_CACHE and not t.value.startswith("_")]
+        if ExecutorMemoryType is not None
+        else [
+            "sampler",
+            "drafter",
+            "guided_decoder",
+            "spec_resource_manager",
+            "model_extra",
+            "executor_extra",
+            "model",
+            "draft_model",
+        ]
+    )
 
     @staticmethod
     def get_full_tags() -> list[str]:

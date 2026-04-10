@@ -72,7 +72,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm017.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -108,7 +108,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --upgrade "transformers<5.0"
       #      - name: Download Model to Use
       #        run: |
       #          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct
@@ -122,7 +121,7 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
-          ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
+          ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop -m "not vllm_omni"
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
@@ -145,7 +144,6 @@ jobs:
           pip3 install pytest-asyncio
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --upgrade "transformers<5.0"
           pip3 install cupy-cuda12x==13.6.0
       - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
         run: |
