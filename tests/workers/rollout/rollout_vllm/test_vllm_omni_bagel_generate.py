@@ -38,11 +38,7 @@ from safetensors.torch import save_file
 from verl.workers.rollout.replica import DiffusionOutput, RolloutMode
 from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
-MODEL = os.environ.get("BAGEL_MODEL", "ByteDance-Seed/BAGEL-7B-MoT")
-PIPELINE_CLASS = os.environ.get(
-    "BAGEL_PIPELINE_CLASS",
-    "examples.flowgrpo_trainer.vllm_omni.pipeline_bagel.BagelPipelineWithLogProb",
-)
+MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/BAGEL-7B-MoT"))
 STAGE_CONFIG = os.environ.get("BAGEL_STAGE_CONFIG", "")  # TODO: Point to the location on the CI server by default
 
 DEFAULT_PROMPT = (
@@ -61,7 +57,7 @@ def _tokenize_prompt(text: str) -> list[int]:
 
     from verl.utils.tokenizer import normalize_token_ids
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     token_ids = normalize_token_ids(tokenizer.encode(text))
     return token_ids
 
@@ -107,7 +103,7 @@ def init_server():
             "num_inference_steps": 10,
             "engine_kwargs": {
                 "vllm_omni": {
-                    "custom_pipeline": PIPELINE_CLASS,
+                    "custom_pipeline": "examples.flowgrpo_trainer.vllm_omni.pipeline_bagel.BagelPipelineWithLogProb",
                     "stage_configs_path": STAGE_CONFIG,
                 }
             },
@@ -117,7 +113,7 @@ def init_server():
     model_cfg = OmegaConf.create(
         {
             "_target_": "verl.workers.config.DiffusionModelConfig",
-            "path": MODEL,
+            "path": MODEL_PATH,
             "architecture": "OmniBagelForConditionalGeneration",
             "trust_remote_code": True,
             "load_tokenizer": False,
@@ -259,10 +255,10 @@ def test_generate_concurrent(init_server):
 #                     👇 LoRA helpers 👇
 # ---------------------------------------------------------------------
 
-# BAGEL GQA: hidden_size=3584, 28 Q heads, 4 KV heads, head_dim=128
-# QKV packed dim = 28*128 + 4*128 + 4*128 = 4608
-_LORA_DIM = 3584
-_LORA_QKV_DIM = 4608
+# Tiny BAGEL: hidden_size=64, 2 Q heads, 2 KV heads, head_dim=32
+# QKV packed dim = (2+2+2)*32 = 192
+_LORA_DIM = 64
+_LORA_QKV_DIM = 192
 _LORA_MODULE = "bagel.language_model.model.layers.0.self_attn.qkv_proj"
 _LORA_RANK = 4
 
