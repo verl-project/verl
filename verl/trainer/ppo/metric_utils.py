@@ -163,18 +163,6 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         logger.warning("Response mask is all False, returning default return metrics")
         returns_mean = returns_max = returns_min = float("nan")
 
-    if use_critic:
-        values = batch.batch["values"]
-        if valid_returns.numel() > 0:
-            valid_values = torch.masked_select(values, response_mask)
-            return_diff_var = torch.var(valid_returns - valid_values)
-            return_var = torch.var(valid_returns)
-        else:
-            logger.warning("Response mask is all False, returning default return metrics")
-            valid_values = torch.empty(0, device=values.device)
-            return_diff_var = torch.tensor(float("nan"), device=values.device)
-            return_var = torch.tensor(float("nan"), device=values.device)
-
     # Aborted samples and non-aborted response length statistics
     # response_length_non_aborted/*: statistics computed on non-aborted samples only
     aborted_ratio = torch.mean(aborted_mask.float()).detach().item()
@@ -195,7 +183,11 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         non_aborted_response_length_clip_ratio = float("nan")
 
     if use_critic:
+        values = batch.batch["values"]
+        valid_values = torch.masked_select(values, response_mask)
         if valid_returns.numel() > 0:
+            return_diff_var = torch.var(valid_returns - valid_values)
+            return_var = torch.var(valid_returns)
             critic_value_metrics = {
                 # values
                 "critic/values/mean": torch.mean(valid_values).detach().item(),
@@ -205,6 +197,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
                 "critic/vf_explained_var": (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
             }
         else:
+            logger.warning("Response mask is all False, returning default return metrics")
             critic_value_metrics = {
                 "critic/values/mean": float("nan"),
                 "critic/values/max": float("nan"),
@@ -212,7 +205,6 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
                 # vf explained var
                 "critic/vf_explained_var": float("nan"),
             }
-            logger.warning("Response mask is all False, returning default return metrics")
     else:
         critic_value_metrics = {}
 
