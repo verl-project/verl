@@ -245,7 +245,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         # Extract prompt data from OmniCustomPrompt in req.prompts[0]
         custom_prompt = req.prompts[0] if req.prompts else {}
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
+            prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
@@ -398,12 +398,16 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         return DiffusionOutput(
             output=_maybe_to_cpu(image),
             custom_output={
-                "all_latents": _maybe_to_cpu(all_latents),
-                "all_log_probs": _maybe_to_cpu(all_log_probs),
-                "all_timesteps": _maybe_to_cpu(all_timesteps),
-                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+                "all_latents": _maybe_to_cpu(all_latents[0]),
+                "all_log_probs": _maybe_to_cpu(all_log_probs[0]) if all_log_probs is not None else None,
+                "all_timesteps": _maybe_to_cpu(all_timesteps[0]),
+                "prompt_embeds": _maybe_to_cpu(prompt_embeds[0]),
+                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask[0]) if prompt_embeds_mask is not None else None,
+                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds[0])
+                if negative_prompt_embeds is not None
+                else None,
+                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask[0])
+                if negative_prompt_embeds_mask is not None
+                else None,
             },
         )

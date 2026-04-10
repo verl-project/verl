@@ -97,27 +97,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     async def run_server(self, args: argparse.Namespace):
-        vllm_omni_kwargs = self.config.engine_kwargs.get("vllm_omni", {})
-        stage_configs_path = vllm_omni_kwargs.get("stage_configs_path")
+        engine_args = asdict(OmniEngineArgs.from_cli_args(args))
 
+        # Inject vllm_omni-specific args not covered by CLI
+        vllm_omni_kwargs = self.config.engine_kwargs.get("vllm_omni", {})
+
+        stage_configs_path = vllm_omni_kwargs.get("stage_configs_path")
         if stage_configs_path is not None:
-            # Multi-stage (e.g. BAGEL): per-stage engine args live in the YAML.
-            engine_args = {
-                "stage_configs_path": stage_configs_path,
-                "worker_extension_cls": self._get_worker_extension_cls(),
-            }
-        else:
-            # Single-stage (Qwen-Image): CLI args path.
-            engine_args = asdict(OmniEngineArgs.from_cli_args(args))
+            engine_args["stage_configs_path"] = stage_configs_path
 
         # TODO (mike): read custom_pipeline from CLI
         custom_pipeline = vllm_omni_kwargs.get("custom_pipeline")
         if custom_pipeline is not None:
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": custom_pipeline}
-
-        if stage_configs_path is not None:
-            engine_args["model"] = self.model_config.path
 
         # TODO (mike): support parsing engine config from CLI
         engine_client = AsyncOmni(**engine_args)
@@ -154,7 +147,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
         default_params_list = getattr(self.engine, "default_sampling_params_list", [])
-        is_multi_stage = len(default_params_list) > 1
 
         multi_modal_data = {}
         if image_data is not None:
@@ -162,30 +154,27 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if video_data is not None:
             multi_modal_data["video"] = video_data
 
-        # Add lora request (caller-supplied lora_request takes precedence)
+        # Add lora request (caller-supplied takes precedence over lora_as_adapter)
         if lora_request is None and self.lora_as_adapter:
-            # For multi-stage, only the diffusion stage (last) has LoRA.
-            # Target it specifically to avoid errors on the LLM stage.
-            if is_multi_stage:
-                diffusion_stage_id = len(default_params_list) - 1
-                results = await self.engine.collective_rpc("list_loras", stage_ids=[diffusion_stage_id])
-                loaded_ids = results[0]
-            else:
-                loaded_ids = await self.engine.list_loras()
-            lora_loaded = VLLM_LORA_INT_ID in loaded_ids
+            # Make sure we also check that the lora is already loaded in the engine
+            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
                 lora_request = LoRARequest(
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        # Build OmniCustomPrompt with pre-tokenized IDs
-        custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
+        # Build OmniCustomPrompt with pre-tokenized IDs.
+        # Multi-stage pipelines (e.g. BAGEL) route through vLLM's input
+        # processor which requires "prompt_token_ids" and "modalities".
+        # Single-stage (e.g. Qwen-Image) reads "prompt_ids" directly.
+        if len(default_params_list) > 1:
+            custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids, "modalities": ["image"]}
+        else:
+            custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
         if multi_modal_data:
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
-        if is_multi_stage:
-            custom_prompt["modalities"] = ["image"]
 
         # Build OmniDiffusionSamplingParams from the incoming dict
         sampling_kwargs: dict[str, Any] = {}
@@ -202,8 +191,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
 
         # Build sampling params list: multi-stage models use defaults for non-diffusion stages
-        if is_multi_stage:
-            # Multi-stage (e.g. BAGEL): use defaults for earlier stages, override diffusion stage
+        if len(default_params_list) > 1:
             sampling_params_list = list(default_params_list)
             sampling_params_list[-1] = diffusion_sampling_params
         else:
@@ -227,33 +215,18 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # Extract extra data from custom_output (populated by DiffusionEngine)
         mm_output = final_res.custom_output or {}
 
-        # Single-stage pipelines (Qwen-Image) batch outputs with a leading batch
-        # dim that should be stripped. Multi-stage (BAGEL) returns un-batched tensors.
-        def _unbatch(v):
-            if v is None or is_multi_stage:
-                return v
-            return v[0]
-
         if sampling_params.get("logprobs", False):
-            all_log_probs = mm_output.get("all_log_probs")
-            log_probs = _unbatch(all_log_probs)
+            log_probs = mm_output.get("all_log_probs")
         else:
             log_probs = None
 
-        all_latents = mm_output.get("all_latents")
-        all_timesteps = mm_output.get("all_timesteps")
-        prompt_embeds = mm_output.get("prompt_embeds")
-        prompt_embeds_mask = mm_output.get("prompt_embeds_mask")
-        negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
-        negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
-
         extra_fields = {
-            "all_latents": _unbatch(all_latents),
-            "all_timesteps": _unbatch(all_timesteps),
-            "prompt_embeds": _unbatch(prompt_embeds),
-            "prompt_embeds_mask": _unbatch(prompt_embeds_mask),
-            "negative_prompt_embeds": _unbatch(negative_prompt_embeds),
-            "negative_prompt_embeds_mask": _unbatch(negative_prompt_embeds_mask),
+            "all_latents": mm_output.get("all_latents"),
+            "all_timesteps": mm_output.get("all_timesteps"),
+            "prompt_embeds": mm_output.get("prompt_embeds"),
+            "prompt_embeds_mask": mm_output.get("prompt_embeds_mask"),
+            "negative_prompt_embeds": mm_output.get("negative_prompt_embeds"),
+            "negative_prompt_embeds_mask": mm_output.get("negative_prompt_embeds_mask"),
             "global_steps": self.global_steps,
         }
 
