@@ -1035,6 +1035,8 @@ class PPOTrainer:
         input_ids = prompts.repeat(2)
         attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
         response_mask = torch.zeros_like(prompts)
+        position_ids = self._build_padding_position_ids(template_sample.get("position_ids"), attention_mask)
+        routed_experts = self._build_padding_routed_experts(template_sample.get("routed_experts"), input_ids.size(0))
 
         # Update the fields and remove redundant parts
         template_sample.update(
@@ -1042,19 +1044,50 @@ class PPOTrainer:
             responses=prompts.clone(),
             input_ids=input_ids,
             attention_mask=attention_mask,
-            position_ids=compute_position_id_with_mask(attention_mask.unsqueeze(0)).squeeze(0),
+            position_ids=position_ids,
             num_turns=0,
             response_mask=response_mask,
             loss_mask=response_mask,
             rm_scores=torch.zeros_like(response_mask, dtype=torch.float32),
             rollout_log_probs=torch.zeros_like(response_mask, dtype=torch.float32),
         )
-        template_sample.pop("multi_modal_inputs", None)
-        template_sample.pop("routed_experts", None)
+        if "multi_modal_inputs" in template_sample:
+            template_sample["multi_modal_inputs"] = {}
+        if routed_experts is not None:
+            template_sample["routed_experts"] = routed_experts
+        else:
+            template_sample.pop("routed_experts", None)
 
         # Padding flag is deployed to protect metrics calculation (e.g. response length, score, reward).
         template_tag.update(is_padding=True, prompt_len=1, response_len=1, seq_len=2)
         return template_sample, template_tag
+
+    @staticmethod
+    def _build_padding_position_ids(source_position_ids, attention_mask: torch.Tensor) -> torch.Tensor:
+        """Build padding position ids with the same rank/prefix shape as the source sample."""
+        position_ids = compute_position_id_with_mask(attention_mask.unsqueeze(0)).squeeze(0)
+        if not isinstance(source_position_ids, torch.Tensor):
+            return position_ids
+
+        position_ids = position_ids.to(device=source_position_ids.device, dtype=source_position_ids.dtype)
+        if source_position_ids.dim() <= 1:
+            return position_ids
+
+        view_shape = (1,) * (source_position_ids.dim() - 1) + (position_ids.size(-1),)
+        return position_ids.reshape(view_shape).expand(*source_position_ids.shape[:-1], -1).clone()
+
+    @staticmethod
+    def _build_padding_routed_experts(source_routed_experts, seq_len: int) -> torch.Tensor | None:
+        """Build a zero routed-experts tensor matching the source per-token expert shape."""
+        if not isinstance(source_routed_experts, torch.Tensor):
+            return None
+        if source_routed_experts.dim() == 0:
+            return torch.zeros_like(source_routed_experts)
+        return torch.zeros(
+            (seq_len, *source_routed_experts.shape[1:]),
+            dtype=source_routed_experts.dtype,
+            device=source_routed_experts.device,
+        )
 
     def _upsample_batch_to_divisible_size(self, batch: KVBatchMeta, batch_multiple: int) -> KVBatchMeta:
         """Append synthetic no-op samples so the batch size becomes divisible by batch_multiple.
