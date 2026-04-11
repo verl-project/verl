@@ -5,7 +5,6 @@ set -xeuo pipefail
 SAVE_PATH=tests/utils/ci/profiler_data
 rm -rf "$SAVE_PATH"
 
-CONTENTS=['cuda']
 PROFILE_STEPS=[1]
 PROFILE_RANKS_ALL=False
 PROFILE_RANKS=[0]
@@ -82,32 +81,40 @@ common_params=(
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=1 \
+    trainer.total_training_steps=2 \
     actor_rollout_ref.actor.profiler.enable=True \
     actor_rollout_ref.actor.profiler.all_ranks=$PROFILE_RANKS_ALL \
     actor_rollout_ref.actor.profiler.ranks=$PROFILE_RANKS \
-    actor_rollout_ref.actor.profiler.tool_config.torch.discrete=$DISCRETE \
-    actor_rollout_ref.actor.profiler.tool_config.torch.contents=$CONTENTS \
     actor_rollout_ref.ref.profiler.enable=True \
     actor_rollout_ref.ref.profiler.all_ranks=$PROFILE_RANKS_ALL \
     actor_rollout_ref.ref.profiler.ranks=$PROFILE_RANKS \
-    actor_rollout_ref.ref.profiler.tool_config.torch.discrete=$DISCRETE \
-    actor_rollout_ref.ref.profiler.tool_config.torch.contents=$CONTENTS \
+    global_profiler.steps=$PROFILE_STEPS \
+    global_profiler.save_path="$SAVE_PATH" \
 )
 
 if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
+    CONTENTS=['cuda']
     python3 -m verl.trainer.main_ppo \
         "${common_params[@]}" \
-        global_profiler.tool=torch \
-        global_profiler.steps=$PROFILE_STEPS \
-        global_profiler.save_path="$SAVE_PATH" $@
+        actor_rollout_ref.actor.profiler.tool_config.torch.discrete=$DISCRETE \
+        actor_rollout_ref.actor.profiler.tool_config.torch.contents=$CONTENTS \
+        actor_rollout_ref.ref.profiler.tool_config.torch.discrete=$DISCRETE \
+        actor_rollout_ref.ref.profiler.tool_config.torch.contents=$CONTENTS \
+        global_profiler.tool=torch $@
 
     python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu"
     
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
+    CONTENTS=['npu','cpu']
     python3 -m verl.trainer.main_ppo \
         "${common_params[@]}" \
+        actor_rollout_ref.actor.profiler.tool_config.npu.discrete=$DISCRETE \
+        actor_rollout_ref.actor.profiler.tool_config.npu.contents=$CONTENTS \
+        actor_rollout_ref.ref.profiler.tool_config.npu.discrete=$DISCRETE \
+        actor_rollout_ref.ref.profiler.tool_config.npu.contents=$CONTENTS \
+        global_profiler.tool=npu $@
     
+    python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="npu"
 else
     echo "Unknown device: $device_name"
     exit 1
