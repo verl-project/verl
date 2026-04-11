@@ -67,7 +67,7 @@ on:
       # Entrypoints
       - ".github/workflows/e2e_ppo_trainer_veomni_vllm_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
-      - "tests/special_e2e/run_ppo_trainer_veomni_npu.sh"
+      - "tests/special_e2e/run_ppo_trainer_veomni.sh"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/ppo_trainer.yaml"
       # Megatron
@@ -125,4 +125,4 @@ jobs:
       - name: Running the E2E test with veomni backend
         run: |
           ray stop --force
-          bash tests/special_e2e/run_ppo_trainer_veomni_npu.sh
+          bash tests/special_e2e/run_ppo_trainer_veomni.sh
