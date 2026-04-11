@@ -105,7 +105,6 @@ if [ -n "$device_name" ] && [ "$device_name" == "gpu" ]; then
     python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu"
     
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
-    # NPU 设备运行
     python3 -m verl.trainer.main_ppo \
         "${common_params[@]}" \
     
@@ -114,5 +113,4 @@ else
     exit 1
 fi
 
-echo "test completed successfully with veomni backend"
 rm -rf "$SAVE_PATH"
