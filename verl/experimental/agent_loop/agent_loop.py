@@ -1221,7 +1221,7 @@ class AgentLoopManager:
         timing["agent_loop/compute_score/mean"] = t_compute_score.mean()
 
         # batch sequence generation is bounded by the slowest sample
-        slowest = np.argmax(t_generate_sequences + t_tool_calls)
+        slowest = np.argmax(t_generate_sequences + t_tool_calls + t_compute_score)
         prompt_length = output.batch["prompts"].shape[1]
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
