@@ -4,14 +4,9 @@
 逻辑：如果比值很高，说明这段 Answer 对模型来说很难通过指令直接预测，包含更多“学习价值”。
 
 
-2.PPL (Perplexity) 困惑度：
-定义：利用一个预训练好的高质量模型（如 Llama 3 或 GPT-4 蒸馏出的模型）计算 Answer 的平均负对数似然。
-逻辑：极高 PPL 可能代表噪声，极低 PPL 可能代表过于平庸的废话（如 "I don't know"）。 计算
-
 3.Informativeness (信息密度)：
 定义：Answer 的长度与其实际携带的实体（Entity）、概念（Concept）数量之比。
 计算：可以用 NLP 工具抽取关键字密度，或计算压缩比。
-
 
 4.Logic Tree Depth (逻辑链深度)：
 计算：对于带有 CoT（思维链）的数据，统计推理步骤的数量（Step count）或关键词（如 "Therefore", "Because", "Firstly"）的频率。
