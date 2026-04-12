@@ -38,7 +38,7 @@ from safetensors.torch import save_file
 from verl.workers.rollout.replica import DiffusionOutput, RolloutMode
 from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
-MODEL_PATH = Path(os.path.expanduser("~/models/zhengyuansu/bagel-tiny-random"))
+MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/bagel"))
 STAGE_CONFIG = os.environ.get("BAGEL_STAGE_CONFIG", "")  # TODO: Point to the location on the CI server by default
 
 DEFAULT_PROMPT = (
