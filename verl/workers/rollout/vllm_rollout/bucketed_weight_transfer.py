@@ -198,12 +198,16 @@ class BucketedWeightSender:
             self.socket = None
         del self.buffer
         self.buffer = None
+        
+        # Explicit python GC to collect any stray tensor views
+        # targeting the shared memory before closing it.
+        gc.collect()
+
         if self.shm is not None:
             self.shm.close()
             self.shm.unlink()
             del self.shm
             self.shm = None
-        gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
 
@@ -251,48 +255,59 @@ class BucketedWeightReceiver:
             partial_tensors = {}
             while True:
                 metadata = self.socket.recv_pyobj()
-                weights = []
-                for name, meta in metadata["bucket_meta"].items():
-                    shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
-                    tensor_offset = meta.get("tensor_offset", 0)
-                    chunk_bytes = meta.get("chunk_bytes", dtype.itemsize * shape.numel())
-                    is_complete = meta.get("is_complete", True)
-                    
-                    chunk_tensor = self.buffer[offset : offset + chunk_bytes]
-                    full_size = dtype.itemsize * shape.numel()
-                    
-                    # Optimization: if the tensor is complete in one chunk, avoid extra allocation
-                    if is_complete and chunk_bytes == full_size:
-                        tensor = chunk_tensor.view(dtype=dtype).view(shape)
-                        if self.use_shm:
-                            tensor = tensor.to(self.device)
-                        weights.append((name, tensor))
-                        continue
-
-                    if name not in partial_tensors:
-                        # allocate an empty tensor on the target device
-                        partial_tensors[name] = torch.empty(shape, dtype=dtype, device=self.device)
-
-                    partial_1d = partial_tensors[name].view(-1).view(torch.uint8)
-                    if not self.use_shm:
-                        partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(chunk_tensor, non_blocking=True)
-                    else:
-                        t = chunk_tensor.to(self.device, non_blocking=True)
-                        partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(t)
-
-                    if is_complete:
-                        weights.append((name, partial_tensors.pop(name)))
-
-                if weights:
-                    on_bucket_received(weights)
-                    
-                get_torch_device().synchronize()
-                self.socket.send(b"")
-                del weights
+                self._process_bucket(metadata, partial_tensors, on_bucket_received)
                 if metadata["is_last"]:
                     break
         finally:
             self._cleanup()
+
+    def _process_bucket(self, metadata, partial_tensors, on_bucket_received):
+        """Process a single bucket in a separate method to ensure local variables 
+        (e.g., tensor views holding shm references) go out of scope immediately."""
+        weights = []
+        for name, meta in metadata["bucket_meta"].items():
+            shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
+            tensor_offset = meta.get("tensor_offset", 0)
+            chunk_bytes = meta.get("chunk_bytes", dtype.itemsize * shape.numel())
+            is_complete = meta.get("is_complete", True)
+            
+            chunk_tensor = self.buffer[offset : offset + chunk_bytes]
+            full_size = dtype.itemsize * shape.numel()
+            
+            # Optimization: if the tensor is complete in one chunk, avoid extra allocation
+            if is_complete and chunk_bytes == full_size:
+                tensor = chunk_tensor.view(dtype=dtype).view(shape)
+                if self.use_shm:
+                    tensor = tensor.to(self.device)
+                    # If device is CPU, `.to()` doesn't copy and still holds the shm buffer pointer.
+                    # Force clone to detatch shared memory in local/CPU testing mode.
+                    if tensor.device.type == "cpu":
+                        tensor = tensor.clone()
+                else: 
+                    tensor = tensor.clone()
+
+                weights.append((name, tensor))
+                continue
+
+            if name not in partial_tensors:
+                # allocate an empty tensor on the target device
+                partial_tensors[name] = torch.empty(shape, dtype=dtype, device=self.device)
+
+            partial_1d = partial_tensors[name].view(-1).view(torch.uint8)
+            if not self.use_shm:
+                partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(chunk_tensor, non_blocking=True)
+            else:
+                t = chunk_tensor.to(self.device, non_blocking=True)
+                partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(t)
+
+            if is_complete:
+                weights.append((name, partial_tensors.pop(name)))
+
+        if weights:
+            on_bucket_received(weights)
+            
+        get_torch_device().synchronize()
+        self.socket.send(b"")
 
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
@@ -325,10 +340,14 @@ class BucketedWeightReceiver:
         get_torch_device().synchronize()
         del self.buffer
         self.buffer = None
+        
+        # Explicit python GC to collect any stray tensor views
+        # targeting the shared memory before closing it.
+        gc.collect()
+
         if self.shm is not None:
             self.shm.close()
             del self.shm
             self.shm = None
-        gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
