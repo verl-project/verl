@@ -572,8 +572,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # Send a finish signal
             await self.message_queue_client.put_sample(sample=None)
 
-        async with self.lock:
-            self.running = False
+            async with self.lock:
+                self.running = False
 
     async def fit(self):
         """
