@@ -1,0 +1,9 @@
+# Tool environment manifest: maps tool_env_id -> tool config path.
+# Each dataset row's extra_info.tool_env_id is looked up here to
+# determine which tools to load for that particular trajectory.
+
+inventory_store:
+  tool_config_path: ./config/tool_config/inventory_tool_config.yaml
+
+bank_account:
+  tool_config_path: ./config/tool_config/bank_tool_config.yaml

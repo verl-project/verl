@@ -1,0 +1,8 @@
+{
+  "products": {
+    "laptop": {"stock": 10, "price": 999.99},
+    "phone": {"stock": 25, "price": 699.99},
+    "tablet": {"stock": 15, "price": 449.99},
+    "headphones": {"stock": 50, "price": 149.99}
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "accounts": {
+    "alice": {"balance": 5000.00},
+    "bob": {"balance": 3000.00},
+    "charlie": {"balance": 1500.00}
+  }
+}

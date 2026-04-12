@@ -20,6 +20,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import torch
+from omegaconf import OmegaConf
 from PIL import Image
 
 from verl.experimental.agent_loop.agent_loop import (
@@ -113,6 +114,12 @@ class ToolAgentLoop(AgentLoopBase):
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
 
+        # Per-instance tool environment support
+        self.tool_env_manifest_path = self.rollout_config.multi_turn.get("tool_env_manifest_path", None)
+        self._manifest_cache_path: str | None = None
+        self._manifest_cache: dict[str, dict[str, Any]] = {}
+        self._tool_env_cache: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+
         # Initialize interactions from config file
         self.interaction_config_file = self.rollout_config.multi_turn.interaction_config_path
         if self.interaction_config_file:
@@ -160,6 +167,10 @@ class ToolAgentLoop(AgentLoopBase):
             interaction_kwargs=interaction_kwargs,
         )
 
+        # Per-instance setup hook (override in subclasses to inject
+        # per-instance tools, shared state, etc. into agent_data.extra_fields)
+        await self._setup_instance(agent_data, **kwargs)
+
         # State machine loop
         state = AgentState.PENDING
         while state != AgentState.TERMINATED:
@@ -200,11 +211,117 @@ class ToolAgentLoop(AgentLoopBase):
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
         return output
 
+    async def _setup_instance(self, agent_data: AgentData, **kwargs) -> None:
+        """Resolve per-instance tools and shared DB if extra_info provides them.
+
+        When ``extra_info`` contains ``tool_config_path`` or ``tool_env_id`` (with
+        a ``tool_env_manifest_path`` configured), this method loads the
+        corresponding tool set and stores it in ``agent_data.extra_fields`` so
+        that subsequent state-machine steps use per-instance tools.
+
+        An optional ``extra_info.db_path`` (JSON) is loaded and stored as
+        ``agent_data.extra_fields["shared_db"]`` for stateful tool environments.
+
+        Override in subclasses for further customization.
+        """
+        extra_info = kwargs.get("extra_info", {}) or {}
+
+        # --- Per-instance tool environment --------------------------------
+        active_tools, active_tool_schemas = self._resolve_active_tool_env(extra_info)
+        if active_tools is not self.tools:
+            agent_data.extra_fields["active_tools"] = active_tools
+            agent_data.extra_fields["active_tool_schemas"] = active_tool_schemas
+
+        # --- Per-instance shared DB ---------------------------------------
+        db_path = extra_info.get("db_path")
+        if isinstance(db_path, str) and db_path and os.path.exists(db_path):
+            try:
+                with open(db_path, encoding="utf-8") as f:
+                    agent_data.extra_fields["shared_db"] = json.load(f)
+            except Exception as e:
+                logger.warning("Failed to load shared DB from %s: %s", db_path, e)
+
+    def _resolve_active_tool_env(self, extra_info: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Determine the tool set for this particular request."""
+        direct_path = extra_info.get("tool_config_path")
+
+        if not direct_path:
+            tool_env_id = extra_info.get("tool_env_id")
+            if tool_env_id:
+                manifest = self._load_tool_env_manifest()
+                env_cfg = manifest.get(str(tool_env_id), {})
+                direct_path = env_cfg.get("tool_config_path")
+
+        if direct_path:
+            try:
+                return self._build_tools_from_config(direct_path)
+            except Exception as e:
+                logger.warning(
+                    "Failed to load tools from %s, falling back to defaults: %s",
+                    direct_path,
+                    e,
+                )
+
+        return self.tools, self.tool_schemas
+
+    def _load_tool_env_manifest(self) -> dict[str, dict[str, Any]]:
+        """Load and cache the tool environment manifest YAML."""
+        if not self.tool_env_manifest_path:
+            return {}
+        resolved = os.path.expanduser(self.tool_env_manifest_path)
+        if self._manifest_cache_path == resolved and self._manifest_cache:
+            return self._manifest_cache
+        if not os.path.exists(resolved):
+            logger.warning("tool_env_manifest_path does not exist: %s", resolved)
+            self._manifest_cache_path = resolved
+            self._manifest_cache = {}
+            return {}
+        try:
+            loaded = OmegaConf.load(resolved)
+            raw = OmegaConf.to_container(loaded, resolve=True)
+            self._manifest_cache = self._normalize_manifest(raw)
+        except Exception as e:
+            logger.warning("Failed to load tool env manifest %s: %s", resolved, e)
+            self._manifest_cache = {}
+        self._manifest_cache_path = resolved
+        return self._manifest_cache
+
+    @staticmethod
+    def _normalize_manifest(raw: Any) -> dict[str, dict[str, Any]]:
+        """Accept both dict-style and list-style manifests."""
+        if raw is None:
+            return {}
+        if isinstance(raw, dict):
+            if "environments" in raw and isinstance(raw["environments"], list):
+                return {str(env["id"]): env for env in raw["environments"] if isinstance(env, dict) and "id" in env}
+            return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+        return {}
+
+    def _build_tools_from_config(self, tool_config_path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Build tool map and schemas from a config file, with caching."""
+        resolved = os.path.expanduser(tool_config_path)
+        if resolved in self._tool_env_cache:
+            return self._tool_env_cache[resolved]
+        tool_list = initialize_tools_from_config(resolved)
+        tool_map = {tool.name: tool for tool in tool_list}
+        tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
+        self._tool_env_cache[resolved] = (tool_map, tool_schemas)
+        return tool_map, tool_schemas
+
+    def _get_active_tools(self, agent_data: AgentData) -> dict[str, Any]:
+        """Return the tool map for the current instance."""
+        return agent_data.extra_fields.get("active_tools", self.tools)
+
+    def _get_active_tool_schemas(self, agent_data: AgentData) -> list[dict[str, Any]]:
+        """Return the tool schemas for the current instance."""
+        return agent_data.extra_fields.get("active_tool_schemas", self.tool_schemas)
+
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
+        active_tool_schemas = self._get_active_tool_schemas(agent_data)
         prompt_ids = await self.apply_chat_template(
             agent_data.messages,
-            tools=self.tool_schemas,
+            tools=active_tool_schemas,
             images=agent_data.image_data,
             videos=agent_data.video_data,
         )
@@ -259,7 +376,8 @@ class ToolAgentLoop(AgentLoopBase):
             return AgentState.TERMINATED
 
         # Extract tool calls
-        tools = [tool.tool_schema for tool in self.tools.values()]
+        active_tools = self._get_active_tools(agent_data)
+        tools = [tool.tool_schema for tool in active_tools.values()]
         _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
 
         # Handle interaction if needed
@@ -427,9 +545,15 @@ class ToolAgentLoop(AgentLoopBase):
             # TODO: append malformed tool_call to the prompt: invalid function name or arguments
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
-            tool = self.tools[tool_name]
+            active_tools = self._get_active_tools(agent_data)
+            tool = active_tools[tool_name]
             kwargs = tools_kwargs.get(tool_name, {})
-            instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+            create_kwargs = dict(kwargs.get("create_kwargs", {}))
+            # Inject shared state (e.g. per-instance DB) into tool creation
+            shared_db = agent_data.extra_fields.get("shared_db")
+            if shared_db is not None:
+                create_kwargs.setdefault("shared_db", shared_db)
+            instance_id, _ = await tool.create(create_kwargs=create_kwargs)
             tool_execution_response, tool_reward, res = await tool.execute(
                 instance_id, tool_args, agent_data=agent_data
             )

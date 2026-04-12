@@ -281,6 +281,7 @@ actor_rollout_ref:
       enable: false
       max_assistant_turns: null
       tool_config_path: null
+      tool_env_manifest_path: null
       max_user_turns: null
       max_parallel_calls: 1
       max_tool_response_length: 256

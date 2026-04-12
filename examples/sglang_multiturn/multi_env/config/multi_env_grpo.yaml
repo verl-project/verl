@@ -1,0 +1,31 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  max_prompt_length: 1024
+  max_response_length: 2048
+  train_batch_size: 64
+  return_raw_chat: True
+
+actor_rollout_ref:
+  hybrid_engine: True
+  rollout:
+    name: sglang
+    multi_turn:
+      enable: True
+      max_assistant_turns: 5
+      max_user_turns: 5
+      max_parallel_calls: 5
+      max_tool_response_length: 512
+      tool_response_truncate_side: right
+      # No global tool_config_path — tools are resolved per-instance
+      # via the manifest below.
+      tool_config_path: null
+      tool_env_manifest_path: ./config/tool_env_manifest.yaml
+    agent:
+      default_agent_loop: tool_agent

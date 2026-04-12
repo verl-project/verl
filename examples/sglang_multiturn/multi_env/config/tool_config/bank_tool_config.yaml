@@ -1,0 +1,16 @@
+tools:
+  - class_name: "examples.sglang_multiturn.multi_env.envs.bank_tools.CheckBalanceTool"
+    config:
+      type: native
+    tool_schema:
+      type: "function"
+      function:
+        name: "check_balance"
+        description: "Look up the current balance of a bank account."
+        parameters:
+          type: "object"
+          properties:
+            account_id:
+              type: "string"
+              description: "Account holder name (e.g. 'alice')."
+          required: ["account_id"]

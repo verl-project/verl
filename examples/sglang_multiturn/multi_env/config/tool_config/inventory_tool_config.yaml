@@ -1,0 +1,16 @@
+tools:
+  - class_name: "examples.sglang_multiturn.multi_env.envs.inventory_tools.CheckStockTool"
+    config:
+      type: native
+    tool_schema:
+      type: "function"
+      function:
+        name: "check_stock"
+        description: "Look up the current stock and price of a product."
+        parameters:
+          type: "object"
+          properties:
+            product_name:
+              type: "string"
+              description: "Product name (e.g. 'laptop')."
+          required: ["product_name"]
