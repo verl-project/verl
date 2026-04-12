@@ -117,34 +117,45 @@ class BucketedWeightSender:
             bucket_meta: dict[str, TensorMetadata] = {}
             # dtype = PrecisionType.to_dtype(self.config.dtype)
             async for name, weight in ensure_async_iterator(weights):
-                # model parameters are in fp32 full precision
-                # (vermouth1992) we should not force cast weight here because some parameters
-                # (such as moe gate) have to keep fp32 precision. If a weight is bf16 in the rollout side,
-                # the rollout should automatically cast on demand. However, this would incur a higher weight
-                # transfer volume.
-                # weight = weight.to(dtype, non_blocking=True)
+                weight_bytes = weight.view(-1).view(torch.uint8)
+                tensor_bytes = weight.nbytes
+                tensor_offset = 0
 
-                # fill the tensor bucket
-                if offset + weight.nbytes > self.bucket_size:
-                    get_torch_device().synchronize()
-                    self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                    self.socket.recv()
-                    bucket_meta = {}
-                    offset = 0
+                while tensor_offset < tensor_bytes:
+                    chunk_bytes = min(tensor_bytes - tensor_offset, self.bucket_size - offset)
+                    
+                    if chunk_bytes == 0:
+                        get_torch_device().synchronize()
+                        self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+                        self.socket.recv()
+                        bucket_meta = {}
+                        offset = 0
+                        chunk_bytes = min(tensor_bytes - tensor_offset, self.bucket_size - offset)
 
-                # TODO: slice embedding layer weight into chunks
-                assert offset + weight.nbytes <= self.bucket_size, (
-                    f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
-                    f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
-                )
-                bucket_meta[name] = {
-                    "name": name,
-                    "shape": weight.shape,
-                    "dtype": weight.dtype,
-                    "offset": offset,
-                }
-                self.buffer[offset : offset + weight.nbytes].copy_(weight.view(-1).view(torch.uint8), non_blocking=True)
-                offset += weight.nbytes
+                    bucket_meta[name] = {
+                        "name": name,
+                        "shape": weight.shape,
+                        "dtype": weight.dtype,
+                        "tensor_offset": tensor_offset,
+                        "offset": offset,
+                        "chunk_bytes": chunk_bytes,
+                        "is_complete": tensor_offset + chunk_bytes == tensor_bytes
+                    }
+                    
+                    self.buffer[offset : offset + chunk_bytes].copy_(
+                        weight_bytes[tensor_offset : tensor_offset + chunk_bytes], non_blocking=True
+                    )
+                    
+                    offset += chunk_bytes
+                    tensor_offset += chunk_bytes
+                    
+                    # If bucket is entirely full but tensor is not fully written, flush it
+                    if offset == self.bucket_size and tensor_offset < tensor_bytes:
+                        get_torch_device().synchronize()
+                        self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+                        self.socket.recv()
+                        bucket_meta = {}
+                        offset = 0
 
             # send the last bucket
             get_torch_device().synchronize()
@@ -237,20 +248,47 @@ class BucketedWeightReceiver:
             self._init_buffer()
 
             # receive bucket and update weights
+            partial_tensors = {}
             while True:
                 metadata = self.socket.recv_pyobj()
-                weights, tensor = [], None
+                weights = []
                 for name, meta in metadata["bucket_meta"].items():
                     shape, dtype, offset = meta["shape"], meta["dtype"], meta["offset"]
-                    size = dtype.itemsize * shape.numel()
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
-                    if self.use_shm:
-                        tensor = tensor.to(self.device)
-                    weights.append((name, tensor))
-                on_bucket_received(weights)
+                    tensor_offset = meta.get("tensor_offset", 0)
+                    chunk_bytes = meta.get("chunk_bytes", dtype.itemsize * shape.numel())
+                    is_complete = meta.get("is_complete", True)
+                    
+                    chunk_tensor = self.buffer[offset : offset + chunk_bytes]
+                    full_size = dtype.itemsize * shape.numel()
+                    
+                    # Optimization: if the tensor is complete in one chunk, avoid extra allocation
+                    if is_complete and chunk_bytes == full_size:
+                        tensor = chunk_tensor.view(dtype=dtype).view(shape)
+                        if self.use_shm:
+                            tensor = tensor.to(self.device)
+                        weights.append((name, tensor))
+                        continue
+
+                    if name not in partial_tensors:
+                        # allocate an empty tensor on the target device
+                        partial_tensors[name] = torch.empty(shape, dtype=dtype, device=self.device)
+
+                    partial_1d = partial_tensors[name].view(-1).view(torch.uint8)
+                    if not self.use_shm:
+                        partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(chunk_tensor, non_blocking=True)
+                    else:
+                        t = chunk_tensor.to(self.device, non_blocking=True)
+                        partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(t)
+
+                    if is_complete:
+                        weights.append((name, partial_tensors.pop(name)))
+
+                if weights:
+                    on_bucket_received(weights)
+                    
                 get_torch_device().synchronize()
                 self.socket.send(b"")
-                del weights, tensor
+                del weights
                 if metadata["is_last"]:
                     break
         finally:
