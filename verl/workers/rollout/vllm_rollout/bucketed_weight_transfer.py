@@ -294,11 +294,7 @@ class BucketedWeightReceiver:
                 partial_tensors[name] = torch.empty(shape, dtype=dtype, device=self.device)
 
             partial_1d = partial_tensors[name].view(-1).view(torch.uint8)
-            if not self.use_shm:
-                partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(chunk_tensor, non_blocking=True)
-            else:
-                t = chunk_tensor.to(self.device, non_blocking=True)
-                partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(t)
+            partial_1d[tensor_offset : tensor_offset + chunk_bytes].copy_(chunk_tensor, non_blocking=True)
 
             if is_complete:
                 weights.append((name, partial_tensors.pop(name)))
