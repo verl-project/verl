@@ -584,9 +584,14 @@ class MegatronEngine(BaseEngine):
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
         # compute num_tokens in global batch for loss normalization
+        # Must all-reduce over DP×CP (with_context_parallel=True) because each
+        # CP rank holds only a 1/CP slice of the sequence.  Using the pure DP
+        # group would undercount tokens by a factor of CP.
         batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
         torch.distributed.all_reduce(
-            batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+            batch_num_tokens,
+            op=torch.distributed.ReduceOp.SUM,
+            group=mpu.get_data_parallel_group(with_context_parallel=True),
         )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
