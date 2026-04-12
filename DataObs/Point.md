@@ -12,13 +12,8 @@
 计算：对于带有 CoT（思维链）的数据，统计推理步骤的数量（Step count）或关键词（如 "Therefore", "Because", "Firstly"）的频率。
 
 
-Response Diversity (回复多样性)：
-计算：计算子集内所有 Answer 的 Self-BLEU 或相似度矩阵的平均值。
-逻辑：如果 SFT 数据过于单一，RL 阶段模型容易陷入局部最优，失去探索能力。
-
-Verbosity Bias (字数偏好)：
-计算：统计 Answer 的平均字数。
-逻辑：RL 阶段模型往往会通过“刷字数”来骗取 Reward。如果在 SFT 阶段就引入了过长或过短的偏好，会直接影响 RL 的稳定性。
-
-
 这个熵什么的还有相似度，xx要改
+
+换数据集
+
+eval现在不太可以
