@@ -38,13 +38,12 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import DiffusionAlgoConfig
-from verl.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator
+from verl.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
-from verl.trainer.ppo.core_algos import get_adv_estimator_fn
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
@@ -94,7 +93,7 @@ def compute_advantage(
     if "reward_baselines" in data.batch:
         adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
 
-    adv_estimator_fn = get_adv_estimator_fn(adv_estimator)
+    adv_estimator_fn = get_diffusion_adv_estimator_fn(adv_estimator)
     if adv_estimator == DiffusionAdvantageEstimator.FLOW_GRPO:
         adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         adv_kwargs["global_std"] = global_std

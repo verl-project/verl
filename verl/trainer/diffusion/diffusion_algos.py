@@ -15,14 +15,88 @@
 
 from collections import defaultdict
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
 from omegaconf import DictConfig
 
-from verl.trainer.ppo.core_algos import register_adv_est, register_policy_loss
 from verl.workers.config import DiffusionActorConfig
+
+DiffusionLossFn = Callable[
+    [
+        torch.Tensor,  # old_log_prob
+        torch.Tensor,  # log_prob
+        torch.Tensor,  # advantages
+        Optional[DictConfig | DiffusionActorConfig],  # config
+    ],
+    tuple[torch.Tensor, dict[str, Any]],
+]
+
+DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
+
+
+def register_diffusion_loss(name: str) -> Callable[[DiffusionLossFn], DiffusionLossFn]:
+    """Register a diffusion loss function with the given name.
+
+    Args:
+        name (str): The name to register the diffusion loss function under.
+
+    Returns:
+        function: Decorator function that registers the diffusion loss function.
+    """
+
+    def decorator(func: DiffusionLossFn) -> DiffusionLossFn:
+        DIFFUSION_LOSS_REGISTRY[name] = func
+        return func
+
+    return decorator
+
+
+def get_diffusion_loss_fn(name):
+    """Get the diffusion loss with a given name.
+
+    Args:
+        name: `(str)`
+            The name of the policy loss.
+
+    Returns:
+        `(callable)`: The policy loss function.
+    """
+
+    if name not in DIFFUSION_LOSS_REGISTRY:
+        raise ValueError(
+            f"Unsupported diffusion loss mode: {name}. Supported modes are: {list(DIFFUSION_LOSS_REGISTRY.keys())}"
+        )
+    return DIFFUSION_LOSS_REGISTRY[name]
+
+
+DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
+
+
+def register_diffusion_adv_est(name_or_enum: "str | DiffusionAdvantageEstimator") -> Callable:
+    """Register a diffusion advantage estimator function with the given name."""
+
+    def decorator(fn):
+        name = name_or_enum.value if isinstance(name_or_enum, Enum) else name_or_enum
+        if name in DIFFUSION_ADV_ESTIMATOR_REGISTRY and DIFFUSION_ADV_ESTIMATOR_REGISTRY[name] != fn:
+            raise ValueError(
+                f"Diffusion adv estimator {name} already registered: {DIFFUSION_ADV_ESTIMATOR_REGISTRY[name]} vs {fn}"
+            )
+        DIFFUSION_ADV_ESTIMATOR_REGISTRY[name] = fn
+        return fn
+
+    return decorator
+
+
+def get_diffusion_adv_estimator_fn(name_or_enum: "str | DiffusionAdvantageEstimator") -> Callable:
+    """Get the diffusion advantage estimator function with a given name."""
+    name = name_or_enum.value if isinstance(name_or_enum, Enum) else name_or_enum
+    if name not in DIFFUSION_ADV_ESTIMATOR_REGISTRY:
+        raise ValueError(
+            f"Unknown diffusion advantage estimator: {name}. Supported: {list(DIFFUSION_ADV_ESTIMATOR_REGISTRY.keys())}"
+        )
+    return DIFFUSION_ADV_ESTIMATOR_REGISTRY[name]
 
 
 class DiffusionAdvantageEstimator(str, Enum):
@@ -31,7 +105,7 @@ class DiffusionAdvantageEstimator(str, Enum):
     FLOW_GRPO = "flow_grpo"
 
 
-@register_adv_est(DiffusionAdvantageEstimator.FLOW_GRPO)
+@register_diffusion_adv_est(DiffusionAdvantageEstimator.FLOW_GRPO)
 def compute_flow_grpo_outcome_advantage(
     sample_level_rewards: torch.Tensor,
     index: np.ndarray,
@@ -108,8 +182,8 @@ def compute_flow_grpo_outcome_advantage(
     return scores, scores
 
 
-@register_policy_loss("flow_grpo")
-def compute_policy_loss_flow_grpo(
+@register_diffusion_loss("flow_grpo")
+def compute_diffusion_loss_flow_grpo(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,

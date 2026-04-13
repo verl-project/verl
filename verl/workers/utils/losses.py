@@ -16,7 +16,7 @@
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.diffusion.diffusion_algos import kl_penalty_image
+from verl.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn, kl_penalty_image
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
@@ -201,7 +201,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
     loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
 
-    policy_loss_fn = get_policy_loss_fn(loss_mode)
+    policy_loss_fn = get_diffusion_loss_fn(loss_mode)
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,

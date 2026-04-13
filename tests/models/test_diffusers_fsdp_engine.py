@@ -68,8 +68,8 @@ def create_training_config(model_type, strategy, device_count, model):
                 config_name="dp_diffusion_actor",
                 overrides=[
                     "strategy=" + strategy,
-                    "clip_ratio=0.0001",
-                    "adv_clip_max=5.0",
+                    "diffusion_loss.clip_ratio=0.0001",
+                    "diffusion_loss.adv_clip_max=5.0",
                     "ppo_mini_batch_size=4",
                     "ppo_micro_batch_size_per_gpu=4",
                     "optim.lr=1e-4",
@@ -82,7 +82,7 @@ def create_training_config(model_type, strategy, device_count, model):
                     "fsdp_config.forward_only=False",
                     "fsdp_config.fsdp_size=" + str(fsdp_size),
                     "fsdp_config.ulysses_sequence_parallel_size=" + str(cp),
-                    "policy_loss.loss_mode='flow_grpo'",
+                    "diffusion_loss.loss_mode='flow_grpo'",
                 ],
             )
         actor_config: FSDPDiffusersActorConfig = omega_conf_to_dataclass(cfg)

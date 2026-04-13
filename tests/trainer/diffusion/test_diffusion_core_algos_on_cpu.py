@@ -56,15 +56,15 @@ def test_compute_policy_loss_flow_grpo() -> None:
             config_name="dp_diffusion_actor",
             overrides=[
                 "strategy=fsdp",
-                "clip_ratio=0.0001",
-                "adv_clip_max=5.0",
+                "diffusion_loss.clip_ratio=0.0001",
+                "diffusion_loss.adv_clip_max=5.0",
                 "ppo_micro_batch_size_per_gpu=8",
             ],
         )
     actor_config: FSDPDiffusersActorConfig = omega_conf_to_dataclass(cfg)
 
     for step in range(steps):
-        pg_loss, pg_metrics = diffusion_algos.compute_policy_loss_flow_grpo(
+        pg_loss, pg_metrics = diffusion_algos.compute_diffusion_loss_flow_grpo(
             old_log_prob=rollout_log_probs[:, step],
             log_prob=current_log_probs[:, step],
             advantages=advantages[:, step],
