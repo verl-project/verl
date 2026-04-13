@@ -39,7 +39,7 @@ from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.utils.tracking import Tracking
+from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             experiment_name=self.config.trainer.experiment_name,
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
+        )
+        self.validation_generations_logger = ValidationGenerationsLogger(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
         )
 
         # ==================== fully async config ====================
@@ -532,6 +536,28 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
         self.metrics_aggregator.reset()
 
+    def _maybe_log_val_generations(self, inputs, outputs, scores):
+        """Capture validation generations for deferred logging in _fit_validate.
+
+        When use_trainer_do_validate=True, the trainer also runs _validate(True) which
+        calls this method. We capture instead of logging immediately so that we can
+        merge with rollouter-side generations and log once with the correct step.
+        """
+        generations_to_log = self.config.trainer.log_val_generations
+        if generations_to_log == 0:
+            self._captured_val_generations = []
+            return
+
+        import numpy as np
+
+        samples = list(zip(inputs, outputs, scores, strict=True))
+        samples.sort(key=lambda x: x[0])
+
+        rng = np.random.RandomState(42)
+        rng.shuffle(samples)
+
+        self._captured_val_generations = samples[:generations_to_log]
+
     async def _validate_process(self):
         """Run trainer-side validation using async rollout manager"""
         if self.config.async_training.use_trainer_do_validate:
@@ -573,6 +599,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         val_future = self.rollouter.do_validate.remote()
 
         # Run trainer-side validation
+        self._captured_val_generations = []
         train_val_metrics = await self._validate_process()
 
         # Wait for rollouter validation result and log
@@ -595,6 +622,23 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                     f"Validation metrics: {val_metrics.metrics}"
                 )
         self.logger.log(data=val_metrics.timing_raw, step=self.current_param_version)
+
+        # Merge and log validation generations from rollouter (and trainer if applicable)
+        generations_to_log = self.config.trainer.log_val_generations
+        if generations_to_log > 0:
+            import numpy as np
+
+            all_generations = list(self._captured_val_generations)
+            if val_metrics.val_generations:
+                all_generations.extend(val_metrics.val_generations)
+            if all_generations:
+                all_generations.sort(key=lambda x: x[0])
+                rng = np.random.RandomState(42)
+                rng.shuffle(all_generations)
+                all_generations = all_generations[:generations_to_log]
+                self.validation_generations_logger.log(
+                    self.config.trainer.logger, all_generations, self.current_param_version
+                )
 
     def _fit_save_checkpoint(self, force=False):
         if self.current_param_version == self.last_ckpt_version:
