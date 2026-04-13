@@ -28,7 +28,6 @@ from ray.actor import ActorHandle
 from sglang.srt.entrypoints.http_server import (
     ServerArgs,
     _GlobalState,
-    _launch_subprocesses,
     app,
     set_global_state,
 )
@@ -263,7 +262,20 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        if version.parse(sglang.__version__) >= version.parse("0.5.7"):
+        # For SGLang main branch or version >= 0.5.10
+        # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
+        if version.parse(sglang.__version__) >= version.parse("0.5.10"):
+            from sglang.srt.entrypoints.http_server import Engine
+
+            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
+                server_args=server_args,
+                init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
+                run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
+                run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
+            )
+        elif version.parse(sglang.__version__) >= version.parse("0.5.7"):
+            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args,
                 init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
@@ -271,6 +283,8 @@ class SGLangHttpServer:
                 run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
             )
         else:
+            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args
             )
@@ -413,13 +427,23 @@ class SGLangHttpServer:
             generate_request.lora_path = SGLANG_LORA_NAME
 
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
-        finish_reason = output["meta_info"]["finish_reason"]
+        meta_info = output.get("meta_info", {})
+        finish_reason = meta_info.get("finish_reason")
         finish_reason = finish_reason["type"] if finish_reason else None
         if return_logprob:
-            output_token_logprobs = output["meta_info"]["output_token_logprobs"]
-            log_probs, token_ids = zip(
-                *[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs], strict=True
-            )
+            token_ids = list(output.get("output_ids", []))
+            output_token_logprobs = meta_info.get("output_token_logprobs") or []
+            if output_token_logprobs and len(output_token_logprobs) == len(token_ids):
+                log_probs = [float(log_prob) for log_prob, _, _ in output_token_logprobs]
+            else:
+                # SGLang may return mismatched lengths (e.g. max_new_tokens=0
+                # produces a phantom logprob entry with empty output_ids), or
+                # an abort may leave an empty logprob payload.
+                assert not token_ids, (
+                    f"output_token_logprobs length ({len(output_token_logprobs)}) != "
+                    f"output_ids length ({len(token_ids)}) for request {request_id}"
+                )
+                log_probs = []
         else:
             token_ids = output["output_ids"]
             log_probs = None

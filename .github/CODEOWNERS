@@ -1,17 +1,17 @@
 /docs @eric-haibin-lin @zhaochenyang20 @hongpeng-guo
 /docs/amd_tutorial @yushengsu-thu
 /docs/slang_multiturn @zhaochenyang20 @SwordFaith
-/docs/ascend_tutorial @FightingZhen
+/docs/ascend_tutorial @wucong25
 
 /third_party/sglang @zhaochenyang20 @SwordFaith
 /third_party/vllm @PeterSH6 @wuxibin89
 
-/examples/grpo_trainer @vermouth1992 @PeterSH6 @tardis-key @FightingZhen @ji-huazhong
+/examples/grpo_trainer @vermouth1992 @PeterSH6 @tardis-key @wucong25 @ji-huazhong
 
 /verl/single_controller @zw0610 @wuxibin89 @hongpeng-guo
 /verl/trainer @eric-haibin-lin @vermouth1992 @tongyx361 @PeterSH6
 /verl/models/mcore @ISEEKYAN @vermouth1992
-/verl/models/transformers @vermouth1992 @PeterSH6 @tardis-key @FightingZhen @ji-huazhong
+/verl/models/transformers @vermouth1992 @PeterSH6 @tardis-key @wucong25 @ji-huazhong
 /verl/workers/engine @eric-haibin-lin @vermouth1992 @ZihengJiang
 /verl/workers/roles @eric-haibin-lin @vermouth1992 @ZihengJiang
 /verl/workers/engine/fsdp @eric-haibin-lin @vermouth1992 @ZihengJiang

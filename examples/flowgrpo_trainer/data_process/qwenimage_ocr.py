@@ -95,6 +95,7 @@ if __name__ == "__main__":
     else:
         local_save_dir = args.local_save_dir
 
+    local_save_dir = os.path.expanduser(local_save_dir)
     train_dataset.to_parquet(os.path.join(local_save_dir, "train.parquet"))
     test_dataset.to_parquet(os.path.join(local_save_dir, "test.parquet"))
 

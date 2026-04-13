@@ -17,6 +17,7 @@ from types import FunctionType
 
 from verl.protocol import DataProtoFuture, _padding_size_key
 from verl.utils.py_functional import DynamicEnum
+from verl.utils.transferqueue_utils import tqbridge
 
 # here we add a magic number of avoid user-defined function already have this attribute
 MAGIC_ATTR = "attrs_3141562937"
@@ -411,6 +412,7 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
         materialize_futures:
             Whether to materialize the data before dispatching. Defaults to True.
 
+
     Returns:
         A decorator that wraps the original function with distributed execution
         configuration.
@@ -420,6 +422,8 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
     _check_execute_mode(execute_mode=execute_mode)
 
     def decorator(func):
+        func = tqbridge(dispatch_mode=dispatch_mode)(func)
+
         @wraps(func)
         def inner(*args, **kwargs):
             if materialize_futures:
