@@ -55,7 +55,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.model.path=Qwen/Qwen3-VL-8B-Instruct \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.optim.lr_decay_steps=51200 \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
