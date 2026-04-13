@@ -11,7 +11,7 @@ _target_: verl.workers.config.DiffusionActorConfig
 rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
 
 # the abstract actor configs
-# fsdp, fsdp2
+# fsdp, fsdp2 or megatron. must be set.
 strategy: ???
 
 # Split each sample into sub-batches of this size for PPO
