@@ -208,25 +208,14 @@ class vLLMHttpServer:
             engine_kwargs["cuda_graph_sizes"] = self.config.cudagraph_capture_sizes
         if "disable_mm_preprocessor_cache" in engine_kwargs:
             if _VLLM_VERSION >= version.parse("0.13.0"):
+                # `disable_mm_preprocessor_cache` was deprecated in vllm 0.11.0 and removed in vllm 0.13.0.
+                # Convert it to `mm_processor_cache_gb=0` for vllm >= 0.13.0.
+                # If `mm_processor_cache_gb` is already set by the user, respect that value and ignore
+                # `disable_mm_preprocessor_cache` to avoid overriding the user's explicit configuration.
                 disable_cache = engine_kwargs.pop("disable_mm_preprocessor_cache")
                 if disable_cache:
-                    if "mm_processor_cache_gb" in engine_kwargs:
-                        if engine_kwargs["mm_processor_cache_gb"] != 0:
-                            logger.warning(
-                                f"'disable_mm_preprocessor_cache=True' is ignored because "
-                                f"'mm_processor_cache_gb' is already set to {engine_kwargs['mm_processor_cache_gb']}."
-                            )
-                    else:
-                        logger.warning(
-                            "'disable_mm_preprocessor_cache' is not supported in vllm >= 0.13.0, "
-                            "automatically converting to 'mm_processor_cache_gb=0'."
-                        )
+                    if "mm_processor_cache_gb" not in engine_kwargs:
                         engine_kwargs["mm_processor_cache_gb"] = 0
-                else:
-                    logger.warning(
-                        "'disable_mm_preprocessor_cache=False' is not supported in vllm >= 0.13.0, "
-                        "the parameter will be ignored."
-                    )
 
         self._preprocess_engine_kwargs(engine_kwargs)
 
