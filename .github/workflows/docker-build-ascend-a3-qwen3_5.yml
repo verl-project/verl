@@ -1,4 +1,4 @@
-name: docker-build-ascend-a3
+name: docker-build-ascend-a3-qwen3_5
 
 on:
   workflow_dispatch:
@@ -7,7 +7,12 @@ on:
     paths:
       - "docker/ascend/Dockerfile.ascend_8.5.1_a3_qwen3-5"
       - ".github/workflows/docker-build-ascend-a3-qwen3_5.yml"
-
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - ".github/workflows/docker-build-ascend-a3-qwen3_5.yml"
 jobs:
   build-ascend-image-a3:
     if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
