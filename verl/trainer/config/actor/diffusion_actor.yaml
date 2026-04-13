@@ -7,11 +7,12 @@
 # Target class for this configuration
 _target_: verl.workers.config.DiffusionActorConfig
 
-# Training strategy: fsdp, fsdp2. must be set.
-strategy: ???
-
-# Number of rollouts per update
+# Number of rollouts per update (mirrors actor rollout_n)
 rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# the abstract actor configs
+# fsdp, fsdp2
+strategy: ???
 
 # Split each sample into sub-batches of this size for PPO
 ppo_mini_batch_size: 256

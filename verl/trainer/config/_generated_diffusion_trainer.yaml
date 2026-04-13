@@ -40,8 +40,8 @@ actor_rollout_ref:
       strategy: fsdp
       dtype: bfloat16
     _target_: verl.workers.config.FSDPDiffusersActorConfig
-    strategy: fsdp
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+    strategy: fsdp
     ppo_mini_batch_size: 256
     ppo_micro_batch_size_per_gpu: null
     clip_ratio: 0.0001
