@@ -68,14 +68,19 @@ _SKIP_STAGES = {"rollout_generate"}
 class PrecisionDebuggerProfiler:
     """Minimal msprobe PrecisionDebugger integration."""
 
-    def __init__(self, precision_cfg, rank: Optional[int] = None):
+    def __init__(self, precision_cfg, rank: Optional[int] = None, save_path: Optional[str] = None):
         self.rank = rank
         self.precision_cfg = self._normalize_config(precision_cfg)
-        self._enabled = bool(self.precision_cfg.enable)
         self._available = is_msprobe_available()
         self._debugger = None
         self._stages = self._normalize_stages(self.precision_cfg.stages)
         self._current_global_step = None
+        self._dump_root = save_path or "outputs/profile"
+        if self.precision_cfg.steps is not None:
+            logger.warning(
+                "`precision_debugger.steps` is deprecated and ignored. "
+                "Use `global_profiler.steps` to control profiling steps."
+            )
 
     @staticmethod
     def _normalize_config(precision_cfg) -> PrecisionDebuggerToolConfig:
@@ -149,8 +154,6 @@ class PrecisionDebuggerProfiler:
         return self._current_global_step
 
     def _should_collect(self, stage: str, global_step: Optional[int]) -> bool:
-        if not self._enabled:
-            return False
         if stage in _SKIP_STAGES:
             return False
         if stage not in _STAGE_TO_ROLE:
@@ -161,9 +164,6 @@ class PrecisionDebuggerProfiler:
             return False
         if self._stages is not None and stage not in self._stages:
             return False
-        if self.precision_cfg.steps is not None and global_step is not None:
-            if int(global_step) not in set(self.precision_cfg.steps):
-                return False
         return True
 
     def start(self, stage: Optional[str] = None, global_step: Optional[int] = None, model=None, **kwargs) -> bool:
@@ -181,7 +181,7 @@ class PrecisionDebuggerProfiler:
             if self.precision_cfg.strict:
                 raise ImportError("msprobe is not available but precision_debugger.strict is True")
             return False
-        if not self.precision_cfg.config_path or not self.precision_cfg.data_dir:
+        if not self.precision_cfg.config_path or not self._dump_root:
             return False
         if not self._is_valid_model(model):
             msg = f"PrecisionDebugger model not resolved for stage '{stage}'"
@@ -194,7 +194,7 @@ class PrecisionDebuggerProfiler:
             from msprobe.pytorch import PrecisionDebugger
 
             step_tag = f"step_{global_step}" if global_step is not None else "step_unknown"
-            dump_path = os.path.join(self.precision_cfg.data_dir, step_tag, stage)
+            dump_path = os.path.join(self._dump_root, step_tag, stage)
             os.makedirs(dump_path, exist_ok=True)
 
             if self._debugger is None:
