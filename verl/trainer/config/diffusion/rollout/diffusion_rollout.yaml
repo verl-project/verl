@@ -48,7 +48,6 @@ load_format: dummy
 # for huge model, layered summon can save memory (prevent OOM) but make it slower
 layered_summon: False
 
-
 # The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
 log_prob_micro_batch_size_per_gpu: null
 
