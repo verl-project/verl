@@ -53,7 +53,7 @@ def test_compute_policy_loss_flow_grpo() -> None:
 
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor"), version_base=None):
         cfg = compose(
-            config_name="diffusion_dp_actor",
+            config_name="dp_diffusion_actor",
             overrides=[
                 "strategy=fsdp",
                 "clip_ratio=0.0001",

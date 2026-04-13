@@ -1,12 +1,3 @@
-# Format checks enforced on CI:
-# 1. Comments must appear above each field.
-# 2. There must be a blank line between each field.
-# 3. Inline comments (after a field on the same line) are not allowed.
-# 4. Indentation level is respected for nested fields.
-
-# Standalone diffusion rollout config (does NOT inherit from rollout.yaml).
-# Only includes fields relevant to diffusion model training.
-
 # Target class for this configuration
 _target_: verl.workers.config.DiffusionRolloutConfig
 

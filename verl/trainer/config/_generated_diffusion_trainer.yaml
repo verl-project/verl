@@ -48,7 +48,7 @@ actor_rollout_ref:
     adv_clip_max: 5.0
     policy_loss:
       _target_: verl.workers.config.PolicyLossConfig
-      loss_mode: vanilla
+      loss_mode: flow_grpo
     use_kl_loss: false
     kl_loss_coef: 0.001
     ppo_epochs: 1

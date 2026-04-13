@@ -9,7 +9,7 @@
 defaults:
 
   # Diffusion FSDP actor config.
-  - actor@actor_rollout_ref.actor: diffusion_dp_actor
+  - actor@actor_rollout_ref.actor: dp_diffusion_actor
 
   # data: trainer/config/data/legacy_data.yaml
   - data@data: legacy_data

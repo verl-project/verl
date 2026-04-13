@@ -4,24 +4,11 @@
 # 3. Inline comments (after a field on the same line) are not allowed.
 # 4. Indentation level is respected for nested fields.
 
-# Lean FSDP actor config for diffusion model training (does NOT inherit from actor.yaml).
-# Only includes fields relevant to diffusion training.
-defaults:
-
-  # fsdp optimizer config
-  - ../optim@optim: fsdp
-
-  # fsdp engine config (lean, no QAT/entropy/SP)
-  - ../engine@fsdp_config: diffusion_fsdp
-
-  # load the reference default config, then apply the fields in the current yaml
-  - _self_
-
 # Target class for this configuration
-_target_: verl.workers.config.FSDPDiffusersActorConfig
+_target_: verl.workers.config.DiffusionActorConfig
 
-# Training strategy: fsdp
-strategy: fsdp
+# Training strategy: fsdp, fsdp2. must be set.
+strategy: ???
 
 # Number of rollouts per update
 rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
@@ -29,13 +16,13 @@ rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
 # Split each sample into sub-batches of this size for PPO
 ppo_mini_batch_size: 256
 
-# Local per-GPU micro batch size for gradient accumulation
+# Local per-GPU micro batch size
 ppo_micro_batch_size_per_gpu: null
 
-# PPO clip ratio (FlowGRPO-style; tighter than default 0.2)
+# PPO clip ratio
 clip_ratio: 0.0001
 
-# Maximum value to clamp advantages before computing policy loss
+# Maximum value to clamp advantages
 adv_clip_max: 5.0
 
 # policy loss config
@@ -44,13 +31,13 @@ policy_loss:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.PolicyLossConfig
 
-  # Loss function mode for diffusion: vanilla (overridden to flow_grpo in examples)
-  loss_mode: "vanilla"
+  # Loss function mode for diffusion: flow_grpo
+  loss_mode: "flow_grpo"
 
 # Whether to use KL loss
 use_kl_loss: false
 
-# KL loss coefficient when use_kl_loss is enabled
+# KL loss coefficient when use_kl_loss is enabled. For FlowGRPO
 kl_loss_coef: 0.001
 
 # Number of PPO epochs per batch
@@ -72,12 +59,17 @@ checkpoint:
   save_contents: ['model', 'optimizer', 'extra']
 
   # For more flexibility, you can specify the contents to load from the checkpoint.
+  # .xxx refers to the local variable xxx from the same level of hierarchy similar to python pkg
   load_contents: ${.save_contents}
 
-  # Whether to save checkpoints asynchronously.
+  # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
 
   # Mbridge config extension.
+  # when vanilla_mbridge=True, and your filesystem is a distributed filesystem,(which means you write a file in node A
+  # and you can read the file in node B immediately)
+  # set `mbridge_config.distributed_filesystem=True` and `mbridge_config.memory_efficient=True` to 
+  # speed up the checkpoint saving by 10x speed.
   mbridge_config: {}
 
 # optimizer configs
@@ -86,10 +78,10 @@ optim:
   # Learning rate
   lr: 1e-6
 
-  # Warmup steps ratio
+  # Warmup steps ratio (used if lr_warmup_steps is 0 or negative)
   lr_warmup_steps_ratio: 0.0
 
-  # Total training steps
+  # Total training steps (must be overridden at runtime)
   total_training_steps: -1
 
   # Weight decay
@@ -97,6 +89,3 @@ optim:
 
   # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
   lr_warmup_steps: -1
-
-# Gradient clipping for actor updates
-grad_clip: 1.0

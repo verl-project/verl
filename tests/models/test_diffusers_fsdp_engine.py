@@ -65,7 +65,7 @@ def create_training_config(model_type, strategy, device_count, model):
 
         with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
             cfg = compose(
-                config_name="diffusion_dp_actor",
+                config_name="dp_diffusion_actor",
                 overrides=[
                     "strategy=" + strategy,
                     "clip_ratio=0.0001",
