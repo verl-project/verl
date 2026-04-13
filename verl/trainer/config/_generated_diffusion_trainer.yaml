@@ -244,20 +244,12 @@ reward:
     max_concurrent: 64
     memory_limit_mb: 1024
 algorithm:
-  rollout_correction:
-    rollout_is: null
-    rollout_is_threshold: 2.0
-    rollout_rs: null
-    rollout_rs_threshold: null
-    bypass_mode: false
-    loss_type: ppo_clip
-    rollout_is_batch_normalize: false
   _target_: verl.trainer.config.DiffusionAlgoConfig
   adv_estimator: flow_grpo
   norm_adv_by_std_in_grpo: true
+  bypass_mode: false
   global_std: true
 trainer:
-  balance_batch: true
   total_epochs: 30
   total_training_steps: null
   project_name: verl_examples
