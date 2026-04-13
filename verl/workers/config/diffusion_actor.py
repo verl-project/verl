@@ -21,7 +21,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 from verl.utils.profiler.config import ProfilerConfig
 
-from .actor import PolicyLossConfig
+from .actor import DiffusionLossConfig
 from .engine import FSDPEngineConfig
 from .optimizer import OptimizerConfig
 
@@ -59,14 +59,8 @@ class DiffusionActorConfig(BaseConfig):
     # Micro-batch size per GPU for gradient accumulation
     ppo_micro_batch_size_per_gpu: Optional[int] = None
 
-    # PPO clip ratio (FlowGRPO-style; tighter than LLM default 0.2)
-    clip_ratio: float = 0.0001
-
-    # Maximum value to clamp advantages before computing policy loss
-    adv_clip_max: float = 5.0
-
-    # Policy loss config
-    policy_loss: PolicyLossConfig = field(default_factory=PolicyLossConfig)
+    # Diffusion loss config (loss mode, clip ratio, adv clamp)
+    diffusion_loss: DiffusionLossConfig = field(default_factory=DiffusionLossConfig)
 
     # Scale factor for 'seq-mean-token-sum-norm' loss aggregation mode
     loss_scale_factor: Optional[int] = None

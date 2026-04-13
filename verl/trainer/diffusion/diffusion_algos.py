@@ -133,26 +133,27 @@ def compute_policy_loss_flow_grpo(
     """
     assert config is not None
     assert isinstance(config, DiffusionActorConfig)
+    loss_cfg = config.diffusion_loss
     advantages = torch.clamp(
         advantages,
-        -config.adv_clip_max,
-        config.adv_clip_max,
+        -loss_cfg.adv_clip_max,
+        loss_cfg.adv_clip_max,
     )
     log_ratio = log_prob - old_log_prob
     ratio = torch.exp(log_ratio)
     unclipped_loss = -advantages * ratio
     clipped_loss = -advantages * torch.clamp(
         ratio,
-        1.0 - config.clip_ratio,
-        1.0 + config.clip_ratio,
+        1.0 - loss_cfg.clip_ratio,
+        1.0 + loss_cfg.clip_ratio,
     )
     pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
 
     with torch.no_grad():
         ppo_kl = torch.mean(-log_ratio)
-        pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > config.clip_ratio).float())
-        pg_clipfrac_higher = torch.mean((ratio - 1.0 > config.clip_ratio).float())
-        pg_clipfrac_lower = torch.mean((1.0 - ratio > config.clip_ratio).float())
+        pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > loss_cfg.clip_ratio).float())
+        pg_clipfrac_higher = torch.mean((ratio - 1.0 > loss_cfg.clip_ratio).float())
+        pg_clipfrac_lower = torch.mean((1.0 - ratio > loss_cfg.clip_ratio).float())
 
     pg_metrics = {
         "actor/ppo_kl": ppo_kl.detach().item(),

@@ -30,7 +30,7 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.policy_loss.loss_mode=flow_grpo \
+    actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \

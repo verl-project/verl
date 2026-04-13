@@ -20,20 +20,20 @@ ppo_mini_batch_size: 256
 # Local per-GPU micro batch size
 ppo_micro_batch_size_per_gpu: null
 
-# PPO clip ratio
-clip_ratio: 0.0001
-
-# Maximum value to clamp advantages
-adv_clip_max: 5.0
-
-# policy loss config
-policy_loss:
+# diffusion loss config
+diffusion_loss:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.PolicyLossConfig
+  _target_: verl.workers.config.DiffusionLossConfig
 
   # Loss function mode for diffusion: flow_grpo
   loss_mode: "flow_grpo"
+
+  # PPO clip ratio
+  clip_ratio: 0.0001
+
+  # Maximum value to clamp advantages before computing policy loss
+  adv_clip_max: 5.0
 
 # Whether to use KL loss
 use_kl_loss: false

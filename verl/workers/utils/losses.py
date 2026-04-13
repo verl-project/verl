@@ -199,7 +199,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
 
-    loss_mode = config.policy_loss.get("loss_mode", "flow_grpo")
+    loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     pg_loss, pg_metrics = policy_loss_fn(

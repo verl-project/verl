@@ -47,11 +47,11 @@ actor_rollout_ref:
     strategy: fsdp
     ppo_mini_batch_size: 256
     ppo_micro_batch_size_per_gpu: null
-    clip_ratio: 0.0001
-    adv_clip_max: 5.0
-    policy_loss:
-      _target_: verl.workers.config.PolicyLossConfig
+    diffusion_loss:
+      _target_: verl.workers.config.DiffusionLossConfig
       loss_mode: flow_grpo
+      clip_ratio: 0.0001
+      adv_clip_max: 5.0
     use_kl_loss: false
     kl_loss_coef: 0.001
     ppo_epochs: 1
