@@ -1,5 +1,5 @@
 set -x
-ENGINE=${1:-vllm}
+ENGINE=${1:-sglang}
 export WANDB_API_KEY=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
 
 
@@ -11,7 +11,6 @@ test_path=$HOME/data/geo3k/test.parquet
 rollout_mode="async"
 rollout_name="sglang" # sglang or vllm
 if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
     return_raw_chat="True"
 fi
 
