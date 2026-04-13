@@ -47,7 +47,7 @@ def create_training_config(model_type, strategy, device_count, model):
 
         from verl.utils.config import omega_conf_to_dataclass
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/model")):
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/diffusion/model")):
             cfg = compose(
                 config_name="diffusion_model",
                 overrides=[
@@ -63,7 +63,7 @@ def create_training_config(model_type, strategy, device_count, model):
             )
         model_config: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/diffusion/actor")):
             cfg = compose(
                 config_name="dp_diffusion_actor",
                 overrides=[

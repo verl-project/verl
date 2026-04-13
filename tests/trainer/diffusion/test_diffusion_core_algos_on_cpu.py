@@ -51,7 +51,7 @@ def test_compute_policy_loss_flow_grpo() -> None:
     current_log_probs = torch.randn((batch_size, steps), dtype=torch.float32)
     advantages = torch.randn((batch_size, steps), dtype=torch.float32)
 
-    with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor"), version_base=None):
+    with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/diffusion/actor"), version_base=None):
         cfg = compose(
             config_name="dp_diffusion_actor",
             overrides=[

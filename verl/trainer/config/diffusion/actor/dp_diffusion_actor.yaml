@@ -8,12 +8,12 @@
 defaults:
 
   # fsdp optimizer config
-  - ../optim@optim: fsdp
+  - ../../optim@optim: fsdp
 
   # fsdp engine config
   - ../engine@fsdp_config: diffusion_fsdp
 
-  # diffusion actor config, inheriting from trainer/config/actor/diffusion_actor.yaml
+  # diffusion actor config, inheriting from trainer/config/diffusion/actor/diffusion_actor.yaml
   - diffusion_actor
 
   # load the reference default config, then apply the fields in the current yaml

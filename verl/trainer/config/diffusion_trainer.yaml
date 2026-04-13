@@ -7,24 +7,24 @@
 # specify the default per-component configs
 defaults:
 
-  - model_engine: dp_diffusion
+  - diffusion/model_engine: dp_diffusion
 
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
-  # actor_rollout_ref.actor: trainer/config/actor/dp_diffusion_actor.yaml
-  - actor@actor_rollout_ref.actor: ${model_engine}_actor
+  # actor_rollout_ref.actor: trainer/config/diffusion/actor/dp_diffusion_actor.yaml
+  - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
 
   # data: trainer/config/data/legacy_data.yaml
   - data@data: legacy_data
 
   # Reference model config.
   # Reference model will be enabled when actor.use_kl_loss is True.
-  - ref@actor_rollout_ref.ref: ${model_engine}_ref
+  - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
 
   # Rollout model config.
-  - rollout@actor_rollout_ref.rollout: diffusion_rollout
+  - diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
 
   # Model config.
-  - model@actor_rollout_ref.model: diffusion_model
+  - diffusion/model@actor_rollout_ref.model: diffusion_model
 
   # Reward config.
   - reward@reward: reward

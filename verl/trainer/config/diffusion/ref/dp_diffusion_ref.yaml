@@ -1,7 +1,7 @@
 # defaults specify the default config from each component
 defaults:
 
-  # diffusion ref config, inheriting from trainer/config/ref/diffusion_ref.yaml
+  # diffusion ref config, inheriting from trainer/config/diffusion/ref/diffusion_ref.yaml
   - diffusion_ref
 
   # fsdp engine config
