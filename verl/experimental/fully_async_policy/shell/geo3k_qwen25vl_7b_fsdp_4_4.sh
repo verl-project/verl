@@ -95,7 +95,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.test_freq="${test_freq}" \
     trainer.val_before_train=True \
     trainer.save_freq=-1 \
-    trainer.resume_mode=auto \
+    trainer.resume_mode=disable \
     trainer.nnodes="${NNODES}" \
     trainer.n_gpus_per_node="${n_gpus_training}" \
     rollout.nnodes="${NNODES}" \
