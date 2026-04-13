@@ -1,5 +1,5 @@
 #!/bin/bash
-# set -x
+# SFT training script for JSONL format data
 
 # ============================ Configurations ===========================
 PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save logs!!!!!
@@ -48,8 +48,6 @@ export WANDB_RUN_ID="exp-${MODEL_NAME}-${DATA_NAME}-sft"
 
 torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
      -m verl.trainer.fsdp_sft_trainer \
-    data.train_files=${DATA_DIR}/train.parquet \
-    data.val_files=${DATA_DIR}/test.parquet \
     data.prompt_key=extra_info \
     data.response_key=extra_info \
     data.prompt_dict_keys=['question'] \
@@ -62,7 +60,6 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
     model.lora_alpha=16 \
     model.enable_gradient_checkpointing=true \
     model.use_liger=true \
-    trainer.default_local_dir=${SAVE_PATH} \
     trainer.project_name=${DATA_NAME}-sft \
     trainer.experiment_name=${LOG_NAME} \
     trainer.total_epochs=1 \
