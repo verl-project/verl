@@ -195,12 +195,9 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
     metrics = {}
 
-    response_mask = data["response_mask"].to(bool)
     # compute policy loss
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
-
-    loss_agg_mode = config.loss_agg_mode
 
     loss_mode = config.policy_loss.get("loss_mode", "flow_grpo")
 
@@ -209,10 +206,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         old_log_prob=old_log_prob,
         log_prob=log_prob,
         advantages=advantages,
-        response_mask=response_mask,
-        loss_agg_mode=loss_agg_mode,
         config=config,
-        rollout_is_weights=None,
     )
 
     pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)

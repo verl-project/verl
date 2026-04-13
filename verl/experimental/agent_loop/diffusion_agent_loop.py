@@ -68,10 +68,6 @@ class _InternalDiffusionAgentLoopOutput(DiffusionAgentLoopOutput):
     """Padded prompt token ids."""
     response_diffusion_output: torch.Tensor
     """Response diffusion output: image (NCHW format) / video (NTCHW format)."""
-    input_ids: torch.Tensor
-    """Padded input ids(prompt_ids)."""
-    attention_mask: torch.Tensor
-    """Padded attention mask."""
     response_logprobs: Optional[torch.Tensor] = None
     """Log probabilities over denoising timesteps."""
     extra_fields: dict[str, Any] = {}
@@ -226,11 +222,10 @@ class DiffusionAgentLoopWorker:
             padding="max_length",
             max_length=self.rollout_config.prompt_length,
             return_tensors="pt",
-            return_attention_mask=True,
+            return_attention_mask=False,
         )
         if prompt_output["input_ids"].dim() == 1:
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
-            prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
         response_diffusion_output = output.response_diffusion_output.unsqueeze(0)
 
@@ -238,15 +233,12 @@ class DiffusionAgentLoopWorker:
         if output.response_logprobs is not None:
             response_logprobs = output.response_logprobs.unsqueeze(0)
 
-        attention_mask = prompt_output["attention_mask"]
-        input_ids = prompt_output["input_ids"]
+        prompt_ids = prompt_output["input_ids"]
 
         await self._compute_score(
             output,
-            prompts=input_ids,
+            prompts=prompt_ids,
             responses=response_diffusion_output,
-            attention_mask=attention_mask,
-            input_ids=input_ids,
             kwargs=kwargs,
         )
 
@@ -254,10 +246,8 @@ class DiffusionAgentLoopWorker:
             extra_fields["reward_extra_info"] = output.extra_fields["reward_extra_info"]
 
         return _InternalDiffusionAgentLoopOutput(
-            prompt_ids=input_ids,
+            prompt_ids=prompt_ids,
             response_diffusion_output=response_diffusion_output,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
             response_logprobs=response_logprobs,
             reward_score=output.reward_score,
             num_turns=output.num_turns,
@@ -265,7 +255,7 @@ class DiffusionAgentLoopWorker:
             extra_fields=extra_fields,
         )
 
-    async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, kwargs):
+    async def _compute_score(self, output, prompts, responses, kwargs):
         """Compute reward score for single sample."""
         enable_async_reward = self.reward_loop_worker_handles is not None
 
@@ -274,8 +264,6 @@ class DiffusionAgentLoopWorker:
                 {
                     "prompts": prompts,  # [1, prompt_length]
                     "responses": responses,  # [1, C, H, W] or [1, T, C, H, W]
-                    "attention_mask": attention_mask,  # [1, prompt_length]
-                    "input_ids": input_ids,  # [1, prompt_length]
                 },
                 batch_size=1,
             )
@@ -303,8 +291,6 @@ class DiffusionAgentLoopWorker:
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
         response_diffusion_output = torch.cat([input.response_diffusion_output for input in inputs], dim=0)
-        attention_mask = torch.cat([input.attention_mask for input in inputs], dim=0)
-        input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
@@ -320,8 +306,6 @@ class DiffusionAgentLoopWorker:
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
                 "responses": response_diffusion_output,  # [bsz, C, H, W] or [bsz, T, C, H, W]
-                "input_ids": input_ids,  # [bsz, prompt_length]
-                "attention_mask": attention_mask,  # [bsz, prompt_length]
                 **optional_outputs,
             },
             batch_size=len(inputs),

@@ -22,8 +22,7 @@ import torch
 from omegaconf import DictConfig
 
 from verl.trainer.ppo.core_algos import register_adv_est, register_policy_loss
-from verl.workers.config import ActorConfig
-from verl.workers.config.diffusion_actor import DiffusionActorConfig
+from verl.workers.config import DiffusionActorConfig
 
 
 class DiffusionAdvantageEstimator(str, Enum):
@@ -35,7 +34,6 @@ class DiffusionAdvantageEstimator(str, Enum):
 @register_adv_est(DiffusionAdvantageEstimator.FLOW_GRPO)
 def compute_flow_grpo_outcome_advantage(
     sample_level_rewards: torch.Tensor,
-    response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-4,
     norm_adv_by_std_in_grpo: bool = True,
@@ -48,8 +46,6 @@ def compute_flow_grpo_outcome_advantage(
 
     Args:
         sample_level_rewards: `(torch.Tensor)`
-            shape is (bs, ), (bs, 1) or (bs, response_length)
-        response_mask: `(torch.Tensor)`
             shape is (bs, response_length)
         index: `(np.ndarray)`
             index array for grouping
@@ -73,10 +69,7 @@ def compute_flow_grpo_outcome_advantage(
             shape is (bs, response_length)
     """
     scores = sample_level_rewards
-    if scores.ndim == 1:
-        scores = scores.unsqueeze(-1)
-    scores = scores.expand_as(response_mask).clone()
-
+    assert scores.ndim == 2
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
@@ -120,10 +113,7 @@ def compute_policy_loss_flow_grpo(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
-    response_mask: torch.Tensor,
-    loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | ActorConfig] = None,
-    rollout_is_weights: torch.Tensor | None = None,
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the clipped policy objective and related metrics for FlowGRPO.
@@ -131,19 +121,15 @@ def compute_policy_loss_flow_grpo(
     https://github.com/yifan123/flow_grpo/blob/main/scripts/train_sd3_fast.py#L885
     Args:
         old_log_prob (torch.Tensor):
-            Log-probabilities of actions under the old policy, shape (batch_size,).
+            Log-probabilities of actions under the old (rollout) policy,
+            shape ``(batch_size,)`` per timestep or ``(batch_size, num_timesteps)`` for the full trajectory.
         log_prob (torch.Tensor):
-            Log-probabilities of actions under the current policy, shape (batch_size,).
-        response_mask (torch.Tensor):
-            Not used currently.
-        loss_agg_mode (str, optional):
-            Not used currently.
+            Log-probabilities of actions under the current policy, same shape as ``old_log_prob``.
         advantages (torch.Tensor):
-            Advantage estimates for each action, shape (batch_size,).
-        config: `(verl.trainer.config.ActorConfig)`:
+            Per-sample advantage estimates, shape ``(batch_size,)`` or broadcastable to ``log_prob``.
+            Broadcasted to match ``log_prob`` before computing the loss.
+        config: `(verl.trainer.config.DiffusionActorConfig)`:
             config for the actor.
-        rollout_is_weights: `torch.Tensor, optional)`:
-            Not used currently.
     """
     assert config is not None
     assert isinstance(config, DiffusionActorConfig)

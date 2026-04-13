@@ -53,9 +53,6 @@ use_kl_loss: false
 # KL loss coefficient when use_kl_loss is enabled
 kl_loss_coef: 0.001
 
-# Loss aggregation mode: token-mean, seq-mean-token-sum, etc.
-loss_agg_mode: token-mean
-
 # Number of PPO epochs per batch
 ppo_epochs: 1
 

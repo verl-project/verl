@@ -68,9 +68,6 @@ class DiffusionActorConfig(BaseConfig):
     # Policy loss config
     policy_loss: PolicyLossConfig = field(default_factory=PolicyLossConfig)
 
-    # Loss aggregation mode
-    loss_agg_mode: str = "token-mean"
-
     # Scale factor for 'seq-mean-token-sum-norm' loss aggregation mode
     loss_scale_factor: Optional[int] = None
 

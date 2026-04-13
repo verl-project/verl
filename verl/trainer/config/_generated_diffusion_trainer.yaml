@@ -51,7 +51,6 @@ actor_rollout_ref:
       loss_mode: vanilla
     use_kl_loss: false
     kl_loss_coef: 0.001
-    loss_agg_mode: token-mean
     ppo_epochs: 1
     shuffle: false
     data_loader_seed: 42
