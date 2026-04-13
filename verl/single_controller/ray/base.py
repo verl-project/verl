@@ -17,7 +17,7 @@ import os
 import socket
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import ray
@@ -119,6 +119,8 @@ class RayResourcePool(ResourcePool):
         max_colocate_count: int = 10,
         detached=False,
         accelerator_type: Optional[str] = None,
+        node_rack_resources: Optional[list[str]] = None,
+        placement_group_target_node_ids: Optional[list[str]] = None,
     ) -> None:
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
@@ -127,6 +129,11 @@ class RayResourcePool(ResourcePool):
         self.pgs = None
         self.detached = detached
         self.accelerator_type = accelerator_type
+        # One Ray custom-resource key per logical node (same order as process_on_nodes / PG index).
+        # Must match resources declared on `ray start` (e.g. RACK_A). See placement_pin_rack_resources.
+        self.node_rack_resources = node_rack_resources
+        # Ray NodeID per PG (same order as process_on_nodes); uses placement_group(..., _soft_target_node_id=...).
+        self.placement_group_target_node_ids = placement_group_target_node_ids
 
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
         if self.pgs is not None:
@@ -150,12 +157,79 @@ class RayResourcePool(ResourcePool):
                 bundle[self.accelerator_type] = 1e-4
         pg_scheme = [[bundle.copy() for _ in range(process_count)] for process_count in self._store]
 
+        if self.node_rack_resources is not None:
+            if len(self.node_rack_resources) != len(self._store):
+                logger.warning(
+                    "node_rack_resources length (%d) != process_on_nodes length (%d); ignoring rack pin",
+                    len(self.node_rack_resources),
+                    len(self._store),
+                )
+            else:
+                for pg_idx, bundles in enumerate(pg_scheme):
+                    rack_key = self.node_rack_resources[pg_idx]
+                    if not rack_key:
+                        continue
+                    for b in bundles:
+                        b[rack_key] = 1e-4
+                logger.info(
+                    "Placement groups request rack resources per node slot: %s",
+                    self.node_rack_resources,
+                )
+
         lifetime = "detached" if self.detached else None
 
-        pgs = [
-            placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime)
-            for idx, bundles in enumerate(pg_scheme)
-        ]
+        pg_target_ids = self.placement_group_target_node_ids
+        if pg_target_ids is not None and len(pg_target_ids) != len(self._store):
+            logger.warning(
+                "placement_group_target_node_ids length (%d) != process_on_nodes length (%d); ignoring node pin",
+                len(pg_target_ids),
+                len(self._store),
+            )
+            pg_target_ids = None
+
+        if pg_target_ids and any(pg_target_ids):
+            logger.info(
+                "Placement groups use Ray _soft_target_node_id (node hint) per slot: %s",
+                pg_target_ids,
+            )
+
+        pgs = []
+        for idx, bundles in enumerate(pg_scheme):
+            pg_name = pg_name_prefix + str(idx)
+            kwargs = {
+                "bundles": bundles,
+                "strategy": strategy,
+                "name": pg_name,
+                "lifetime": lifetime,
+            }
+            target_nid: Optional[str] = None
+            if pg_target_ids is not None:
+                target_nid = pg_target_ids[idx] or None
+            if target_nid:
+                if strategy != "STRICT_PACK":
+                    logger.warning(
+                        "placement_group node target for %s ignored: _soft_target_node_id requires STRICT_PACK, got %s",
+                        pg_name,
+                        strategy,
+                    )
+                else:
+                    kwargs["_soft_target_node_id"] = target_nid
+            try:
+                pgs.append(placement_group(**kwargs))
+            except TypeError as e:
+                if "_soft_target_node_id" not in kwargs:
+                    raise
+                msg = str(e).lower()
+                if "unexpected keyword" not in msg and "got an unexpected keyword" not in msg:
+                    raise
+                kwargs.pop("_soft_target_node_id", None)
+                if target_nid:
+                    logger.warning(
+                        "placement_group rejected _soft_target_node_id (%s); retrying without node pin for %s",
+                        e,
+                        pg_name,
+                    )
+                pgs.append(placement_group(**kwargs))
 
         ray.get([pg.ready() for pg in pgs])
 
@@ -190,6 +264,8 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[int, str]
     max_colocate_count: int = 3
+    pool_rack_labels: Optional[Dict[str, List[str]]] = None
+    pool_placement_group_target_node_ids: Optional[Dict[str, List[str]]] = None
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -205,11 +281,35 @@ class ResourcePoolManager:
             # For FSDP backend, using max_colocate_count=3: actor_critic_ref, rollout, reward model (optional)
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
+            rack_list: Optional[list[str]] = None
+            if self.pool_rack_labels:
+                rack_list = self.pool_rack_labels.get(resource_pool_name)
+                if rack_list is not None and len(rack_list) != len(process_on_nodes):
+                    logger.warning(
+                        "pool_rack_labels[%s] length %d != process_on_nodes length %d; ignoring rack pin for this pool",
+                        resource_pool_name,
+                        len(rack_list),
+                        len(process_on_nodes),
+                    )
+                    rack_list = None
+            target_nodes: Optional[list[str]] = None
+            if self.pool_placement_group_target_node_ids:
+                target_nodes = self.pool_placement_group_target_node_ids.get(resource_pool_name)
+                if target_nodes is not None and len(target_nodes) != len(process_on_nodes):
+                    logger.warning(
+                        "pool_placement_group_target_node_ids[%s] length %d != process_on_nodes length %d; ignoring node pin for this pool",
+                        resource_pool_name,
+                        len(target_nodes),
+                        len(process_on_nodes),
+                    )
+                    target_nodes = None
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes,
                 use_gpu=True,
                 max_colocate_count=self.max_colocate_count,
                 name_prefix=resource_pool_name,
+                node_rack_resources=rack_list,
+                placement_group_target_node_ids=target_nodes,
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -239,6 +339,16 @@ class ResourcePoolManager:
         if total_available_gpus < total_required_gpus:
             raise ValueError(
                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
+            )
+
+        if self.pool_rack_labels:
+            from verl.utils.placement import validate_rack_pinned_pools_feasible
+
+            validate_rack_pinned_pools_feasible(
+                self.resource_pool_spec,
+                self.pool_rack_labels,
+                node_available_resources,
+                max_colocate_count=3,
             )
 
 

@@ -145,6 +145,42 @@ trainer:
   # Number of GPUs per node
   n_gpus_per_node: 8
 
+  # Enable placement search (Ray rack-aware node selection).
+  # Requires Ray nodes to expose `RACK_*` custom resources.
+  enable_placement: false
+
+  # When true with enable_placement, add Ray bundle custom resources (e.g. RACK_A) per logical node
+  # so placement groups schedule only on nodes that declare matching resources in `ray start --resources`.
+  placement_pin_rack_resources: false
+
+  # Optional map from placement rack id (selected_nodes[i][0]) to the exact Ray resource string to put on PG
+  # bundles, if you must differ from the key Ray reports (validated against the cluster at startup).
+  # Example: {RACK_A: rack_a} when nodes declare `rack_a` not `RACK_A`.
+  placement_rack_bundle_resource_map: null
+
+  # When true with enable_placement, pass selected_nodes[i][1] (Ray NodeID) into each PG as
+  # placement_group(..., _soft_target_node_id=...) so STRICT_PACK groups prefer that node (Ray >= 2.x).
+  placement_pin_node_affinity: false
+
+  # When reward_model.enable_resource_pool is true, copy rack/node PG pins from the trainer pool for the
+  # first reward_model.nnodes slots (requires reward n_gpus_per_node == trainer n_gpus_per_node).
+  placement_reward_pool_follows_trainer: true
+
+  # Analytical (formula-based) auto-parallelization for degrees (TP/PP/CP/EP/DP).
+  # Disabled by default; can be enabled via CLI override:
+  #   python -m verl.trainer.main_ppo trainer.auto_parallel.enabled=true
+  auto_parallel:
+    enabled: false
+    # analytical-only mode for now
+    memory_check_mode: "analytical"
+    # multiplier for CI_upper (defensive buffer)
+    safety_margin: 1.10
+    # memory budget fraction
+    target_utilization: 0.90
+    objective: "max_mp"
+    respect_config_parallelism: false
+    allow_context_parallel: false
+
   # Save frequency (by iteration) for model checkpoints
   save_freq: -1
 
@@ -412,6 +448,10 @@ ray_kwargs:
 
   # configs related to ray initialization
   ray_init:
+
+    # If null/omitted, main_ppo uses address="auto" to join a `ray start` cluster (multinode).
+    # Override with e.g. "192.168.1.1:6379" or ray.client() URL when needed.
+    address: null
 
     # Number of CPUs for Ray. Use a fixed number instead of null when using SLURM.
     num_cpus: null

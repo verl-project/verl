@@ -15,6 +15,7 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other mpain.
 """
 
+import logging
 import os
 import socket
 
@@ -30,6 +31,8 @@ from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import deprecated
+
+logger = logging.getLogger(__name__)
 
 
 @deprecated(
@@ -76,8 +79,11 @@ def run_ppo(config, task_runner_class=None) -> None:
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        ray_init_container = OmegaConf.to_container(ray_init_kwargs, resolve=True)
+        if not ray_init_container.get("address"):
+            ray_init_container["address"] = "auto"
+        print(f"ray init kwargs: {ray_init_container}")
+        ray.init(**ray_init_container)
 
     if task_runner_class is None:
         task_runner_class = ray.remote(num_cpus=1)(TaskRunner)  # please make sure main_task is not scheduled on head
@@ -159,9 +165,84 @@ class TaskRunner:
         """Initialize resource pool manager."""
 
         global_pool_id = "global_pool"
-        resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-        }
+        reward_pool_id = "reward_pool"
+        selected_nodes = None
+        pool_rack_labels = None
+        pool_placement_group_target_node_ids = None
+        pin_rack = getattr(config.trainer, "placement_pin_rack_resources", False)
+        pin_node = getattr(config.trainer, "placement_pin_node_affinity", False)
+        enable_placement = getattr(config.trainer, "enable_placement", False)
+
+        if pin_rack and not enable_placement:
+            logger.warning(
+                "placement_pin_rack_resources is True but enable_placement is False; rack labels will not be applied"
+            )
+        if pin_node and not enable_placement:
+            logger.warning(
+                "placement_pin_node_affinity is True but enable_placement is False; node pinning will not be applied"
+            )
+
+        # Placement search init (degrees validation + compute_process_on_nodes) runs whenever enable_placement is set.
+        # Rack custom resources on PG bundles are added only when placement_pin_rack_resources is also true.
+        if enable_placement:
+            from verl.utils.placement import init_pool_degrees_and_spec
+
+            _, resource_pool_spec, selected_nodes = init_pool_degrees_and_spec(
+                config, global_pool_id=global_pool_id
+            )
+            if pin_rack:
+                if selected_nodes and len(selected_nodes) == config.trainer.nnodes:
+                    from verl.utils.placement import (
+                        apply_rack_bundle_resource_map,
+                        validate_rack_bundle_resource_labels,
+                    )
+
+                    raw_rack_ids = [str(t[0]) for t in selected_nodes]
+                    rack_map = getattr(config.trainer, "placement_rack_bundle_resource_map", None)
+                    if rack_map is not None:
+                        rack_map = OmegaConf.to_container(rack_map, resolve=True)
+                    if not isinstance(rack_map, dict):
+                        rack_map = None
+                    bundle_rack_names = apply_rack_bundle_resource_map(raw_rack_ids, rack_map)
+                    validate_rack_bundle_resource_labels(bundle_rack_names)
+                    pool_rack_labels = {global_pool_id: bundle_rack_names}
+                    logger.info(
+                        "Ray placement groups will request rack resources per node: %s",
+                        pool_rack_labels[global_pool_id],
+                    )
+                else:
+                    logger.warning(
+                        "placement_pin_rack_resources: missing or mismatched placement selection "
+                        "(len(selected_nodes)=%s, nnodes=%s); skipping rack pin",
+                        len(selected_nodes) if selected_nodes else None,
+                        config.trainer.nnodes,
+                    )
+            if pin_node:
+                if selected_nodes and len(selected_nodes) == config.trainer.nnodes:
+                    from verl.utils.placement import (
+                        validate_placement_targets_distinct_ray_nodes,
+                        validate_ray_node_ids_exist,
+                    )
+
+                    ray_node_ids = [str(t[1]) for t in selected_nodes]
+                    validate_ray_node_ids_exist(ray_node_ids)
+                    validate_placement_targets_distinct_ray_nodes(ray_node_ids)
+                    pool_placement_group_target_node_ids = {global_pool_id: ray_node_ids}
+                    logger.info(
+                        "Placement groups target Ray nodes (NodeID) per slot: %s",
+                        pool_placement_group_target_node_ids[global_pool_id],
+                    )
+                else:
+                    logger.warning(
+                        "placement_pin_node_affinity: missing or mismatched placement selection "
+                        "(len(selected_nodes)=%s, nnodes=%s); skipping node pin",
+                        len(selected_nodes) if selected_nodes else None,
+                        config.trainer.nnodes,
+                    )
+        else:
+            resource_pool_spec = {
+                global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+            }
 
         if config.reward.reward_model.enable_resource_pool:
             if config.reward.reward_model.n_gpus_per_node <= 0:
@@ -185,9 +266,67 @@ class TaskRunner:
             teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
             resource_pool_spec["teacher_pool"] = teacher_pool
 
+        # Copy trainer rack/node PG pins onto reward_pool when shapes align (subset or full).
+        follow_reward = getattr(config.trainer, "placement_reward_pool_follows_trainer", True)
+        if (
+            follow_reward
+            and config.reward.reward_model.enable_resource_pool
+            and selected_nodes
+            and len(selected_nodes) == config.trainer.nnodes
+        ):
+            rn = config.reward.reward_model.nnodes
+            rg = config.reward.reward_model.n_gpus_per_node
+            tg = config.trainer.n_gpus_per_node
+            if rg != tg:
+                logger.warning(
+                    "placement_reward_pool_follows_trainer: reward n_gpus_per_node (%s) != trainer (%s); "
+                    "not pinning reward_pool",
+                    rg,
+                    tg,
+                )
+            elif rn > len(selected_nodes):
+                logger.warning(
+                    "placement_reward_pool_follows_trainer: reward nnodes (%s) > placement slots (%s); skip",
+                    rn,
+                    len(selected_nodes),
+                )
+            elif rn <= len(selected_nodes):
+                if pool_rack_labels and global_pool_id in pool_rack_labels:
+                    src_rack = pool_rack_labels[global_pool_id]
+                    pool_rack_labels = dict(pool_rack_labels)
+                    pool_rack_labels[reward_pool_id] = src_rack[:rn]
+                    logger.info(
+                        "placement_reward_pool_follows_trainer: rack labels for %s: %s",
+                        reward_pool_id,
+                        pool_rack_labels[reward_pool_id],
+                    )
+                if pool_placement_group_target_node_ids and global_pool_id in pool_placement_group_target_node_ids:
+                    from verl.utils.placement import (
+                        validate_placement_targets_distinct_ray_nodes,
+                        validate_ray_node_ids_exist,
+                    )
+
+                    src_nodes = pool_placement_group_target_node_ids[global_pool_id]
+                    sliced_nodes = src_nodes[:rn]
+                    validate_ray_node_ids_exist(sliced_nodes)
+                    if len([x for x in sliced_nodes if x]) > 1:
+                        validate_placement_targets_distinct_ray_nodes(sliced_nodes)
+                    pool_placement_group_target_node_ids = dict(pool_placement_group_target_node_ids)
+                    pool_placement_group_target_node_ids[reward_pool_id] = sliced_nodes
+                    logger.info(
+                        "placement_reward_pool_follows_trainer: Ray NodeIDs for %s: %s",
+                        reward_pool_id,
+                        sliced_nodes,
+                    )
+
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+            pool_rack_labels=pool_rack_labels,
+            pool_placement_group_target_node_ids=pool_placement_group_target_node_ids,
+        )
         return resource_pool_manager
 
     def add_reward_model_resource_pool(self, config):
