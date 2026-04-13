@@ -33,8 +33,11 @@ actor_rollout_ref:
       offload_policy: false
       reshard_after_forward: true
       fsdp_size: -1
+      forward_prefetch: false
       model_dtype: fp32
+      use_orig_params: false
       seed: 42
+      full_determinism: false
       ulysses_sequence_parallel_size: 1
       forward_only: false
       strategy: fsdp
@@ -77,8 +80,11 @@ actor_rollout_ref:
       offload_policy: false
       reshard_after_forward: true
       fsdp_size: -1
+      forward_prefetch: false
       model_dtype: fp32
+      use_orig_params: false
       seed: 42
+      full_determinism: false
       ulysses_sequence_parallel_size: 1
       forward_only: true
       strategy: fsdp
