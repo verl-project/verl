@@ -96,7 +96,6 @@ actor_rollout_ref:
     mode: async
     nnodes: 0
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
-    'n': 1
     dtype: bfloat16
     gpu_memory_utilization: 0.5
     enforce_eager: false
@@ -108,28 +107,29 @@ actor_rollout_ref:
     max_num_seqs: 1024
     load_format: dummy
     layered_summon: false
-    skip_tokenizer_init: true
-    disable_log_stats: true
-    do_sample: true
-    calculate_log_probs: false
     log_prob_micro_batch_size_per_gpu: null
+    disable_log_stats: true
+    'n': 1
     engine_kwargs:
       vllm_omni: {}
-    agent:
-      _target_: verl.workers.config.AgentLoopConfig
-      num_workers: 8
-      default_agent_loop: single_turn_agent
-    checkpoint_engine:
-      _target_: verl.workers.config.CheckpointEngineConfig
-      backend: naive
-      update_weights_bucket_megabytes: 2048
-      engine_kwargs: {}
     val_kwargs:
       _target_: verl.workers.config.DiffusionSamplingConfig
       'n': 1
       num_inference_steps: 40
       seed: 42
       extra_configs: {}
+    calculate_log_probs: false
+    agent:
+      _target_: verl.workers.config.AgentLoopConfig
+      num_workers: 8
+      default_agent_loop: diffusion_single_turn_agent
+    checkpoint_engine:
+      _target_: verl.workers.config.CheckpointEngineConfig
+      backend: naive
+      update_weights_bucket_megabytes: 2048
+      engine_kwargs: {}
+      custom_backend_module: null
+    skip_tokenizer_init: true
     height: 512
     width: 512
     num_inference_steps: 10

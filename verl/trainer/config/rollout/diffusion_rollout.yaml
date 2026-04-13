@@ -13,16 +13,14 @@ nnodes: 0
 # Number of GPUs per node for rollout server.
 n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
 
-# Number of samples per prompt
-n: 1
-
-# Rollout model parameters type.
+# for vllm-omni rollout
+# Rollout model parameters type. Align with actor model's FSDP/Megatron type.
 dtype: bfloat16
 
-# Fraction of GPU memory used by the inference engine.
+# Fraction of GPU memory used by vLLM-Omni for cache.
 gpu_memory_utilization: 0.5
 
-# Whether to disable CUDA graph. Default False for best performance.
+# Whether to disable CUDA graph. Default False to best performance.
 enforce_eager: False
 
 # Whether to free engine cache after generation.
@@ -40,62 +38,31 @@ max_num_batched_tokens: 8192
 # max length for rollout
 max_model_len: null
 
-# max number of sequences
+# max length of sequences
 max_num_seqs: 1024
 
-# Which loader to use for rollout model weights: dummy, safetensors, etc.
+# Which loader to use for rollout model weights: dummy, hf, megatron, etc.
+# safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
 load_format: dummy
 
 # for huge model, layered summon can save memory (prevent OOM) but make it slower
 layered_summon: False
 
-# Do not sample from text tokenizer
-skip_tokenizer_init: True
-
-# Disable inferring engine stats logging
-disable_log_stats: True
-
-# Whether to sample (required by some inference engines)
-do_sample: True
-
-# Whether to compute log probs during rollout
-calculate_log_probs: False
 
 # The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
 log_prob_micro_batch_size_per_gpu: null
 
-# Extra inference engine arguments
+# disable logging statistics
+disable_log_stats: True
+
+# number of responses (i.e. num sample times). > 1 for grpo
+n: 1
+
+# Extra inference engine arguments (vllm-omni), please refer vllm/sglang/trtllm official doc for detail
 engine_kwargs:
 
-  # vLLM-Omni engine options for diffusion rollout (empty dict uses defaults)
+  # vllm-omni engine config
   vllm_omni: {}
-
-# Agent loop config for diffusion rollout
-agent:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.AgentLoopConfig
-
-  # Number of parallel agent workers
-  num_workers: 8
-
-  # Default agent loop for diffusion model
-  default_agent_loop: single_turn_agent
-
-# Checkpoint Engine config for update weights from trainer to rollout
-checkpoint_engine:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.CheckpointEngineConfig
-
-  # Backend for checkpoint engine
-  backend: naive
-
-  # Bucket size in MB to transfer multiple weights at one time
-  update_weights_bucket_megabytes: 2048
-
-  # Additional keyword arguments for checkpoint engine
-  engine_kwargs: {}
 
 # Sampling parameters used during validation (diffusion-specific).
 val_kwargs:
@@ -114,6 +81,57 @@ val_kwargs:
 
   # extra configs for validation
   extra_configs: {}
+
+# support logging rollout prob for debugging purpose
+calculate_log_probs: False
+
+# [Experimental] agent loop based rollout configs
+agent:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.AgentLoopConfig
+
+  # Number of agent loop workers
+  num_workers: 8
+
+  # default agent loop to use if `agent_name` not set in RL dataset
+  default_agent_loop: diffusion_single_turn_agent
+
+# Checkpoint Engine config for update weights from trainer to rollout
+checkpoint_engine:
+
+  # Target class for checkpoint engine config
+  _target_: verl.workers.config.CheckpointEngineConfig
+
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  backend: naive
+
+  # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
+  # This parameter controls the maximum payload size for a single weight update request.
+  # Reference: https://github.com/volcengine/verl/pull/2418
+  # Currently only supported in SGLang rollout implementations
+  # Larger values may improve throughput but increase memory overhead
+  # Detailed performance comparison:
+  # https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/169#issuecomment-3070686720
+  # Default value (512MB) is optimized for typical GPU memory configurations
+  # For the best performance of `rebuild_cuda_tensor`, it is recommended to:
+  # 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
+  # 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+  # when using Tensor Parallelism (TP) >= 8.
+  update_weights_bucket_megabytes: 2048
+
+  # Additional keyword arguments to pass to the checkpoint engine constructor
+  engine_kwargs: {}
+
+  # If set, this Python module is imported on every worker process before the
+  # backend is instantiated, allowing custom backends to register themselves
+  # in CheckpointEngineRegistry.
+  custom_backend_module: null
+
+
+# Whether to skip tokenizer initialization for rollout engine
+# When enabled (True), the rollout assume token in token out for generation
+skip_tokenizer_init: True
 
 # image height for diffusion model rollout
 height: 512

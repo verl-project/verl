@@ -35,7 +35,6 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
-    actor_rollout_ref.rollout.agent.default_agent_loop=diffusion_single_turn_agent \
     actor_rollout_ref.rollout.agent.num_workers=4 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
