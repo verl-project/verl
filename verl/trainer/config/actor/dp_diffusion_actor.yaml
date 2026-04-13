@@ -20,7 +20,7 @@ defaults:
   - _self_
 
 # Target class for this configuration
-_target_: verl.workers.config.FSDPDiffusersActorConfig
+_target_: verl.workers.config.FSDPDiffusionActorConfig
 
 # Training strategy: fsdp, fsdp2
 strategy: fsdp

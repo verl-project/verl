@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Diffusion-specific policy loss functions and KL penalties."""
+"""Diffusion-specific loss functions and KL penalties."""
 
 from collections import defaultdict
 from enum import Enum
@@ -63,7 +63,6 @@ def get_diffusion_loss_fn(name):
     Returns:
         `(callable)`: The policy loss function.
     """
-
     if name not in DIFFUSION_LOSS_REGISTRY:
         raise ValueError(
             f"Unsupported diffusion loss mode: {name}. Supported modes are: {list(DIFFUSION_LOSS_REGISTRY.keys())}"
@@ -71,17 +70,30 @@ def get_diffusion_loss_fn(name):
     return DIFFUSION_LOSS_REGISTRY[name]
 
 
+class DiffusionAdvantageEstimator(str, Enum):
+    """Advantage estimators specific to diffusion-based training."""
+
+    FLOW_GRPO = "flow_grpo"
+
+
 DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
 
 
-def register_diffusion_adv_est(name_or_enum: "str | DiffusionAdvantageEstimator") -> Callable:
-    """Register a diffusion advantage estimator function with the given name."""
+def register_diffusion_adv_est(name_or_enum: str | DiffusionAdvantageEstimator) -> Any:
+    """Register a diffusion advantage estimator function with the given name.
+
+    Args:
+        name_or_enum: `(str)` or `(DiffusionAdvantageEstimator)`
+            The name or enum of the advantage estimator.
+
+    """
 
     def decorator(fn):
         name = name_or_enum.value if isinstance(name_or_enum, Enum) else name_or_enum
         if name in DIFFUSION_ADV_ESTIMATOR_REGISTRY and DIFFUSION_ADV_ESTIMATOR_REGISTRY[name] != fn:
             raise ValueError(
-                f"Diffusion adv estimator {name} already registered: {DIFFUSION_ADV_ESTIMATOR_REGISTRY[name]} vs {fn}"
+                f"Diffusion adv estimator {name} has already been registered: "
+                f"{DIFFUSION_ADV_ESTIMATOR_REGISTRY[name]} vs {fn}"
             )
         DIFFUSION_ADV_ESTIMATOR_REGISTRY[name] = fn
         return fn
@@ -89,7 +101,7 @@ def register_diffusion_adv_est(name_or_enum: "str | DiffusionAdvantageEstimator"
     return decorator
 
 
-def get_diffusion_adv_estimator_fn(name_or_enum: "str | DiffusionAdvantageEstimator") -> Callable:
+def get_diffusion_adv_estimator_fn(name_or_enum):
     """Get the diffusion advantage estimator function with a given name."""
     name = name_or_enum.value if isinstance(name_or_enum, Enum) else name_or_enum
     if name not in DIFFUSION_ADV_ESTIMATOR_REGISTRY:
@@ -97,12 +109,6 @@ def get_diffusion_adv_estimator_fn(name_or_enum: "str | DiffusionAdvantageEstima
             f"Unknown diffusion advantage estimator: {name}. Supported: {list(DIFFUSION_ADV_ESTIMATOR_REGISTRY.keys())}"
         )
     return DIFFUSION_ADV_ESTIMATOR_REGISTRY[name]
-
-
-class DiffusionAdvantageEstimator(str, Enum):
-    """Advantage estimators specific to diffusion-based policy training."""
-
-    FLOW_GRPO = "flow_grpo"
 
 
 @register_diffusion_adv_est(DiffusionAdvantageEstimator.FLOW_GRPO)

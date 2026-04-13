@@ -24,7 +24,7 @@ from verl import DataProto
 from verl.models.diffusers_model import build_scheduler
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
-from verl.workers.config import DiffusionModelConfig, FSDPDiffusersActorConfig, TrainingWorkerConfig
+from verl.workers.config import DiffusionModelConfig, FSDPDiffusionActorConfig, TrainingWorkerConfig
 from verl.workers.engine_workers import TrainingWorker
 from verl.workers.utils.losses import diffusion_loss
 from verl.workers.utils.padding import embeds_padding_2_no_padding
@@ -85,7 +85,7 @@ def create_training_config(model_type, strategy, device_count, model):
                     "diffusion_loss.loss_mode='flow_grpo'",
                 ],
             )
-        actor_config: FSDPDiffusersActorConfig = omega_conf_to_dataclass(cfg)
+        actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
 
         engine_config = actor_config.engine
         optimizer_config = actor_config.optim

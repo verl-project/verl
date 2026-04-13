@@ -27,7 +27,7 @@ from .optimizer import OptimizerConfig
 
 __all__ = [
     "DiffusionActorConfig",
-    "FSDPDiffusersActorConfig",
+    "FSDPDiffusionActorConfig",
 ]
 
 
@@ -108,7 +108,7 @@ class DiffusionActorConfig(BaseConfig):
 
 
 @dataclass
-class FSDPDiffusersActorConfig(DiffusionActorConfig):
+class FSDPDiffusionActorConfig(DiffusionActorConfig):
     """FSDP actor config for diffusion training.
 
     Extends DiffusionActorConfig with FSDP-specific fields (fsdp_config,
