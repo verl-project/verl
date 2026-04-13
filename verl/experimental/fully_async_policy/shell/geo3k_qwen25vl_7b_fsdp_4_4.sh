@@ -93,7 +93,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.experiment_name='qwen2_5_vl_7b_fsdp_async' \
     trainer.total_epochs="${total_epochs}" \
     trainer.test_freq="${test_freq}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.save_freq=-1 \
     trainer.resume_mode=disable \
     trainer.nnodes="${NNODES}" \
