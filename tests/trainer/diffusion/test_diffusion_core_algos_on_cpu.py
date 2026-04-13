@@ -25,7 +25,8 @@ from verl.trainer.diffusion import diffusion_algos
 @pytest.mark.parametrize("global_std", [True, False])
 def test_flow_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: bool) -> None:
     batch_size = 8
-    sample_level_rewards = torch.randn((batch_size, 1), dtype=torch.float32)
+    steps = 10
+    sample_level_rewards = torch.randn((batch_size, steps), dtype=torch.float32)
     uid = np.array([f"uid-{idx}" for idx in range(batch_size)], dtype=object)
 
     advantages, returns = diffusion_algos.compute_flow_grpo_outcome_advantage(
@@ -35,7 +36,7 @@ def test_flow_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: b
         global_std=global_std,
     )
 
-    assert advantages.shape == returns.shape == (batch_size,)
+    assert advantages.shape == returns.shape == (batch_size, steps)
 
 
 def test_compute_policy_loss_flow_grpo() -> None:
@@ -48,7 +49,7 @@ def test_compute_policy_loss_flow_grpo() -> None:
     steps = 10
     rollout_log_probs = torch.randn((batch_size, steps), dtype=torch.float32)
     current_log_probs = torch.randn((batch_size, steps), dtype=torch.float32)
-    advantages = torch.randn((batch_size,), dtype=torch.float32)
+    advantages = torch.randn((batch_size, steps), dtype=torch.float32)
 
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor"), version_base=None):
         cfg = compose(
@@ -62,13 +63,15 @@ def test_compute_policy_loss_flow_grpo() -> None:
         )
     actor_config: FSDPDiffusersActorConfig = omega_conf_to_dataclass(cfg)
 
-    pg_loss, pg_metrics = diffusion_algos.compute_policy_loss_flow_grpo(
-        old_log_prob=rollout_log_probs,
-        log_prob=current_log_probs,
-        advantages=advantages,
-        config=actor_config,
-    )
+    for step in range(steps):
+        pg_loss, pg_metrics = diffusion_algos.compute_policy_loss_flow_grpo(
+            old_log_prob=rollout_log_probs[:, step],
+            log_prob=current_log_probs[:, step],
+            advantages=advantages[:, step],
+            loss_agg_mode="token-mean",
+            config=actor_config,
+        )
 
-    assert pg_loss.shape == ()
-    assert isinstance(pg_loss.item(), float)
-    assert "actor/ppo_kl" in pg_metrics
+        assert pg_loss.shape == ()
+        assert isinstance(pg_loss.item(), float)
+        assert "actor/ppo_kl" in pg_metrics
