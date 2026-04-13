@@ -232,6 +232,14 @@ class AgentLoopOutput(BaseModel):
             rm_scores[-1] = reward_score
             output["rm_scores"] = rm_scores
 
+        teacher_ids, teacher_logprobs = (
+            output["extra_fields"].pop("teacher_ids", None),
+            output["extra_fields"].pop("teacher_logprobs", None),
+        )
+        if teacher_ids is not None:
+            output["teacher_ids"] = teacher_ids
+        if teacher_logprobs is not None:
+            output["teacher_logprobs"] = teacher_logprobs
         return output
 
 

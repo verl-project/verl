@@ -25,6 +25,7 @@ from verl.experimental.agent_loop import AsyncLLMServerManager
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.transferqueue_utils import tqbridge
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 
@@ -125,18 +126,35 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
         assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(sequence_ids)
         return teacher_ids, teacher_logprobs
 
-    async def compute_teacher_logprobs_batch(self, data: DataProto) -> DataProto:
+    @tqbridge()
+    async def compute_teacher_logprobs_batch(self, data: DataProto | TensorDict) -> DataProto | TensorDict:
         """Compute teacher log probabilities for a batch of prompt-response pairs."""
+        use_tensordict = isinstance(data, TensorDict)
+        if use_tensordict:
+            prompt_width = int(max(data["prompts"].offsets()[1:] - data["prompts"].offsets()[:-1]))
+            response_width = int(max(data["responses"].offsets()[1:] - data["responses"].offsets()[:-1]))
+            data = DataProto.from_tensordict(data)
+        else:
+            prompt_width = data.batch["prompts"].shape[1]
+            response_width = data.batch["responses"].shape[1]
+
         multi_modal_data_batch = data.non_tensor_batch.get("teacher_multi_modal_data")
         tasks = []
         lengths = []
-        prompt_width = data.batch["prompts"].shape[1]
-        response_width = data.batch["responses"].shape[1]
 
         # Compute logprobs for each sample in the batch
         for i in range(len(data)):
-            item = data[i : i + 1]
-            sequence_ids, prompt_length, response_length = _unpad_teacher_inputs(item)
+            if not use_tensordict:
+                item = data[i : i + 1]
+                sequence_ids, prompt_length, response_length = _unpad_teacher_inputs(item)
+            else:
+                item = data[i]
+                sequence_ids, prompt_length, response_length = (
+                    normalize_token_ids(item.batch["input_ids"]),
+                    len(item.batch["prompts"]),
+                    len(item.batch["responses"]),
+                )
+
             multi_modal_data = None if multi_modal_data_batch is None else multi_modal_data_batch[i]
             lengths.append((prompt_length, response_length))
             tasks.append(
@@ -149,27 +167,43 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
             )
         outputs = await asyncio.gather(*tasks)
 
-        # Pad the teacher logprobs and ids
-        padded_teacher_ids = []
-        padded_teacher_logprobs = []
-        for (teacher_ids, teacher_logprobs), (prompt_length, response_length) in zip(outputs, lengths, strict=True):
-            padded_ids, padded_logprobs = _pad_teacher_outputs(
-                teacher_ids,
-                teacher_logprobs,
-                prompt_width=prompt_width,
-                response_width=response_width,
-                prompt_length=prompt_length,
-                response_length=response_length,
-                pad_token_id=self.pad_token_id,
-            )
-            padded_teacher_ids.append(padded_ids)
-            padded_teacher_logprobs.append(padded_logprobs)
+        if not use_tensordict:
+            # Pad the teacher logprobs and ids
+            padded_teacher_ids = []
+            padded_teacher_logprobs = []
+            for (teacher_ids, teacher_logprobs), (prompt_length, response_length) in zip(outputs, lengths, strict=True):
+                padded_ids, padded_logprobs = _pad_teacher_outputs(
+                    teacher_ids,
+                    teacher_logprobs,
+                    prompt_width=prompt_width,
+                    response_width=response_width,
+                    prompt_length=prompt_length,
+                    response_length=response_length,
+                    pad_token_id=self.pad_token_id,
+                )
+                padded_teacher_ids.append(padded_ids)
+                padded_teacher_logprobs.append(padded_logprobs)
 
-        batch = TensorDict(
-            {
-                "teacher_ids": torch.cat(padded_teacher_ids),
-                "teacher_logprobs": torch.cat(padded_teacher_logprobs),
-            },
-            batch_size=len(data),
-        )
-        return DataProto(batch=batch)
+            batch = TensorDict(
+                {
+                    "teacher_ids": torch.cat(padded_teacher_ids),
+                    "teacher_logprobs": torch.cat(padded_teacher_logprobs),
+                },
+                batch_size=len(data),
+            )
+            return DataProto(batch=batch)
+        else:
+            all_teacher_ids = []
+            all_teacher_logprobs = []
+            for teacher_ids, teacher_logprobs in outputs:
+                all_teacher_ids.append(teacher_ids)
+                all_teacher_logprobs.append(teacher_logprobs)
+
+            batch = TensorDict(
+                {
+                    "teacher_ids": torch.nested.as_nested_tensor(all_teacher_ids, layout=torch.jagged),
+                    "teacher_logprobs": torch.nested.as_nested_tensor(all_teacher_logprobs, layout=torch.jagged),
+                },
+                batch_size=len(data),
+            )
+            return batch

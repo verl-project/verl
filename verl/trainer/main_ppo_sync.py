@@ -61,6 +61,7 @@ from verl.single_controller.ray import (
     ResourcePoolManager,
     create_colocated_worker_cls,
 )
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
@@ -90,7 +91,7 @@ from verl.utils.ray_utils import auto_await
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
-from verl.workers.config import CriticConfig
+from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.utils.losses import value_loss
 from verl.workers.utils.padding import response_from_nested, response_to_nested
@@ -372,6 +373,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             kwargs=kwargs,
         )
 
+        # TODO: Support output:list[AgentLoopOutput]
+        await self._compute_teacher_logprobs(
+            output,
+            prompt_ids=output.prompt_ids,
+            response_ids=output.response_ids,
+            validate=validate,
+        )
+
         if final_output.reward_score is not None:
             for output in outputs[:-1]:
                 output.reward_score = final_output.reward_score
@@ -454,7 +463,8 @@ class AgentLoopManagerTQ(AgentLoopManager):
         await instance._init_agent_loop_workers()
         return instance
 
-    def generate_sequences(self, prompts: TensorDict) -> None:
+    @auto_await
+    async def generate_sequences(self, prompts: TensorDict) -> None:
         """
         Dispatch input batch to agent loop workers without blocking. Workers should put agent loop outputs
         into TransferQueue once an agent loop finished.
@@ -462,6 +472,9 @@ class AgentLoopManagerTQ(AgentLoopManager):
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
         """
+        if self.stream_teacher_with_rollout:
+            await self.teacher_model_manager.wake_up()
+
         # mark prompts as pending in replay buffer
         global_steps = prompts["global_steps"]
         partition_id = "train" if "validate" not in prompts else "val"
@@ -475,6 +488,11 @@ class AgentLoopManagerTQ(AgentLoopManager):
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
             ]
         )
+
+        # Ignore teacher model sleep because the above ray.get only makesure all the tasks were dispatched,
+        # not completed.
+        # if self.stream_teacher_with_rollout:
+        #     await self.teacher_model_manager.sleep()
 
 
 # ======================================= USER SECTION END =======================================
@@ -593,6 +611,7 @@ class PPOTrainer:
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
             config=self.config.actor_rollout_ref,
+            distillation_config=self.config.get("distillation"),
             role=str(actor_role),
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
@@ -631,6 +650,8 @@ class PPOTrainer:
         logger.info(f"worker group kwargs: {wg_kwargs}")
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = RayWorkerGroup(
                 resource_pool=resource_pool,
@@ -674,16 +695,19 @@ class PPOTrainer:
         )
         logger.info("reward loop manager initialized")
 
-        # TODO: Support OPD
+        # 8. initialize teacher loop manager
         if self.use_teacher_policy:
-            logger.info("OPD is not supported in `main_ppo_sync.py` yet.")
-            self.teacher_model_manager = None
-            self.distillation_config = None
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            self.teacher_model_manager = TeacherModelManager(
+                config=self.config.distillation,
+                resource_pool=teacher_resource_pool,
+            )
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
         else:
             self.teacher_model_manager = None
             self.distillation_config = None
 
-        # 8. initialize agent loop manager
+        # 9. initialize agent loop manager
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
@@ -699,7 +723,7 @@ class PPOTrainer:
         )
         logger.info("agent loop manager initialized")
 
-        # 9. initialize checkpoint engine manager
+        # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
@@ -826,6 +850,16 @@ class PPOTrainer:
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+    def _should_compute_teacher_colocate(self, batch: KVBatchMeta) -> bool:
+        return self.use_teacher_policy and not self.distillation_config.teacher_model.enable_resource_pool
+
+    def _compute_teacher_colocate(self, batch: KVBatchMeta) -> KVBatchMeta:
+        """Compute teacher logprobs after rollout when teacher and student are colocated."""
+        assert self.teacher_model_manager is not None, "TeacherModelManager is None"
+        teacher_batch = self.teacher_model_manager.compute_logprobs(batch)
+
+        return teacher_batch
 
     def _validate(self) -> dict[str, float]:
         # Lists to collect samples for the table
@@ -1038,7 +1072,13 @@ class PPOTrainer:
             return
 
         # 1. compute log probs
-        batch.extra_info.update({"calculate_entropy": True, "compute_loss": False})
+        batch.extra_info.update(
+            {
+                "calculate_entropy": True,
+                "compute_loss": False,
+                "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            }
+        )
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
 
@@ -1054,7 +1094,7 @@ class PPOTrainer:
         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
         data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
         t_start = time.time()
-        tq.kv_batch_put(
+        batch = tq.kv_batch_put(
             keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
         )
         t_end = time.time()
@@ -1085,7 +1125,11 @@ class PPOTrainer:
     def _compute_ref_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the reference log prob of the batch."""
         # 1. compute log probs
-        metadata = {"calculate_entropy": False, "compute_loss": False}
+        metadata = {
+            "calculate_entropy": False,
+            "compute_loss": False,
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
+        }
         if self.ref_in_actor:
             metadata["no_lora_adapter"] = True
         batch.extra_info.update(metadata)
@@ -1191,7 +1235,7 @@ class PPOTrainer:
             output[field] = response_to_nested(data.batch[field], response_mask)
         output = TensorDict(output, batch_size=len(batch))
         t_start = time.time()
-        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
+        batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
         t_end = time.time()
         print(f"[DEBUG] _compute_advantage time to put data: {t_end - t_start:.2f}", flush=True)
 
@@ -1226,13 +1270,20 @@ class PPOTrainer:
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
+        distillation_use_topk = (
+            self.distillation_config.distillation_loss.loss_settings.use_topk
+            if is_distillation_enabled(self.config.get("distillation"))
+            else False
+        )
         extra_info = {
             "calculate_entropy": calculate_entropy,
+            "distillation_use_topk": distillation_use_topk,
             "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
 
@@ -1387,38 +1438,43 @@ class PPOTrainer:
         batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         self.checkpoint_manager.sleep_replicas()
 
-        # 3. [OPTIONAL] compute reward score with colocated reward model
+        # 3. [OPTIONAL] compute teacher logprobs
+        if self._should_compute_teacher_colocate(batch):
+            with marked_timer("teacher", timing_raw, color="cyan"):
+                batch = self._compute_teacher_colocate(batch)
+
+        # 4. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
                 batch = self._compute_reward_colocate(batch)
 
-        # 4. balance batch across data parallel groups
+        # 5. balance batch across data parallel groups
         self._balance_batch(batch, metrics=metrics)
 
-        # 5. compute old_log_prob
+        # 6. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
             batch = self._compute_old_log_prob(batch, metrics=metrics)
 
-        # 6. [OPTIONAL] compute ref_log_prob
+        # 7. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):
                 batch = self._compute_ref_log_prob(batch, metrics=metrics)
 
-        # 7. [OPTIONAL] compute critic values
+        # 8. [OPTIONAL] compute critic values
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
                 batch = self._compute_values(batch, metrics=metrics)
 
-        # 8. compute advantage and return
+        # 9. compute advantage and return
         with marked_timer("adv", timing_raw, color="brown"):
             batch = self._compute_advantage(batch, metrics=metrics)
 
-        # 9. [OPTIONAL] update critic
+        # 10. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
                 batch = self._update_critic(batch, metrics=metrics)
 
-        # 10. update actor
+        # 11. update actor
         if self.config.trainer.critic_warmup <= self.global_steps:
             with marked_timer("update_actor", timing_raw, color="red"):
                 batch = self._update_actor(batch, metrics=metrics)
@@ -1451,6 +1507,18 @@ class TaskRunner:
             self.role_worker_mapping[Role.Critic] = ray.remote(TrainingWorker)
             self.mapping[Role.Critic] = "global_pool"
 
+    def add_teacher_model_resource_pool(self, config):
+        """Add teacher model worker if enabled."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        if is_distillation_enabled(config.get("distillation")):
+            # we do not use teacher model workers, so we only register teacher model in resource pool
+            # without registering a teacher model worker in role-worker mapping
+            if config.distillation.teacher_model.enable_resource_pool:
+                self.mapping[Role.TeacherModel] = "teacher_pool"
+            else:
+                self.mapping[Role.TeacherModel] = "global_pool"
+
     def init_resource_pool_mgr(self, config):
         """Initialize resource pool manager."""
 
@@ -1475,6 +1543,22 @@ class TaskRunner:
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
             self.mapping[Role.RewardModel] = "global_pool"
 
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config):
+            if distillation_config.teacher_model.enable_resource_pool:
+                if distillation_config.teacher_model.n_gpus_per_node <= 0:
+                    raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
+                if distillation_config.teacher_model.nnodes <= 0:
+                    raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
+
+                teacher_pool = [
+                    distillation_config.teacher_model.n_gpus_per_node
+                ] * distillation_config.teacher_model.nnodes
+                resource_pool_spec["teacher_pool"] = teacher_pool
+            else:
+                distillation_config.teacher_model.nnodes = config.trainer.nnodes
+                distillation_config.teacher_model.n_gpus_per_node = config.trainer.n_gpus_per_node
+
         self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 
     def run(self, config):
@@ -1486,6 +1570,7 @@ class TaskRunner:
 
         self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
+        self.add_teacher_model_resource_pool(config)
         self.init_resource_pool_mgr(config)
 
         trainer = PPOTrainer(
