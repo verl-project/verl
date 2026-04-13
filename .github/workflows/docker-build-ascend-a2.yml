@@ -7,6 +7,7 @@ on:
     paths:
       - "docker/ascend/Dockerfile.ascend_8.5.0_a2"
       - ".github/workflows/docker-build-ascend-a2.yml"
+      - "docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1"
   release:
     types: [published]
   schedule:
@@ -78,6 +79,21 @@ jobs:
           push: true
           tags: |
             quay.io/ascend/verl:${{ steps.version.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Build and push v0.7.1 image to Quay
+        # if: ${{ github.event_name == 'schedule' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          file: ./docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1
+          push: true
+          tags: |
+            quay.io/ascend/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-v0.7.1
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |

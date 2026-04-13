@@ -33,6 +33,7 @@ from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import (
     rollout_trace_op,
 )
+from verl.utils.tokenizer import normalize_token_ids
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -65,6 +66,8 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         Returns:
             TokenOutput: token output
         """
+        prompt_ids = normalize_token_ids(prompt_ids)
+
         limit_key = None
         if "max_tokens" in sampling_params:
             limit_key = "max_tokens"

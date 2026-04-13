@@ -91,6 +91,9 @@ scheduling_policy: fcfs
 # safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
 load_format: dummy
 
+# for huge model, layered summon can save memory (prevent OOM) but make it slower
+layered_summon: False
+
 # [Will be deprecated, use log_prob_micro_batch_size_per_gpu] The batch size for one forward pass in the computation of log_prob. Global batch size.
 log_prob_micro_batch_size: null
 
@@ -274,6 +277,11 @@ checkpoint_engine:
 
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
+
+  # If set, this Python module is imported on every worker process before the
+  # backend is instantiated, allowing custom backends to register themselves
+  # in CheckpointEngineRegistry.
+  custom_backend_module: null
 
 # trace rollout data
 trace:

@@ -111,7 +111,6 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     values = tensor.values() if tensor.is_nested else tensor
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
-    attention_mask = data["attention_mask"]
 
     max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
 
@@ -121,6 +120,7 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
         if max_response_len < 0:
             max_response_len = response_lens.max().item()
     else:
+        attention_mask = data["attention_mask"]
         assert not attention_mask.is_nested
         prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
         response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
@@ -141,3 +141,81 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     output = torch.stack(response_list, dim=0)
     return output
+
+
+def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
+    """
+    Convert TensorDict from prompt embeds with padding to no-padding format.
+    For diffusion model training only.
+
+    Currently we expect the prompt embedding mask to be [1111000...] format,
+    which means the valid tokens are continuous and start from the left.
+
+    Args:
+        data: TensorDict with "prompt_embeds", "prompt_embeds_mask",
+              "negative_prompt_embeds", "negative_prompt_embeds_mask"
+
+    Returns:
+        data: TensorDict with
+        - Tensor includes NestedTensors "prompt_embeds", "prompt_embeds_mask",
+          "negative_prompt_embeds", "negative_prompt_embeds_mask"
+    """
+
+    def _to_nested(embeds: torch.Tensor, mask: torch.Tensor):
+        """Strip padding from (bs, seq_len, dim) embeds using the boolean mask and return nested tensors."""
+        embeds_list, mask_list = [], []
+        for i in range(mask.shape[0]):
+            curr_mask = mask[i].bool()
+            embeds_list.append(embeds[i, curr_mask, :])
+            mask_list.append(curr_mask[curr_mask])
+        return (
+            torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged),
+            torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
+        )
+
+    data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(data["prompt_embeds"], data["prompt_embeds_mask"])
+
+    if isinstance(data.get("negative_prompt_embeds", None), torch.Tensor):
+        data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(
+            data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"]
+        )
+
+    return data
+
+
+def response_from_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Extract response from nested model output.
+
+    Args:
+        tensor: a nested tensor with shape (bsz, prompt_len + response_len)
+        response_mask: a nested tensor with shape (bsz, response_len)
+
+    Returns:
+        tensor: a nested tensor with shape (bsz, response_len)
+    """
+    values, offsets = tensor.values(), tensor.offsets()
+    response_lens = response_mask.offsets().diff()
+    response_list = []
+    for resp_len, seq_offset in zip(response_lens, offsets[1:], strict=True):
+        # left-shift model output by one token for log_probs/values
+        response_list.append(values[seq_offset - resp_len - 1 : seq_offset - 1])
+    return torch.nested.as_nested_tensor(response_list, layout=torch.jagged)
+
+
+def response_to_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Convert padded response tensor to nested tensor.
+
+    Args:
+        tensor: a tensor with shape (bsz, response_len)
+        response_mask: a nested tensor with shape (bsz, response_len)
+
+    Returns:
+        tensor: a nested tensor with shape (bsz, response_len)
+    """
+    assert response_mask.is_nested
+    response_lens = response_mask.offsets().diff()
+    response_list = []
+    for i in range(tensor.shape[0]):
+        response_list.append(tensor[i, : response_lens[i]])
+
+    return torch.nested.as_nested_tensor(response_list, layout=torch.jagged)

@@ -22,6 +22,7 @@ from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.utils.distributed import initialize_global_process_group_ray
+from verl.utils.import_utils import import_external_libs
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
@@ -266,6 +267,9 @@ class CheckpointEngineWorker(Worker):
         backend = self.rollout_config.checkpoint_engine.backend
         bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
         engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
+        # If custom_backend_module is set, import it so plugins can register
+        # in CheckpointEngineRegistry before the backend is instantiated.
+        import_external_libs(self.rollout_config.checkpoint_engine.custom_backend_module or None)
         self.checkpoint_engine: CheckpointEngine = CheckpointEngineRegistry.new(
             backend, bucket_size=bucket_size, **engine_kwargs
         )
@@ -342,6 +346,7 @@ class CheckpointEngineManager:
     ) -> None:
         self.config = config
         self.backend = config.backend
+        import_external_libs(self.config.custom_backend_module or None)
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.trainer = trainer
         self.replicas = replicas

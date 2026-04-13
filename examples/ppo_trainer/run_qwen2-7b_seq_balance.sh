@@ -43,8 +43,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.path=Qwen/Qwen2-7B-Instruct \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_max_token_len_per_gpu=98304 \
-    critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.fsdp.param_offload=False \
+    critic.fsdp.optimizer_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \

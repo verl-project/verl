@@ -93,7 +93,11 @@ def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     <|vision_start|><|image_pad|><|vision_end|>
     ```
     """
-    if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
+    if (
+        processor is not None
+        and hasattr(processor, "image_processor")
+        and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__
+    ):
         prompt_ids = np.array(prompt_ids)
         mask = np.ones(len(prompt_ids), dtype=bool)
         is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)

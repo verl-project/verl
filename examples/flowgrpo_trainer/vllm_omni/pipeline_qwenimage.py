@@ -20,7 +20,7 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
-from ..scheduler.scheduling_flow_match_sde_discrete import FlowMatchSDEDiscreteScheduler
+from ..scheduler import FlowMatchSDEDiscreteScheduler
 
 
 def _maybe_to_cpu(v):

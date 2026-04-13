@@ -22,7 +22,13 @@ from verl.trainer.config import CheckpointConfig, RolloutCorrectionConfig
 from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig, TorchtitanEngineConfig, VeOmniEngineConfig
+from .engine import (
+    FSDPEngineConfig,
+    McoreEngineConfig,
+    MindSpeedEngineConfig,
+    TorchtitanEngineConfig,
+    VeOmniEngineConfig,
+)
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
@@ -35,6 +41,7 @@ __all__ = [
     "VeOmniActorConfig",
     "QATConfig",
     "TorchTitanActorConfig",
+    "MindSpeedActorConfig",
 ]
 
 
@@ -305,6 +312,10 @@ class FSDPActorConfig(ActorConfig):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
         self.engine = self.fsdp_config
+        # Sync strategy to engine config so engine_workers can pick the right FSDP version.
+        # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
+        # falls back to FSDP1 even when actor.strategy="fsdp2".
+        object.__setattr__(self.engine, "strategy", self.strategy)
 
         # backward compatibility
         if self.ulysses_sequence_parallel_size > 1:
@@ -366,3 +377,29 @@ class TorchTitanActorConfig(ActorConfig):
         """Validate TorchTitan actor configuration parameters."""
         super().__post_init__()
         self.engine = self.torchtitan
+
+
+@dataclass
+class MindSpeedActorConfig(ActorConfig):
+    """Configuration for mindspeed actor models.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        strategy (str): Training strategy set to 'mindspeed' for mindspeed parallelism.
+        load_weight (bool): Whether to load model weights from checkpoint.
+        mindspeed (dict[str, Any]): Configuration for mindspeed parallelism settings.
+        profile (dict[str, Any]): Configuration for profiling settings.
+        use_rollout_log_probs (bool): Whether to use log probabilities from rollout engine.
+    """
+
+    strategy: str = "mindspeed"
+    load_weight: bool = True
+    mindspeed: MindSpeedEngineConfig = field(default_factory=MindSpeedEngineConfig)
+    profile: dict[str, Any] = field(default_factory=dict)
+    use_rollout_log_probs: bool = False
+
+    def __post_init__(self):
+        """Validate MindSpeed actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.mindspeed

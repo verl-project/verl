@@ -26,36 +26,9 @@ from megatron.core import parallel_state as mpu
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from transformers import PretrainedConfig
 
+from verl.utils.megatron_utils import get_hf_rope_theta
+
 T = TypeVar("T", bound=TransformerConfig)
-
-
-def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
-    """Return RoPE base frequency theta.
-
-    Most configs expose ``rope_theta`` on the root. Newer models (e.g. Qwen3 in transformers>=5) store it under
-    ``rope_parameters["rope_theta"]``, optionally nested per attention pattern when ``rope_parameters`` maps names
-    to parameter dicts.
-    """
-    if hasattr(hf_config, "rope_theta"):
-        return hf_config.rope_theta
-    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_theta"):
-        return hf_config.text_config.rope_theta
-
-    rp = None
-    if hasattr(hf_config, "rope_parameters"):
-        rp = hf_config.rope_parameters
-    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_parameters"):
-        rp = hf_config.text_config.rope_parameters
-    if isinstance(rp, dict):
-        if "rope_theta" in rp:
-            return rp["rope_theta"]
-        for v in rp.values():
-            if isinstance(v, dict) and "rope_theta" in v:
-                return v["rope_theta"]
-    raise AttributeError(
-        f"{type(hf_config).__name__} has no rope_theta and no rope_parameters['rope_theta'] — "
-        "cannot determine RoPE base."
-    )
 
 
 def _get_base_transformer_config(

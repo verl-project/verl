@@ -1206,7 +1206,7 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
                 # For trl.AutoModelForCausalLMWithValueHead
                 values = output[2]
             else:
-                values = output.logits
+                values = output.logits.squeeze(-1)
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()

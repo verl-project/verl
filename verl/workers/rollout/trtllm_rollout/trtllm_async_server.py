@@ -28,7 +28,6 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -117,14 +116,25 @@ class TRTLLMHttpServer:
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
         from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
+
+        try:
+            from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType, SleepConfig
+        except ImportError:
+            ExecutorMemoryType = None
+            SleepConfig = None
         from tensorrt_llm.serve import OpenAIServer
 
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
+        # Pop kv_cache_config from engine_kwargs to merge into KvCacheConfig constructor,
+        # otherwise **engine_kwargs unpacking in llm_kwargs would overwrite the entire
+        # KvCacheConfig object, losing free_gpu_memory_fraction and enable_block_reuse.
+        kv_cache_overrides = engine_kwargs.pop("kv_cache_config", {})
         kv_cache_config = KvCacheConfig(
             enable_block_reuse=self.config.enable_prefix_caching,
             free_gpu_memory_fraction=self.config.gpu_memory_utilization,
+            **kv_cache_overrides,
         )
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
@@ -164,7 +174,14 @@ class TRTLLMHttpServer:
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
             "per_worker_gpu_share": per_worker_gpu_share,
-            "enable_sleep": self.config.enable_sleep_mode,
+            "sleep_config": SleepConfig(
+                restore_modes={
+                    ExecutorMemoryType.MODEL_WEIGHTS_MAIN: "NONE",
+                    ExecutorMemoryType.KV_CACHE: "NONE",
+                }
+            )
+            if self.config.enable_sleep_mode and SleepConfig is not None
+            else None,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,
@@ -285,6 +302,8 @@ class TRTLLMHttpServer:
         raise NotImplementedError
 
     async def wake_up(self):
+        from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
+
         if self.rollout_mode == RolloutMode.HYBRID:
             # In hybrid mode, rollout is wake up in `update_weights`
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
@@ -294,6 +313,8 @@ class TRTLLMHttpServer:
             logger.info("skip wake_up in standalone mode")
 
     async def sleep(self):
+        from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
+
         if not self.config.free_cache_engine:
             return
 
@@ -348,8 +369,8 @@ class TRTLLMReplica(RolloutReplica):
             local_bundle_index = self.world_size * self.replica_rank
 
         while local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
-            start_pg_index += 1
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
+            start_pg_index += 1
         assert (
             start_pg_index < len(self.resource_pool.pgs)
             and local_bundle_index < self.resource_pool.pgs[start_pg_index].bundle_count
@@ -386,7 +407,6 @@ class TRTLLMReplica(RolloutReplica):
         return pgs, bundle_indices
 
     async def launch_servers(self):
-        assert self.nnodes == 1, "TRTLLMReplica doesn't support multiple nodes for single replica yet."
         assert self.resource_pool.pgs is not None, "placement groups are not initialized"
 
         pgs, bundle_indices = self.get_pgs_and_bundle_indices()

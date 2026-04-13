@@ -86,7 +86,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
         use_shm=use_shm,
     )
     received = []
-    receiver.receive_weights(on_bucket_received=lambda w: received.extend(w))
+    receiver.receive_weights(on_bucket_received=lambda w: received.extend([(name, t.clone()) for name, t in w]))
     # Only send lightweight metadata + checksum back through the queue
     summaries = [(name, t.dtype, tuple(t.shape), t.float().sum().item()) for name, t in received]
     result_queue.put(summaries)

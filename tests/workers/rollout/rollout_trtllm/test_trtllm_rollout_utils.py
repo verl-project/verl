@@ -22,11 +22,11 @@ from omegaconf import OmegaConf
 from PIL import Image
 from transformers import AutoTokenizer
 
-UNIMODAL_MODEL_PATH = "Qwen/Qwen2.5-Math-7B"
-MULTIMODAL_MODEL_PATH = "Qwen/Qwen2.5-VL-7B-Instruct"
+UNIMODAL_MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
+MULTIMODAL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 
-MAX_MODEL_LEN = 4096
-RESPONSE_LENGTH = 256
+MAX_MODEL_LEN = 2048
+RESPONSE_LENGTH = 32
 MAX_NUM_SEQS = 16
 GPU_MEMORY_UTILIZATION = 0.8
 TENSOR_PARALLEL_SIZE = 1

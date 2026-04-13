@@ -160,7 +160,6 @@ class DistillationConfig(BaseConfig):
     def __post_init__(self):
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.teacher_model.inference.max_model_len
-        max_num_batched_tokens = self.teacher_model.inference.max_num_batched_tokens
         student_prompt_length = self.teacher_model.inference.prompt_length
         student_response_length = self.teacher_model.inference.response_length
         if self.enabled:
@@ -170,13 +169,6 @@ class DistillationConfig(BaseConfig):
                     "Distillation teacher inference requires room for the student prompt, the full student "
                     f"response, and one generated token, but got {student_prompt_length=}, "
                     f"{student_response_length=}, {required_context_len=}, {max_model_len=}."
-                )
-            if max_num_batched_tokens is not None and required_context_len > max_num_batched_tokens:
-                raise ValueError(
-                    "Distillation teacher inference requires room for the student prompt, the full student "
-                    f"response, and one generated token within the engine batching budget, but got "
-                    f"{student_prompt_length=}, {student_response_length=}, {required_context_len=}, "
-                    f"{max_num_batched_tokens=}."
                 )
 
         self.teacher_model.inference.prompt_length = (

@@ -119,6 +119,61 @@ jobs:
           ray stop --force
           USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
 
+  engine_mindspeed_llm_rl_job:
+    if: github.repository_owner == 'verl-project'
+    name: E2E Ascend testing for RL training scenarios of LLM models using MindSpeed_LLM engine
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 120
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.3.rc1-910b-ubuntu22.04-py3.11-latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout volcengine/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install --no-deps --no-build-isolation -e .
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Configure related dependencies
+        run: |
+          git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
+          rm -rf /MindSpeed
+          git clone https://gitcode.com/ascend/MindSpeed.git /MindSpeed
+          git clone https://gitcode.com/ascend/MindSpeed-LLM.git /MindSpeed-LLM
+      - name: Preprocess gsm8k dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend)
+        run: |
+          ray stop --force
+          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
+          export PYTHONPATH=$PYTHONPATH:/MindSpeed
+          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
+          bash tests/special_npu/run_qwen3_8b_grpo_mindspeedllm.sh
+      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend, MoE Model)
+        run: |
+          ray stop --force
+          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
+          export PYTHONPATH=$PYTHONPATH:/MindSpeed
+          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
+          USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm bash tests/special_npu/run_qwen3_30b_grpo_mindspeedllm.sh
+
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models

@@ -11,7 +11,7 @@ defaults:
   - ../optim@optim: fsdp
 
   # fsdp engine config
-  - ../engine@model.fsdp_config: fsdp
+  - ../engine@fsdp: fsdp
 
   # dp actor config, inheriting from trainer/config/critic/critic.yaml
   - critic
@@ -24,42 +24,6 @@ _target_: verl.workers.config.FSDPCriticConfig
 
 # distribution strategy. Options: fsdp (deprecating), fsdp2
 strategy: fsdp
-
-# model config for the critic
-model:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.FSDPCriticModelCfg
-
-  # Whether to use shared memory for loading the model
-  use_shm: False
-
-  # Enable gradient checkpointing to save memory
-  enable_gradient_checkpointing: True
-
-  # Offload activations to CPU to reduce GPU memory usage
-  enable_activation_offload: False
-
-  # Use remove padding optimization (saves compute)
-  use_remove_padding: False
-
-  # Set to positive value to enable LoRA (e.g., 32)
-  lora_rank: 0
-
-  # LoRA scaling factor
-  lora_alpha: 16
-
-  # LoRA target modules: "all-linear" or list of linear projection layers
-  target_modules: all-linear
-
-  # TiledMLP configuration for memory-efficient MLP computation.
-  tiled_mlp:
-
-    # whether to enable TiledMLP
-    enabled: False
-
-    # number of shards to split the input
-    num_shards: 4
 
 # Forward-only batch size during inference (global)
 forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
