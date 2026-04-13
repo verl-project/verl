@@ -5,7 +5,7 @@
 PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save logs!!!!!
 STORE_DIR="/data/hjw"               # !!!!! Change this to where you want to save checkpoints!!!!!
 
-MODEL_NAME="Qwen2.5-0.5B"
+MODEL_NAME="Qwen2.5-0.5B-Instruct"
 DATA_NAME="gsm8k"
 DATA_DIR="/data/open_datasets/GSM8K"
 SFT_CHECKPOINT="${STORE_DIR}/outputs/${MODEL_NAME}--${DATA_NAME}--sft/checkpoint-last"    # SFT后的模型路径

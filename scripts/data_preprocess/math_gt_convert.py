@@ -18,8 +18,8 @@ def extract_boxed_answer(solution_text):
     return ""
 
 # 读取 MATH 数据
-# df = pd.read_parquet('/data/open_datasets/NuminaMath-CoT/data/test-00000-of-00001.parquet')
-df = pd.read_json('/data/open_datasets/MATH-500/test.jsonl', orient='records', lines=True)
+df = pd.read_parquet('/data/open_datasets/NuminaMath-CoT/data/train-00000-of-00005.parquet')
+# df = pd.read_json('/data/open_datasets/MATH-500/test.jsonl', orient='records', lines=True)
 
 # 添加 prompt 列（如果需要在 problem 前加指令）
 df['prompt'] = df['problem'].apply(lambda x: [
@@ -28,7 +28,7 @@ df['prompt'] = df['problem'].apply(lambda x: [
 ])
 
 # 添加 data_source 列
-df['data_source'] = 'math-500'
+df['data_source'] = 'numinamath'
 
 # 添加 reward_model 列（包含提取的 ground_truth）
 df['reward_model'] = df['solution'].apply(lambda x: {
@@ -38,6 +38,6 @@ df['reward_model'] = df['solution'].apply(lambda x: {
 
 # 保存处理后的数据
 df[['prompt', 'problem', 'solution', 'data_source', 'reward_model']].to_parquet(
-    '/data/open_datasets/MATH-500/test-processed.parquet',
+    '/data/open_datasets/NuminaMath-CoT/train-processed-0.parquet',
     index=False
 )

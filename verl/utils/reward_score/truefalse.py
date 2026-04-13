@@ -115,7 +115,7 @@ def extract_boolean_answer(text: str, flexible: bool = False) -> str:
 #             return ""
 
 
-def compute_score(solution_str, ground_truth, method="flexible", format_score=0.0, score=1.0):
+def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):
     """
     Evaluate true/false question.
     

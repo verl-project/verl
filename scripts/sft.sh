@@ -5,8 +5,8 @@
 PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save logs!!!!!
 STORE_DIR="/data/hjw"               # !!!!! Change this to where you want to save checkpoints!!!!!
 
-MODEL_NAME="Qwen2.5-0.5B"
-MODEL_ID="Qwen/Qwen2.5-0.5B"
+MODEL_NAME="Qwen2.5-0.5B-Instruct"
+MODEL_ID="Qwen/Qwen2.5-0.5B-Instruct"
 DATA_NAME="gsm8k"
 DATA_DIR="/data/open_datasets/GSM8K"
 
@@ -48,8 +48,8 @@ export WANDB_RUN_ID="exp-${MODEL_NAME}-${DATA_NAME}-sft"
 
 torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
      -m verl.trainer.fsdp_sft_trainer \
-    data.train_files=${DATA_DIR}/train_messages.parquet \
-    data.val_files=${DATA_DIR}/test_messages.parquet \
+    data.train_files=${DATA_DIR}/train.parquet \
+    data.val_files=${DATA_DIR}/test.parquet \
     data.prompt_key=extra_info \
     data.response_key=extra_info \
     data.prompt_dict_keys=['question'] \

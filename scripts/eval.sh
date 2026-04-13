@@ -13,10 +13,10 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
 BASE_MODEL="Qwen/Qwen2.5-Coder-7B"
 IS_BASE_MODEL=False                       # Whether the model is a base model (without a chat template)
 
-# Inference Params
+# Generation Params
 N_SAMPLES="${N_SAMPLES:-1}"           # 采样次数（pass@n 评估时可设为 n）
 TEMPERATURE="${TEMPERATURE:-0.6}"     # 采样温度
-TOP_P="${TOP_P:-0.95}"
+TOP_P="${TOP_P:-0.7}"
 MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-512}"
 MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-1024}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
@@ -54,7 +54,7 @@ find_latest_eval_dir() {
 # =======================================================================
 
 
-# ============================== 参数解析 ================================
+# =========================== Param Parsing =============================
 if [ "$#" -lt 2 ]; then
     echo "Usage: bash $0 <dataset_name> <gpu_ids> [checkpoint_path] [other configs...]"
     echo "Supported datasets: arc-challenge, aqua_rat, gsm8k, livecodebench, math, math-500, numinamath, strategyQA, theoremQA"
@@ -199,6 +199,8 @@ else
     echo "[INFO] Loading base model: $MODEL_PATH"
 fi
 
+
+# =========================== Param Settings =============================
 export CUDA_VISIBLE_DEVICES=$gpu_ids
 n_gpus_per_node=$(echo $gpu_ids | tr ',' ' ' | wc -w)
 
@@ -206,8 +208,8 @@ n_gpus_per_node=$(echo $gpu_ids | tr ',' ' ' | wc -w)
 tp_size=3
 if [ $((n_gpus_per_node % tp_size)) -ne 0 ]; then
     echo "[WARNING]: n_gpus_per_node($n_gpus_per_node) is not divisible by tensor_model_parallel_size($tp_size). It is advised to set tensor_model_parallel_size to a devisor of $n_gpus_per_node (e.g. 1, $n_gpus_per_node)."
-    echo "[INFO] Fallback: Setting tp_size to 1..."
-    tp_size=1  # 自动回退到 1 避免错误
+    echo "[INFO] Fallback: Setting tp_size to $n_gpus_per_node..."
+    tp_size=$n_gpus_per_node  # Automatic fallback to avoid errors
 fi
 
 export HF_HUB_OFFLINE=1
@@ -254,6 +256,7 @@ else
     data.n_samples=${N_SAMPLES} \
     data.batch_size=${BATCH_SIZE} \
     rollout.temperature=${TEMPERATURE} \
+    rollout.top_p=${TOP_P} \
     rollout.seed=${SEED} \
     rollout.prompt_length=${MAX_PROMPT_LEN} \
     rollout.response_length=${MAX_RESPONSE_LEN} \

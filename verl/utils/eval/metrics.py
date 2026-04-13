@@ -19,8 +19,8 @@ def compute_best_and_maj_at_n(dataset, scores_per_response, preds_per_response):
         # 将每个 response 展开为独立条目
         for score, pred in zip(scores, preds):
             data_sources_list.append(row['data_source'])
-            # 使用 problem 或 prompt 作为唯一标识，确保同一问题的 responses 被分组
-            sample_inputs_list.append(str(row['problem']))  
+            # 使用 prompt 作为唯一标识，确保同一问题的 responses 被分组
+            sample_inputs_list.append(str(row['prompt']))  
             infos_dict['score'].append(float(score))
             infos_dict['pred'].append(pred)
 
