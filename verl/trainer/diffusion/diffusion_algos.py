@@ -201,13 +201,11 @@ def compute_diffusion_loss_flow_grpo(
     https://github.com/yifan123/flow_grpo/blob/main/scripts/train_sd3_fast.py#L885
     Args:
         old_log_prob (torch.Tensor):
-            Log-probabilities of actions under the old (rollout) policy,
-            shape ``(batch_size,)`` per timestep or ``(batch_size, num_timesteps)`` for the full trajectory.
+            Log-probabilities of actions under the old policy, shape (batch_size,).
         log_prob (torch.Tensor):
-            Log-probabilities of actions under the current policy, same shape as ``old_log_prob``.
+            Log-probabilities of actions under the current policy, shape (batch_size,).
         advantages (torch.Tensor):
-            Per-sample advantage estimates, shape ``(batch_size,)`` or broadcastable to ``log_prob``.
-            Broadcasted to match ``log_prob`` before computing the loss.
+            Advantage estimates for each action, shape (batch_size,).
         config: `(verl.trainer.config.DiffusionActorConfig)`:
             config for the actor.
     """
