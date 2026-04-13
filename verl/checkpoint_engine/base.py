@@ -266,11 +266,16 @@ class CheckpointEngineWorker(Worker):
 
         self.server_adapter: BaseRollout = server_adapter
         backend = self.rollout_config.checkpoint_engine.backend
-        # Auto-adjust bucket size based on embedding weight size
-        self.bucket_size_mb = get_minimum_bucket_size_mb(
-            hf_config=self.model_config.hf_config,
-            current_bucket_size_mb=self.config.checkpoint_engine.update_weights_bucket_megabytes,
-        )
+        hf_config = self.model_config.hf_config if isinstance(self.model_config, HFModelConfig) else None
+
+        if hf_config is not None:
+            self.bucket_size_mb = get_minimum_bucket_size_mb(
+                hf_config=hf_config,
+                current_bucket_size_mb=self.config.checkpoint_engine.update_weights_bucket_megabytes,
+            )
+        else:
+            self.bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
+
         bucket_size = self.bucket_size_mb << 20
         engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
         # If custom_backend_module is set, import it so plugins can register
