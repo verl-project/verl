@@ -130,3 +130,38 @@ class FP8QuantizerHelper:
                 logger.error(f"Failed to quantize {k}: {e}")
                 # If quantization fails, use original weights
                 yield (k, v)
+
+    def quant_weights_by_name_sync(self, weights, dtype=torch.bfloat16):
+        """Synchronous version for checkpoint engine send_weights path.
+
+        Checkpoint engines (NCCL/NIXL/HCCL) iterate weights with a standard
+        for loop, so the async version cannot be used.
+        """
+        if isinstance(self.quant_config, dict):
+            weight_block_size = self.quant_config.get("weight_block_size")
+        else:
+            weight_block_size = getattr(self.quant_config, "weight_block_size", None)
+
+        if weight_block_size is None:
+            raise ValueError("weight_block_size not found in quant_config")
+
+        for k, v in weights:
+            if not self.should_quantize_param(k):
+                yield (k, v)
+                continue
+
+            try:
+                param_lp, param_scale = scaled_fp8_blockwise(
+                    v.to(dtype),
+                    weight_block_size=weight_block_size,
+                )
+                param_scale = param_scale.squeeze(-1)
+
+                yield (k, param_lp)
+                yield (k + "_scale_inv", param_scale)
+
+                del param_lp, param_scale
+
+            except Exception as e:
+                logger.error(f"Failed to quantize {k}: {e}")
+                yield (k, v)

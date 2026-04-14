@@ -289,7 +289,10 @@ class CheckpointEngineWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
         weights = self.checkpoint_engine.receive_weights()
-        await self.server_adapter.update_weights(weights, global_steps=global_steps)
+        pre_quantized_fp8 = self.rollout_config.get("trainer_quantize_fp8", False)
+        await self.server_adapter.update_weights(
+            weights, global_steps=global_steps, pre_quantized_fp8=pre_quantized_fp8
+        )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):

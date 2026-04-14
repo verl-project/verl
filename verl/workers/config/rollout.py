@@ -279,6 +279,8 @@ class RolloutConfig(BaseConfig):
 
     quantization_config_file: Optional[str] = None
 
+    trainer_quantize_fp8: bool = False
+
     enable_rollout_routing_replay: bool = False
 
     enable_sleep_mode: bool = True

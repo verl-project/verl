@@ -241,7 +241,7 @@ class ServerAdapter(BaseRollout):
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
             update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-            if self.config.get("quantization", None) == "fp8":
+            if self.config.get("quantization", None) == "fp8" and not kwargs.get("pre_quantized_fp8", False):
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
                 logger.info("Convert bf16 weights to fp8 format before loading")
@@ -250,8 +250,8 @@ class ServerAdapter(BaseRollout):
                     weights,
                     dtype=self.model_config.hf_config.dtype,
                 )
-            else:
-                weights = weights
+            elif kwargs.get("pre_quantized_fp8", False):
+                logger.info("Skipping FP8 quantization, weights pre-quantized on trainer side")
 
             async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
                 await sgl_update_weights(

@@ -856,6 +856,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
             aggressive_empty_cache(force_sync=True)
 
+        # FP8: quantize weights on trainer side before sending to rollout
+        _pre_quantized_fp8 = False
+        fp8_quantizer = None
+        if self.config.rollout.get("trainer_quantize_fp8", False) and (peft_config is None or self.peft_merge):
+            from verl.utils.fp8_utils import FP8QuantizerHelper
+
+            fp8_quantizer = FP8QuantizerHelper(self.rollout.model_config.hf_config.quantization_config)
+            per_tensor_param = fp8_quantizer.quant_weights_by_name(per_tensor_param, dtype=self._param_dtype)
+            _pre_quantized_fp8 = True
+            logger.info("FP8 trainer-side quantization enabled")
+
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
@@ -870,10 +881,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
                 for name, param in base_model_params.items()
             )
-            await self.rollout.update_weights(per_tensor_base_params, base_sync_done=False)
+            if _pre_quantized_fp8:
+                per_tensor_base_params = fp8_quantizer.quant_weights_by_name(
+                    per_tensor_base_params, dtype=self._param_dtype
+                )
+            await self.rollout.update_weights(
+                per_tensor_base_params, base_sync_done=False, pre_quantized_fp8=_pre_quantized_fp8
+            )
             del base_model_params, per_tensor_base_params
 
-        await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=self.base_sync_done)
+        await self.rollout.update_weights(
+            per_tensor_param,
+            peft_config=peft_config,
+            base_sync_done=self.base_sync_done,
+            pre_quantized_fp8=_pre_quantized_fp8,
+        )
         log_gpu_memory_usage("After update_weights", logger=logger)
         del params, per_tensor_param
         aggressive_empty_cache(force_sync=True)
