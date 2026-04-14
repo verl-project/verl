@@ -118,6 +118,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
         self.group_name = group_name
         self.rebuild_group = rebuild_group
         self.rollout_dtype = rollout_dtype
+        self.send_buf = None
+        self.recv_buf = None
 
         # start zeromq server for broadcasting bucket tensor metadata
         self.is_master = is_master
@@ -126,13 +128,9 @@ class NCCLCheckpointEngine(CheckpointEngine):
             self._start_zmq_server()
 
     def prepare(self) -> MasterMetadata:
-        # For master process, use cupy instead of torch to avoid memory register error
-        # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
-        if self.is_master:
-            self.send_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
-            self.recv_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
-        else:
+        if self.send_buf is None:
             self.send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
+        if self.recv_buf is None:
             self.recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
 
         return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
@@ -144,11 +142,6 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 collective.destroy_collective_group(self.group_name)
             self.rank = None
             self.world_size = None
-
-        self.send_buf = None
-        self.recv_buf = None
-
-        torch.cuda.empty_cache()
 
     @classmethod
     def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
@@ -274,7 +267,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 "dtype": weight.dtype,
                 "offset": offset,
             }
-            send_buf[offset : offset + weight.nbytes] = cp.asarray(weight.view(-1).view(torch.uint8))
+            send_buf[offset : offset + weight.nbytes] = weight.view(-1).view(torch.uint8)
             offset += weight.nbytes
 
         # broadcast last bucket
