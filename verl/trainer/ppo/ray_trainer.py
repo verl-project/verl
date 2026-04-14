@@ -1160,12 +1160,20 @@ class RayPPOTrainer:
                 pad_token_id=self.tokenizer.pad_token_id,
                 field_to_mask_and_pad={"loss_mask": ("response_mask", 0)},
             )
+            # Restore `response_mask` as a nested all-ones alias of `loss_mask`
+            # so worker-side loss code (which still selects "response_mask")
+            # keeps working; `_decompress_batch` drops this alias before
+            # `unnest_batch_by_mask` rehydrates the real 2D mask.
+            if "loss_mask" in batch_td:
+                batch_td["response_mask"] = batch_td["loss_mask"]
         return batch_td
 
     def _decompress_batch(self, batch_td: TensorDict) -> TensorDict:
         """Inverse of :meth:`_compress_batch`. No-op in legacy mode."""
         if not self.use_mask_nesting:
             return batch_td
+        # Drop the nested alias before unnest so it rehydrates the real 2D mask.
+        batch_td.pop("response_mask", None)
         unnest_batch_by_mask(batch_td)  # no-op if batch_td wasn't nested
         batch_td.pop("loss_mask", None)
         return batch_td
