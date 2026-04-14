@@ -83,17 +83,30 @@ class DiffusionRolloutConfig(BaseConfig):
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
 
+    enable_chunked_prefill: bool = True
+
+    enable_prefix_caching: bool = True
+
     load_format: str = "dummy"
 
     layered_summon: bool = False
+
     skip_tokenizer_init: bool = True
 
+    enable_sleep_mode: bool = True
+
     height: int = 512
+
     width: int = 512
+
     num_inference_steps: int = 10
+
     true_cfg_scale: float = 4.0
+
     max_sequence_length: int = 512
+
     guidance_scale: Optional[float] = None
+
     algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
     def __post_init__(self):

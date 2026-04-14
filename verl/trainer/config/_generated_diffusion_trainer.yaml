@@ -106,6 +106,8 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 1024
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
     load_format: dummy
     layered_summon: false
     log_prob_micro_batch_size_per_gpu: null

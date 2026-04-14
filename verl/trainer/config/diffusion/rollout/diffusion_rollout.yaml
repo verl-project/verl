@@ -44,6 +44,12 @@ max_model_len: null
 # max length of sequences
 max_num_seqs: 1024
 
+# may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
+enable_chunked_prefill: True
+
+# Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
+enable_prefix_caching: True
+
 # Which loader to use for rollout model weights: dummy, hf, megatron, etc.
 # safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
 load_format: dummy
