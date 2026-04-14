@@ -1,21 +1,39 @@
 #!/bin/bash
 # set -x
 
-# ============================ Configurations ===========================
-PROJECT_DIR="$HOME/CoT-DataSynth"   # !!!!! Change this to where you want to save checkpoints & logs!!!!!
-MODEL_NAME="Qwen2.5-Coder-7B"
+# =========================== Load User Configs =========================
+# Find & Load Config File
+# Precedence: 1. Env CONFIG_FILE  2. ../config/bash_config.env
 
-# 使用绝对路径或从环境变量读取
+# CONFIG_DIR: 使用绝对路径或从环境变量读取
 if [ -z "$CONFIG_DIR" ]; then
     CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config"
 fi
+
+CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/bash_config.env}"
+
+if [ -f "$CONFIG_FILE" ]; then
+    echo "[INFO] Loading config from: $CONFIG_FILE"
+    source "$CONFIG_FILE"
+else
+    echo "[WARNING] Config file not found. Using default values."
+fi
+
+# fallback
+PROJECT_DIR="${PROJECT_DIR:-$HOME/CoT-Data-verl}"
+STORE_DIR="${STORE_DIR:-/data/hjw}"
+# =======================================================================
+
+
+# ============================ Configurations ===========================
+MODEL_NAME="${MODEL_NAME:-Llama-3.1-8B-Instruct}"
 
 # Model Path Config:
 # 1. Use specific checkpoints if specified by CLI param / environment variable.
 # 2. Otherwise use the cached base model.
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
-BASE_MODEL="Qwen/Qwen2.5-Coder-7B"
-IS_BASE_MODEL=False                       # Whether the model is a base model (without a chat template)
+BASE_MODEL="${BASE_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+IS_BASE_MODEL="${IS_BASE_MODEL:-False}"     # Whether the model is a base model (without a chat template)
 
 # Generation Params
 N_SAMPLES="${N_SAMPLES:-1}"           # 采样次数（pass@n 评估时可设为 n）
@@ -61,7 +79,7 @@ find_latest_eval_dir() {
 # =========================== Param Parsing =============================
 if [ "$#" -lt 2 ]; then
     echo "Usage: bash $0 <dataset_name> <gpu_ids> [checkpoint_path] [other configs...]"
-    echo "Supported datasets: arc-challenge, aqua_rat, gsm8k, livecodebench, math, math-500, numinamath, strategyQA, theoremQA"
+    echo "Supported datasets (any case): arc-challenge, aqua_rat, gsm8k, livecodebench, math, math-500, numinamath, strategyQA, theoremQA"
     echo ""
     echo "Examples:"
     echo "  # Evaluate the base model on gsm8k"
@@ -251,7 +269,15 @@ else
 
     GENERATION_OUTPUT="${EVAL_OUTPUT_DIR}/generated/responses.parquet"
 
-    GEN_ARGS="\
+    GEN_ARGS=""
+    
+    if [ ! "$MODEL_PATH" = "$BASE_MODEL" ] && [ -f "$MODEL_PATH/adapter_model.safetensors" ]; then
+        echo "[INFO] Detected LoRA adapter, using base model: $BASE_MODEL"
+        LORA_PATH="$MODEL_PATH"
+        MODEL_PATH="$BASE_MODEL"
+        GEN_ARGS="${GEN_ARGS} +model.lora_path=${LORA_PATH} "
+
+    GEN_ARGS="${GEN_ARGS} \
     model.path=${MODEL_PATH} \
     model.no_chat=${IS_BASE_MODEL} \
     data.path=${EVAL_DATA} \

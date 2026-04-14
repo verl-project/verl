@@ -95,3 +95,6 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
             return format_score
     
     return 0.0
+
+def extract_pred(solution_str: str) -> str:
+    return extract_option_letter(solution_str)
