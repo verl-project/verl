@@ -41,6 +41,15 @@ def extract_solution(solution_str, method="strict"):
     return final_answer
 
 
+def extract_pred(solution_str: str) -> str:
+    """Extract prediction from solution string for evaluation.
+
+    This function is required by the evaluation pipeline.
+    """
+    answer = extract_solution(solution_str, method="flexible")
+    return answer if answer is not None else ""
+
+
 def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):
     """The scoring function for GSM8k.
 

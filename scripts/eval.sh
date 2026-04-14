@@ -4,7 +4,11 @@
 # ============================ Configurations ===========================
 PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save checkpoints & logs!!!!!
 MODEL_NAME="Llama-3.1-8B-Instruct"
-CONFIG_DIR=$(realpath "../config")
+
+# 使用绝对路径或从环境变量读取
+if [ -z "$CONFIG_DIR" ]; then
+    CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config"
+fi
 
 # Model Path Config:
 # 1. Use specific checkpoints if specified by CLI param / environment variable.

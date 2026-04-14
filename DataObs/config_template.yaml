@@ -1,0 +1,49 @@
+# DataObs Configuration Template
+# Copy this file and modify for your experiment
+
+# Data configuration
+data:
+  path: /path/to/data.parquet          # Path to dataset (parquet/jsonl/json)
+  n_splits: 10                         # Number of splits
+  seed: 42                             # Random seed for reproducibility
+
+# Output configuration
+output:
+  dir: ./experiments/exp1              # Output directory
+  save_splits: true                    # Save split data
+  save_metrics: true                   # Save computed metrics
+
+# GPU configuration
+gpu:
+  ids: [0, 1, 2, 3, 4, 5, 6, 7]       # Available GPU IDs
+  per_split: 1                         # GPUs per training split
+
+# Training configuration
+training:
+  enabled: false                       # Run training phase
+  script: scripts/sft.sh               # Training script path
+  model_id: /path/to/model             # Model ID
+  timeout: null                        # Training timeout (seconds)
+  extra_params:                        # Extra parameters to pass to training script
+    trainer.total_epochs: 1
+    model.lora_rank: 8
+    model.lora_alpha: 16
+
+# Analysis configuration
+analysis:
+  enabled: false                       # Run analysis phase
+  correlation_method: pearson          # Correlation method (pearson/spearman/kendall)
+  significance_threshold: 0.05         # P-value threshold for significance
+  generate_plots: true                 # Generate visualization plots
+
+# Data metrics configuration
+metrics:
+  compute_statistics: true             # Compute statistical metrics
+  compute_quality: true                # Compute quality metrics
+  compute_difficulty: false            # Compute difficulty metrics (requires reward function)
+  reward_function: null                # Path to reward function (if computing difficulty)
+
+# Logging configuration
+logging:
+  level: INFO                          # Logging level (DEBUG/INFO/WARNING/ERROR)
+  file: null                           # Log file path (null = console only)
