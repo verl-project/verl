@@ -1149,6 +1149,14 @@ class RayPPOTrainer:
     def _compress_batch(self, batch_td: TensorDict) -> TensorDict:
         """Compress a batch TensorDict for worker dispatch."""
         with marked_timer("compress", self._timing_raw):
+            # Record config-declared lengths so downstream consumers don't have
+            # to re-derive them from tensor shapes (which drift after nesting
+            # and worker chunking).
+            tu.assign_non_tensor(
+                batch_td,
+                max_prompt_length=self.config.data.max_prompt_length,
+                max_response_length=self.config.data.max_response_length,
+            )
             if not self.use_mask_nesting:
                 return left_right_2_no_padding(batch_td)
             # TODO: eliminate loss_mask alias once worker loss code reads response_mask directly.

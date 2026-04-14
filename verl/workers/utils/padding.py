@@ -768,20 +768,32 @@ def prepare_response_slice(data: TensorDict) -> ResponseSliceContext:
         return None
 
     orig_seq_len = _orig_mask_len("attention_mask")
-    orig_response_len = _orig_mask_len("response_mask")
+
+    # Canonical per-task max_response_length comes from the config (stashed on
+    # the batch by the trainer); fall back to the stashed mask_shape only if
+    # the config value wasn't recorded.
+    config_max_response_len = tu.get_non_tensor_data(data, "max_response_length", default=None)
+    spec_response_len = _orig_mask_len("response_mask")
 
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
     if prompt_ids.is_nested:
         prompt_lens = prompt_ids.offsets().diff()
         response_lens = response_ids.offsets().diff()
-        max_response_len = orig_response_len if orig_response_len is not None else response_lens.max().item()
     else:
         mask_shape = (batch_size, orig_seq_len) if orig_seq_len is not None else None
         attn_mask = rle_to_mask(offsets, lengths, shape=mask_shape)
         prompt_lens = attn_mask[:, : prompt_ids.shape[1]].sum(dim=1)
         response_lens = attn_mask[:, prompt_ids.shape[1] :].sum(dim=1)
-        max_response_len = orig_response_len if orig_response_len is not None else response_ids.shape[1]
+
+    if config_max_response_len is not None:
+        max_response_len = int(config_max_response_len)
+    elif spec_response_len is not None:
+        max_response_len = int(spec_response_len)
+    elif prompt_ids.is_nested:
+        max_response_len = int(response_lens.max().item())
+    else:
+        max_response_len = int(response_ids.shape[1])
 
     rle_first_offsets = offsets.values()[offsets._offsets[:-1]]
     slice_bounds: list[tuple[int, int, int]] = []
@@ -811,6 +823,37 @@ def slice_response(ctx: ResponseSliceContext, dense: torch.Tensor) -> torch.Tens
 # ---------------------------------------------------------------------------
 # Dispatching layer: unified response extraction over both batch nesting styles
 # ---------------------------------------------------------------------------
+
+
+def select_and_pad_to_response(data: TensorDict, *fields: str) -> TensorDict:
+    """Select nested response-axis fields and pad them to the canonical width.
+
+    :meth:`TensorDict.to_padded_tensor` pads jagged tensors to the
+    *per-micro-batch local* max along the response axis. That width can be
+    narrower than :func:`extract_response`'s output (which targets the
+    task-level ``max_response_length`` stashed on the batch by the trainer).
+    Any downstream arithmetic that mixes the two (e.g.
+    ``log_prob - old_log_prob`` in :func:`ppo_loss`) would then crash on
+    shape mismatch after worker chunking.
+
+    This helper right-pads every selected field's response dim up to that
+    canonical width so all response-axis tensors share one shape.
+    """
+    selected = data.select(*fields).to_padded_tensor()
+    max_response_length = tu.get_non_tensor_data(data, "max_response_length", default=None)
+    if max_response_length is None:
+        return selected
+    target = int(max_response_length)
+    for key in list(selected.keys()):
+        v = selected[key]
+        if not isinstance(v, torch.Tensor) or v.ndim < 2:
+            continue
+        gap = target - v.shape[1]
+        if gap <= 0:
+            continue
+        pad_dims = (0, 0) * (v.ndim - 2) + (0, gap)
+        selected[key] = F.pad(v, pad_dims)
+    return selected
 
 
 def extract_response(data: TensorDict, tensor: torch.Tensor) -> torch.Tensor:
