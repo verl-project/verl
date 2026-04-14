@@ -15,7 +15,7 @@ on:
       - ".github/workflows/docker-build-ascend-a3-qwen3_5.yml"
 jobs:
   build-ascend-image-a3:
-    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
+    if: ${{ github.repository_owner == 'verl-project' }}
     runs-on: ubuntu-latest
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-build-ascend-image-a3
