@@ -29,6 +29,7 @@ __all__ = [
 
 @dataclass
 class DiffusionRolloutAlgoConfig(BaseConfig):
+    # for SDE-based diffusion models
     noise_level: float = 1.0
     sde_type: str = "sde"
     sde_window_size: Optional[int] = None
