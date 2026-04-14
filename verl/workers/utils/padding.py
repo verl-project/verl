@@ -768,20 +768,24 @@ def prepare_response_slice(data: TensorDict) -> ResponseSliceContext:
         return None
 
     orig_seq_len = _orig_mask_len("attention_mask")
-    orig_response_len = _orig_mask_len("response_mask")
 
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
     if prompt_ids.is_nested:
         prompt_lens = prompt_ids.offsets().diff()
         response_lens = response_ids.offsets().diff()
-        max_response_len = orig_response_len if orig_response_len is not None else response_lens.max().item()
     else:
         mask_shape = (batch_size, orig_seq_len) if orig_seq_len is not None else None
         attn_mask = rle_to_mask(offsets, lengths, shape=mask_shape)
         prompt_lens = attn_mask[:, : prompt_ids.shape[1]].sum(dim=1)
         response_lens = attn_mask[:, prompt_ids.shape[1] :].sum(dim=1)
-        max_response_len = orig_response_len if orig_response_len is not None else response_ids.shape[1]
+    # Pad to the batch-local max so the resulting dense (bs, local_max) aligns
+    # with the per-micro-batch dimensions produced by
+    # ``TensorDict.to_padded_tensor()`` on response-axis nested fields
+    # (old_log_probs, advantages, ...). Using the spec-stashed full-batch
+    # ``orig_response_len`` here would leave extract_response's output wider
+    # than the rest and break downstream arithmetic in ppo_loss.
+    max_response_len = int(response_lens.max().item())
 
     rle_first_offsets = offsets.values()[offsets._offsets[:-1]]
     slice_bounds: list[tuple[int, int, int]] = []
