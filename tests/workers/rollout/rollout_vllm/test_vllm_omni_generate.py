@@ -80,6 +80,7 @@ def init_server():
             "mode": "async",
             "tensor_model_parallel_size": 1,
             "data_parallel_size": 1,
+            "pipeline_model_parallel_size": 1,
             "gpu_memory_utilization": 0.8,
             "max_num_batched_tokens": 8192,
             "max_num_seqs": 256,
@@ -109,6 +110,7 @@ def init_server():
             "path": model_path,
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
+            "load_tokenizer": True,
         }
     )
 
