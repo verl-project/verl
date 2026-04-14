@@ -3,14 +3,14 @@
 
 # ============================ Configurations ===========================
 PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save checkpoints & logs!!!!!
-MODEL_NAME="Qwen2.5-Coder-7B"
+MODEL_NAME="Llama-3.1-8B-Instruct"
 CONFIG_DIR=$(realpath "../config")
 
 # Model Path Config:
 # 1. Use specific checkpoints if specified by CLI param / environment variable.
 # 2. Otherwise use the cached base model.
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
-BASE_MODEL="Qwen/Qwen2.5-Coder-7B"
+BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 IS_BASE_MODEL=False                       # Whether the model is a base model (without a chat template)
 
 # Generation Params
@@ -57,7 +57,7 @@ find_latest_eval_dir() {
 # =========================== Param Parsing =============================
 if [ "$#" -lt 2 ]; then
     echo "Usage: bash $0 <dataset_name> <gpu_ids> [checkpoint_path] [other configs...]"
-    echo "Supported datasets: arc-challenge, aqua_rat, gsm8k, livecodebench, math, math-500, numinamath, strategyQA, theoremQA"
+    echo "Supported datasets (any case): arc-challenge, aqua_rat, gsm8k, livecodebench, math, math-500, numinamath, strategyQA, theoremQA"
     echo ""
     echo "Examples:"
     echo "  # Evaluate the base model on gsm8k"
