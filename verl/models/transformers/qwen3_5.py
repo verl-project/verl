@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import logging
 import os
 from dataclasses import dataclass
@@ -32,21 +33,55 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def fast_pos_embed_interpolate(self, grid_thw):
-    interpolation_tensors = build_bilinear_interpolation_tensors(
-        grid_thw=grid_thw,
-        num_grid_per_side=self.num_grid_per_side,
-        weight_dtype=self.pos_embed.weight.dtype,
-    )
-    pos_embeds = self.pos_embed(interpolation_tensors.idx_tensor).to(interpolation_tensors.device)
-    return merge_bilinear_interpolated_pos_embeds(
-        pos_embeds=pos_embeds,
-        weight_tensor=interpolation_tensors.weight_tensor,
-        grid_ts=interpolation_tensors.grid_ts,
-        grid_hs=interpolation_tensors.grid_hs,
-        grid_ws=interpolation_tensors.grid_ws,
-        merge_size=self.config.spatial_merge_size,
-    )
+def _is_sharded_tensor(tensor: Optional[torch.Tensor]) -> bool:
+    return tensor is not None and hasattr(tensor, "full_tensor")
+
+
+def _patch_qwen3_5_vision_fast_pos_embed_interpolate(vision_model_cls, model_name: str):
+    if getattr(vision_model_cls.fast_pos_embed_interpolate, "_verl_device_safe_patch", False):
+        return
+
+    original_fast_pos_embed_interpolate = vision_model_cls.fast_pos_embed_interpolate
+
+    @functools.wraps(original_fast_pos_embed_interpolate)
+    def patched_fast_pos_embed_interpolate(self, grid_thw):
+        interpolation_tensors = build_bilinear_interpolation_tensors(
+            grid_thw=grid_thw,
+            num_grid_per_side=self.num_grid_per_side,
+            weight_dtype=self.pos_embed.weight.dtype,
+        )
+        pos_embed_weight = self.pos_embed.weight
+        if _is_sharded_tensor(pos_embed_weight):
+            # FSDP2 may wrap the embedding weight as a DTensor and route nn.Embedding
+            # indices through a CPU path. Materialize the small position embedding
+            # table locally on the active device so lookup stays device-consistent.
+            pos_embed_weight = pos_embed_weight.full_tensor().to(device=interpolation_tensors.device)
+            pos_embeds = torch.nn.functional.embedding(interpolation_tensors.idx_tensor, pos_embed_weight)
+        else:
+            pos_embeds = self.pos_embed(interpolation_tensors.idx_tensor).to(interpolation_tensors.device)
+        return merge_bilinear_interpolated_pos_embeds(
+            pos_embeds=pos_embeds,
+            weight_tensor=interpolation_tensors.weight_tensor,
+            grid_ts=interpolation_tensors.grid_ts,
+            grid_hs=interpolation_tensors.grid_hs,
+            grid_ws=interpolation_tensors.grid_ws,
+            merge_size=self.config.spatial_merge_size,
+        )
+
+    patched_fast_pos_embed_interpolate._verl_device_safe_patch = True
+    vision_model_cls.fast_pos_embed_interpolate = patched_fast_pos_embed_interpolate
+    logger.warning("Monkey patched %s.fast_pos_embed_interpolate for device-safe vision position embedding", model_name)
+
+
+def patch_qwen3_5_vision_fast_pos_embed_interpolate():
+    try:
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionModel
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeVisionModel
+    except ImportError:
+        return
+
+    _patch_qwen3_5_vision_fast_pos_embed_interpolate(Qwen3_5VisionModel, "Qwen3_5VisionModel")
+    _patch_qwen3_5_vision_fast_pos_embed_interpolate(Qwen3_5MoeVisionModel, "Qwen3_5MoeVisionModel")
 
 
 def _get_input_embeds(
@@ -59,8 +94,13 @@ def _get_input_embeds(
     video_grid_thw: Optional[torch.LongTensor] = None,
 ):
     inputs_embeds = model.get_input_embeddings()(input_ids)
+    device = inputs_embeds.device
+    if image_grid_thw is not None:
+        image_grid_thw = image_grid_thw.to(device)
+    if video_grid_thw is not None:
+        video_grid_thw = video_grid_thw.to(device)
     if pixel_values is not None:
-        pixel_values = pixel_values.type(model.visual.dtype)
+        pixel_values = pixel_values.to(device=device, dtype=model.visual.dtype)
         image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw).pooler_output
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
         n_image_features = image_embeds.shape[0]
@@ -78,7 +118,7 @@ def _get_input_embeds(
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
-        pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
+        pixel_values_videos = pixel_values_videos.to(device=device, dtype=model.visual.dtype)
         video_embeds = model.visual(pixel_values_videos, grid_thw=video_grid_thw).pooler_output
         n_video_tokens = (input_ids == model.config.video_token_id).sum().item()
         n_video_features = video_embeds.shape[0]

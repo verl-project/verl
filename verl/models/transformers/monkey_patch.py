@@ -492,18 +492,16 @@ def apply_monkey_patch(
             Qwen3_5ForConditionalGeneration,
             Qwen3_5Model,
             Qwen3_5TextModel,
-            Qwen3_5VisionModel,
         )
         from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
             Qwen3_5MoeForConditionalGeneration,
             Qwen3_5MoeModel,
             Qwen3_5MoeTextModel,
-            Qwen3_5MoeVisionModel,
         )
 
         from verl.models.transformers.qwen3_5 import (
-            fast_pos_embed_interpolate,
             forward_with_normal_backend,
+            patch_qwen3_5_vision_fast_pos_embed_interpolate,
             qwen3_5_base_forward,
         )
 
@@ -514,8 +512,7 @@ def apply_monkey_patch(
         print(f"Monkey patch {model.__class__.__name__} model forward")
 
         # Step 2: patch vision model to fix fsdp2 cpu_offload bug.
-        Qwen3_5VisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
-        Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+        patch_qwen3_5_vision_fast_pos_embed_interpolate()
 
         # Step 3: patch input for multimodal sequence parallelism
         if ulysses_sp_size > 1:
