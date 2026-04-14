@@ -127,9 +127,14 @@ class TRTLLMHttpServer:
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
+        # Pop kv_cache_config from engine_kwargs to merge into KvCacheConfig constructor,
+        # otherwise **engine_kwargs unpacking in llm_kwargs would overwrite the entire
+        # KvCacheConfig object, losing free_gpu_memory_fraction and enable_block_reuse.
+        kv_cache_overrides = engine_kwargs.pop("kv_cache_config", {})
         kv_cache_config = KvCacheConfig(
             enable_block_reuse=self.config.enable_prefix_caching,
             free_gpu_memory_fraction=self.config.gpu_memory_utilization,
+            **kv_cache_overrides,
         )
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
