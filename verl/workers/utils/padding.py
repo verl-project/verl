@@ -279,13 +279,15 @@ KNOWN_FIELD_TO_MASK_AND_PAD: dict[str, tuple[str, int | float | DynamicPadValue]
     "input_ids": ("attention_mask", PAD_TOKEN_ID),
     "teacher_ids": ("attention_mask", PAD_TOKEN_ID),
     "position_ids": ("attention_mask", 0),
-    "old_log_probs": ("attention_mask", 0.0),
-    "ref_log_prob": ("attention_mask", 0.0),
-    "rollout_log_probs": ("attention_mask", 0.0),
-    "entropys": ("attention_mask", 0.0),
     "teacher_logprobs": ("attention_mask", 0.0),
     "routed_experts": ("attention_mask", 0),
     # paired with response_mask (response-only axis)
+    # log-prob / entropy fields are extracted via `extract_response` in
+    # `_decompress_model_outputs` and stored back as (bsz, max_response_len).
+    "old_log_probs": ("response_mask", 0.0),
+    "ref_log_prob": ("response_mask", 0.0),
+    "rollout_log_probs": ("response_mask", 0.0),
+    "entropys": ("response_mask", 0.0),
     "advantages": ("response_mask", 0.0),
     "returns": ("response_mask", 0.0),
     "values": ("response_mask", 0.0),
