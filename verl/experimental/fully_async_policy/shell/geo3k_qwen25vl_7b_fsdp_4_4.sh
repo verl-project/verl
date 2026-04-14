@@ -28,15 +28,16 @@ infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
-n_resp_per_prompt=16
-train_prompt_mini_bsz=64
-total_rollout_steps=$(((512*400)))
-test_freq=5
-staleness_threshold=0.5
-trigger_parameter_sync_step=2
-require_batches=4
-partial_rollout=True
+n_resp_per_prompt=8
+train_prompt_mini_bsz=128
+require_batches=1
+total_rollout_steps=$(((512*100)))
 total_epochs=200
+test_freq=5
+
+staleness_threshold=0
+trigger_parameter_sync_step=1
+partial_rollout=False
 
 # FSDP specific parameters
 actor_offload=False
@@ -90,10 +91,12 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_grpo_example_geo3k' \
-    trainer.experiment_name='qwen2_5_vl_7b_fsdp_async' \
+    trainer.experiment_name='qwen3_vl_8b_fsdp_async' \
     trainer.total_epochs="${total_epochs}" \
     trainer.test_freq="${test_freq}" \
-    trainer.val_before_train=False \
+    trainer.log_val_generations=10 \
+    trainer.validation_data_dir="/root/verl/val_outputs" \
+    trainer.val_before_train=True \
     trainer.save_freq=-1 \
     trainer.resume_mode=disable \
     trainer.nnodes="${NNODES}" \
