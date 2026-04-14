@@ -4,7 +4,7 @@ Implement Reward Function for Dataset
 Last updated: 06/02/2025.
 
 For each dataset, we need to implement a reward function or utilize a reward model to compute the rewards for the generated responses.
-We already pre-implemented some reward functions in `reward_score directory <https://github.com/volcengine/verl/blob/main/verl/utils/reward_score>`_.
+We already pre-implemented some reward functions in `reward_score directory <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score>`_.
 You can also use customized reward functions.
 
 Currently, we support reward functions for GSM8k and MATH datasets. For RLHF datasets (e.g.,
@@ -14,7 +14,7 @@ and SandBox (will opensource soon) for evaluation respectively.
 RewardManager
 -------------
 
-In the entrypoint of the PPO Post-Training script `main_ppo.py <https://github.com/volcengine/verl/blob/main/verl/trainer/main_ppo.py#L33>`_,
+In the entrypoint of the PPO Post-Training script `main_ppo.py <https://github.com/verl-project/verl/blob/main/verl/trainer/main_ppo.py#L33>`_,
 we implement a ``RewardManager`` that utilize pre-implemented reward functions to compute the scores for each response.
 
 In the ``RewardManager``, we implemented a ``__call__`` function to
@@ -42,14 +42,14 @@ Reward Functions
 Pre-implemented
 ~~~~~~~~~~~~~~~
 
-We already pre-implemented some reward functions in `reward_score directory <https://github.com/volcengine/verl/blob/main/verl/utils/reward_score>`_.
+We already pre-implemented some reward functions in `reward_score directory <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score>`_.
 
-- In the `GSM8k example <https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/gsm8k.py>`_, we
+- In the `GSM8k example <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/gsm8k.py>`_, we
   force the response to output the final answer after four ####, then
   use string matching to compare with the ground truth. If completely
   correct, score 1 point; if the format is correct, score 0.1 points; if
   the format is incorrect, score 0 points.
-- In the `MATH example <https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/math.py>`_, we follow
+- In the `MATH example <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/math.py>`_, we follow
   the implementation in `lm-evaluation-harness repository <https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py>`_.
 
 Customized

@@ -263,7 +263,7 @@ checkpoint_engine:
 
   # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
   # This parameter controls the maximum payload size for a single weight update request.
-  # Reference: https://github.com/volcengine/verl/pull/2418
+  # Reference: https://github.com/verl-project/verl/pull/2418
   # Currently only supported in SGLang rollout implementations
   # Larger values may improve throughput but increase memory overhead
   # Detailed performance comparison:

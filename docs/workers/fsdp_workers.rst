@@ -57,7 +57,7 @@ highlighted below:
    Engine and make it executed under SPMD to fit into our
    ``WorkerGroup`` design.
 
-See `source code <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py>`_. for more information.
+See `source code <https://github.com/verl-project/verl/blob/main/verl/workers/fsdp_workers.py>`_. for more information.
 
 1. Generate sequence and recompute log prob
 

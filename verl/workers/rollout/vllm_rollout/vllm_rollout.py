@@ -41,7 +41,8 @@ from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
 from verl.utils.device import get_device_id, is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
-from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
+from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import \
+    BucketedWeightSender
 from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 
 logger = logging.getLogger(__file__)
@@ -198,5 +199,5 @@ class ServerAdapter(BaseRollout):
             "The vLLM SPMD mode was retired in PR #4411. For batch generation, "
             "please use the async server interface via vLLMReplica and AsyncLLMServerManager, "
             "or use HFRollout for synchronous generation. "
-            "See https://github.com/volcengine/verl/issues/4682 for more details."
+            "See https://github.com/verl-project/verl/issues/4682 for more details."
         )

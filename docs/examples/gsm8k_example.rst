@@ -75,11 +75,11 @@ model.
 ---------------------------------
 
 We provide a SFT Trainer using PyTorch FSDP in
-`sft_trainer.py <https://github.com/volcengine/verl/blob/main/verl/trainer/sft_trainer.py>`_. 
+`sft_trainer.py <https://github.com/verl-project/verl/blob/main/verl/trainer/sft_trainer.py>`_. 
 Users can customize their own SFT
 script using our FSDP SFT Trainer.
 
-We also provide various training scripts for SFT on GSM8K dataset in `gsm8k sft directory <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k/>`_.
+We also provide various training scripts for SFT on GSM8K dataset in `gsm8k sft directory <https://github.com/verl-project/verl/blob/main/examples/sft/gsm8k/>`_.
 
 .. code:: shell
 

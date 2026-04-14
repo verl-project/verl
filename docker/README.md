@@ -21,14 +21,14 @@ Upon base image, the following packages are added:
 - DeepEP
 
 Latest docker file:
-- [Dockerfile.stable.vllm](https://github.com/volcengine/verl/blob/main/docker/Dockerfile.stable.vllm)
-- [Dockerfile.stable.sglang](https://github.com/volcengine/verl/blob/main/docker/Dockerfile.stable.sglang)
+- [Dockerfile.stable.vllm](https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.vllm)
+- [Dockerfile.stable.sglang](https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.sglang)
 
 All pre-built images are available in dockerhub: https://hub.docker.com/r/verlai/verl. For example, `verlai/verl:sgl059.latest`, `verlai/verl:vllm017.latest`.
 
 You can find the latest images used for development and ci in our github workflows:
-- [.github/workflows/vllm.yml](https://github.com/volcengine/verl/blob/main/.github/workflows/vllm.yml)
-- [.github/workflows/sgl.yml](https://github.com/volcengine/verl/blob/main/.github/workflows/sgl.yml)
+- [.github/workflows/vllm.yml](https://github.com/verl-project/verl/blob/main/.github/workflows/vllm.yml)
+- [.github/workflows/sgl.yml](https://github.com/verl-project/verl/blob/main/.github/workflows/sgl.yml)
 
 
 ## Building Locally
@@ -71,7 +71,7 @@ docker exec -it verl bash
 
 ```sh
 # install the nightly version (recommended)
-git clone https://github.com/volcengine/verl && cd verl
+git clone https://github.com/verl-project/verl && cd verl
 pip3 install --no-deps -e .
 ```
 
@@ -79,7 +79,7 @@ pip3 install --no-deps -e .
 
 ```sh
 # install the nightly version (recommended)
-git clone https://github.com/volcengine/verl && cd verl
+git clone https://github.com/verl-project/verl && cd verl
 pip3 install -e .[vllm]
 pip3 install -e .[sglang]
 ```

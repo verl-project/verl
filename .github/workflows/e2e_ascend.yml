@@ -84,7 +84,7 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
-      - name: Checkout volcengine/verl repo
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -139,7 +139,7 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
-      - name: Checkout volcengine/verl repo
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -194,7 +194,7 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
-      - name: Checkout volcengine/verl repo
+      - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
