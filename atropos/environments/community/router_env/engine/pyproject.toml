@@ -1,0 +1,74 @@
+[project]
+name = "engine"
+version = "0.1.0"
+description = "Backend server for Stone OS with Pydantic-AI agents"
+authors = [
+    { name = "Stone AIOS Team", email = "dev@example.com" }, # Placeholder author
+]
+dependencies = [
+    "fastapi>=0.103.1",
+    "uvicorn[standard]>=0.23.2", # Added [standard] for better performance
+    "pydantic>=2.4.2",
+    "pydantic-settings>=2.0.3",
+    "anthropic>=0.15.0",
+    "logfire>=0.19.0",
+    "httpx>=0.25.0", # Needed for tests and EmailEngine API communication
+    # asyncio is built-in
+    "python-dotenv>=1.0.0",
+    "typing_extensions>=4.8.0",
+    # Add missing dependencies for memory system
+    "aiofiles>=0.8.0",
+    "filelock>=3.0.0",
+    "apscheduler",
+    # Add scheduler for background tasks
+    #    "apscheduler>=3.0.0,<4.0.0", # Added APScheduler V3
+    # MCP server dependency - assuming the Python SDK is needed if direct node execution fails
+    # 'mcp-sdk @ git+https://github.com/modelcontextprotocol/python-sdk.git', # Uncomment if needed
+    "spotipy>=2.0.0", # Added for Listen Agent Spotify integration
+    # Add Google API client libraries for Connect Agent direct integration
+    "google-api-python-client>=2.0.0",
+    "google-auth-oauthlib>=0.7.0",
+    "google-auth-httplib2", # Relaxed constraint
+
+    # --- Added LiveKit Agents ---
+    "livekit-agents[mcp]~=1.0",
+    "livekit-plugins-openai", # Example, if OpenAI is used for LLM/TTS/STT
+    "livekit-plugins-deepgram", # Example, if Deepgram is used for STT
+    "livekit-plugins-silero", # For VAD
+    "livekit-plugins-cartesia", # Example, for TTS
+    "livekit-plugins-turn-detector", # For turn detection
+    # ----------------------------
+]
+requires-python = ">=3.13" # Updated minimum Python version for mcp-gsuite
+readme = "README.md" # Assuming a README exists or will be created
+license = { text = "MIT" } # Or choose appropriate license
+
+# Add optional dependencies for development/testing
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.20",
+    "respx>=0.20",
+    # Add other dev tools like linters (ruff, mypy) or formatters (black) here if desired
+]
+
+[project.urls]
+Homepage = "https://github.com/stone-ui/stone-aios" # Placeholder URL
+Repository = "https://github.com/stone-ui/stone-aios" # Placeholder URL
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+# Optional: Specify settings for uv if needed
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+# Explicitly include directories containing the package code relative to pyproject.toml
+# Assuming these contain the core library code. Adjust if needed.
+packages = ["engine/agents", "engine/api", "engine/config", "engine/tools"] # Adjusted paths
+# If main.py and __init__.py should also be part of the package, might need adjustment
+# e.g., include '.' or specific file paths if they are not just scripts.
