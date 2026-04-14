@@ -146,6 +146,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+          steps: null
+          stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+          strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     router_replay:
       _target_: verl.workers.config.RouterReplayConfig
       mode: disabled
@@ -195,6 +201,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+          steps: null
+          stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+          strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     router_replay:
       _target_: verl.workers.config.RouterReplayConfig
       mode: disabled
@@ -359,6 +371,12 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+        precision_debugger:
+          _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+          config_path: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.config_path,${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}}
+          steps: null
+          stages: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.stages,${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}}
+          strict: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.strict,${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}}
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
@@ -591,6 +609,12 @@ critic:
         _target_: verl.utils.profiler.config.TorchMemoryToolConfig
         trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
         stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+      precision_debugger:
+        _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+        config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+        steps: null
+        stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+        strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
   nccl_timeout: 600
   load_weight: true
   model:
@@ -873,9 +897,7 @@ global_profiler:
       kw_args: {}
     precision_debugger:
       _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
-      enable: false
       config_path: null
-      data_dir: outputs/precision_debug
       steps: null
       stages: null
       strict: false
