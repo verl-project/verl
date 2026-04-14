@@ -113,9 +113,7 @@ class DiffusionAgentLoopWorker:
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
 
-        self.max_prompt_embed_length = self.rollout_config.extra_configs.get(
-            "max_sequence_length", self.rollout_config.prompt_length
-        )
+        self.max_prompt_embed_length = self.rollout_config.max_sequence_length
 
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
@@ -146,17 +144,19 @@ class DiffusionAgentLoopWorker:
         """
         config = self.rollout_config
 
-        sampling_params = dict(config.extra_configs)
-        sampling_params.update(
-            height=config.height,
-            width=config.width,
-            num_inference_steps=config.num_inference_steps,
-            logprobs=config.calculate_log_probs,
-        )
+        sampling_params = {
+            "true_cfg_scale": config.true_cfg_scale,
+            "max_sequence_length": config.max_sequence_length,
+            "height": config.height,
+            "width": config.width,
+            "num_inference_steps": config.num_inference_steps,
+            "logprobs": config.calculate_log_probs,
+            **dict(config.algo),
+        }
 
         # override sampling params for validation
         if batch.meta_info.get("validate", False):
-            sampling_params.update(config.val_kwargs.extra_configs)
+            sampling_params.update(dict(config.val_kwargs.algo))
             sampling_params["num_inference_steps"] = config.val_kwargs.num_inference_steps
             sampling_params["seed"] = config.val_kwargs.seed
 

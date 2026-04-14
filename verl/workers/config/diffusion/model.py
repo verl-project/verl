@@ -23,45 +23,13 @@ from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 
+from .rollout import DiffusionRolloutAlgoConfig
+
 __all__ = ["DiffusionModelConfig"]
 
 
 @dataclass
 class DiffusionModelConfig(BaseConfig):
-    """Configuration for diffusion model loading and training.
-
-    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
-
-    Args:
-        path (str): Path to the diffusion model (e.g., HuggingFace model directory). Must be specified.
-        architecture (Optional[str]): Handler key matched against @DiffusionModelBase.register(name).
-            When None (the default), it is auto-detected from model_index.json's ``_class_name``.
-        local_path (Optional[str]): Local path after copying from remote/shared storage.
-        tokenizer_path (Optional[str]): Path to the tokenizer. Defaults to ``{path}/tokenizer``.
-        local_tokenizer_path (Optional[str]): Local tokenizer path after copying.
-        model_type (str): Model type identifier. Always "diffusion_model" for diffusion models.
-        tokenizer (Any): Loaded tokenizer instance (set at runtime).
-        processor (Any): Loaded processor instance (set at runtime).
-        use_shm (bool): Whether to use shared memory for model loading.
-        trust_remote_code (bool): Whether to trust remote code.
-        custom_chat_template (Optional[str]): Custom chat template for the model.
-        external_lib (Optional[str]): Path to external library for loading custom model classes.
-        enable_gradient_checkpointing (bool): Whether to enable gradient checkpointing.
-        lora_rank (int): Set to positive value to enable LoRA (e.g., 32).
-        lora_alpha (int): LoRA scaling factor.
-        lora_init_weights (str): LoRA initialization method.
-        target_modules (Optional[Any]): Target modules for LoRA adaptation.
-        target_parameters (Optional[list[str]]): Target parameters for LoRA adaptation.
-        exclude_modules (Optional[str]): Exclude modules from LoRA adaptation.
-        lora_adapter_path (Optional[str]): Path to pre-trained LoRA adapter to load.
-        load_tokenizer (bool): Whether to load the tokenizer.
-        lora (dict): Megatron LoRA config (used by engine_workers for LoRA merge detection).
-        height (int): Default image height for diffusion generation.
-        width (int): Default image width for diffusion generation.
-        num_inference_steps (int): Default number of denoising steps.
-        extra_configs (dict): Extra configs for algorithm-specific features.
-    """
-
     _mutable_fields = {
         "model_type",
         "tokenizer_path",
@@ -97,8 +65,6 @@ class DiffusionModelConfig(BaseConfig):
 
     enable_gradient_checkpointing: bool = True
 
-    # TODO: unify fsdp and megatron lora config
-    # fsdp lora related. We may setup a separate config later
     lora_rank: int = 32
     lora_alpha: int = 64
     lora_init_weights: str = "gaussian"
@@ -114,12 +80,12 @@ class DiffusionModelConfig(BaseConfig):
     lora_adapter_path: Optional[str] = None
 
     height: int = 512
-
     width: int = 512
-
     num_inference_steps: int = 10
-
-    extra_configs: dict[str, Any] = field(default_factory=dict)
+    true_cfg_scale: float = 4.0
+    max_sequence_length: int = 512
+    guidance_scale: Optional[float] = None
+    algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

@@ -56,9 +56,9 @@ def create_training_config(model_type, strategy, device_count, model):
                     "external_lib=" + EXTERNAL_LIB,
                     "lora_rank=8",
                     "lora_alpha=16",
-                    "+extra_configs.true_cfg_scale=4.0",
-                    "+extra_configs.sde_type=sde",
-                    "+extra_configs.noise_level=1.2",
+                    "true_cfg_scale=4.0",
+                    "algo.noise_level=1.2",
+                    "algo.sde_type=sde",
                 ],
             )
         model_config: DiffusionModelConfig = omega_conf_to_dataclass(cfg)

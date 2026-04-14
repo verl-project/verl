@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 from omegaconf import MISSING
 
@@ -21,29 +21,25 @@ from verl.base_config import BaseConfig
 from ..rollout import AgentLoopConfig, CheckpointEngineConfig, SamplingConfig
 
 __all__ = [
+    "DiffusionRolloutAlgoConfig",
     "DiffusionSamplingConfig",
     "DiffusionRolloutConfig",
 ]
 
 
 @dataclass
+class DiffusionRolloutAlgoConfig(BaseConfig):
+    noise_level: float = 1.0
+    sde_type: str = "sde"
+    sde_window_size: Optional[int] = None
+    sde_window_range: list[int] = [0, 5]
+
+
+@dataclass
 class DiffusionSamplingConfig(SamplingConfig):
-    """Sampling configuration for diffusion model validation.
-
-    Args:
-        num_inference_steps (int): Number of inference steps for diffusion model validation.
-        seed (int): Random seed for validation.
-        extra_configs (dict): Extra configs for validation.
-    """
-
-    # Number of inference steps for diffusion model validation
     num_inference_steps: int = 40
-
-    # Random seed for validation
     seed: int = 42
-
-    # Extra configs for validation
-    extra_configs: dict[str, Any] = field(default_factory=dict)
+    algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
 
 @dataclass
@@ -93,11 +89,12 @@ class DiffusionRolloutConfig(BaseConfig):
     skip_tokenizer_init: bool = True
 
     height: int = 512
-
     width: int = 512
-
     num_inference_steps: int = 10
-    extra_configs: dict[str, Any] = field(default_factory=dict)
+    true_cfg_scale: float = 4.0
+    max_sequence_length: int = 512
+    guidance_scale: Optional[float] = None
+    algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
     def __post_init__(self):
         """Validate the diffusion rollout config"""

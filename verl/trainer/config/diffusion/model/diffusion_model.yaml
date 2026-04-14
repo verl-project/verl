@@ -57,5 +57,15 @@ width: ${oc.select:actor_rollout_ref.rollout.width,512}
 # inference steps
 num_inference_steps: ${oc.select:actor_rollout_ref.rollout.num_inference_steps,10}
 
-# extra configs for algorithm specific features.
-extra_configs: ${oc.select:actor_rollout_ref.rollout.extra_configs,{}}
+# Classifier-free guidance scale
+true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.true_cfg_scale,4.0}
+
+# Maximum text-encoder token sequence length
+max_sequence_length: ${oc.select:actor_rollout_ref.rollout.max_sequence_length,512}
+
+# Distilled guidance scale
+guidance_scale: ${oc.select:actor_rollout_ref.rollout.guidance_scale,null}
+
+# Rollout Algorithm configuration,
+algo: ${oc.select:actor_rollout_ref.rollout.algo,{}}
+

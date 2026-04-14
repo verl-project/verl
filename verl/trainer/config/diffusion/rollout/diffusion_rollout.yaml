@@ -78,11 +78,29 @@ val_kwargs:
   # number of inference steps for diffusion model validation
   num_inference_steps: 40
 
-  # random seed for validation
-  seed: 42
+  # Rollout Algorithm configuration,
+  algo:
+  
+    # Magnitude of SDE noise injected inside the active window during validation
+    noise_level: 0.0
 
-  # extra configs for validation
-  extra_configs: {}
+# Rollout Algorithm configuration,
+algo:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
+  # Magnitude of SDE noise injected inside the active window
+  noise_level: 1.0
+
+  # SDE variant: "sde" or "cps"
+  sde_type: sde
+
+  # Number of consecutive denoising steps in the active SDE window; null = all steps
+  sde_window_size: null
+
+  # [start, end) range for random window start-index sampling
+  sde_window_range: [0, 5]
 
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
@@ -144,7 +162,11 @@ width: 512
 # number of inference steps for diffusion model rollout
 num_inference_steps: 10
 
-# extra configs for algorithm specific features.
-# Model-specific diffusion sampling params (e.g. true_cfg_scale, guidance_scale,
-# max_sequence_length, noise_level)
-extra_configs: {}
+# Classifier-free guidance scale (true CFG); values > 1.0 enable CFG with negative prompt
+true_cfg_scale: 4.0
+
+# Maximum text-encoder token sequence length for prompt encoding
+max_sequence_length: 512
+
+# Distilled guidance scale for models with guidance_embeds; null to disable
+guidance_scale: null
