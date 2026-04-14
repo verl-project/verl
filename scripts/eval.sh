@@ -276,6 +276,7 @@ else
         LORA_PATH="$MODEL_PATH"
         MODEL_PATH="$BASE_MODEL"
         GEN_ARGS="${GEN_ARGS} +model.lora_path=${LORA_PATH} "
+    fi
 
     GEN_ARGS="${GEN_ARGS} \
     model.path=${MODEL_PATH} \
