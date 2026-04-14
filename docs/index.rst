@@ -108,7 +108,6 @@ verl is fast with:
    perf/verl_profiler_system.md
    perf/nsight_profiling.md
    perf/torch_profiling.md
-   ascend_tutorial/profiling/precision_debugger.md
 
 .. toctree::
    :maxdepth: 1
@@ -167,6 +166,7 @@ verl is fast with:
    ascend_tutorial/features/ascend_backend_features.md
    ascend_tutorial/profiling/ascend_profiling_zh.rst
    ascend_tutorial/profiling/ascend_profiling_en.rst
+   ascend_tutorial/profiling/precision_debugger.md
    ascend_tutorial/examples/gspo_optimization_practice.md
    ascend_tutorial/examples/ascend_performance_analysis_guide.md
    ascend_tutorial/examples/dapo_multi_model_optimization_practice.md
