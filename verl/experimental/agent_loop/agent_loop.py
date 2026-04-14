@@ -681,10 +681,15 @@ class AgentLoopWorker:
         """Compute multi-modal inputs with image and video."""
         multi_modal_inputs = {}
         if self.processor is None:
+            logger.info("[_compute_multi_modal_inputs] processor is None, skipping multi-modal inputs")
             return multi_modal_inputs
 
         images = output.multi_modal_data.get("images")
         videos = output.multi_modal_data.get("videos")
+        logger.info(
+            f"[_compute_multi_modal_inputs] images={type(images).__name__}(len={len(images) if images else 0}), "
+            f"videos={type(videos).__name__}(len={len(videos) if videos else 0})"
+        )
         # split the videos and according metadatas
         if videos is not None:
             videos, video_metadatas = zip(*videos, strict=False)
@@ -710,6 +715,11 @@ class AgentLoopWorker:
         if image_grid_thw is not None:
             images_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])
             multi_modal_inputs["images_seqlens"] = images_seqlens
+        logger.info(
+            f"[_compute_multi_modal_inputs] output keys: {list(multi_modal_inputs.keys())}, "
+            f"pixel_values shape: {multi_modal_inputs['pixel_values'].shape if 'pixel_values' in multi_modal_inputs else 'N/A'}, "
+            f"image_grid_thw: {image_grid_thw}"
+        )
         return multi_modal_inputs
 
     def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs) -> torch.Tensor:
