@@ -5,7 +5,7 @@
 # 4. Indentation level is respected for nested fields.
 
 # Target class for this configuration
-_target_: verl.workers.config.DiffusionActorConfig
+_target_: verl.workers.config.diffusion.DiffusionActorConfig
 
 # Number of rollouts per update (mirrors actor rollout_n)
 rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
@@ -24,7 +24,7 @@ ppo_micro_batch_size_per_gpu: null
 diffusion_loss:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.DiffusionLossConfig
+  _target_: verl.workers.config.diffusion.DiffusionLossConfig
 
   # Loss function mode for diffusion: flow_grpo
   loss_mode: "flow_grpo"

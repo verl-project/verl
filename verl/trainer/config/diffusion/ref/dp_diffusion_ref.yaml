@@ -11,7 +11,7 @@ defaults:
   - _self_
 
 # Target class for this configuration
-_target_: verl.workers.config.FSDPDiffusionActorConfig
+_target_: verl.workers.config.diffusion.FSDPDiffusionActorConfig
 
 # fsdp config
 fsdp_config:

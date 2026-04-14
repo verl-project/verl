@@ -43,7 +43,7 @@ def test_compute_policy_loss_flow_grpo() -> None:
     from hydra import compose, initialize_config_dir
 
     from verl.utils.config import omega_conf_to_dataclass
-    from verl.workers.config.diffusion_actor import FSDPDiffusionActorConfig
+    from verl.workers.config.diffusion.actor import FSDPDiffusionActorConfig
 
     batch_size = 8
     steps = 10

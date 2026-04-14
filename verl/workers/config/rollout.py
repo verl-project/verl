@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 from omegaconf import MISSING
 
@@ -23,7 +23,6 @@ from verl.workers.config.model import MtpConfig
 
 __all__ = [
     "SamplingConfig",
-    "DiffusionSamplingConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -31,7 +30,6 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
-    "DiffusionRolloutConfig",
     "CheckpointEngineConfig",
     "SkipConfig",
 ]
@@ -61,13 +59,6 @@ class SamplingConfig(BaseConfig):
     top_p: float = 1.0
     do_sample: bool = True
     n: int = 1
-
-
-@dataclass
-class DiffusionSamplingConfig(SamplingConfig):
-    num_inference_steps: int = 40
-    seed: int = 42
-    extra_configs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -333,118 +324,3 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
-
-
-@dataclass
-class DiffusionRolloutConfig(BaseConfig):
-    """Standalone rollout config for diffusion model inference via vLLM-Omni.
-
-    Does NOT inherit from RolloutConfig. Only contains fields actually used by
-    the diffusion rollout pipeline (DiffusionAgentLoopWorker, AgentLoopManager,
-    ray_diffusion_trainer.py).
-    """
-
-    _mutable_fields = {"max_model_len", "load_format"}
-
-    # Rollout engine name (e.g., vllm_omni)
-    name: Optional[str] = MISSING
-
-    # Rollout mode. Only async is supported.
-    mode: str = "async"
-
-    # Number of nodes for standalone rollout server
-    nnodes: int = 0
-
-    # Number of GPUs per node
-    n_gpus_per_node: int = 8
-
-    # Number of samples per prompt
-    n: int = 1
-
-    # Model dtype
-    dtype: str = "bfloat16"
-
-    # Fraction of GPU memory used by inference engine
-    gpu_memory_utilization: float = 0.5
-
-    # Whether to disable CUDA graph
-    enforce_eager: bool = False
-
-    # Whether to free engine cache after generation
-    free_cache_engine: bool = True
-
-    # TP size for rollout
-    tensor_model_parallel_size: int = 2
-
-    # DP size for rollout
-    data_parallel_size: int = 1
-
-    # PP size (not supported for vllm_omni yet)
-    pipeline_model_parallel_size: int = 1
-
-    # Max number of tokens in a batch
-    max_num_batched_tokens: int = 8192
-
-    # Max length for rollout
-    max_model_len: Optional[int] = None
-
-    # Max number of sequences
-    max_num_seqs: int = 1024
-
-    # Model weight loader format
-    load_format: str = "dummy"
-
-    # Whether to use layered summon for huge models
-    layered_summon: bool = False
-
-    # Skip text tokenizer init (diffusion doesn't use text tokenizer)
-    skip_tokenizer_init: bool = True
-
-    # Disable inference engine stats logging
-    disable_log_stats: bool = True
-
-    # Whether to sample
-    do_sample: bool = True
-
-    # Whether to compute log probs during rollout
-    calculate_log_probs: bool = False
-
-    # Log-prob micro batch size per GPU
-    log_prob_micro_batch_size_per_gpu: Optional[int] = None
-
-    # Extra inference engine arguments
-    engine_kwargs: dict = field(default_factory=dict)
-
-    # Agent loop config
-    agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
-
-    # Checkpoint engine config for weight updates
-    checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
-
-    # Validation sampling params (diffusion-specific)
-    val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
-
-    # Prometheus monitoring config
-    prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
-
-    # Diffusion-specific fields
-    height: int = 512
-
-    width: int = 512
-
-    num_inference_steps: int = 10
-
-    extra_configs: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        """Validate diffusion rollout config"""
-        if self.mode == "sync":
-            raise ValueError(
-                "Rollout mode 'sync' has been removed. Please set "
-                "`actor_rollout_ref.rollout.mode=async` or remove the mode setting entirely."
-            )
-
-        if self.pipeline_model_parallel_size > 1 and self.name == "vllm_omni":
-            raise NotImplementedError(
-                f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
-            )

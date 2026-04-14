@@ -1,5 +1,5 @@
 # Target class for this configuration
-_target_: verl.workers.config.DiffusionRolloutConfig
+_target_: verl.workers.config.diffusion.DiffusionRolloutConfig
 
 # actor_rollout_ref.rollout.name: vllm_omni. The default value will be removed in the future
 name: ???
@@ -31,6 +31,9 @@ tensor_model_parallel_size: 2
 
 # DP size for rollout
 data_parallel_size: 1
+
+# PP size for rollout
+pipeline_model_parallel_size: 1
 
 # max number of tokens in a batch
 max_num_batched_tokens: 8192
@@ -67,7 +70,7 @@ engine_kwargs:
 val_kwargs:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.DiffusionSamplingConfig
+  _target_: verl.workers.config.diffusion.DiffusionSamplingConfig
 
   # whether to repeat n times for validation
   n: 1

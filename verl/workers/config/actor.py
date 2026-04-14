@@ -34,7 +34,6 @@ from .optimizer import OptimizerConfig
 
 __all__ = [
     "PolicyLossConfig",
-    "DiffusionLossConfig",
     "RouterReplayConfig",
     "ActorConfig",
     "FSDPActorConfig",
@@ -98,29 +97,6 @@ class PolicyLossConfig(BaseConfig):
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
-
-
-@dataclass
-class DiffusionLossConfig(BaseConfig):
-    """Configuration for diffusion policy loss computation.
-
-    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
-
-    Args:
-        loss_mode (str): Loss function mode. Options: 'flow_grpo'.
-        clip_ratio (float): PPO clipping ratio for FlowGRPO policy loss.
-        adv_clip_max (float): Maximum value to clamp advantages before computing policy loss.
-    """
-
-    loss_mode: str = "flow_grpo"
-    clip_ratio: float = 0.0001
-    adv_clip_max: float = 5.0
-
-    def __post_init__(self):
-        """Validate diffusion loss configuration."""
-        valid_modes = ["flow_grpo"]
-        if self.loss_mode not in valid_modes:
-            raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
 
 
 @dataclass

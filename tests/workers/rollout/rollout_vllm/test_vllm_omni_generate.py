@@ -75,12 +75,11 @@ def init_server():
 
     rollout_cfg = OmegaConf.create(
         {
-            "_target_": "verl.workers.config.DiffusionRolloutConfig",
+            "_target_": "verl.workers.config.diffusion.DiffusionRolloutConfig",
             "name": "vllm_omni",
             "mode": "async",
             "tensor_model_parallel_size": 1,
             "data_parallel_size": 1,
-            "pipeline_model_parallel_size": 1,
             "gpu_memory_utilization": 0.8,
             "max_num_batched_tokens": 8192,
             "max_num_seqs": 256,
@@ -88,9 +87,6 @@ def init_server():
             "dtype": "bfloat16",
             "load_format": "auto",
             "enforce_eager": True,
-            "enable_chunked_prefill": False,
-            "enable_prefix_caching": False,
-            "enable_sleep_mode": False,
             "free_cache_engine": True,
             "disable_log_stats": True,
             "n": 4,
@@ -109,11 +105,10 @@ def init_server():
 
     model_cfg = OmegaConf.create(
         {
-            "_target_": "verl.workers.config.DiffusionModelConfig",
+            "_target_": "verl.workers.config.diffusion.DiffusionModelConfig",
             "path": model_path,
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
-            "load_tokenizer": True,
         }
     )
 
