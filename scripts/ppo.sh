@@ -1,11 +1,31 @@
 #!/bin/bash
 # set -x
 
-# ============================ Configurations ===========================
-PROJECT_DIR="$HOME/CoT-Data-verl"   # !!!!! Change this to where you want to save logs!!!!!
-STORE_DIR="/data/hjw"               # !!!!! Change this to where you want to save checkpoints!!!!!
-CONFIG_DIR=$(realpath "../config")
+# =========================== Load User Configs =========================
+# Find & Load Config File
+# Precedence: 1. Env CONFIG_FILE  2. ../config/bash_config.env
 
+# CONFIG_DIR: 使用绝对路径或从环境变量读取
+if [ -z "$CONFIG_DIR" ]; then
+    CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config"
+fi
+
+CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/bash_config.env}"
+
+if [ -f "$CONFIG_FILE" ]; then
+    echo "[INFO] Loading config from: $CONFIG_FILE"
+    source "$CONFIG_FILE"
+else
+    echo "[WARNING] Config file not found. Using default values."
+fi
+
+# fallback
+PROJECT_DIR="${PROJECT_DIR:-$HOME/CoT-Data-verl}"
+STORE_DIR="${STORE_DIR:-/data/hjw}"
+# =======================================================================
+
+
+# ============================ Configurations ===========================
 MODEL_NAME="Qwen2.5-0.5B-Instruct"
 BASE_MODEL="Qwen/Qwen2.5-0.5B-Instruct"      # Only need to change this if you wish to ppo with base model.
 
