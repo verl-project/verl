@@ -14,13 +14,13 @@ from typing import Optional, List, Dict, Callable
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.data_obs import DataSplitter, DatasetMetrics
-from lib.data_metrics import (
+from pipeline_lib.data_obs import DataSplitter, DatasetMetrics
+from pipeline_lib.data_metrics import (
     compute_data_statistics,
     compute_data_quality_metrics,
     compute_all_data_metrics
 )
-from lib.advanced_metrics import (
+from pipeline_lib.advanced_metrics import (
     compute_dataset_diversity,
     compute_dataset_entropy,
     compute_ppl_metrics,
