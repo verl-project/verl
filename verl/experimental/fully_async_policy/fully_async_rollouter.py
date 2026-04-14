@@ -260,12 +260,36 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             self.step_start_time = time.time()
         return timing_raw
 
+    def _maybe_log_val_generations(self, inputs, outputs, scores):
+        """Capture validation generations to send back to trainer instead of logging directly.
+
+        The rollouter process does not have an active wandb session, so we capture the
+        sampled generations and return them via ValidateMetrics to the trainer for logging.
+        """
+        generations_to_log = self.config.trainer.log_val_generations
+        if generations_to_log == 0:
+            self._captured_val_generations = []
+            return
+
+        samples = list(zip(inputs, outputs, scores, strict=True))
+        samples.sort(key=lambda x: x[0])
+
+        rng = np.random.RandomState(42)
+        rng.shuffle(samples)
+
+        self._captured_val_generations = samples[:generations_to_log]
+
     def do_validate(self) -> ValidateMetrics:
         """Run validation and return metrics"""
         timing_raw = {}
+        self._captured_val_generations = []
         with marked_timer("rollouter/validate_time", timing_raw, color="green"):
             val_metrics: dict = self._validate()
-        return ValidateMetrics(timing_raw=timing_raw, metrics=val_metrics)
+        return ValidateMetrics(
+            timing_raw=timing_raw,
+            metrics=val_metrics,
+            val_generations=self._captured_val_generations,
+        )
 
     async def save_checkpoint(self, local_global_step_folder: str):
         # WARNING!: Due to the asynchronous nature, there are some in-flight samples

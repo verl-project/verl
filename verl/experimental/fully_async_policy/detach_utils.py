@@ -45,6 +45,7 @@ class ValidateMetrics:
 
     timing_raw: dict[str, Any]
     metrics: Optional[dict[str, Any]] = None
+    val_generations: Optional[list[tuple]] = None
 
 
 def prepare_single_generation_data(batch_dict, config) -> DataProto:
