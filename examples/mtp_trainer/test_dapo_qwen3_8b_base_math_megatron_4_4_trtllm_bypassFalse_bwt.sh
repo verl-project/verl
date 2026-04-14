@@ -148,6 +148,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.log_val_generations=10 \
     trainer.total_epochs=10 \
     algorithm.rollout_correction.bypass_mode=False \
+    algorithm.rollout_correction.rollout_is=token \
     +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 \
     +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5 \
     "${fully_async[@]}" \
