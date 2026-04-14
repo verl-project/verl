@@ -1151,11 +1151,15 @@ class RayPPOTrainer:
         with marked_timer("compress", self._timing_raw):
             if not self.use_mask_nesting:
                 return left_right_2_no_padding(batch_td)
+            # TODO: eliminate loss_mask alias once worker loss code reads response_mask directly.
+            if "response_mask" in batch_td:
+                batch_td["loss_mask"] = batch_td["response_mask"]
             compress_batch_dtypes(batch_td)
-            nest_batch_by_mask(batch_td, pad_token_id=self.tokenizer.pad_token_id)
-        # TODO: eliminate loss_mask alias once worker loss code reads response_mask directly.
-        if "response_mask" in batch_td:
-            batch_td["loss_mask"] = batch_td["response_mask"]
+            nest_batch_by_mask(
+                batch_td,
+                pad_token_id=self.tokenizer.pad_token_id,
+                field_to_mask_and_pad={"loss_mask": ("response_mask", 0)},
+            )
         return batch_td
 
     def _decompress_batch(self, batch_td: TensorDict) -> TensorDict:
