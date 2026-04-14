@@ -37,6 +37,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.model.path = os.path.join(model_root, "Qwen/Qwen2.5-0.5B-Instruct")
     config.actor_rollout_ref.rollout.name = "trtllm"
     config.actor_rollout_ref.rollout.mode = "async"
+    config.actor_rollout_ref.rollout.skip_tokenizer_init = False
 
     return config
 
