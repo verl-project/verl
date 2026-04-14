@@ -155,11 +155,23 @@ class BucketedWeightSender:
 
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            try:
+                os.remove(ipc_path)
+            except FileNotFoundError:
+                pass
         self.socket = self.zmq_context.socket(zmq.REQ)
         self.socket.bind(self.zmq_handle)
 
     def _init_buffer(self):
-        """build communication buffer"""
+        """build communication buffer, reuse if already allocated"""
+        if self.buffer is not None and not self.use_shm:
+            handle = reduce_tensor(self.buffer)
+            self.socket.send_pyobj(handle)
+            self.socket.recv()
+            return
+
         buffer, shm = None, None
         if not self.use_shm:
             buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
@@ -181,17 +193,22 @@ class BucketedWeightSender:
         self.shm = shm
 
     def _cleanup(self):
-        """clean up"""
+        """clean up socket but keep buffer for reuse"""
         if self.socket is not None:
             self.socket.close()
             self.socket = None
-        del self.buffer
-        self.buffer = None
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            try:
+                os.remove(ipc_path)
+            except FileNotFoundError:
+                pass
         if self.shm is not None:
             self.shm.close()
             self.shm.unlink()
             del self.shm
             self.shm = None
+            self.buffer = None
         gc.collect()
         get_torch_device().ipc_collect()
         get_torch_device().empty_cache()

@@ -230,9 +230,11 @@ class NCCLCheckpointEngine(CheckpointEngine):
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
 
         # For trainer rank other than 0, consume weights without sending.
+        # synchronize() after each weight to keep all_gather calls aligned with rank 0,
+        # preventing FSDP2 collective deadlock when weights is a lazy generator.
         if self.rank < 0:
             for name, weight in weights:
-                pass
+                torch.cuda.synchronize()
             return
 
         send_buf, recv_buf = self.send_buf, self.recv_buf

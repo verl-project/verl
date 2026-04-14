@@ -90,7 +90,7 @@ def init_execution_pool(
     if mode == PoolMode.ThreadMode:
         return (
             ray.remote(ExecutionWorker)
-            .options(max_concurrency=num_workers)
+            .options(name="sandbox-execution-pool", get_if_exists=True, max_concurrency=num_workers)
             .remote(enable_global_rate_limit=enable_global_rate_limit, rate_limit=rate_limit)
         )
     else:

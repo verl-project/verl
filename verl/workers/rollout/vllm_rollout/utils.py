@@ -176,11 +176,15 @@ class vLLMColocateWorkerExtension:
         # patch weight loader to support MoE model
         patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False, replica_rank: int = 0
+    ):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
+
+        self._replica_rank = replica_rank
 
         if current_platform.device_type == "npu" and self.device is None:
             self.device = torch.device(f"npu:{self.local_rank}")
@@ -265,9 +269,8 @@ class vLLMColocateWorkerExtension:
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""
-        if not hasattr(self, "device_uuid") or not self.device_uuid:
-            self.device_uuid = get_device_uuid(self.device.index)
-        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        replica_rank = getattr(self, "_replica_rank", 0)
+        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{self.local_rank}.sock"
 
 
 class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
@@ -292,10 +295,14 @@ class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
 
         return super().__new__(cls)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False, replica_rank: int = 0
+    ):
         """Update the weights of the rollout model."""
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
+
+        self._replica_rank = replica_rank
 
         # In async mode, make sure the old lora is removed before adding the new one
         if peft_config and base_sync_done:
@@ -331,9 +338,8 @@ class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""
-        if not hasattr(self, "device_uuid") or not self.device_uuid:
-            self.device_uuid = get_device_uuid(self.device.index)
-        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        replica_rank = getattr(self, "_replica_rank", 0)
+        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{self.local_rank}.sock"
 
 
 class SuppressSignalInThread:
