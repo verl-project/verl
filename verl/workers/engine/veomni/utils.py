@@ -108,4 +108,5 @@ def _map_moe_params_qwen3_moe(name, tensor):
 
 MOE_PARAM_HANDERS = {
     "qwen3_moe": _map_moe_params_qwen3_moe,
+    "deepseek_v3": _map_moe_params_qwen3_moe,
 }
