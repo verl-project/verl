@@ -51,13 +51,9 @@ import torch
 from accelerate import init_empty_weights
 from safetensors.torch import load_file
 from torch.distributed._tensor import Placement, Shard
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoModelForTokenClassification,
-    GenerationConfig,
-    PretrainedConfig,
-)
+from transformers import (AutoConfig, AutoModelForCausalLM,
+                          AutoModelForTokenClassification, GenerationConfig,
+                          PretrainedConfig)
 
 try:
     # for torch 2.5+
@@ -141,7 +137,7 @@ class BaseModelMerger(ABC):
     def patch_model_generation_config(self, model):
         """
         The generation_config created from model config may be different to the pretrained model,
-        this may lead to error when generating: https://github.com/volcengine/verl/issues/1246
+        this may lead to error when generating: https://github.com/verl-project/verl/issues/1246
 
         This function patch the generation_config created from model config to the pretrained model.
         """
@@ -439,7 +435,8 @@ class FSDPModelMerger(BaseModelMerger):
 
 class MegatronModelMerger(BaseModelMerger):
     def __init__(self, config: ModelMergerConfig):
-        from verl.utils.megatron_utils import get_hf_config_and_tokenizer_checkpoint_path
+        from verl.utils.megatron_utils import \
+            get_hf_config_and_tokenizer_checkpoint_path
 
         config.hf_model_config_path = get_hf_config_and_tokenizer_checkpoint_path(config.local_dir)
         super().__init__(config)

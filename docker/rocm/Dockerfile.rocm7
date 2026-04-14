@@ -122,7 +122,7 @@ ENV HIP_FORCE_DEV_KERNARG=1
 
 # -----------------------
 # Install verl
-ARG VERL_REPO=https://github.com/volcengine/verl.git
+ARG VERL_REPO=https://github.com/verl-project/verl.git
 ARG VERL_BRANCH=main
 RUN pip install "tensordict==0.6.2" --no-deps && \
     pip install accelerate \

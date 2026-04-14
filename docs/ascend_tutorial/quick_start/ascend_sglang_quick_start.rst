@@ -73,7 +73,7 @@ Atlas 800T A3
 
 .. code-block:: bash
 
-    git clone https://github.com/volcengine/verl.git  
+    git clone https://github.com/verl-project/verl.git  
     # Make sure you have activated verl conda env
     # NPU_DEVICE=A3 or A2 depends on your device
     # USE_MEGATRON=1 if you need to install megatron backend

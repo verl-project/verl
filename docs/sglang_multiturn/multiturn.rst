@@ -323,13 +323,13 @@ See the training performance of multi-turn rollout on the GSM8K task HERE_.
 
 .. _HERE: https://wandb.ai/zhaochenyang20/gsm8k_async_rl/runs/1ro1r7om?nw=nwuserzhaochenyang20
 
-.. _GSM8KTool_example_configuration: https://github.com/volcengine/verl/blob/main/examples/sglang_multiturn/config/tool_config/gsm8k_tool_config.yaml
+.. _GSM8KTool_example_configuration: https://github.com/verl-project/verl/blob/main/examples/sglang_multiturn/config/tool_config/gsm8k_tool_config.yaml
 
-.. _gsm8k_tool.py: https://github.com/volcengine/verl/blob/main/verl/tools/gsm8k_tool.py
+.. _gsm8k_tool.py: https://github.com/verl-project/verl/blob/main/verl/tools/gsm8k_tool.py
 
-.. _mcp_search_tool.py: https://github.com/volcengine/verl/blob/main/verl/tools/mcp_search_tool.py
+.. _mcp_search_tool.py: https://github.com/verl-project/verl/blob/main/verl/tools/mcp_search_tool.py
 
-.. _mcp_tool_config.yaml: https://github.com/volcengine/verl/blob/main/examples/sglang_multiturn/config/tool_config/mcp_tool_config.yaml
+.. _mcp_tool_config.yaml: https://github.com/verl-project/verl/blob/main/examples/sglang_multiturn/config/tool_config/mcp_tool_config.yaml
 
 Interaction System
 ~~~~~~~~~~~~~~~~~~

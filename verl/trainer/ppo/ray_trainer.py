@@ -36,41 +36,39 @@ from tqdm import tqdm
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
+from verl.single_controller.ray import (RayClassWithInitArgs, RayWorkerGroup,
+                                        ResourcePoolManager)
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    compute_variance_proxy_metrics,
-    process_validation_metrics,
-)
+from verl.trainer.ppo.metric_utils import (compute_data_metrics,
+                                           compute_throughout_metrics,
+                                           compute_timing_metrics,
+                                           compute_variance_proxy_metrics,
+                                           process_validation_metrics)
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import (
-    Role,
-    WorkerType,
-    need_critic,
-    need_reference_policy,
-    need_reward_model,
-    need_teacher_policy,
-)
+from verl.trainer.ppo.utils import (Role, WorkerType, need_critic,
+                                    need_reference_policy, need_reward_model,
+                                    need_teacher_policy)
 from verl.utils import tensordict_utils as tu
-from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
+from verl.utils.checkpoint.checkpoint_manager import (find_latest_ckpt_path,
+                                                      should_save_ckpt_esi)
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
-from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.seqlen_balancing import (calculate_workload,
+                                         get_seqlen_balanced_partitions,
+                                         log_seqlen_unbalance)
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
-from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+from verl.workers.utils.padding import (left_right_2_no_padding,
+                                        no_padding_2_padding)
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -347,7 +345,8 @@ class RayPPOTrainer:
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
         if collate_fn is None:
-            from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
+            from verl.utils.dataset.rl_dataset import \
+                collate_fn as default_collate_fn
 
             collate_fn = default_collate_fn
 
@@ -752,7 +751,7 @@ class RayPPOTrainer:
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
         # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
+        # See https://github.com/verl-project/verl/blob/master/examples/ray/tutorial.ipynb for more information.
         all_wg = {}
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
@@ -1073,7 +1072,8 @@ class RayPPOTrainer:
 
         # Use group-level balancing for PrefixGrouper to keep same-uid samples together
         if getattr(self, "use_prefix_grouper", False) and "uid" in batch.non_tensor_batch:
-            from verl.utils.seqlen_balancing import get_group_balanced_partitions
+            from verl.utils.seqlen_balancing import \
+                get_group_balanced_partitions
 
             uid_list = list(batch.non_tensor_batch["uid"])
             seqlen_list = global_seqlen_lst.tolist()
@@ -1443,7 +1443,8 @@ class RayPPOTrainer:
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
+                        from verl.trainer.ppo.rollout_corr_helper import \
+                            apply_bypass_mode
 
                         apply_bypass_mode(
                             batch=batch,
@@ -1479,7 +1480,8 @@ class RayPPOTrainer:
                             batch = batch.union(old_log_prob)
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
-                                from verl.utils.debug.metrics import calculate_debug_metrics
+                                from verl.utils.debug.metrics import \
+                                    calculate_debug_metrics
 
                                 metrics.update(calculate_debug_metrics(batch))
 
@@ -1522,7 +1524,8 @@ class RayPPOTrainer:
                             and "rollout_log_probs" in batch.batch
                             and not bypass_recomputing_logprobs  # Only in decoupled mode
                         ):
-                            from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
+                            from verl.trainer.ppo.rollout_corr_helper import \
+                                compute_rollout_correction_and_add_to_batch
 
                             # Compute IS weights, apply rejection sampling, compute metrics
                             batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)

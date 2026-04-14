@@ -34,13 +34,12 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    process_validation_metrics,
-)
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage
+from verl.trainer.ppo.metric_utils import (compute_data_metrics,
+                                           compute_throughout_metrics,
+                                           compute_timing_metrics,
+                                           process_validation_metrics)
+from verl.trainer.ppo.ray_trainer import (RayPPOTrainer, apply_kl_penalty,
+                                          compute_advantage)
 from verl.trainer.ppo.reward import compute_reward
 from verl.trainer.ppo.utils import Role
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
@@ -149,7 +148,7 @@ class RobRayPPOTrainer(RayPPOTrainer):
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
         # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
+        # See https://github.com/verl-project/verl/blob/master/examples/ray/tutorial.ipynb for more information.
         all_wg = {}
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
@@ -363,7 +362,8 @@ class RobRayPPOTrainer(RayPPOTrainer):
 
                         if "rollout_log_probs" in batch.batch.keys():
                             # TODO: we may want to add diff of probs too.
-                            from verl.utils.debug.metrics import calculate_debug_metrics
+                            from verl.utils.debug.metrics import \
+                                calculate_debug_metrics
 
                             metrics.update(calculate_debug_metrics(batch))
 

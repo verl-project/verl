@@ -6,8 +6,8 @@ Last updated: 12/01/2025.
 We support Megatron Backend by implementing various workers for actor,
 critic, reference, rollout and reward models. We also implement the
 ``3DHybridEngine`` using Megatron-LM and vLLM/SGLang in
-`megatron_vllm.py <https://github.com/volcengine/verl/blob/main/verl/workers/sharding_manager/megatron_vllm.py>`_
-and `megatron_sglang.py <https://github.com/volcengine/verl/blob/main/verl/workers/sharding_manager/megatron_sglang.py>`_.
+`megatron_vllm.py <https://github.com/verl-project/verl/blob/main/verl/workers/sharding_manager/megatron_vllm.py>`_
+and `megatron_sglang.py <https://github.com/verl-project/verl/blob/main/verl/workers/sharding_manager/megatron_sglang.py>`_.
 
 **Pros**
 
@@ -90,7 +90,7 @@ We implement various of APIs for each ``Worker`` class decorated by the
 ``@register(dispatch_mode=)`` . These APIs can be called by the ray
 driver process. The data can be correctly collect and dispatch following
 the ``dispatch_mode`` on each function. The supported dispatch_model
-(i.e., transfer protocols) can be found in `decorator.py <https://github.com/volcengine/verl/blob/main/verl/single_controller/base/decorator.py>`_.
+(i.e., transfer protocols) can be found in `decorator.py <https://github.com/verl-project/verl/blob/main/verl/single_controller/base/decorator.py>`_.
 
 ActorRolloutRefWorker
 ^^^^^^^^^^^^^^^^^^^^^
@@ -122,7 +122,7 @@ highlighted below:
    Engine and make it executed under SPMD to fit into our
    ``WorkerGroup`` design.
 
-See `source code <https://github.com/volcengine/verl/blob/main/verl/workers/megatron_workers.py#L63>`_ for more information.
+See `source code <https://github.com/verl-project/verl/blob/main/verl/workers/megatron_workers.py#L63>`_ for more information.
 
 .. code:: python
 
@@ -273,4 +273,4 @@ Related MCore Document
 ----------------------
 
 There is also a detailed document of using MCore to train different
-kinds of models, please refer to `MCore Document <https://github.com/volcengine/verl/blob/main/verl/models/mcore/readme.md>`_.
+kinds of models, please refer to `MCore Document <https://github.com/verl-project/verl/blob/main/verl/models/mcore/readme.md>`_.

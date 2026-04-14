@@ -91,7 +91,7 @@ RUN ARCH=$(uname -m) && \
 
 
 # Prepare and install verl (update frequently)
-RUN git clone https://github.com/volcengine/verl.git && \
+RUN git clone https://github.com/verl-project/verl.git && \
     cd verl && git checkout 4045d67063052dcb800c918c107b8d5a87046006 && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \

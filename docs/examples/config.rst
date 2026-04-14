@@ -320,7 +320,7 @@ Actor/Rollout/Reference Policy
 
 - ``actor_rollout_ref.actor.kl_loss_coef``: The coefficient of kl loss. Default is 0.001. 
 
-- ``actor_rollout_ref.actor.kl_loss_type``: Support ``kl`` (``k1``), ``abs``, ``mse`` (``k2``), ``low_var_kl`` (``k3``) and ``full``. Appending ``+`` in the end (e.g., ``k1+`` and ``k3+``) would use straight-through to employ ``k2`` for unbiased gradient estimation, regardless of the kl value estimation (see https://github.com/volcengine/verl/pull/2953#issuecomment-3162113848 for more details). How to calculate the kl divergence between actor and reference policy. For specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ . See this blog post for detailed analysis: http://joschu.net/blog/kl-approx.html
+- ``actor_rollout_ref.actor.kl_loss_type``: Support ``kl`` (``k1``), ``abs``, ``mse`` (``k2``), ``low_var_kl`` (``k3``) and ``full``. Appending ``+`` in the end (e.g., ``k1+`` and ``k3+``) would use straight-through to employ ``k2`` for unbiased gradient estimation, regardless of the kl value estimation (see https://github.com/verl-project/verl/pull/2953#issuecomment-3162113848 for more details). How to calculate the kl divergence between actor and reference policy. For specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ . See this blog post for detailed analysis: http://joschu.net/blog/kl-approx.html
 
 - ``actor_rollout_ref.actor.checkpoint``: The configurations of checkpoint function in actor
 
@@ -543,7 +543,7 @@ Algorithm
 - ``use_kl_in_reward``: Whether to enable in-reward kl penalty. Default is False.
 - ``kl_penalty``: Support ``kl``, ``abs``, ``mse``, ``low_var_kl`` and ``full``. How to
   calculate the kl divergence between actor and reference policy. For
-  specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ .
+  specific options, refer to `kl_penalty()` in `core_algos.py <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py>`_ .
 - ``kl_ctrl``: Config for in-reward kl_penalty controller
 
   - ``kl_coef``: The (initial) coefficient of in-reward kl_penalty. Default is 0.001.

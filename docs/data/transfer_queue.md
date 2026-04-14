@@ -33,9 +33,9 @@ TransferQueue offers **fine-grained, sub-sample-level** data management and **lo
  - **Nov 5, 2025**: We provide a `KVStorageManager` that simplifies the integration with KV-based storage backends [PR#96](https://github.com/TransferQueue/TransferQueue/pull/96). The first available KV-based backend is [Yuanrong](https://gitcode.com/openeuler/yuanrong-datasystem).
  - **Nov 4, 2025**: Data partitioning capability is available in [PR#98](https://github.com/TransferQueue/TransferQueue/pull/98). Now you can define logical data partitions to manage your train/val/test datasets.
  - **Oct 25, 2025**: Storage backends are now pluggable in [PR#66](https://github.com/TransferQueue/TransferQueue/pull/66). You can try to integrate your own storage backend with TransferQueue now!
- - **Oct 21, 2025**: Official integration into verl is ready [verl/pulls/3649](https://github.com/volcengine/verl/pull/3649). Following PRs will optimize the single controller architecture by fully decoupling data & control flows.
+ - **Oct 21, 2025**: Official integration into verl is ready [verl/pulls/3649](https://github.com/verl-project/verl/pull/3649). Following PRs will optimize the single controller architecture by fully decoupling data & control flows.
  - **July 22, 2025**: We published a series of Chinese blog posts on <a href="https://zhuanlan.zhihu.com/p/1930244241625449814">Zhihu 1</a>, <a href="https://zhuanlan.zhihu.com/p/1933259599953232589">2</a>.
- - **July 21, 2025**: We initiated an RFC in the verl community [verl/RFC#2662](https://github.com/volcengine/verl/discussions/2662).
+ - **July 21, 2025**: We initiated an RFC in the verl community [verl/RFC#2662](https://github.com/verl-project/verl/discussions/2662).
  - **July 2, 2025**: We published the paper [AsyncFlow](https://arxiv.org/abs/2507.01663).
 
 <h2 id="components"> Components</h2>

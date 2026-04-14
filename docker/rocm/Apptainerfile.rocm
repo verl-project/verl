@@ -47,7 +47,7 @@ FROM lmsysorg/sglang:v0.4.5-rocm630
 
     # Clone and install verl from GitHub
     cd /opt
-    git clone https://github.com/volcengine/verl.git
+    git clone https://github.com/verl-project/verl.git
     cd verl
     # Uncomment to use a specific version
     # git checkout v0.3.0.post0
