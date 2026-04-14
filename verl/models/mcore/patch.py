@@ -34,6 +34,7 @@ def apply_patch():
     from packaging import version
 
     mcore_ge_013 = version.parse(megatron.core.__version__) >= version.parse("0.13.0")
+    mcore_ge_0162 = version.parse(megatron.core.__version__) >= version.parse("0.16.2")
 
     def patch_get_query_key_value_tensors(
         self,
@@ -294,14 +295,17 @@ def apply_patch():
         # core attention computation
         # ==================================
         # Need corresponding TE change
-        non_dsa_thd_qkv_format = (
-            packed_seq_params
-            and packed_seq_params.qkv_format == "thd"
+        orig_v_dim = value.shape[-1] if value is not None else None
+        thd_packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == "thd"
+        need_v_pad = (
+            thd_packed_seq
             and getattr(self.config, "experimental_attention_variant", None) is None
+            and value is not None
+            and query.shape[-1] != orig_v_dim
         )
-        v_dim = value.shape[-1]
-        if non_dsa_thd_qkv_format and query.shape[-1] != v_dim:
-            value = F.pad(value, [0, query.shape[-1] - v_dim])
+        if need_v_pad:
+            # Pad V so THD attention can run when Q/V head dims differ.
+            value = F.pad(value, [0, query.shape[-1] - orig_v_dim])
             self.core_attention.hidden_size_per_attention_head_v = value.shape[-1]
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
@@ -323,11 +327,11 @@ def apply_patch():
                 attn_mask_type=attn_mask_type,
                 **extra_kwargs,
             )
-        if non_dsa_thd_qkv_format:
-            if core_attn_out.ndim == 2:
-                core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-1], -1, value.shape[-1])
-            if query.shape[-1] != v_dim:
-                core_attn_out = core_attn_out[..., :v_dim]
+        if thd_packed_seq:
+            if need_v_pad:
+                if core_attn_out.ndim == 2:
+                    core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-1], -1, value.shape[-1])
+                core_attn_out = core_attn_out[..., :orig_v_dim]
             # reshape to same output shape as unpacked case
             # (t, np, hn) -> (t, b=1, h=np*hn)
             # t is the pack size = sum (sq_i)
@@ -352,7 +356,8 @@ def apply_patch():
     if not mcore_ge_013:
         MLASelfAttention.get_query_key_value_tensors = patch_get_query_key_value_tensors
 
-    MultiLatentAttention.forward = patch_forward
+    if not mcore_ge_0162:
+        MultiLatentAttention.forward = patch_forward
 
 
 def apply_patch_mbridge():
