@@ -1157,15 +1157,6 @@ class RayPPOTrainer:
                 max_prompt_length=self.config.data.max_prompt_length,
                 max_response_length=self.config.data.max_response_length,
             )
-            # One-shot payload-size instrumentation: for the first `_bench_compress`
-            # call, measure the same real batch through both the legacy dense path
-            # (left_right_2_no_padding) and the nested path (nest_batch_by_mask),
-            # report per-field bytes + cloudpickle size for direct comparison.
-            if not getattr(self, "_bench_compress_done", False):
-                try:
-                    self._bench_payload_sizes(batch_td)
-                finally:
-                    self._bench_compress_done = True
             if not self.use_mask_nesting:
                 return left_right_2_no_padding(batch_td)
             # TODO: eliminate loss_mask alias once worker loss code reads response_mask directly.
@@ -1184,105 +1175,6 @@ class RayPPOTrainer:
             if "loss_mask" in batch_td:
                 batch_td["response_mask"] = batch_td["loss_mask"]
         return batch_td
-
-    def _bench_payload_sizes(self, batch_td: TensorDict) -> None:
-        """One-shot instrumentation: pickle both code paths and report sizes."""
-        import io
-        import pickle
-
-        import cloudpickle
-
-        def _tensor_bytes(t):
-            if t.is_nested:
-                v = t.values()
-                o = t.offsets() if hasattr(t, "offsets") else None
-                b = v.numel() * v.element_size()
-                if o is not None:
-                    b += o.numel() * o.element_size()
-                return b
-            return t.numel() * t.element_size()
-
-        def _field_row(k, v):
-            if isinstance(v, torch.Tensor):
-                dtype = str(v.dtype).replace("torch.", "")
-                shape = tuple(v.shape)
-                nested = v.is_nested
-                nelem = v.values().numel() if v.is_nested else v.numel()
-                b = _tensor_bytes(v)
-                extra = f"values_numel={v.values().numel()}" if v.is_nested else ""
-                return (
-                    f"  {k:<30} nested={str(nested):<5} dtype={dtype:<10} "
-                    f"shape={str(shape):<28} nelem={nelem:<12} bytes={b / 1e6:>9.2f} MB  {extra}"
-                )
-            return f"  {k:<30} non-tensor type={type(v).__name__}"
-
-        def _td_total_bytes(td):
-            return sum(_tensor_bytes(v) for v in td.values() if isinstance(v, torch.Tensor))
-
-        def _pickle_bytes(td):
-            buf = io.BytesIO()
-            cloudpickle.dump(td, buf, protocol=pickle.HIGHEST_PROTOCOL)
-            return len(buf.getvalue())
-
-        print("=" * 90, flush=True)
-        print("PAYLOAD BENCH — one-shot measurement on real batch before _compress_batch", flush=True)
-        print("=" * 90, flush=True)
-
-        # Snapshot the real pre-compress batch for the legacy run (clone to a fresh TD
-        # so both paths see the exact same input).
-        src_items = {k: v for k, v in batch_td.items()}
-        orig_raw = _td_total_bytes(batch_td)
-        orig_pkl = _pickle_bytes(batch_td)
-        print(f"ORIGINAL DENSE (pre-compress, {len(list(batch_td.keys()))} keys):", flush=True)
-        for k in sorted(batch_td.keys()):
-            print(_field_row(k, batch_td.get(k)), flush=True)
-        print(f"  >>> total raw = {orig_raw / 1e6:.2f} MB,  cloudpickle = {orig_pkl / 1e6:.2f} MB", flush=True)
-
-        # Run legacy path on a clone
-        legacy_td = TensorDict(src_items, batch_size=batch_td.batch_size)
-        try:
-            legacy_td = left_right_2_no_padding(legacy_td)
-            legacy_raw = _td_total_bytes(legacy_td)
-            legacy_pkl = _pickle_bytes(legacy_td)
-            print(f"\nLEGACY (left_right_2_no_padding, {len(list(legacy_td.keys()))} keys):", flush=True)
-            for k in sorted(legacy_td.keys()):
-                print(_field_row(k, legacy_td.get(k)), flush=True)
-            print(f"  >>> total raw = {legacy_raw / 1e6:.2f} MB,  cloudpickle = {legacy_pkl / 1e6:.2f} MB", flush=True)
-        except Exception as e:
-            print(f"\nLEGACY path raised {type(e).__name__}: {e}", flush=True)
-            legacy_raw = legacy_pkl = -1
-
-        # Run nesting path on another clone
-        nest_td = TensorDict(src_items, batch_size=batch_td.batch_size)
-        try:
-            if "response_mask" in nest_td:
-                nest_td["loss_mask"] = nest_td["response_mask"]
-            compress_batch_dtypes(nest_td)
-            nest_batch_by_mask(
-                nest_td,
-                pad_token_id=self.tokenizer.pad_token_id,
-                field_to_mask_and_pad={"loss_mask": ("response_mask", 0)},
-            )
-            nest_raw = _td_total_bytes(nest_td)
-            nest_pkl = _pickle_bytes(nest_td)
-            print(f"\nNESTING (nest_batch_by_mask, {len(list(nest_td.keys()))} keys):", flush=True)
-            for k in sorted(nest_td.keys()):
-                print(_field_row(k, nest_td.get(k)), flush=True)
-            print(f"  >>> total raw = {nest_raw / 1e6:.2f} MB,  cloudpickle = {nest_pkl / 1e6:.2f} MB", flush=True)
-        except Exception as e:
-            print(f"\nNESTING path raised {type(e).__name__}: {e}", flush=True)
-            nest_raw = nest_pkl = -1
-
-        print("\n=== SUMMARY ===", flush=True)
-        print(f"  original dense  : raw {orig_raw / 1e6:10.2f} MB | pkl {orig_pkl / 1e6:10.2f} MB", flush=True)
-        print(f"  legacy          : raw {legacy_raw / 1e6:10.2f} MB | pkl {legacy_pkl / 1e6:10.2f} MB", flush=True)
-        print(f"  nesting         : raw {nest_raw / 1e6:10.2f} MB | pkl {nest_pkl / 1e6:10.2f} MB", flush=True)
-        if legacy_raw > 0 and nest_raw > 0:
-            print(
-                f"  ratio legacy/nesting:   raw {legacy_raw / nest_raw:.2f}x    pkl {legacy_pkl / nest_pkl:.2f}x",
-                flush=True,
-            )
-        print("=" * 90, flush=True)
 
     def _decompress_batch(self, batch_td: TensorDict) -> TensorDict:
         """Inverse of :meth:`_compress_batch`. No-op in legacy mode."""
