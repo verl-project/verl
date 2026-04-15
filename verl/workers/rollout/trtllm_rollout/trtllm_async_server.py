@@ -34,6 +34,47 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
+# TODO: refactor
+def _resolve_chat_stop_tokens(model_config) -> tuple[int, list[int]]:
+    """Return (end_id, stop_token_ids) for TorchSampler.
+
+    Both TRTLLM's samplers stops only on end_id.  For chat-format prompts the model
+    naturally ends each assistant turn with a chat-end token (e.g. <|im_end|>
+    for Qwen, <|eot_id|> for Llama-3) that is *different* from the base-model
+    eos_token_id.  If end_id is set to the base eos the sampler ignores the
+    chat-end token and the model loops into a second turn, inflating response
+    lengths until max_tokens is hit.
+
+    For models without a distinct chat-end token the return values are
+    identical to the current default (end_id = hf_config.eos_token_id).
+    """
+    eos_token_id = model_config.hf_config.eos_token_id
+    all_stop_ids: list[int] = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
+
+    if model_config.generation_config is not None:
+        gen_eos = model_config.generation_config.eos_token_id
+        if gen_eos is not None:
+            for t in gen_eos if isinstance(gen_eos, list) else [gen_eos]:
+                if t not in all_stop_ids:
+                    all_stop_ids.append(t)
+
+    chat_end_id = None
+    if model_config.tokenizer is not None:
+        _chat_stop_strings = ["<|im_end|>", "<|eot_id|>", "<|end_of_turn|>"]
+        _added_vocab = model_config.tokenizer.get_added_vocab()
+        for stop_str in _chat_stop_strings:
+            if stop_str in _added_vocab:
+                tid = _added_vocab[stop_str]
+                if tid not in all_stop_ids:
+                    all_stop_ids.append(tid)
+                if chat_end_id is None:
+                    chat_end_id = tid
+
+    primary_end_id = chat_end_id if chat_end_id is not None else eos_token_id
+    logger.warning(f"TRT-LLM stop token IDs: {all_stop_ids}, end_id: {primary_end_id}")
+    return primary_end_id, all_stop_ids
+
+
 @ray.remote
 class TRTLLMHttpServer:
     """TensorRT LLM HTTP server in single node.
@@ -100,10 +141,14 @@ class TRTLLMHttpServer:
 
         logger.info(f"TRTLLMHttpServer, replica_rank: {self.replica_rank}")
 
+        _end_id, _stop_ids = _resolve_chat_stop_tokens(self.model_config)
+
         self.sampling_args = {
-            # TorchSampler: use end_id for hard stop on EOS
             "detokenize": True,
-            "end_id": self.model_config.hf_config.eos_token_id,
+            "end_id": _end_id,
+            "stop_token_ids": _stop_ids,
+            # "end_id": self.model_config.hf_config.eos_token_id,
+            # "stop_token_ids": None,
             "pad_id": self.model_config.hf_config.pad_token_id,
             "include_stop_str_in_output": True,
         }
