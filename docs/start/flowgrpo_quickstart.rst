@@ -4,6 +4,8 @@
 Quickstart: FlowGRPO training on Qwen-Image OCR dataset
 =========================================================
 
+Last updated: 04/15/2026
+
 Post-train a diffusion image generation model with FlowGRPO.
 
 Introduction
