@@ -136,6 +136,7 @@ def test_update_weights_from_ipc_accumulates_lora_tensors_across_buckets(monkeyp
     worker.device = torch.device("cpu")
     worker.local_rank = 0
     worker._is_qat_model = False
+    worker._is_modelopt_qat = False
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-lora.sock"
 
     removed_loras = []
@@ -156,3 +157,49 @@ def test_update_weights_from_ipc_accumulates_lora_tensors_across_buckets(monkeyp
         "layers.0.self_attn.q_proj.lora_A.weight",
         "layers.0.self_attn.q_proj.lora_B.weight",
     }
+
+
+def test_update_weights_from_ipc_uses_reload_weights_stream_for_standard_base_sync(monkeypatch):
+    import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bucketed_weight_transfer
+    import verl.workers.rollout.vllm_rollout.utils as worker_utils
+
+    class _StreamingBucketReceiver:
+        def __init__(self, zmq_handle, device, use_shm):
+            del zmq_handle, device, use_shm
+
+        def iter_weights(self):
+            shared_tensor = torch.ones(1)
+            yield ("model.language_model.layers.0.self_attn.q_proj.weight", shared_tensor)
+            shared_tensor.fill_(7)
+            yield ("model.language_model.layers.0.mlp.experts.base_layer.down_proj", torch.zeros(1))
+
+        def receive_weights(self, on_bucket_received):
+            raise AssertionError("standard base sync should use reload_weights streaming path")
+
+    monkeypatch.setattr(bucketed_weight_transfer, "BucketedWeightReceiver", _StreamingBucketReceiver)
+    monkeypatch.setattr(worker_utils, "patch_vllm_moe_model_weight_loader", lambda model: None)
+
+    worker = _make_worker(_FakeModel())
+    worker.model_runner.vllm_config = SimpleNamespace()
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker._is_qat_model = False
+    worker._is_modelopt_qat = False
+    worker._get_zmq_handle = lambda: "ipc:///tmp/test-streaming-reload.sock"
+
+    reloaded_weights = []
+
+    def _reload_weights(*, weights_iterator, is_checkpoint_format):
+        reloaded_weights.extend(list(weights_iterator))
+        assert is_checkpoint_format is True
+
+    worker.reload_weights = _reload_weights
+
+    worker.update_weights_from_ipc(peft_config=None, base_sync_done=True)
+
+    assert [name for name, _ in reloaded_weights] == [
+        "model.language_model.layers.0.self_attn.q_proj.base_layer.weight",
+        "model.language_model.layers.0.mlp.experts.down_proj",
+    ]
+    torch.testing.assert_close(reloaded_weights[0][1], torch.ones(1))
+    torch.testing.assert_close(reloaded_weights[1][1], torch.zeros(1))
