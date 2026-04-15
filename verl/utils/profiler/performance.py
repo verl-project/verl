@@ -340,7 +340,7 @@ def log_transfer_end(task_name: Optional[str] = None):
         if TRANSFER_TIME_LOGGER_HANDEL is None:
             TRANSFER_TIME_LOGGER_HANDEL = ray.get_actor("TransferTimeLogger")
     except ValueError:
-        logger.warning("TransferTimeLogger not initialized. Ignoring `log_transfer_end`.")
+        logger.debug("TransferTimeLogger not initialized. Ignoring `log_transfer_end`.")
         return
 
     ray.get(TRANSFER_TIME_LOGGER_HANDEL.log_transfer_end.remote(task_name))
