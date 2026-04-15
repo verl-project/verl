@@ -101,8 +101,8 @@ def _rle_scatter_indices(
 
     seq_len: int = (flat_off + flat_len).max().item()
 
-    # Segments-per-row from the jagged offsets buffer
-    nt_offsets = offsets._offsets  # (batch_size + 1,)
+    # Segments-per-row from the jagged offsets buffer (public API).
+    nt_offsets = offsets.offsets()  # (batch_size + 1,)
     segs_per_row = nt_offsets[1:] - nt_offsets[:-1]  # (batch_size,)
     batch_size = segs_per_row.shape[0]
 

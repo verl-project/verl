@@ -875,7 +875,15 @@ def prepare_response_slice(data: TensorDict) -> ResponseSliceContext:
     else:
         max_response_len = int(response_ids.shape[1])
 
-    rle_first_offsets = offsets.values()[offsets._offsets[:-1]]
+    # First column of the per-row RLE offsets. Uses the public ``offsets()``
+    # jagged-layout API instead of the private ``_offsets`` attribute, and
+    # guards against rows whose mask had zero True positions (which would
+    # otherwise pick up the next non-empty row's first segment).
+    row_offsets = offsets.offsets()
+    has_segments = row_offsets.diff() > 0
+    rle_first_offsets = torch.zeros(batch_size, dtype=torch.long, device=offsets.device)
+    if has_segments.any():
+        rle_first_offsets[has_segments] = offsets.values()[row_offsets[:-1][has_segments]]
     slice_bounds: list[tuple[int, int, int]] = []
     for i in range(batch_size):
         abs_start = rle_first_offsets[i].item()
