@@ -30,6 +30,7 @@ verl is fast with:
 
    start/install
    start/quickstart
+   start/flowgrpo_quickstart
    start/multinode
    start/ray_debug_tutorial
    start/more_resources
@@ -70,6 +71,7 @@ verl is fast with:
 
    algo/ppo.md
    algo/grpo.md
+   algo/flowgrpo.md
    algo/collabllm.md
    algo/dapo.md
    algo/spin.md
