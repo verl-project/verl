@@ -64,7 +64,6 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
-from verl.utils.profiler.performance import flush_transfer_time, log_transfer_start
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -670,8 +669,6 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
-
-        _ = flush_transfer_time()  # Ignore the transfer time metrics during validation
 
         return metric_dict
 
@@ -1381,7 +1378,6 @@ class RayPPOTrainer:
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.async_rollout_manager.start_profile()
-                        log_transfer_start(task_name="generate_sequences")
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
@@ -1396,7 +1392,6 @@ class RayPPOTrainer:
                             gen_baseline_batch.meta_info["do_sample"] = False
                             if curr_step_profile:
                                 self.async_rollout_manager.start_profile()
-                            log_transfer_start(task_name="generate_sequences")
                             gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
                             self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
@@ -1470,7 +1465,6 @@ class RayPPOTrainer:
                         )
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            log_transfer_start(task_name="compute_old_log_prob")
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
@@ -1507,14 +1501,12 @@ class RayPPOTrainer:
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            log_transfer_start(task_name="compute_ref_log_prob")
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
-                            log_transfer_start(task_name="compute_values")
                             values = self._compute_values(batch)
                             batch = batch.union(values)
 
@@ -1568,7 +1560,6 @@ class RayPPOTrainer:
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
-                            log_transfer_start(task_name="update_critic")
                             critic_output = self._update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
@@ -1580,7 +1571,6 @@ class RayPPOTrainer:
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            log_transfer_start(task_name="update_actor")
                             actor_output = self._update_actor(batch)
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
@@ -1675,8 +1665,6 @@ class RayPPOTrainer:
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
                     self.train_dataloader.sampler.update(batch=batch)
-
-                metrics.update(flush_transfer_time())
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
