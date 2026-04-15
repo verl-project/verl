@@ -13,7 +13,7 @@ pybind11
 pylatexenc
 pre-commit
 ray[default]
-tensordict>=0.8.0,<=0.10.0,!=0.9.0
+tensordict>=0.8.0,!=0.9.0,<=0.12.1
 torchdata
 transformers
 # vllm==0.8.4
