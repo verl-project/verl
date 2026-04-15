@@ -1,4 +1,4 @@
-Last Updated: 2025.12.05
+Last updated: 2025.12.05
 
 ## 一、背景概述
 
