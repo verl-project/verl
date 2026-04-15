@@ -29,6 +29,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 from omegaconf import OmegaConf, open_dict
+from tensordict import TensorDict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -70,7 +71,13 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
-from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+from verl.workers.utils.padding import (
+    compress_batch_dtypes,
+    extract_response,
+    left_right_2_no_padding,
+    nest_batch_by_mask,
+    unnest_batch_by_mask,
+)
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -314,6 +321,12 @@ class RayPPOTrainer:
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        self.use_mask_nesting = config.trainer.get("use_mask_nesting", False)
+        # When True, `_compress_batch` raises if any tensor field is not nested
+        # (i.e. missing from the registry) — guards against silent compression
+        # regressions when new fields are added. Defaults to False to preserve
+        # backward compatibility; warnings are still emitted.
+        self.strict_mask_nesting = config.trainer.get("strict_mask_nesting", False)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -1138,17 +1151,70 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _compress_batch(self, batch_td: TensorDict) -> TensorDict:
+        """Compress a batch TensorDict for worker dispatch."""
+        with marked_timer("compress", self._timing_raw):
+            # Record config-declared lengths so downstream consumers don't have
+            # to re-derive them from tensor shapes (which drift after nesting
+            # and worker chunking).
+            tu.assign_non_tensor(
+                batch_td,
+                max_prompt_length=self.config.data.max_prompt_length,
+                max_response_length=self.config.data.max_response_length,
+            )
+            if not self.use_mask_nesting:
+                return left_right_2_no_padding(batch_td)
+            # Derive `prompt_mask` from attention_mask's left half so the
+            # registry entry ``"prompts": ("prompt_mask", ...)`` can nest it.
+            # attention_mask is left-padded on the prompt side, so slicing up
+            # to `max_prompt_length` recovers exactly the prompt-axis mask.
+            if "prompts" in batch_td and "prompt_mask" not in batch_td and "attention_mask" in batch_td:
+                pm_len = batch_td["prompts"].shape[-1]
+                batch_td["prompt_mask"] = batch_td["attention_mask"][:, :pm_len].contiguous()
+            # TODO: eliminate loss_mask alias once worker loss code reads response_mask directly.
+            if "response_mask" in batch_td:
+                batch_td["loss_mask"] = batch_td["response_mask"]
+            compress_batch_dtypes(batch_td)
+            nest_batch_by_mask(
+                batch_td,
+                pad_token_id=self.tokenizer.pad_token_id,
+                field_to_mask_and_pad={"loss_mask": ("response_mask", 0)},
+                strict=self.strict_mask_nesting,
+            )
+            # Restore `response_mask` as a nested all-ones alias of `loss_mask`
+            # so worker-side loss code (which still selects "response_mask")
+            # keeps working; `_decompress_batch` drops this alias before
+            # `unnest_batch_by_mask` rehydrates the real 2D mask.
+            if "loss_mask" in batch_td:
+                batch_td["response_mask"] = batch_td["loss_mask"]
+        return batch_td
+
+    def _decompress_batch(self, batch_td: TensorDict) -> TensorDict:
+        """Inverse of :meth:`_compress_batch`. No-op in legacy mode."""
+        if not self.use_mask_nesting:
+            return batch_td
+        # Drop the nested alias before unnest so it rehydrates the real 2D mask.
+        batch_td.pop("response_mask", None)
+        unnest_batch_by_mask(batch_td)  # no-op if batch_td wasn't nested
+        batch_td.pop("loss_mask", None)
+        # Drop the derived prompt_mask — original input didn't have it.
+        batch_td.pop("prompt_mask", None)
+        return batch_td
+
+    def _decompress_model_outputs(self, batch_td, tensors: dict):
+        """Extract padded response slices from model outputs via :func:`extract_response`."""
+        with marked_timer("decompress", self._timing_raw):
+            return {key: extract_response(batch_td, t) for key, t in tensors.items()}
+
     def _compute_values(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = left_right_2_no_padding(batch_td)
-            # step 3: add meta info
+            batch_td = self._compress_batch(batch_td)
             tu.assign_non_tensor(batch_td, compute_loss=False)
             output = self.critic_wg.infer_batch(batch_td)
             output = output.get()
             values = tu.get(output, "values")
-            values = no_padding_2_padding(values, batch_td)
+            values = self._decompress_model_outputs(batch_td, {"values": values})["values"]
             values = tu.get_tensordict({"values": values.float()})
             values = DataProto.from_tensordict(values)
         else:
@@ -1157,11 +1223,8 @@ class RayPPOTrainer:
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
-            # step 1: convert dataproto to tensordict.
             batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = left_right_2_no_padding(batch_td)
-            # step 3: add meta info
+            batch_td = self._compress_batch(batch_td)
             metadata = {"calculate_entropy": False, "compute_loss": False}
             if self.ref_in_actor:
                 metadata["no_lora_adapter"] = True
@@ -1170,11 +1233,8 @@ class RayPPOTrainer:
                 output = self.actor_rollout_wg.compute_log_prob(batch_td)
             else:
                 output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
-            # gather output
             log_probs = tu.get(output, "log_probs")
-            # step 4. No padding to padding
-            log_probs = no_padding_2_padding(log_probs, batch_td)
-            # step 5: rebuild a tensordict and convert to dataproto
+            log_probs = self._decompress_model_outputs(batch_td, {"log_probs": log_probs})["log_probs"]
             ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
             ref_log_prob = DataProto.from_tensordict(ref_log_prob)
         else:
@@ -1184,24 +1244,19 @@ class RayPPOTrainer:
 
     def _compute_old_log_prob(self, batch: DataProto):
         if self.use_legacy_worker_impl == "disable":
-            # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
-            # step 1: convert dataproto to tensordict.
+            # TODO: drop the nest/unnest round-trip once training is fully padding-free
             batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = left_right_2_no_padding(batch_td)
-            # step 3: add meta info
+            batch_td = self._compress_batch(batch_td)
             tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
             output = self.actor_rollout_wg.compute_log_prob(batch_td)
-            # gather output
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
             routed_experts = tu.get(output, "routed_experts")
 
             old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
-            # step 4. No padding to padding
-            entropy = no_padding_2_padding(entropy, batch_td)
-            log_probs = no_padding_2_padding(log_probs, batch_td)
-            # step 5: rebuild a tensordict and convert to dataproto
+            unnested = self._decompress_model_outputs(batch_td, {"entropy": entropy, "log_probs": log_probs})
+            entropy = unnested["entropy"]
+            log_probs = unnested["log_probs"]
             if routed_experts is not None:
                 old_log_prob = tu.get_tensordict(
                     {"old_log_probs": log_probs.float(), "entropys": entropy.float(), "routed_experts": routed_experts}
@@ -1222,8 +1277,7 @@ class RayPPOTrainer:
         # update actor
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
-            # step 2: convert from padding to no-padding
-            batch_td = left_right_2_no_padding(batch_td)
+            batch_td = self._compress_batch(batch_td)
             calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
             distillation_use_topk = (
                 self.distillation_config.distillation_loss.loss_settings.use_topk
@@ -1260,8 +1314,7 @@ class RayPPOTrainer:
     def _update_critic(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
-            # step 2: convert from padding to no-padding
-            batch_td = left_right_2_no_padding(batch_td)
+            batch_td = self._compress_batch(batch_td)
             ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
             ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
             ppo_epochs = self.config.critic.ppo_epochs
@@ -1349,6 +1402,15 @@ class RayPPOTrainer:
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}
                 timing_raw = {}
+                self._timing_raw = timing_raw
+                all_wgs = (
+                    self.actor_rollout_wg,
+                    getattr(self, "critic_wg", None),
+                    getattr(self, "ref_policy_wg", None),
+                )
+                for wg in all_wgs:
+                    if wg is not None:
+                        wg._wg_timing = timing_raw
 
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(

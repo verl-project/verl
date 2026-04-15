@@ -855,6 +855,8 @@ trainer:
   save_freq: -1
   esi_redundant_time: 0
   resume_mode: auto
+  use_mask_nesting: false
+  strict_mask_nesting: false
   resume_from_path: null
   val_before_train: true
   val_only: false

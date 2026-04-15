@@ -23,7 +23,7 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
-from verl.workers.utils.padding import no_padding_2_padding
+from verl.workers.utils.padding import extract_response, select_and_pad_to_response
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -57,10 +57,11 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
-    log_prob = no_padding_2_padding(model_output["log_probs"], data)
+    # Dispatches on the batch's nesting style (legacy vs new) transparently.
+    log_prob = extract_response(data, model_output["log_probs"])
     entropy = model_output.get("entropy", None)
     if entropy is not None:
-        entropy = no_padding_2_padding(entropy, data)
+        entropy = extract_response(data, entropy)
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
@@ -89,7 +90,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
-    data = data.select(*fields).to_padded_tensor()
+    data = select_and_pad_to_response(data, *fields)
 
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
@@ -157,10 +158,10 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     Returns:
         value loss
     """
-    vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
+    vpreds = extract_response(data, model_output["values"])  # (bsz, response_length)
 
     # select fields and convert to padded tensor
-    data = data.select("values", "returns", "response_mask").to_padded_tensor()
+    data = select_and_pad_to_response(data, "values", "returns", "response_mask")
     values = data["values"]
     returns = data["returns"]
     response_mask = data["response_mask"].to(bool)

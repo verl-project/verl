@@ -28,6 +28,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, Place
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
+from verl.utils.debug import marked_timer
 from verl.utils.device import get_device_name, is_torch_npu_available
 from verl.utils.py_functional import temp_env_var
 
@@ -48,12 +49,24 @@ def get_random_string(length: int) -> str:
 def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, blocking):
     class Functor:
         def __call__(this, *args, **kwargs):
-            args, kwargs = dispatch_fn(self, *args, **kwargs)
-            padding_count = kwargs.pop(_padding_size_key, 0)
-            output = execute_fn(method_name, *args, **kwargs)
-            if blocking:
-                output = ray.get(output)
-            output = collect_fn(self, output)
+            timing = getattr(self, "_wg_timing", None)
+            if timing is not None:
+                with marked_timer("wg_dispatch", timing), marked_timer(f"wg_dispatch/{method_name}", timing):
+                    args, kwargs = dispatch_fn(self, *args, **kwargs)
+                padding_count = kwargs.pop(_padding_size_key, 0)
+                with marked_timer("wg_execute", timing), marked_timer(f"wg_execute/{method_name}", timing):
+                    output = execute_fn(method_name, *args, **kwargs)
+                    if blocking:
+                        output = ray.get(output)
+                with marked_timer("wg_collect", timing), marked_timer(f"wg_collect/{method_name}", timing):
+                    output = collect_fn(self, output)
+            else:
+                args, kwargs = dispatch_fn(self, *args, **kwargs)
+                padding_count = kwargs.pop(_padding_size_key, 0)
+                output = execute_fn(method_name, *args, **kwargs)
+                if blocking:
+                    output = ray.get(output)
+                output = collect_fn(self, output)
             if padding_count > 0:
                 if isinstance(output, DataProto):
                     indices = [i for i in range(len(output))][:-padding_count]
