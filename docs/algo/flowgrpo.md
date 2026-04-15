@@ -1,4 +1,6 @@
-# Training Flow Matching Models via Online RL (Flow-GRPO)
+# Flow-GRPO
+
+Last updated: 04/15/2026.
 
 Flow-GRPO ([paper](https://arxiv.org/abs/2505.05470), [code](https://github.com/yifan123/flow_grpo)) is the first method to integrate online policy gradient reinforcement learning into **flow matching** generative models (e.g., Stable Diffusion 3, FLUX). It enables direct reward optimization for tasks such as compositional text-to-image generation, visual text rendering, and human preference alignment, without modifying the standard inference pipeline.
 
@@ -28,61 +30,100 @@ Empirically, RL-tuned SD3.5-M with Flow-GRPO raises GenEval accuracy from 63% to
 | **Log-probability** | Standard next-token log-prob | Log-prob of the SDE noise prediction at each selected denoising step |
 | **Training steps** | All decoding steps are trivially identical in cost | Denoising Reduction: train on a small window of steps, infer with full steps |
 | **Reward signal** | Rule-based verifiers or LLM judges on text | Image reward models (GenEval, OCR, PickScore, aesthetic, etc.) |
-| **KL regularization** | KL penalty added to reward or directly to loss | KL loss applied to SDE steps; `use_kl_loss=True` recommended |
+| **KL regularization** | KL penalty added to reward or directly to loss | KL-style regularization is available, but the exact setup depends on the training config |
 | **CFG (guidance)** | Not applicable | CFG distillation occurs naturally; CFG can be disabled at both train and test time |
 | **Advantage estimator** | `algorithm.adv_estimator=grpo` | `algorithm.adv_estimator=flow_grpo` |
-| **Loss mode** | `actor_rollout_ref.actor.policy_loss.loss_mode` not diffusion-specific | `actor_rollout_ref.actor.policy_loss.loss_mode=flow_grpo` |
+| **Loss mode** | `actor_rollout_ref.actor.policy_loss.loss_mode` not diffusion-specific | `actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo` |
 
 ## Configuration
 
+Diffusion training now uses dedicated diffusion config blocks. In `verl/trainer/config/diffusion_trainer.yaml`,
+the main sections are:
+
+- `algorithm`: diffusion-specific advantage computation and normalization
+- `actor_rollout_ref.actor`: optimization and diffusion loss settings
+- `actor_rollout_ref.rollout`: rollout backend, sampling, and SDE controls
+- `actor_rollout_ref.model`: model path plus diffusion-model / LoRA settings
+- `reward`: reward manager, reward model, and custom reward function
+
+The default diffusion model YAML mirrors several rollout fields
+(`num_inference_steps`, `true_cfg_scale`, `max_sequence_length`,
+`guidance_scale`, and `algo`) into `actor_rollout_ref.model.*`, so in practice
+the rollout section is the main place to override sampling behavior.
+
 ### Core parameters
 
-- `algorithm.adv_estimator`: Set to `flow_grpo` (instead of `grpo`).
+#### Algorithm
 
-- `actor_rollout_ref.actor.policy_loss.loss_mode`: Set to `flow_grpo`.
+- `algorithm.adv_estimator`: Set to `flow_grpo`.
 
-- `actor_rollout_ref.rollout.n`: Number of image trajectories to sample per prompt for group-relative advantage computation. Analogous to GRPO's group size; should be > 1 (default in examples: `16`).
+#### Actor / loss
 
-- `actor_rollout_ref.rollout.noise_level`: Controls the SDE noise injection level during rollout. Larger values increase diversity but may degrade image quality. Typical value: `1.2`.
+- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Set to `flow_grpo`.
 
-- `actor_rollout_ref.rollout.sde_window_size`: Number of denoising steps to train on per trajectory (Denoising Reduction). Reducing this from the full step count speeds up training significantly.
+- `actor_rollout_ref.actor.diffusion_loss.clip_ratio`: clipping
+  factor used in the diffusion loss.
 
-- `actor_rollout_ref.rollout.sde_window_range`: The range of denoising steps from which the training window is sampled, e.g., `[0, 5]` to focus on early (high-noise) steps.
+- `actor_rollout_ref.actor.diffusion_loss.adv_clip_max`: Maximum absolute
+  advantage used before computing the policy loss.
 
-- `actor_rollout_ref.rollout.val_kwargs.num_inference_steps`: Full number of denoising steps used during inference/evaluation. This is kept at its original value (e.g., `50`) and is independent of `sde_window_size`.
+- `actor_rollout_ref.actor.use_kl_loss`: Enables KL loss against the reference
+  policy.
 
-- `actor_rollout_ref.rollout.guidance_scale`: Classifier-free guidance scale during rollout. Can be set to `1.0` (no CFG) because the RL process naturally performs CFG distillation.
+- `actor_rollout_ref.actor.kl_loss_coef`: Coefficient for the KL term when KL enabled.
 
-- `actor_rollout_ref.actor.use_kl_loss`: Set to `True` to add a KL divergence term between the trained policy and the reference policy to the loss.
+#### Rollout / sampling
 
-- `actor_rollout_ref.actor.kl_loss_coef`: Coefficient for the KL loss term.
+- `actor_rollout_ref.rollout.name`: Selects the rollout backend. Currently supports `vllm_omni`.
 
-## Data Preprocessing
+- `actor_rollout_ref.rollout.n`: Number of sampled image trajectories per
+  prompt. This is the FlowGRPO group size and should be greater than `1`.
 
-All training scripts expect the dataset in parquet format. The examples use an OCR dataset from the [Flow-GRPO repository](https://github.com/yifan123/flow_grpo/tree/main/dataset/ocr). The raw dataset consists of text files where each ground-truth answer is stored in the format `The image displays "xxx".`. Before running any training script, convert it to parquet format using the provided preprocessing script.
+- `actor_rollout_ref.rollout.algo.noise_level`: Magnitude of SDE noise injected
+  during rollout. Larger values increase diversity but can hurt image quality.
 
-### Step 1: Download the raw dataset
+- `actor_rollout_ref.rollout.algo.sde_type`: SDE variant for rollout. The
+  current example uses `sde`.
 
-Download the OCR dataset from the Flow-GRPO repository and place it at `~/dataset/ocr/` (or any path of your choice):
+- `actor_rollout_ref.rollout.algo.sde_window_size`: Number of denoising steps
+  included in the active training window. Smaller values reduce training cost.
 
-```bash
-# Clone or download from https://github.com/yifan123/flow_grpo/tree/main/dataset/ocr
-# Place the dataset directory at ~/dataset/ocr/
-# Expected structure:
-#   ~/dataset/ocr/
-#       train/   (or train split files)
-#       test/    (or test split files)
-```
+- `actor_rollout_ref.rollout.algo.sde_window_range`: Range used to sample the
+  start of that active denoising window.
 
-### Step 2: Run the preprocessing script
+- `actor_rollout_ref.rollout.num_inference_steps`: Number of denoising steps
+  used for rollout generation during training.
 
-```bash
-python examples/data_preprocess/qwenimage_ocr.py \
-    --local_dataset_path ~/dataset/ocr \
-    --local_save_dir ~/data/ocr
-```
+- `actor_rollout_ref.rollout.val_kwargs.num_inference_steps`: Number of
+  denoising steps used during validation / evaluation.
 
-The output parquet files are consumed directly by all training scripts via `data.train_files` and `data.val_files`.
+- `actor_rollout_ref.rollout.true_cfg_scale`: True classifier-free guidance
+  scale used during rollout. Used in `Qwen-Image`.
+
+- `actor_rollout_ref.rollout.guidance_scale`: Distilled guidance scale for
+  models that expose a guidance embedding; keep `null` to disable it.
+
+- `actor_rollout_ref.rollout.engine_kwargs.vllm_omni.custom_pipeline`:
+  Required by the `vllm_omni` Qwen-Image example to register the custom
+  pipeline implementation.
+
+#### Model
+
+- `actor_rollout_ref.model.path`: Base diffusion model path.
+
+- `actor_rollout_ref.model.tokenizer_path`: Optional tokenizer path if it is
+  not located under the model path.
+
+#### Reward
+
+- `reward.reward_manager.name`: Selects the reward manager.
+
+- `reward.custom_reward_function.path` and
+  `reward.custom_reward_function.name`: Register the task-specific reward
+  post-processing function such as `compute_score_ocr`.
+
+For an end-to-end OCR training walkthrough, including dataset preparation and
+the full runnable command, see `docs/start/flowgrpo_quickstart.rst`.
 
 ## Variants
 
@@ -108,20 +149,13 @@ For reward models that are expensive to evaluate (e.g., a VLM judge), the reward
 bash examples/flowgrpo_trainer/run_flowgrpo_async_reward.sh
 ```
 
-### Full Fine-Tuning
-
-To fine-tune all model weights instead of using LoRA:
-
-```bash
-bash examples/flowgrpo_trainer/run_flowgrpo_full_ft.sh
-```
-
 ## Reference Example
 
-Standard LoRA training with OCR reward (Qwen-Image, 4 GPUs) with CFG and KL loss enabled:
+Standard LoRA training with OCR reward (Qwen-Image, 4 GPUs) using the current
+`vllm_omni` rollout example:
 
 ```bash
-bash examples/flowgrpo_trainer/run_flowgrpo.sh
+bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
 ```
 
 ## Citation

@@ -129,4 +129,3 @@ Further reading
 For the algorithm background and more detailed configuration notes, see:
 
 - :doc:`../algo/flowgrpo`
-- ``examples/flowgrpo_trainer/README.md``
