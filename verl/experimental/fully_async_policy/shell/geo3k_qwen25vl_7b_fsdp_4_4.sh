@@ -5,8 +5,8 @@ export WANDB_API_KEY=wandb_v1_OFGxPIdmsDyUkVKf4QvL6EVOSrc_701LfOMNkuxvyV33Aa6IGY
 
 HF_MODEL_PATH=${HF_MODEL_PATH:-"Qwen/Qwen2.5-VL-7B-Instruct"}
 
-train_path=$HOME/data/geo3k/train.parquet
-test_path=$HOME/data/geo3k/test.parquet
+train_path=/efs/data/geo3k/train.parquet
+test_path=/efs/data/geo3k/test.parquet
 
 rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
@@ -84,6 +84,7 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=$ENGINE \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
