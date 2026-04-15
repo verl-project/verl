@@ -269,7 +269,7 @@ def gather_timing(timing_raw: dict[str, float]) -> dict[str, list[float]]:
     return timing_generate
 
 
-TRANSFER_TIME_LOGGER_HANDEL = None
+TRANSFER_TIME_LOGGER_HANDLE = None
 
 
 @ray.remote
@@ -315,13 +315,13 @@ def log_transfer_start(task_name: str):
         task_name (str): The name of the transfer task to start timing.
     """
     try:
-        global TRANSFER_TIME_LOGGER_HANDEL
-        if TRANSFER_TIME_LOGGER_HANDEL is None:
-            TRANSFER_TIME_LOGGER_HANDEL = ray.get_actor("TransferTimeLogger")
+        global TRANSFER_TIME_LOGGER_HANDLE
+        if TRANSFER_TIME_LOGGER_HANDLE is None:
+            TRANSFER_TIME_LOGGER_HANDLE = ray.get_actor("TransferTimeLogger")
     except ValueError:
-        TRANSFER_TIME_LOGGER_HANDEL = TransferTimeLogger.options(name="TransferTimeLogger").remote()
+        TRANSFER_TIME_LOGGER_HANDLE = TransferTimeLogger.options(name="TransferTimeLogger").remote()
 
-    ray.get(TRANSFER_TIME_LOGGER_HANDEL.log_transfer_start.remote(task_name))
+    ray.get(TRANSFER_TIME_LOGGER_HANDLE.log_transfer_start.remote(task_name))
 
 
 def log_transfer_end(task_name: Optional[str] = None):
@@ -336,14 +336,14 @@ def log_transfer_end(task_name: Optional[str] = None):
             Defaults to None, which uses the last started task.
     """
     try:
-        global TRANSFER_TIME_LOGGER_HANDEL
-        if TRANSFER_TIME_LOGGER_HANDEL is None:
-            TRANSFER_TIME_LOGGER_HANDEL = ray.get_actor("TransferTimeLogger")
+        global TRANSFER_TIME_LOGGER_HANDLE
+        if TRANSFER_TIME_LOGGER_HANDLE is None:
+            TRANSFER_TIME_LOGGER_HANDLE = ray.get_actor("TransferTimeLogger")
     except ValueError:
-        logger.debug("TransferTimeLogger not initialized. Ignoring `log_transfer_end`.")
+        logger.info("TransferTimeLogger not initialized. Ignoring `log_transfer_end`.")
         return
 
-    ray.get(TRANSFER_TIME_LOGGER_HANDEL.log_transfer_end.remote(task_name))
+    ray.get(TRANSFER_TIME_LOGGER_HANDLE.log_transfer_end.remote(task_name))
 
 
 def flush_transfer_time():
@@ -359,11 +359,11 @@ def flush_transfer_time():
             Returns an empty dict if the logger is not initialized.
     """
     try:
-        global TRANSFER_TIME_LOGGER_HANDEL
-        if TRANSFER_TIME_LOGGER_HANDEL is None:
-            TRANSFER_TIME_LOGGER_HANDEL = ray.get_actor("TransferTimeLogger")
+        global TRANSFER_TIME_LOGGER_HANDLE
+        if TRANSFER_TIME_LOGGER_HANDLE is None:
+            TRANSFER_TIME_LOGGER_HANDLE = ray.get_actor("TransferTimeLogger")
     except ValueError:
-        logger.warning("TransferTimeLogger not initialized. Ignoring `flush_transfer_time` by returning empty logs.")
+        logger.info("TransferTimeLogger not initialized. Ignoring `flush_transfer_time` by returning empty logs.")
         return {}
 
-    return ray.get(TRANSFER_TIME_LOGGER_HANDEL.flush_log.remote())
+    return ray.get(TRANSFER_TIME_LOGGER_HANDLE.flush_log.remote())
