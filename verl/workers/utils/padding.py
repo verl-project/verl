@@ -30,6 +30,7 @@ Two APIs coexist here:
 """
 
 import enum
+import warnings
 from dataclasses import dataclass
 
 import torch
@@ -281,9 +282,12 @@ KNOWN_FIELD_TO_MASK_AND_PAD: dict[str, tuple[str, int | float | DynamicPadValue]
     "position_ids": ("attention_mask", 0),
     "teacher_logprobs": ("attention_mask", 0.0),
     "routed_experts": ("attention_mask", 0),
+    # paired with prompt_mask (prompt-only axis, left-aligned = valid prompt tokens)
+    "prompts": ("prompt_mask", PAD_TOKEN_ID),
     # paired with response_mask (response-only axis)
     # log-prob / entropy fields are extracted via `extract_response` in
     # `_decompress_model_outputs` and stored back as (bsz, max_response_len).
+    "responses": ("response_mask", PAD_TOKEN_ID),
     "old_log_probs": ("response_mask", 0.0),
     "ref_log_prob": ("response_mask", 0.0),
     "rollout_log_probs": ("response_mask", 0.0),
@@ -520,6 +524,8 @@ def nest_batch_by_mask(
     *,
     pad_token_id: int | None = None,
     field_to_mask_and_pad: dict[str, tuple[str, int | float | bool | DynamicPadValue]] | None = None,
+    strict: bool = False,
+    ignore_dense_fields: set[str] | None = None,
 ) -> TensorDict:
     """Nest every eligible tensor field in *data* in place using mask-driven RLE.
 
@@ -568,6 +574,15 @@ def nest_batch_by_mask(
             ``field_to_mask_and_pad``.
         pad_token_id: Tokenizer pad token id (paths 1 & 2).
         field_to_mask_and_pad: Per-field overrides (path 2).
+        strict: If True, raise ``RuntimeError`` when any tensor field in
+            ``data`` is not nested by the time this function returns
+            (e.g. a field missing from the registry). Defaults to False,
+            in which case a ``warnings.warn`` is issued instead — useful
+            for catching un-registered new fields that silently bypass
+            compression and bloat worker dispatch.
+        ignore_dense_fields: Tensor field names that are expected to
+            remain dense and should be excluded from the post-nest
+            check (e.g. scalar-per-row fields, pre-computed buffers).
 
     Returns:
         The mutated TensorDict.
@@ -598,7 +613,72 @@ def nest_batch_by_mask(
     if permutations:
         tu.assign_non_tensor_data(data, _MASK_NESTING_PERMUTATIONS_KEY, permutations)
 
+    # Post-nest coverage check: any remaining dense tensor field is a
+    # missed compression opportunity (likely absent from the registry).
+    _check_nesting_coverage(data, strict=strict, ignore_dense_fields=ignore_dense_fields)
+
     return data
+
+
+# Tensor fields that are structurally expected to remain dense after nesting
+# (scalar-per-row tracking fields, RLE meta, etc.) — skip them in the coverage
+# check to avoid noisy warnings.
+_DEFAULT_IGNORE_DENSE = frozenset({"dummy_tensor"})
+
+
+def _check_nesting_coverage(
+    data: TensorDict,
+    *,
+    strict: bool,
+    ignore_dense_fields: set[str] | None,
+) -> None:
+    """Report any tensor field in *data* that wasn't nested.
+
+    Nested tensors (``is_nested``) and the RLE offsets/lengths emitted by
+    :meth:`MaskNestingSpec.nest_in_td` are expected; anything else that
+    survived as a dense tensor is flagged — either via ``warnings.warn``
+    or ``RuntimeError`` (when ``strict=True``).
+    """
+    ignore = set(_DEFAULT_IGNORE_DENSE)
+    if ignore_dense_fields:
+        ignore.update(ignore_dense_fields)
+
+    # Mask-spec artefacts (``{mask}_offsets`` / ``{mask}_lengths``) are
+    # the nested RLE products of nesting itself — exempt them.
+    specs = tu.get_non_tensor_data(data, _MASK_NESTING_SPECS_KEY, default={}) or {}
+    for spec in specs.values():
+        ignore.add(spec.offsets_field)
+        ignore.add(spec.lengths_field)
+
+    remaining: list[tuple[str, tuple[int, ...], torch.dtype, int]] = []
+    for key in list(data.keys()):
+        if key in ignore:
+            continue
+        value = data.get(key)
+        if not isinstance(value, torch.Tensor):
+            continue
+        if value.is_nested:
+            continue
+        remaining.append((key, tuple(value.shape), value.dtype, value.numel() * value.element_size()))
+
+    if not remaining:
+        return
+
+    total_bytes = sum(b for *_, b in remaining)
+    lines = [
+        f"nest_batch_by_mask: {len(remaining)} tensor field(s) remained dense "
+        f"after nesting (total {total_bytes / 1e6:.1f} MB). Each is a missed "
+        f"compression opportunity — either register it in "
+        f"KNOWN_FIELD_TO_MASK_AND_PAD, pass it via `field_to_mask_and_pad`, "
+        f"or add it to `ignore_dense_fields` if it is intentionally dense:",
+    ]
+    for name, shape, dtype, nbytes in remaining:
+        lines.append(f"  {name}: shape={shape} dtype={dtype} bytes={nbytes / 1e6:.2f} MB")
+    message = "\n".join(lines)
+
+    if strict:
+        raise RuntimeError(message)
+    warnings.warn(message, stacklevel=2)
 
 
 def response_from_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:

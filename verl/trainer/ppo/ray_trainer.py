@@ -322,6 +322,11 @@ class RayPPOTrainer:
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
         self.use_mask_nesting = config.trainer.get("use_mask_nesting", False)
+        # When True, `_compress_batch` raises if any tensor field is not nested
+        # (i.e. missing from the registry) — guards against silent compression
+        # regressions when new fields are added. Defaults to False to preserve
+        # backward compatibility; warnings are still emitted.
+        self.strict_mask_nesting = config.trainer.get("strict_mask_nesting", False)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -1159,6 +1164,13 @@ class RayPPOTrainer:
             )
             if not self.use_mask_nesting:
                 return left_right_2_no_padding(batch_td)
+            # Derive `prompt_mask` from attention_mask's left half so the
+            # registry entry ``"prompts": ("prompt_mask", ...)`` can nest it.
+            # attention_mask is left-padded on the prompt side, so slicing up
+            # to `max_prompt_length` recovers exactly the prompt-axis mask.
+            if "prompts" in batch_td and "prompt_mask" not in batch_td and "attention_mask" in batch_td:
+                pm_len = batch_td["prompts"].shape[-1]
+                batch_td["prompt_mask"] = batch_td["attention_mask"][:, :pm_len].contiguous()
             # TODO: eliminate loss_mask alias once worker loss code reads response_mask directly.
             if "response_mask" in batch_td:
                 batch_td["loss_mask"] = batch_td["response_mask"]
@@ -1167,6 +1179,7 @@ class RayPPOTrainer:
                 batch_td,
                 pad_token_id=self.tokenizer.pad_token_id,
                 field_to_mask_and_pad={"loss_mask": ("response_mask", 0)},
+                strict=self.strict_mask_nesting,
             )
             # Restore `response_mask` as a nested all-ones alias of `loss_mask`
             # so worker-side loss code (which still selects "response_mask")
@@ -1184,6 +1197,8 @@ class RayPPOTrainer:
         batch_td.pop("response_mask", None)
         unnest_batch_by_mask(batch_td)  # no-op if batch_td wasn't nested
         batch_td.pop("loss_mask", None)
+        # Drop the derived prompt_mask — original input didn't have it.
+        batch_td.pop("prompt_mask", None)
         return batch_td
 
     def _decompress_model_outputs(self, batch_td, tensors: dict):
