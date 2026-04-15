@@ -203,7 +203,6 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
     import os
 
     from verl.single_controller.base.worker_group import WorkerGroup
-    from verl.utils.profiler.performance import log_transfer_end
     from verl.utils.ray_utils import parallel_put
 
     assert isinstance(worker_group, WorkerGroup)
@@ -212,11 +211,6 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
 
     args = [parallel_put(arg, max_workers=max_workers) for arg in args]
     kwargs = {k: parallel_put(v, max_workers=max_workers) for k, v in kwargs.items()}
-
-    # When TransferQueue is enabled, this logs the dispatch time of (KV)BatchMeta.
-    # It will not cause inaccurate metric calculation because we use the maximum transfer end time,
-    # which is recorded by the `tqbridge` decorator.
-    log_transfer_end()
 
     all_args = []
     for arg in args:
@@ -423,6 +417,10 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
         A decorator that wraps the original function with distributed execution
         configuration.
     """
+    from verl.utils.profiler.performance import log_transfer_end
+    # When TransferQueue is enabled, the `log_transfer_end` records the dispatch time of (KV)BatchMeta.
+    # It will not cause inaccurate metric calculation because we use the maximum transfer end time,
+    # which is recorded by the `tqbridge` decorator.
 
     _check_dispatch_mode(dispatch_mode=dispatch_mode)
     _check_execute_mode(execute_mode=execute_mode)
@@ -434,12 +432,14 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
         def inner(*args, **kwargs):
             if materialize_futures:
                 args, kwargs = _materialize_futures(*args, **kwargs)
+            log_transfer_end()
             return func(*args, **kwargs)
 
         @wraps(func)
         async def async_inner(*args, **kwargs):
             if materialize_futures:
                 args, kwargs = _materialize_futures(*args, **kwargs)
+            log_transfer_end()
             return await func(*args, **kwargs)
 
         wrapper = async_inner if inspect.iscoroutinefunction(func) else inner
