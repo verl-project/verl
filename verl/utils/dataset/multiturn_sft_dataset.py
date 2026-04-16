@@ -64,9 +64,7 @@ def _is_gemma4_model(tokenizer: PreTrainedTokenizer, processor: Optional[Process
     if getattr(tokenizer, "name_or_path", None) and "gemma-4" in tokenizer.name_or_path.lower():
         return True
 
-    return getattr(tokenizer, "chat_template", "") is not None and "<start_of_turn>" in str(
-        getattr(tokenizer, "chat_template", "")
-    )
+    return False
 
 
 def _find_subsequence_insert_positions(sequence: torch.Tensor, subsequence: torch.Tensor) -> list[int]:
