@@ -74,10 +74,10 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     Returns:
         dict: metrics
             "training/rollout_probs_diff_valid": 1->input is valid, 0->input is invalid
-            "training/rollout_probs_diff_max": max value of logprob diff of rollout vs. actor
-            "training/rollout_probs_diff_mean": mean value of logprob diff of rollout vs. actor
-            "training/rollout_probs_diff_std": std value of logprob diff of rollout vs. actor
-            "training/rollout_actor_probs_pearson_corr": logprob's pearson corrcoef of rollout vs. actor, reference to https://arxiv.org/pdf/2506.13585
+            "training/rollout_probs_diff_max": max value of prob diff of rollout vs. actor
+            "training/rollout_probs_diff_mean": mean value of prob diff of rollout vs. actor
+            "training/rollout_probs_diff_std": std value of prob diff of rollout vs. actor
+            "training/rollout_actor_probs_pearson_corr": prob's pearson corrcoef of rollout vs. actor, reference to https://arxiv.org/pdf/2506.13585
     """
 
     rollout_old_log_probs = data.batch["rollout_log_probs"]
