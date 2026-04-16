@@ -22,22 +22,6 @@ Last updated: 2025.12.05
 | torch       | 2.7.1           |
 | torch-npu    | 2.7.1-0919      |
 
-MindSpeed-RL 2.2.0商发配套版本：
-
-**链接：**
-
-| 组件        | 版本                                     |
-| ----------- | ---------------------------------------- |
-| HDK         | 25.2.1                                   |
-| CANN        | 8.3.RC1                                  |
-| VeRL        | 796871d7d092f7cbc6a64e7f4a3796f7a2217f5e |
-| vllm        | 38217877aa70041c0115ee367b75197af9cbc5ad |
-| vllm-ascend | 1de16ead8eecfec8903ec1b330b27a4fa2593c35 |
-| MindSpeed   | 1cdd0ab                                  |
-| Megatron-LM | core_v0.12.1                             |
-| torch       | 2.7.1                                    |
-| torch-npu    | 2.7.1                                    |
-
 ## 二、性能瓶颈分析
 
 在初始配置下，经profiling拆解发现，**generate阶段耗时较大**，成为核心瓶颈。主要问题集中在以下三方面：
