@@ -677,9 +677,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if self.config.rollout.get("trainer_quantize_fp8", False):
                 from verl.utils.fp8_utils import FP8QuantizerHelper
 
-                quant_config = {"weight_block_size": [128, 128]}
+                quant_config = getattr(self.actor.model_config.hf_config, "quantization_config", None)
+                if quant_config is None:
+                    raise ValueError(
+                        "trainer_quantize_fp8=True but model has no quantization_config in hf_config. "
+                        "Ensure the model config includes quantization_config with weight_block_size."
+                    )
                 fp8_quantizer = FP8QuantizerHelper(quant_config)
-                per_tensor_param = fp8_quantizer.quant_weights_by_name_sync(per_tensor_param, dtype=torch.bfloat16)
+                per_tensor_param = fp8_quantizer.quant_weights_by_name(per_tensor_param, dtype=torch.bfloat16)
                 logger.info("FP8 trainer-side quantization enabled (disaggregated)")
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return

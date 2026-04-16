@@ -13,7 +13,7 @@
 # limitations under the License.
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Generator, TypedDict
+from typing import Any, AsyncGenerator, Generator, TypedDict
 
 import ray
 import torch
@@ -160,7 +160,9 @@ class CheckpointEngine(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None] | AsyncGenerator[tuple[str, torch.Tensor], None]
+    ):
         """Send the weights of the model.
 
         Args:
@@ -230,6 +232,10 @@ class ColocatedCheckpointEngine(CheckpointEngine):
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
         """
+        assert not hasattr(weights, "__aiter__"), (
+            "ColocatedCheckpointEngine does not support AsyncGenerator. "
+            "Use a disaggregated checkpoint engine (nccl/nixl/hccl) for async weight generators."
+        )
         self.weights = weights
 
     def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
