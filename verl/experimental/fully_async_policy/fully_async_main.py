@@ -22,6 +22,7 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
+from verl.experimental.fully_async_policy.hybrid_res_pool import normalize_hybrid_res_pool_config
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
 from verl.experimental.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
@@ -205,6 +206,14 @@ def main(config):
 
     start_time = time()
     auto_set_device(config)
+    layout = normalize_hybrid_res_pool_config(config)
+    if layout is not None:
+        print(
+            "[ASYNC MAIN] hybrid_res_pool enabled: "
+            f"trainer_pool={layout.trainer_pool}, "
+            f"rollout_pool={layout.rollout_pool}, "
+            f"logical_gpus_per_node={layout.logical_gpus_per_node}"
+        )
     # TODO: unify rollout config with actor_rollout_ref
     config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
     config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node

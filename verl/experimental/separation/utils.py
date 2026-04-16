@@ -50,6 +50,9 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
     if Role.Rollout in roles:
         assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
         assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
+        rollout_pool = [config.rollout.n_gpus_per_node] * config.rollout.nnodes
+        resource_pool_spec["rollout_pool"] = rollout_pool
+        mapping[Role.Rollout] = "rollout_pool"
 
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
