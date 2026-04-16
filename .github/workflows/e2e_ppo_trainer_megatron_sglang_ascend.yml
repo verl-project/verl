@@ -154,3 +154,4 @@ jobs:
       - name: clean up
         run: |
           rm -rf checkpoints
+          rm -rf "${HOME}/profiling"
