@@ -1,0 +1,54 @@
+FROM quay.io/ascend/vllm-ascend:v0.18.0rc1-a3
+
+ARG SOC_VERSION="ascend910_9392"
+ARG TRANSFORMERS_COMMIT="cc7ab9be"
+ARG TORCH_VERSION="2.9.0"
+ARG TORCH_NPU_VERSION="2.9.0"
+
+ENV HF_ENDPOINT=https://hf-mirror.com
+
+# 配置 pip 镜像源
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    && pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 换 apt 国内源 + 安装系统依赖
+RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
+    apt-get -o Acquire::Check-Valid-Until=false update -y && \
+    apt-get install -y --no-install-recommends \
+        gcc g++ cmake libnuma-dev wget git curl jq vim build-essential && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --upgrade pip packaging setuptools==80.10.2
+
+# 直接从宿主机复制，不需要网络克隆
+COPY transformers/ /workspace/transformers/
+COPY verl/ /workspace/verl/
+COPY MindSpeed/ /workspace/MindSpeed/
+COPY Megatron-LM/ /workspace/Megatron-LM/
+
+# 安装 MindSpeed 和 Megatron-LM
+RUN pip install -e /workspace/MindSpeed && \
+    pip install -e /workspace/Megatron-LM
+
+# 安装 transformers
+RUN pip install -e /workspace/transformers && \
+    pip uninstall -y triton || true
+
+# 安装 verl
+RUN cd /workspace/verl && \
+    pip install -r requirements-npu.txt && \
+    pip install -v -e .
+
+# 安装 mbridge、torch
+RUN pip install \
+        mbridge \
+        torch==${TORCH_VERSION} \
+        torch_npu==${TORCH_NPU_VERSION}
+
+# 统一清理
+RUN rm -rf /tmp/* /var/tmp/* && pip cache purge
+
+RUN pip list
+
+CMD ["/bin/bash"]
