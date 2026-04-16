@@ -11,6 +11,11 @@ trainer:
 
 async_training:
 
+  # Keep original fully-async resource allocation by default.
+  # When True, actor_rollout_ref.partition is normalized into logical resource chunks
+  # before worker/resource-pool initialization.
+  hybrid_res_pool: False
+
   # Maximum samples staleness threshold
   staleness_threshold: 0.1
 

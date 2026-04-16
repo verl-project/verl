@@ -322,6 +322,49 @@ python -m recipe.fully_async_policy.fully_async_main \
     async_training.partial_rollout="${partial_rollout}"
 ```
 
+### Hybrid Resource Pool Opt-In
+
+`hybrid_res_pool` is an opt-in extension on the fully async path. The default value is
+`async_training.hybrid_res_pool=False`, so old behavior stays unchanged unless you explicitly enable it.
+
+This path is only supported through:
+
+```bash
+python3 -m verl.experimental.fully_async_policy.fully_async_main
+```
+
+It does not change `main_ppo`.
+
+Requirements:
+
+* async-only support: `actor_rollout_ref.rollout.mode=async`
+* `actor_rollout_ref.hybrid_engine=False`
+* `actor_rollout_ref.partition` is required and is used to derive the logical trainer and rollout pools
+* examples:
+    * `8_4-4` -> logical trainer pool `[4,4,4]`, logical rollout pool `[4]`
+    * `4-4_8` -> logical trainer pool `[4]`, logical rollout pool `[4,4,4]`
+* non-naive checkpoint backends are unsupported on this path, so set
+  `actor_rollout_ref.rollout.checkpoint_engine.backend=naive`
+
+Minimal runnable example:
+
+```bash
+python3 -m verl.experimental.fully_async_policy.fully_async_main \
+    --config-path=config \
+    --config-name='fully_async_ppo_trainer.yaml' \
+    actor_rollout_ref.rollout.mode=async \
+    actor_rollout_ref.hybrid_engine=False \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=naive \
+    trainer.nnodes=2 \
+    trainer.n_gpus_per_node=8 \
+    rollout.nnodes=1 \
+    rollout.n_gpus_per_node=8 \
+    async_training.hybrid_res_pool=True \
+    +actor_rollout_ref.partition=8_4-4
+```
+
+Use `+actor_rollout_ref.partition=4-4_8` to flip the trainer/rollout logical split.
+
 ## Experiments
 
 ### Asynchronous Training on 7B Model

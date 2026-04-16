@@ -51,6 +51,16 @@ val_top_p=0.7
 # Fully async specific parameters
 n_gpus_rollout=4
 n_gpus_training=4
+HYBRID_RES_POOL=${HYBRID_RES_POOL:-False}
+PARTITION=${PARTITION:-}
+checkpoint_backend='nccl'
+if [ "${HYBRID_RES_POOL}" = "True" ]; then
+    checkpoint_backend='naive'
+fi
+if [ "${HYBRID_RES_POOL}" = "True" ] && [ -z "${PARTITION}" ]; then
+    echo "HYBRID_RES_POOL=True requires PARTITION to be set"
+    exit 1
+fi
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
@@ -135,9 +145,14 @@ common_params=(
     async_training.partial_rollout="${partial_rollout}"
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
     async_training.use_trainer_do_validate=${use_trainer_do_validate}
-    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    async_training.hybrid_res_pool="${HYBRID_RES_POOL}"
+    actor_rollout_ref.rollout.checkpoint_engine.backend="${checkpoint_backend}"
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )
+
+if [ "${HYBRID_RES_POOL}" = "True" ] && [ -n "${PARTITION}" ]; then
+    common_params+=("+actor_rollout_ref.partition=${PARTITION}")
+fi
 
     # Detect device
     device_name=$(python3 - <<'EOF'
@@ -218,4 +233,3 @@ else
 fi
 
 echo "Fully async policy E2E test completed successfully with ${ACTOR_STRATEGY} strategy"
-

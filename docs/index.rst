@@ -122,6 +122,7 @@ verl is fast with:
 
    advance/one_step_off
    advance/fully_async
+   advance/fully_async_hybrid_res_pool
    advance/async-on-policy-distill
 
 .. toctree::

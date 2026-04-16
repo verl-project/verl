@@ -265,6 +265,49 @@ python -m recipe.fully_async_policy.fully_async_main \
     async_training.partial_rollout="${partial_rollout}"
 ```
 
+### Hybrid Resource Pool 开关
+
+`hybrid_res_pool` 是 fully async 路径上的一个显式开关。`async_training.hybrid_res_pool` 默认值为 `False`，
+因此只有在手动开启时才会启用这条路径，旧行为保持不变。
+
+该路径只支持：
+
+```bash
+python3 -m verl.experimental.fully_async_policy.fully_async_main
+```
+
+它不会修改 `main_ppo`。
+
+使用约束：
+
+* 仅支持 async 路径：`actor_rollout_ref.rollout.mode=async`
+* `actor_rollout_ref.hybrid_engine=False`
+* 开启后必须设置 `actor_rollout_ref.partition`，fully async 路径会用它来推导逻辑 trainer/rollout 资源池
+* 示例：
+    * `8_4-4` -> 逻辑 trainer pool `[4,4,4]`，逻辑 rollout pool `[4]`
+    * `4-4_8` -> 逻辑 trainer pool `[4]`，逻辑 rollout pool `[4,4,4]`
+* 该路径不支持非 `naive` 的 checkpoint backend，需要设置
+  `actor_rollout_ref.rollout.checkpoint_engine.backend=naive`
+
+最小可运行示例：
+
+```bash
+python3 -m verl.experimental.fully_async_policy.fully_async_main \
+    --config-path=config \
+    --config-name='fully_async_ppo_trainer.yaml' \
+    actor_rollout_ref.rollout.mode=async \
+    actor_rollout_ref.hybrid_engine=False \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=naive \
+    trainer.nnodes=2 \
+    trainer.n_gpus_per_node=8 \
+    rollout.nnodes=1 \
+    rollout.n_gpus_per_node=8 \
+    async_training.hybrid_res_pool=True \
+    +actor_rollout_ref.partition=8_4-4
+```
+
+如果需要反转 trainer/rollout 的逻辑划分，使用 `+actor_rollout_ref.partition=4-4_8`。
+
 ## 实验
 
 ### 在7B模型上进行异步训练
