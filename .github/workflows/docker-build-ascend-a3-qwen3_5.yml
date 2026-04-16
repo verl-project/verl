@@ -44,10 +44,10 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          file: ./docker/ascend/Dockerfile.ascend_8.5.1_a3_qwen3-5
+          file: ./docker/ascend/Dockerfile.ascend_8.5.2_a3_qwen3-5
           push: true
           tags: |
-            quay.io/ascend/verl:verl-8.5.1-a3-ubuntu22.04-py3.11-qwen3-5
+            quay.io/ascend/verl:verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
