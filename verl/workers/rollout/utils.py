@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import math
 
 import numpy as np
 import uvicorn
@@ -31,6 +32,52 @@ def get_max_position_embeddings(hf_config) -> int:
     if max_len is None:
         raise ValueError("max_position_embeddings not found in HFModelConfig!")
     return int(max_len)
+
+
+def get_minimum_bucket_size_mb(hf_config, current_bucket_size_mb: int) -> int:
+    """
+    Calculate the minimum required bucket size in MB based on the embedding weight size.
+
+    The embedding weight (embed_tokens) is typically the largest single weight tensor
+    in a model. The bucket size must be larger than any single weight tensor to avoid
+    AssertionError during weight transfer.
+
+    For multimodal models (e.g. Qwen3-VL), vocab_size and hidden_size may be nested
+    under text_config instead of the top-level config.
+
+    Args:
+        hf_config: HuggingFace model config object.
+        current_bucket_size_mb: Current bucket size in MB.
+
+    Returns:
+        Adjusted bucket size in MB, guaranteed to fit the embedding weight.
+    """
+    # For multimodal models, vocab_size/hidden_size may be in text_config
+    text_config = getattr(hf_config, "text_config", None)
+    if text_config is not None:
+        vocab_size = getattr(text_config, "vocab_size", 0)
+        hidden_size = getattr(text_config, "hidden_size", 0)
+    else:
+        vocab_size = getattr(hf_config, "vocab_size", 0)
+        hidden_size = getattr(hf_config, "hidden_size", 0)
+
+    if not (vocab_size and hidden_size):
+        return current_bucket_size_mb
+
+    # embed_tokens: [vocab_size, hidden_size] in float32 = 4 bytes
+    embed_size_mb = math.ceil(vocab_size * hidden_size * 4 / 1024 / 1024)
+
+    if embed_size_mb <= current_bucket_size_mb:
+        return current_bucket_size_mb
+
+    # round up to next 512MB boundary
+    recommended_mb = (embed_size_mb // 512 + 1) * 512
+    logger.warning(
+        f"Embedding weight size ({embed_size_mb} MB) exceeds "
+        f"update_weights_bucket_megabytes ({current_bucket_size_mb} MB), "
+        f"automatically increasing to {recommended_mb} MB."
+    )
+    return recommended_mb
 
 
 class _UvicornServerAutoPort(uvicorn.Server):

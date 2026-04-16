@@ -45,6 +45,7 @@ from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     get_named_tensor_buckets,
 )
+from verl.workers.rollout.utils import get_minimum_bucket_size_mb
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -124,6 +125,18 @@ class ServerAdapter(BaseRollout):
             fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
             self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
+
+        # model_config may not be HFModelConfig (e.g. DiffusionModelConfig or plain DictConfig),
+        # in that case skip auto-adjustment and use the configured value directly.
+        hf_config = self.model_config.hf_config if isinstance(self.model_config, HFModelConfig) else None
+
+        if hf_config is not None:
+            self.bucket_size_mb = get_minimum_bucket_size_mb(
+                hf_config=hf_config,
+                current_bucket_size_mb=self.config.checkpoint_engine.update_weights_bucket_megabytes,
+            )
+        else:
+            self.bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
@@ -240,7 +253,7 @@ class ServerAdapter(BaseRollout):
                 # send http request
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
-            update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+            update_weights_bucket_bytes = int(self.bucket_size_mb) << 20
             if self.config.get("quantization", None) == "fp8":
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 

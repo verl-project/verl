@@ -42,7 +42,7 @@ from verl.utils.device import get_torch_device
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
-from verl.workers.rollout.utils import ensure_async_iterator
+from verl.workers.rollout.utils import ensure_async_iterator, get_minimum_bucket_size_mb
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -301,6 +301,17 @@ class ServerAdapter(BaseRollout):
             fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
             model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         super().__init__(config, model_config, device_mesh)
+        # model_config may not be HFModelConfig (e.g. DiffusionModelConfig or plain DictConfig),
+        # in that case skip auto-adjustment and use the configured value directly.
+        hf_config = self.model_config.hf_config if isinstance(self.model_config, HFModelConfig) else None
+
+        if hf_config is not None:
+            self.bucket_size_mb = get_minimum_bucket_size_mb(
+                hf_config=hf_config,
+                current_bucket_size_mb=self.config.checkpoint_engine.update_weights_bucket_megabytes,
+            )
+        else:
+            self.bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
         self._adapter = None
         self.hybrid_device_mesh = None
         self.gpu_id = None
@@ -440,7 +451,7 @@ class ServerAdapter(BaseRollout):
         if self.is_leader_rank:
             await self._init_server_adapter()
 
-        total_available_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) * 1024 * 1024
+        total_available_bytes = int(self.bucket_size_mb) * 1024 * 1024
 
         if self.config.get("quantization", None) == "fp8":
             from verl.utils.trtllm.trtllm_fp8_utils import TRTLLMFP8QuantizerHelper

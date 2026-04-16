@@ -51,6 +51,7 @@ from verl.workers.config import (
     TrainingWorkerConfig,
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
+from verl.workers.rollout.utils import get_minimum_bucket_size_mb
 from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
@@ -613,7 +614,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
             backend = checkpoint_engine_config.backend
-            bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
+            # Auto-adjust bucket size based on embedding weight size
+            bucket_size_mb = get_minimum_bucket_size_mb(
+                hf_config=model_config.hf_config,
+                current_bucket_size_mb=checkpoint_engine_config.update_weights_bucket_megabytes,
+            )
+            bucket_size = bucket_size_mb << 20
             engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
             # If custom_backend_module is set, import it so plugins can register
             # in CheckpointEngineRegistry before the backend is instantiated.

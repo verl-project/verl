@@ -26,6 +26,7 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout.utils import get_minimum_bucket_size_mb
 
 
 class TensorMeta(TypedDict):
@@ -265,7 +266,17 @@ class CheckpointEngineWorker(Worker):
 
         self.server_adapter: BaseRollout = server_adapter
         backend = self.rollout_config.checkpoint_engine.backend
-        bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
+        hf_config = self.model_config.hf_config if isinstance(self.model_config, HFModelConfig) else None
+
+        if hf_config is not None:
+            self.bucket_size_mb = get_minimum_bucket_size_mb(
+                hf_config=hf_config,
+                current_bucket_size_mb=self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes,
+            )
+        else:
+            self.bucket_size_mb = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes
+
+        bucket_size = self.bucket_size_mb << 20
         engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
         # If custom_backend_module is set, import it so plugins can register
         # in CheckpointEngineRegistry before the backend is instantiated.
