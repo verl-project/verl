@@ -551,8 +551,10 @@ class MegatronPPOActor(BasePPOActor):
                 entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
                 if not forward_only:
                     entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                    stats["actor/entropy"] = entropy_loss.detach().item()
                     entropy_coeff = meta_info["entropy_coeff"]
-                    policy_loss = pg_loss - entropy_coeff * entropy_loss
+                    if entropy_coeff != 0:
+                        policy_loss = pg_loss - entropy_coeff * entropy_loss
                 else:
                     ret_entropy = entropy
 
@@ -788,7 +790,7 @@ class MegatronPPOActor(BasePPOActor):
                 # if use distributed optimizer, zero grad buffer will be handled by optimizer
                 chunk.zero_grad_buffer()
 
-            calculate_entropy = self.config.entropy_coeff != 0
+            calculate_entropy = self.config.get("calculate_entropy", False) or (self.config.entropy_coeff != 0)
             if data.meta_info.get("micro_batch_size", None) is not None:
                 micro_batch_size = data.meta_info["micro_batch_size"]
             else:

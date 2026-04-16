@@ -160,6 +160,19 @@ class ToolAgentLoop(AgentLoopBase):
             interaction_kwargs=interaction_kwargs,
         )
 
+        # Per-sample tool selection: filter global tools by extra_info.tool_selection
+        extra_info = kwargs.get("extra_info", {}) or {}
+        tool_selection = extra_info.get("tool_selection")
+        if tool_selection and self.tools:
+            selected = {name: self.tools[name] for name in tool_selection if name in self.tools}
+            agent_data._active_tools = selected
+            agent_data._active_tool_schemas = [
+                t.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for t in selected.values()
+            ]
+        else:
+            agent_data._active_tools = self.tools
+            agent_data._active_tool_schemas = self.tool_schemas
+
         # State machine loop
         state = AgentState.PENDING
         while state != AgentState.TERMINATED:
@@ -202,9 +215,10 @@ class ToolAgentLoop(AgentLoopBase):
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
+        schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
         prompt_ids = await self.apply_chat_template(
             agent_data.messages,
-            tools=self.tool_schemas,
+            tools=schemas,
             images=agent_data.image_data,
             videos=agent_data.video_data,
         )
@@ -258,8 +272,9 @@ class ToolAgentLoop(AgentLoopBase):
         if self.max_user_turns and agent_data.user_turns >= self.max_user_turns:
             return AgentState.TERMINATED
 
-        # Extract tool calls
-        tools = [tool.tool_schema for tool in self.tools.values()]
+        # Extract tool calls (use per-sample tools if routed)
+        active_tools = getattr(agent_data, "_active_tools", self.tools)
+        tools = [tool.tool_schema for tool in active_tools.values()]
         _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
 
         # Handle interaction if needed
@@ -423,11 +438,12 @@ class ToolAgentLoop(AgentLoopBase):
     ) -> tuple[ToolResponse, float, dict]:
         """Call tool and return tool response."""
         tool, instance_id = None, None
+        active_tools = getattr(agent_data, "_active_tools", self.tools)
         try:
             # TODO: append malformed tool_call to the prompt: invalid function name or arguments
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
-            tool = self.tools[tool_name]
+            tool = active_tools[tool_name]
             kwargs = tools_kwargs.get(tool_name, {})
             instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
             tool_execution_response, tool_reward, res = await tool.execute(

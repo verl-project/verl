@@ -1223,7 +1223,9 @@ class PPOTrainer:
         """Update the actor network."""
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-        calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+        calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
+            self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+        )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "global_batch_size": ppo_mini_batch_size,

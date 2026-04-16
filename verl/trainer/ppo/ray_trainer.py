@@ -1224,7 +1224,9 @@ class RayPPOTrainer:
             batch_td = batch.to_tensordict()
             # step 2: convert from padding to no-padding
             batch_td = left_right_2_no_padding(batch_td)
-            calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+            calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
+                self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+            )
             distillation_use_topk = (
                 self.distillation_config.distillation_loss.loss_settings.use_topk
                 if is_distillation_enabled(self.config.get("distillation"))
