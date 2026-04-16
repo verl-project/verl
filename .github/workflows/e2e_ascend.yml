@@ -155,7 +155,9 @@ jobs:
           git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
           rm -rf /MindSpeed
           git clone https://gitcode.com/ascend/MindSpeed.git /MindSpeed
+          cd /MindSpeed && git checkout 932fc7906f49d6e8d4bf0860ecf11c2a89dc2922 && cd ..
           git clone https://gitcode.com/ascend/MindSpeed-LLM.git /MindSpeed-LLM
+          cd /MindSpeed-LLM && git checkout 68f95752003aa60666590bda8205e20280f7063f && cd ..
       - name: Preprocess gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
