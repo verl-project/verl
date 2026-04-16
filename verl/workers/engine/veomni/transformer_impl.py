@@ -196,8 +196,8 @@ class VeOmniEngine(FSDPEngine):
     def _build_model_optimizer(self):
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
-            config_path=self.model_config.hf_config_path,
-            weights_path=self.model_config.path,
+            config_path=self.model_config.local_hf_config_path,
+            weights_path=self.model_config.local_path,
             torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
             moe_implementation=self.engine_config.moe_implementation,
@@ -210,7 +210,7 @@ class VeOmniEngine(FSDPEngine):
         module = build_parallelize_model(
             module,
             init_device=self.engine_config.init_device,
-            weights_path=self.model_config.path,
+            weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
             enable_mixed_precision=self.engine_config.mixed_precision,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
