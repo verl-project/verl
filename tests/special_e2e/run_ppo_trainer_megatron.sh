@@ -300,14 +300,6 @@ elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
         --config-name='ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \
         +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size=${ACTOR_CP} \
-        +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
-        ++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
-        global_profiler.tool=npu \
-        actor_rollout_ref.actor.profiler.tool_config.npu.contents=[npu,cpu,memory,shapes,module] \
-        actor_rollout_ref.actor.profiler.tool_config.npu.level='level1' \
-        actor_rollout_ref.actor.profiler.tool_config.npu.discrete=False \
-        actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False \
-        global_profiler.save_path="${HOME}/profiling" $@
 else
     echo "Unknown device: $device_name"
     exit 1
