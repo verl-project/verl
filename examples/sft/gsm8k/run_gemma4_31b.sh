@@ -8,6 +8,8 @@
 # - Keep `model.use_remove_padding=False` for now. Gemma4 does not yet have the
 #   specialized VLM remove-padding forward patch that Qwen/GLM models use.
 # - Activation checkpointing should remain enabled for 31B.
+# - Default to `sdpa` attention because Gemma4 31B exceeds FlashAttention 2's
+#   supported head dimension on current training environments.
 
 set -x
 
@@ -37,6 +39,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
     model.use_remove_padding=False \
     model.trust_remote_code=True \
     model.enable_gradient_checkpointing=True \
+    +model.override_config.attn_implementation=sdpa \
     optim.lr=1e-5 \
     optim.weight_decay=0.01 \
     optim.betas='[0.9,0.95]' \
