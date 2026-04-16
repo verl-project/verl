@@ -461,7 +461,7 @@ class AgentLoopManagerTQ(AgentLoopManager):
         await instance._initialize_llm_servers()
         await instance._init_global_load_balancer()
         await instance._init_agent_loop_workers()
-        if instance.stream_teacher_with_rollout:
+        if teacher_model_manager is not None:
             await instance.teacher_model_manager.wake_up()
         return instance
 
@@ -843,16 +843,6 @@ class PPOTrainer:
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
-
-    def _should_compute_teacher_colocate(self, batch: KVBatchMeta) -> bool:
-        return self.use_teacher_policy and not self.distillation_config.teacher_model.enable_resource_pool
-
-    def _compute_teacher_colocate(self, batch: KVBatchMeta) -> KVBatchMeta:
-        """Compute teacher logprobs after rollout when teacher and student are colocated."""
-        assert self.teacher_model_manager is not None, "TeacherModelManager is None"
-        teacher_batch = self.teacher_model_manager.compute_logprobs(batch)
-
-        return teacher_batch
 
     def _validate(self) -> dict[str, float]:
         # Lists to collect samples for the table
@@ -1431,43 +1421,38 @@ class PPOTrainer:
         batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         self.checkpoint_manager.sleep_replicas()
 
-        # 3. [OPTIONAL] compute teacher logprobs
-        if self._should_compute_teacher_colocate(batch):
-            with marked_timer("teacher", timing_raw, color="cyan"):
-                batch = self._compute_teacher_colocate(batch)
-
-        # 4. [OPTIONAL] compute reward score with colocated reward model
+        # 3. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
                 batch = self._compute_reward_colocate(batch)
 
-        # 5. balance batch across data parallel groups
+        # 4. balance batch across data parallel groups
         self._balance_batch(batch, metrics=metrics)
 
-        # 6. compute old_log_prob
+        # 5. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
             batch = self._compute_old_log_prob(batch, metrics=metrics)
 
-        # 7. [OPTIONAL] compute ref_log_prob
+        # 6. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):
                 batch = self._compute_ref_log_prob(batch, metrics=metrics)
 
-        # 8. [OPTIONAL] compute critic values
+        # 7. [OPTIONAL] compute critic values
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
                 batch = self._compute_values(batch, metrics=metrics)
 
-        # 9. compute advantage and return
+        # 8. compute advantage and return
         with marked_timer("adv", timing_raw, color="brown"):
             batch = self._compute_advantage(batch, metrics=metrics)
 
-        # 10. [OPTIONAL] update critic
+        # 9. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
                 batch = self._update_critic(batch, metrics=metrics)
 
-        # 11. update actor
+        # 10. update actor
         if self.config.trainer.critic_warmup <= self.global_steps:
             with marked_timer("update_actor", timing_raw, color="red"):
                 batch = self._update_actor(batch, metrics=metrics)
@@ -1500,18 +1485,6 @@ class TaskRunner:
             self.role_worker_mapping[Role.Critic] = ray.remote(TrainingWorker)
             self.mapping[Role.Critic] = "global_pool"
 
-    def add_teacher_model_resource_pool(self, config):
-        """Add teacher model worker if enabled."""
-        from verl.trainer.ppo.ray_trainer import Role
-
-        if is_distillation_enabled(config.get("distillation")):
-            # we do not use teacher model workers, so we only register teacher model in resource pool
-            # without registering a teacher model worker in role-worker mapping
-            if config.distillation.teacher_model.enable_resource_pool:
-                self.mapping[Role.TeacherModel] = "teacher_pool"
-            else:
-                self.mapping[Role.TeacherModel] = "global_pool"
-
     def init_resource_pool_mgr(self, config):
         """Initialize resource pool manager."""
 
@@ -1538,19 +1511,21 @@ class TaskRunner:
 
         distillation_config = config.get("distillation")
         if is_distillation_enabled(distillation_config):
-            if distillation_config.teacher_model.enable_resource_pool:
-                if distillation_config.teacher_model.n_gpus_per_node <= 0:
-                    raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
-                if distillation_config.teacher_model.nnodes <= 0:
-                    raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
+            if not distillation_config.teacher_model.enable_resource_pool:
+                raise ValueError(
+                    "Only support using dedicated resource_pool for teacher_model! Please set "
+                    "`distillation.teacher_model.enable_resource_pool=True`"
+                )
+            if distillation_config.teacher_model.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
+            if distillation_config.teacher_model.nnodes <= 0:
+                raise ValueError("config.distillation.teacher_model.nnodes must be greater than 0")
 
-                teacher_pool = [
-                    distillation_config.teacher_model.n_gpus_per_node
-                ] * distillation_config.teacher_model.nnodes
-                resource_pool_spec["teacher_pool"] = teacher_pool
-            else:
-                distillation_config.teacher_model.nnodes = config.trainer.nnodes
-                distillation_config.teacher_model.n_gpus_per_node = config.trainer.n_gpus_per_node
+            teacher_pool = [
+                distillation_config.teacher_model.n_gpus_per_node
+            ] * distillation_config.teacher_model.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
+            self.mapping[Role.TeacherModel] = "teacher_pool"
 
         self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 
@@ -1563,7 +1538,6 @@ class TaskRunner:
 
         self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
-        self.add_teacher_model_resource_pool(config)
         self.init_resource_pool_mgr(config)
 
         trainer = PPOTrainer(

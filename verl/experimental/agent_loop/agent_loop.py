@@ -1089,8 +1089,6 @@ class AgentLoopManager:
         await instance._initialize_llm_servers()
         await instance._init_global_load_balancer()
         await instance._init_agent_loop_workers()
-        if instance.stream_teacher_with_rollout:
-            await instance.teacher_model_manager.wake_up()
         return instance
 
     async def _initialize_llm_servers(self):
@@ -1191,6 +1189,8 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
+        if self.stream_teacher_with_rollout:
+            await self.teacher_model_manager.wake_up()
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[
@@ -1198,7 +1198,8 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-
+        if self.stream_teacher_with_rollout:
+            await self.teacher_model_manager.sleep()
         output = DataProto.concat(outputs)
 
         # calculate performance metrics
