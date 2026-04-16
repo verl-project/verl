@@ -132,6 +132,7 @@ verl is fast with:
    advance/rollout_skip.rst
    advance/one_step_off
    advance/agent_loop
+   advance/context_manager_plugin
    advance/reward_loop
    advance/fully_async
    data/transfer_queue.md
