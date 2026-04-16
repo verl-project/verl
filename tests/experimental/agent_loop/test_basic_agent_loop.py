@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import os
 from typing import Any
@@ -18,12 +19,14 @@ from typing import Any
 import numpy as np
 import pytest
 import ray
+import torch
 from omegaconf import DictConfig
+from tensordict import TensorDict
 from transformers.utils import get_json_schema
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer, get_trajectory_info
+from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer, get_trajectory_info, work_stealing_schedule
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
@@ -520,3 +523,419 @@ class TestLoadBalancerStickySession:
         ray.get(lb.release_server.remote(server_id=s0))
         s1 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))
         assert s0 == s1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Batch API unit tests (lightweight, no GPU required)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestLoadBalancerBatchAcquire:
+    """acquire_servers_batch / release_servers_batch — batch API for reduced RPC overhead."""
+
+    def test_batch_distributes_across_servers(self, ray_for_lb):
+        """Batch of N new requests should spread across servers just like N single calls."""
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2"])
+        servers = ray.get(lb.acquire_servers_batch.remote(request_ids=["r0", "r1", "r2"]))
+        assert sorted(servers) == ["s0", "s1", "s2"]
+
+    def test_batch_respects_sticky_session(self, ray_for_lb):
+        """Repeated request_ids in a batch should be sticky to the same server."""
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2"])
+        # First batch: assign r0, r1 to different servers
+        first = ray.get(lb.acquire_servers_batch.remote(request_ids=["r0", "r1"]))
+        assert first[0] != first[1]
+        # Release
+        ray.get(lb.release_servers_batch.remote(server_ids=first))
+        # Second batch: r0 and r1 should be sticky
+        second = ray.get(lb.acquire_servers_batch.remote(request_ids=["r0", "r1"]))
+        assert first == second
+
+    def test_batch_least_loaded_within_batch(self, ray_for_lb):
+        """Within a single batch call, requests should still balance across servers."""
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        # 4 new requests → should distribute 2:2 across 2 servers
+        servers = ray.get(lb.acquire_servers_batch.remote(
+            request_ids=["a", "b", "c", "d"]
+        ))
+        from collections import Counter
+        counts = Counter(servers)
+        assert counts["s0"] == 2
+        assert counts["s1"] == 2
+
+    def test_batch_release_multiple(self, ray_for_lb):
+        """release_servers_batch should handle multiple releases including duplicates."""
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        # Acquire 3 times on s0 via sticky
+        servers = ray.get(lb.acquire_servers_batch.remote(
+            request_ids=["x", "x", "x"]
+        ))
+        assert all(s == servers[0] for s in servers)
+        # Release all 3
+        ray.get(lb.release_servers_batch.remote(server_ids=servers))
+        # Now s0 should be at 0 inflight, so new request goes there
+        s = ray.get(lb.acquire_server.remote(request_id="new"))
+        # s0 had 0 inflight after release, s1 also has 0, so it could be either;
+        # but the point is no error was raised during batch release
+        assert s in ("s0", "s1")
+
+    def test_batch_release_invalid_server_raises(self, ray_for_lb):
+        """Batch release with an invalid server_id should raise."""
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        with pytest.raises(ray.exceptions.RayTaskError, match="Invalid server_id"):
+            ray.get(lb.release_servers_batch.remote(server_ids=["nonexistent"]))
+
+    def test_batch_empty_is_noop(self, ray_for_lb):
+        """Empty batch calls should be no-ops."""
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        result = ray.get(lb.acquire_servers_batch.remote(request_ids=[]))
+        assert result == []
+        # release_servers_batch with empty list should not raise
+        ray.get(lb.release_servers_batch.remote(server_ids=[]))
+
+    def test_batch_large_batch_performance(self, ray_for_lb):
+        """A large batch should work correctly and be faster than individual calls."""
+        import time
+
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2", "s3"])
+        n = 200
+
+        # Batch version
+        t0 = time.perf_counter()
+        batch_result = ray.get(lb.acquire_servers_batch.remote(
+            request_ids=[f"batch-{i}" for i in range(n)]
+        ))
+        t_batch = time.perf_counter() - t0
+
+        assert len(batch_result) == n
+        # All server_ids should be valid
+        assert all(s in ("s0", "s1", "s2", "s3") for s in batch_result)
+
+        # Clean up
+        ray.get(lb.release_servers_batch.remote(server_ids=batch_result))
+
+        # Sequential version (separate LB instance to avoid sticky interference)
+        lb2 = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2", "s3"])
+        t0 = time.perf_counter()
+        seq_result = [
+            ray.get(lb2.acquire_server.remote(request_id=f"seq-{i}"))
+            for i in range(n)
+        ]
+        t_seq = time.perf_counter() - t0
+
+        assert len(seq_result) == n
+
+        # Batch should be significantly faster (at least 2x for 200 requests)
+        print(f"Batch: {t_batch:.4f}s, Sequential: {t_seq:.4f}s, Speedup: {t_seq/t_batch:.1f}x")
+        assert t_batch < t_seq, (
+            f"Batch ({t_batch:.4f}s) should be faster than sequential ({t_seq:.4f}s)"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Coalescer unit tests (lightweight, no GPU required)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestAcquireCoalescer:
+    """Tests for _AcquireCoalescer — transparent request batching in AsyncLLMServerManager."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_acquires_are_coalesced(self, ray_for_lb):
+        """Multiple concurrent acquire() calls should be batched into one RPC."""
+        from verl.experimental.agent_loop.agent_loop import _AcquireCoalescer
+
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1", "s2", "s3"])
+        coalescer = _AcquireCoalescer(lb)
+
+        # Fire 8 concurrent acquires
+        tasks = [coalescer.acquire(f"req-{i}") for i in range(8)]
+        results = await asyncio.gather(*tasks)
+
+        assert len(results) == 8
+        # All results should be valid server_ids
+        assert all(s in ("s0", "s1", "s2", "s3") for s in results)
+        # Should be roughly balanced: 8 requests across 4 servers → 2 each
+        from collections import Counter
+        counts = Counter(results)
+        assert all(c == 2 for c in counts.values())
+
+    @pytest.mark.asyncio
+    async def test_coalescer_preserves_sticky_session(self, ray_for_lb):
+        """Coalescer should preserve sticky session semantics."""
+        from verl.experimental.agent_loop.agent_loop import _AcquireCoalescer
+
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        coalescer = _AcquireCoalescer(lb)
+
+        # First round: acquire two different requests
+        results1 = await asyncio.gather(
+            coalescer.acquire("conv-A"),
+            coalescer.acquire("conv-B"),
+        )
+        assert results1[0] != results1[1]  # different conversations → different servers
+
+        # Release both
+        ray.get(lb.release_servers_batch.remote(server_ids=list(results1)))
+
+        # Second round: same request_ids should be sticky
+        results2 = await asyncio.gather(
+            coalescer.acquire("conv-A"),
+            coalescer.acquire("conv-B"),
+        )
+        assert results1 == results2
+
+    @pytest.mark.asyncio
+    async def test_coalescer_sequential_fallback(self, ray_for_lb):
+        """Single acquire (no concurrency) should still work correctly."""
+        from verl.experimental.agent_loop.agent_loop import _AcquireCoalescer
+
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        coalescer = _AcquireCoalescer(lb)
+
+        # Sequential calls — each should trigger its own flush
+        s0 = await coalescer.acquire("solo-0")
+        s1 = await coalescer.acquire("solo-1")
+        assert s0 in ("s0", "s1")
+        assert s1 in ("s0", "s1")
+
+
+class TestReleaseCoalescer:
+    """Tests for _ReleaseCoalescer."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_releases_are_batched(self, ray_for_lb):
+        """Multiple release() calls should be batched into one RPC."""
+        from verl.experimental.agent_loop.agent_loop import _ReleaseCoalescer
+
+        lb = GlobalRequestLoadBalancer.remote(server_actor_ids=["s0", "s1"])
+        # First acquire some servers
+        servers = ray.get(lb.acquire_servers_batch.remote(
+            request_ids=["r0", "r1", "r2", "r3"]
+        ))
+
+        release_coalescer = _ReleaseCoalescer(lb)
+        for s in servers:
+            release_coalescer.release(s)
+
+        # Wait for the fire-and-forget flush to complete
+        await asyncio.sleep(0.1)
+
+        # Verify all inflight counts are back to 0 by acquiring new requests
+        # If releases didn't work, these would pile up unevenly
+        new_servers = ray.get(lb.acquire_servers_batch.remote(
+            request_ids=["new-0", "new-1"]
+        ))
+        assert sorted(new_servers) == ["s0", "s1"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Work-Stealing scheduling unit tests (lightweight, no GPU required)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@ray.remote
+class MockAgentLoopWorker:
+    """A mock worker that simulates generate_batch with configurable delay.
+
+    Each call returns a DataProto-like object containing the batch size and
+    an optional delay to simulate straggler behavior.
+    """
+
+    def __init__(self, worker_id: str, delay_fn=None):
+        self.worker_id = worker_id
+        self.delay_fn = delay_fn  # callable(batch_size) -> delay_seconds
+        self.tasks_completed = 0
+        self.total_samples_processed = 0
+
+    async def generate_batch(self, batch: "DataProto") -> "DataProto":
+        """Simulate processing a micro-batch."""
+        batch_size = len(batch)
+        if self.delay_fn:
+            delay = self.delay_fn(batch_size)
+        else:
+            delay = 0.01 * batch_size  # 10ms per sample by default
+        await asyncio.sleep(delay)
+        self.tasks_completed += 1
+        self.total_samples_processed += batch_size
+        return batch  # Return the input as-is (passthrough for testing)
+
+    async def generate_sequences(self, batch: "DataProto") -> "DataProto":
+        """Fallback for static scheduling."""
+        return await self.generate_batch(batch)
+
+    def get_stats(self):
+        return {
+            "worker_id": self.worker_id,
+            "tasks_completed": self.tasks_completed,
+            "total_samples_processed": self.total_samples_processed,
+        }
+
+
+class TestWorkStealingScheduling:
+    """Tests for work-stealing dynamic scheduling via the standalone work_stealing_schedule function.
+
+    These tests call the *real* scheduling function directly, ensuring that
+    any refactor or bug fix in the production code is automatically covered
+    by regression tests.
+    """
+
+    def _make_fake_prompts(self, n_samples: int) -> DataProto:
+        """Create a minimal DataProto with n_samples entries for testing."""
+        batch = TensorDict(
+            {"input_ids": torch.zeros(n_samples, 10, dtype=torch.long)},
+            batch_size=n_samples,
+        )
+        non_tensor_batch = {
+            "index": np.arange(n_samples),
+        }
+        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={})
+
+    @pytest.mark.asyncio
+    async def test_work_stealing_processes_all_samples(self, ray_for_lb):
+        """All samples should be processed exactly once."""
+        n_samples = 20
+        n_workers = 4
+        prefetch_size = 3
+
+        prompts = self._make_fake_prompts(n_samples)
+        workers = [MockAgentLoopWorker.remote(f"w{i}") for i in range(n_workers)]
+
+        outputs = await work_stealing_schedule(workers, prompts, prefetch_size=prefetch_size)
+
+        # Verify: total samples across all outputs matches input
+        total_output_samples = sum(len(out) for out in outputs)
+        assert total_output_samples == n_samples
+
+    @pytest.mark.asyncio
+    async def test_work_stealing_preserves_sample_order(self, ray_for_lb):
+        """Output samples should be in the same order as input after sorting by micro-batch id."""
+        n_samples = 16
+        prefetch_size = 4
+        n_workers = 3
+
+        prompts = self._make_fake_prompts(n_samples)
+        workers = [MockAgentLoopWorker.remote(f"w{i}") for i in range(n_workers)]
+
+        outputs = await work_stealing_schedule(workers, prompts, prefetch_size=prefetch_size)
+
+        # Reconstruct the indices from ordered outputs
+        reconstructed_indices = []
+        for out in outputs:
+            reconstructed_indices.extend(out.non_tensor_batch["index"].tolist())
+
+        assert reconstructed_indices == list(range(n_samples))
+
+    @pytest.mark.asyncio
+    async def test_work_stealing_handles_straggler(self, ray_for_lb):
+        """With a straggler worker, work-stealing should redistribute work to fast workers."""
+        import time
+
+        n_samples = 24
+        prefetch_size = 4
+
+        # Worker 0 is slow (50ms per sample), workers 1-2 are fast (5ms per sample)
+        workers = [
+            MockAgentLoopWorker.options().remote("slow", delay_fn=lambda bs: 0.05 * bs),
+            MockAgentLoopWorker.options().remote("fast1", delay_fn=lambda bs: 0.005 * bs),
+            MockAgentLoopWorker.options().remote("fast2", delay_fn=lambda bs: 0.005 * bs),
+        ]
+
+        prompts = self._make_fake_prompts(n_samples)
+
+        t0 = time.perf_counter()
+        outputs = await work_stealing_schedule(workers, prompts, prefetch_size=prefetch_size)
+        t_work_stealing = time.perf_counter() - t0
+
+        # Verify all samples processed
+        total = sum(len(out) for out in outputs)
+        assert total == n_samples
+
+        # Check that fast workers did more work than the slow worker
+        stats = [ray.get(w.get_stats.remote()) for w in workers]
+        slow_tasks = stats[0]["total_samples_processed"]
+        fast1_tasks = stats[1]["total_samples_processed"]
+        fast2_tasks = stats[2]["total_samples_processed"]
+
+        print(f"Slow worker: {slow_tasks} samples, Fast1: {fast1_tasks}, Fast2: {fast2_tasks}")
+        print(f"Work-stealing time: {t_work_stealing:.3f}s")
+
+        # Fast workers should have processed more samples than the slow worker
+        assert fast1_tasks + fast2_tasks > slow_tasks, (
+            f"Fast workers ({fast1_tasks}+{fast2_tasks}) should process more than slow worker ({slow_tasks})"
+        )
+
+    @pytest.mark.asyncio
+    async def test_work_stealing_single_worker(self, ray_for_lb):
+        """Work-stealing with a single worker should still work correctly."""
+        n_samples = 8
+        prefetch_size = 3
+
+        prompts = self._make_fake_prompts(n_samples)
+        workers = [MockAgentLoopWorker.remote("solo")]
+
+        outputs = await work_stealing_schedule(workers, prompts, prefetch_size=prefetch_size)
+
+        total = sum(len(out) for out in outputs)
+        assert total == n_samples
+
+    @pytest.mark.asyncio
+    async def test_work_stealing_more_workers_than_batches(self, ray_for_lb):
+        """When there are more workers than micro-batches, excess workers should stay idle."""
+        n_samples = 6
+        prefetch_size = 4  # → 2 micro-batches
+        n_workers = 5
+
+        prompts = self._make_fake_prompts(n_samples)
+        workers = [MockAgentLoopWorker.remote(f"w{i}") for i in range(n_workers)]
+
+        outputs = await work_stealing_schedule(workers, prompts, prefetch_size=prefetch_size)
+
+        total = sum(len(out) for out in outputs)
+        assert total == n_samples
+
+        # Verify only 2 of 5 workers did any work
+        stats = [ray.get(w.get_stats.remote()) for w in workers]
+        active_workers = sum(1 for s in stats if s["tasks_completed"] > 0)
+        assert active_workers == 2
+
+
+class TestDataProtoSplit:
+    """Tests for DataProto.split — the helper used by work-stealing scheduling."""
+
+    def test_split_even(self):
+        """split(4) on 12 samples → 3 chunks of 4."""
+        batch = TensorDict(
+            {"x": torch.arange(12).unsqueeze(1)},
+            batch_size=12,
+        )
+        dp = DataProto(batch=batch, non_tensor_batch={"idx": np.arange(12)}, meta_info={})
+        splits = dp.split(4)
+        assert len(splits) == 3
+        assert all(len(s) == 4 for s in splits)
+
+    def test_split_uneven(self):
+        """split(4) on 10 samples → 2 chunks of 4 + 1 chunk of 2."""
+        batch = TensorDict(
+            {"x": torch.arange(10).unsqueeze(1)},
+            batch_size=10,
+        )
+        dp = DataProto(batch=batch, non_tensor_batch={"idx": np.arange(10)}, meta_info={})
+        splits = dp.split(4)
+        assert len(splits) == 3
+        assert len(splits[0]) == 4
+        assert len(splits[1]) == 4
+        assert len(splits[2]) == 2
+
+    def test_split_preserves_order(self):
+        """Samples in splits should maintain original order."""
+        batch = TensorDict(
+            {"x": torch.arange(7).unsqueeze(1)},
+            batch_size=7,
+        )
+        dp = DataProto(batch=batch, non_tensor_batch={"idx": np.arange(7)}, meta_info={})
+        splits = dp.split(3)
+        reconstructed = []
+        for s in splits:
+            reconstructed.extend(s.non_tensor_batch["idx"].tolist())
+        assert reconstructed == list(range(7))
