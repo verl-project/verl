@@ -23,7 +23,8 @@ AgentLoopBase (existing)
             │       ├── SlidingWindowContextManager
             │       └── SummarizerContextManager
             │
-            └── SummarizerAgentLoop (built-in implementation)
+            ├── SummarizerAgentLoop          (model-generated summary, no tool calling)
+            └── ToolSlidingWindowAgentLoop   (sliding window + tool calling, text-only)
 ```
 
 The `ContextManager` communicates with the agent loop through `ContextState`, a shared dataclass that carries the full state of the conversation:
@@ -103,7 +104,7 @@ After compression, the returned `ContextState` must satisfy:
 | **Sliding Window** | Observation count reaches threshold | Replace earlier tool responses with placeholder text | [Figure 3, arXiv:2510.08276](https://arxiv.org/pdf/2510.08276) |
 | **Summarizer** | Model generates `<summary>` tag | Keep original prompt + model-generated summary | [Figure 1, arXiv:2510.06727](https://arxiv.org/pdf/2510.06727) |
 
-## Built-in: Sliding Window
+## Built-in Manager: Sliding Window
 
 The `SlidingWindowContextManager` compresses context by replacing earlier tool observations with placeholder text. It is a rule-based strategy that does not require LLM calls.
 
@@ -138,7 +139,7 @@ This triggers compression when 8 uncompressed tool responses accumulate, keeps t
 2. **Compress**: replaces the content of earlier observations with `[Compressed]` in both token IDs (via decode-regex-encode) and chat messages (via role-based matching).
 3. **Align**: verifies that the same number of observations were removed from both representations of token_ids and messages.
 
-## Built-in: Summarizer
+## Built-in Manager: Summarizer
 
 The `SummarizerContextManager` relies on the model itself to produce a summary. When the model generates a `<summary>...</summary>` block, the context is compressed to just the original prompt plus the summary.
 
@@ -156,7 +157,58 @@ The `SummarizerContextManager` relies on the model itself to produce a summary. 
 2. **Compress**: keeps the original system/user messages, discards all assistant/tool turns, and appends the last `<summary>` block as a new assistant message.
 3. **Rebuild token IDs**: uses `apply_chat_template(add_generation_prompt=True)` to reconstruct token IDs, which appends an assistant generation prefix to encourage the model to continue generating.
 
-## SummarizerAgentLoop
+## Loop: ToolSlidingWindowAgentLoop
+
+`ToolSlidingWindowAgentLoop` combines tool calling with sliding window context compression for text-only coder-style scenarios. It is registered as `"tool_sliding_window_agent"`.
+
+Unlike `SummarizerAgentLoop` which relies on the model to generate summaries, this loop uses rule-based sliding window compression: when tool response observations accumulate beyond a threshold, earlier observations are replaced with placeholder text.
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `max_context_compressions` | 4 | Maximum number of compression cycles per prompt |
+| `compress_when_m_observations` | 16 | Trigger compression when this many uncompressed observations accumulate |
+| `keep_last_n_observations` | 2 | Number of recent observations to preserve after compression |
+| `replacing_text` | `"[Compressed]"` | Placeholder text for compressed observations |
+| `tool_response_pattern` | `r"(<tool_response>)(.*?)(</tool_response>)"` | Regex pattern to match tool response blocks in token stream |
+
+Tool calling parameters (`max_assistant_turns`, `max_parallel_calls`, `max_tool_response_length`, etc.) are read from `rollout_config.multi_turn`, same as `ToolAgentLoop`.
+
+### Multi-trajectory generation flow
+
+```
+Prompt → Generate → tool_call? ─No──→ Emit output[k], return [output[0..k]]
+                       │
+                      Yes
+                       ↓
+                  Execute tools → append tool_response (mask=0)
+                       ↓
+                  Observations ≥ M? ─No──→ loop back to Generate
+                       │
+                      Yes
+                       ↓
+                  Emit output[k], compress context, k+=1, loop back to Generate
+                       ↓
+                  ... (up to max_context_compressions)
+```
+
+### Usage
+
+Register `"tool_sliding_window_agent"` in your config:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    agent:
+      agent_loop_cls: tool_sliding_window_agent
+```
+
+### Important: `tool_response_pattern` must match your chat template
+
+The sliding window compressor finds tool responses in the token stream via regex. The default pattern `<tool_response>...</tool_response>` works for Qwen-style chat templates. If your model uses a different format (e.g. `gpt-oss` uses `<|start|>functions.xxx...`), you must set `tool_response_pattern` accordingly, otherwise compression will silently never trigger.
+
+## Loop: SummarizerAgentLoop
 
 `SummarizerAgentLoop` is the built-in agent loop that uses `SummarizerContextManager` to produce multi-trajectory training data. It is registered as `"naive_summarizer_agent"`.
 
@@ -172,7 +224,7 @@ The `SummarizerContextManager` relies on the model itself to produce a summary. 
 Prompt → Generate trajectory[0] → <summary> detected?
                                       │
                               No ──→ return [output[0]]
-                              Yes ─→ Compress → Generate trajectory[1] → <summary> detected?
+                              Yes ─→ Compress → Generate trajectory[1] → new <summary> detected?
                                                                               │
                                                                      No ──→ return [output[0], output[1]]
                                                                      Yes ─→ Compress → ... (up to max_context_compressions)
@@ -241,4 +293,3 @@ class MyAgentLoop(AgentLoopWithContextManagement):
         # Your generation + compression loop
         ...
 ```
-

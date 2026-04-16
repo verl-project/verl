@@ -16,6 +16,7 @@ from .agent_loop import AgentLoopBase, AgentLoopManager, AgentLoopWorker, AsyncL
 from .agent_loop_with_context_management import (
     AgentLoopWithContextManagement,
     SummarizerAgentLoop,
+    ToolSlidingWindowAgentLoop,
 )
 from .context_manager import (
     ContextManager,
@@ -26,7 +27,7 @@ from .context_manager import (
 from .single_turn_agent_loop import SingleTurnAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
-_ = [SingleTurnAgentLoop, ToolAgentLoop, SummarizerAgentLoop]
+_ = [SingleTurnAgentLoop, ToolAgentLoop, SummarizerAgentLoop, ToolSlidingWindowAgentLoop]
 
 __all__ = [
     "AgentLoopBase",
@@ -38,4 +39,5 @@ __all__ = [
     "ContextState",
     "SlidingWindowContextManager",
     "SummarizerContextManager",
+    "ToolSlidingWindowAgentLoop",
 ]
