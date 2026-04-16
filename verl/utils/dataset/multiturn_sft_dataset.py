@@ -31,7 +31,7 @@ from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.models.transformers.qwen2_vl import get_rope_index
-from verl.utils import hf_tokenizer
+from verl.utils import hf_tokenizer, normalize_token_ids
 from verl.utils.chat_template import apply_chat_template, extract_system_prompt_and_generation
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
@@ -40,6 +40,8 @@ from verl.utils.py_functional import convert_nested_value_to_list_recursive
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+_GEMMA4_THINKING_PREFIX = "<|channel>thought\n<channel|>"
 
 
 def once(func):
@@ -52,6 +54,108 @@ def once(func):
             return func(*args, **kwargs)
 
     return wrapper
+
+
+def _is_gemma4_model(tokenizer: PreTrainedTokenizer, processor: Optional[ProcessorMixin] = None) -> bool:
+    """Return whether the tokenizer/processor pair targets Gemma4."""
+    if processor is not None and processor.__class__.__name__ == "Gemma4Processor":
+        return True
+
+    if getattr(tokenizer, "name_or_path", None) and "gemma-4" in tokenizer.name_or_path.lower():
+        return True
+
+    return getattr(tokenizer, "chat_template", "") is not None and "<start_of_turn>" in str(
+        getattr(tokenizer, "chat_template", "")
+    )
+
+
+def _find_subsequence_insert_positions(sequence: torch.Tensor, subsequence: torch.Tensor) -> list[int]:
+    """Find insertion positions immediately after every ``subsequence`` match."""
+    if sequence.dim() != 1 or subsequence.dim() != 1 or len(sequence) < len(subsequence) or len(subsequence) == 0:
+        return []
+
+    positions = []
+    i = 0
+    while i <= len(sequence) - len(subsequence):
+        if torch.equal(sequence[i : i + len(subsequence)], subsequence):
+            positions.append(i + len(subsequence))
+            i += len(subsequence)
+        else:
+            i += 1
+    return positions
+
+
+def _insert_tensor_segments(
+    sequence: torch.Tensor,
+    insert_positions: list[int],
+    insert_value: torch.Tensor | int,
+) -> torch.Tensor:
+    """Insert the same tensor or scalar segment after each position."""
+    if not insert_positions:
+        return sequence
+
+    if isinstance(insert_value, torch.Tensor):
+        insert_segment = insert_value.to(device=sequence.device, dtype=sequence.dtype)
+    else:
+        insert_segment = torch.full((1,), insert_value, dtype=sequence.dtype, device=sequence.device)
+
+    chunks = []
+    prev = 0
+    for pos in insert_positions:
+        chunks.append(sequence[prev:pos])
+        chunks.append(insert_segment)
+        prev = pos
+    chunks.append(sequence[prev:])
+    return torch.cat(chunks, dim=0)
+
+
+def _inject_gemma4_thinking_prefix(
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    loss_mask: Optional[torch.Tensor],
+    mm_token_type_ids: Optional[torch.Tensor],
+    generation_prompt_ids: list[int],
+    thinking_prefix_ids: list[int],
+) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Insert the Gemma4 thinking prefix after each assistant turn marker."""
+    if (
+        input_ids.dim() != 1
+        or len(generation_prompt_ids) == 0
+        or len(thinking_prefix_ids) == 0
+        or len(input_ids) < len(generation_prompt_ids)
+    ):
+        return input_ids, attention_mask, loss_mask, mm_token_type_ids
+
+    marker = torch.tensor(generation_prompt_ids, dtype=input_ids.dtype, device=input_ids.device)
+    insert_positions = _find_subsequence_insert_positions(input_ids, marker)
+    if not insert_positions:
+        return input_ids, attention_mask, loss_mask, mm_token_type_ids
+
+    prefix = torch.tensor(thinking_prefix_ids, dtype=input_ids.dtype, device=input_ids.device)
+    input_ids = _insert_tensor_segments(input_ids, insert_positions, prefix)
+
+    if attention_mask is not None:
+        attention_mask = _insert_tensor_segments(
+            attention_mask,
+            insert_positions,
+            torch.ones(len(prefix), dtype=attention_mask.dtype),
+        )
+
+    if loss_mask is not None:
+        loss_mask = _insert_tensor_segments(
+            loss_mask,
+            insert_positions,
+            torch.zeros(len(prefix), dtype=loss_mask.dtype),
+        )
+
+    if mm_token_type_ids is not None:
+        mm_token_type_ids = _insert_tensor_segments(
+            mm_token_type_ids,
+            insert_positions,
+            torch.zeros(len(prefix), dtype=mm_token_type_ids.dtype),
+        )
+
+    return input_ids, attention_mask, loss_mask, mm_token_type_ids
 
 
 @once
@@ -124,6 +228,17 @@ class MultiTurnSFTDataset(Dataset):
             tokenizer = hf_tokenizer(tokenizer)
         self.tokenizer: PreTrainedTokenizer = tokenizer
         self.processor = processor
+        self.is_gemma4_model = _is_gemma4_model(self.tokenizer, self.processor)
+        self.gemma4_thinking_prefix_ids: list[int] = []
+
+        if self.is_gemma4_model:
+            try:
+                self.gemma4_thinking_prefix_ids = normalize_token_ids(
+                    self.tokenizer.encode(_GEMMA4_THINKING_PREFIX, add_special_tokens=False)
+                )
+            except Exception as e:
+                logger.warning("Failed to derive Gemma4 thinking-prefix ids: %s", e)
+                self.gemma4_thinking_prefix_ids = []
 
         self._download()
         self._read_files_and_process()
@@ -236,6 +351,24 @@ class MultiTurnSFTDataset(Dataset):
         else:
             loss_mask = torch.zeros_like(attention_mask)
 
+        if message["role"] == "assistant" and self.is_gemma4_model and self.gemma4_thinking_prefix_ids:
+            mm_token_type_ids = inputs.get("mm_token_type_ids")
+            if isinstance(mm_token_type_ids, torch.Tensor):
+                mm_token_type_ids = mm_token_type_ids[0]
+            else:
+                mm_token_type_ids = None
+
+            input_ids, attention_mask, loss_mask, mm_token_type_ids = _inject_gemma4_thinking_prefix(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                loss_mask=loss_mask,
+                mm_token_type_ids=mm_token_type_ids,
+                generation_prompt_ids=self.generation_prompt,
+                thinking_prefix_ids=self.gemma4_thinking_prefix_ids,
+            )
+            if mm_token_type_ids is not None:
+                inputs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
+
         return input_ids, loss_mask, attention_mask, inputs
 
     def _build_messages(self, example: dict):
@@ -325,7 +458,7 @@ class MultiTurnSFTDataset(Dataset):
         # Since the tokenizer may return user-customized results, we need to filter out inconsistent tensor shapes
         keys_to_remove = []
         for k, v in multi_modal_inputs.items():
-            if k == "mm_token_type_ids":
+            if k == "mm_token_type_ids" and not self.is_gemma4_model:
                 keys_to_remove.append(k)
                 continue
             if len(v) > 0 and v[0] is not None and isinstance(v[0], torch.Tensor):
@@ -447,7 +580,18 @@ class MultiTurnSFTDataset(Dataset):
             "input_ids as the final input_ids. "
         )
 
-        if not torch.equal(input_ids, inputs["input_ids"].squeeze(0)):
+        expected_input_ids = inputs["input_ids"].squeeze(0)
+        if self.is_gemma4_model and self.gemma4_thinking_prefix_ids:
+            expected_input_ids, _, _, _ = _inject_gemma4_thinking_prefix(
+                input_ids=expected_input_ids,
+                attention_mask=None,
+                loss_mask=None,
+                mm_token_type_ids=None,
+                generation_prompt_ids=self.generation_prompt,
+                thinking_prefix_ids=self.gemma4_thinking_prefix_ids,
+            )
+
+        if not torch.equal(input_ids, expected_input_ids):
             if self.ignore_input_ids_mismatch:
                 logger.warning_once(error_message)
             else:

@@ -30,10 +30,33 @@ from transformers.utils import get_json_schema
 
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.dataset_utils import DatasetPadMode, SFTTensorCollator
-from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
+from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset, _inject_gemma4_thinking_prefix
 from verl.utils.model import extract_multi_modal_inputs
 
 custom_model_prefix = Path("~/models").expanduser().resolve()
+
+
+def test_inject_gemma4_thinking_prefix_masks_only_prefix():
+    generation_prompt_ids = [11, 12]
+    thinking_prefix_ids = [21, 22, 23]
+
+    input_ids = torch.tensor([11, 12, 101, 102, 103], dtype=torch.long)
+    attention_mask = torch.tensor([1, 1, 1, 1, 1], dtype=torch.long)
+    loss_mask = torch.tensor([0, 0, 1, 1, 1], dtype=torch.long)
+
+    new_input_ids, new_attention_mask, new_loss_mask, new_mm_token_type_ids = _inject_gemma4_thinking_prefix(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        loss_mask=loss_mask,
+        mm_token_type_ids=torch.tensor([0, 0, 0, 0, 0], dtype=torch.long),
+        generation_prompt_ids=generation_prompt_ids,
+        thinking_prefix_ids=thinking_prefix_ids,
+    )
+
+    assert torch.equal(new_input_ids, torch.tensor([11, 12, 21, 22, 23, 101, 102, 103], dtype=torch.long))
+    assert torch.equal(new_attention_mask, torch.ones(8, dtype=torch.long))
+    assert torch.equal(new_loss_mask, torch.tensor([0, 0, 0, 0, 0, 1, 1, 1], dtype=torch.long))
+    assert torch.equal(new_mm_token_type_ids, torch.zeros(8, dtype=torch.long))
 
 
 @pytest.mark.parametrize(
