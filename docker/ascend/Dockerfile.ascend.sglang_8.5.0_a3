@@ -2,8 +2,8 @@
 FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.5.0-a3-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
-ARG PTA_BASE_VERSION="torch_npu-2.7.1.post2-cp311-cp311-manylinux_2_28"
-ARG PTA_URL="https://gitcode.com/Ascend/pytorch/releases/download/v7.3.0-pytorch2.7.1"
+ARG PTA_BASE_VERSION="torch_npu-2.8.0.post2-cp311-cp311-manylinux_2_28"
+ARG PTA_URL="https://gitcode.com/Ascend/pytorch/releases/download/v7.3.0-pytorch2.8.0"
 
 # Prepare required system dependencies
 RUN apt-get update -y && \
@@ -32,7 +32,7 @@ RUN cd sglang && \
     # Install sglang
     mv python/pyproject.toml python/pyproject.toml.backup && \
     mv python/pyproject_npu.toml python/pyproject.toml && \
-    pip install torch==2.7.1 torchvision==0.22.1 && \
+    pip install torch==2.8.0 torchvision==0.23.0 && \
     pip install -e python[all_npu] && \
     # Install torch_npu
     ARCH=$(uname -m) && wget ${PTA_URL}/${PTA_BASE_VERSION}_${ARCH}.whl && pip install ${PTA_BASE_VERSION}_${ARCH}.whl && \
