@@ -16,17 +16,17 @@ import os
 # sys.path.insert(0, str(Path(__file__).parent / "lib"))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.data_obs import DataSplitter, GPUAllocator, ResultCollector, DatasetMetrics
-from lib.data_metrics import compute_data_statistics, compute_data_quality_metrics
-from lib.advanced_metrics import (
+from pipeline_lib.data_obs import DataSplitter, GPUAllocator, ResultCollector, DatasetMetrics
+from pipeline_lib.data_metrics import compute_data_statistics, compute_data_quality_metrics
+from pipeline_lib.advanced_metrics import (
     compute_dataset_diversity,
     compute_dataset_entropy,
     compute_ppl_metrics,
     compute_ifd_metrics,
     SimilarityType,
 )
-from lib.training_pipeline import TrainingPipeline
-from lib.analysis_pipeline import CorrelationAnalyzer, AnalysisVisualizer
+from pipeline_lib.training_pipeline import TrainingPipeline
+from pipeline_lib.analysis_pipeline import CorrelationAnalyzer, AnalysisVisualizer
 
 # Setup logging
 logging.basicConfig(
