@@ -22,7 +22,6 @@ Differs from original PPO trainer in main_ppo.py:
 """
 
 import asyncio
-import copy
 import logging
 import math
 import os
@@ -73,6 +72,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_variance_proxy_metrics,
     process_validation_metrics,
 )
+from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
@@ -87,7 +87,6 @@ from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
-from verl.utils.model import compute_position_id_with_mask
 from verl.utils.py_functional import rename_dict
 from verl.utils.ray_utils import auto_await
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -1017,135 +1016,6 @@ class PPOTrainer:
         # Notice lcm(a, b, c) == lcm(lcm(a, b), c), so it is optimal.
         return required_multiple
 
-    def _construct_minimal_padding_template(self, source_td, source_tag: dict) -> tuple[dict, dict]:
-        """Construct a minimal text-only padding template of one prompt token and one response token."""
-
-        # Iterate through the key and copy the sample template from a existing sample.
-        template_sample = {}
-        for key in source_td.keys():
-            value = source_td[key]
-            template_sample[key] = value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
-
-        # Deep copy the template tag from a existing sample.
-        template_tag = copy.deepcopy(source_tag)
-
-        # Build minimal sequence
-        token_id = self.tokenizer.eos_token_id
-        prompts = torch.full((1,), token_id, dtype=torch.int64)
-        input_ids = prompts.repeat(2)
-        attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
-        response_mask = torch.zeros_like(prompts)
-        position_ids = self._build_padding_position_ids(template_sample.get("position_ids"), attention_mask)
-        routed_experts = self._build_padding_routed_experts(template_sample.get("routed_experts"), input_ids.size(0))
-
-        # Update the fields and remove redundant parts
-        template_sample.update(
-            prompts=prompts,
-            responses=prompts.clone(),
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            num_turns=0,
-            response_mask=response_mask,
-            loss_mask=response_mask,
-            rm_scores=torch.zeros_like(response_mask, dtype=torch.float32),
-            rollout_log_probs=torch.zeros_like(response_mask, dtype=torch.float32),
-        )
-        if "multi_modal_inputs" in template_sample:
-            template_sample["multi_modal_inputs"] = {}
-        if routed_experts is not None:
-            template_sample["routed_experts"] = routed_experts
-        else:
-            template_sample.pop("routed_experts", None)
-
-        # Padding flag is deployed to protect metrics calculation (e.g. response length, score, reward).
-        template_tag.update(is_padding=True, prompt_len=1, response_len=1, seq_len=2)
-        return template_sample, template_tag
-
-    @staticmethod
-    def _build_padding_position_ids(source_position_ids, attention_mask: torch.Tensor) -> torch.Tensor:
-        """Build padding position ids with the same rank/prefix shape as the source sample."""
-        position_ids = compute_position_id_with_mask(attention_mask.unsqueeze(0)).squeeze(0)
-        if not isinstance(source_position_ids, torch.Tensor):
-            return position_ids
-
-        position_ids = position_ids.to(device=source_position_ids.device, dtype=source_position_ids.dtype)
-        if source_position_ids.dim() <= 1:
-            return position_ids
-
-        view_shape = (1,) * (source_position_ids.dim() - 1) + (position_ids.size(-1),)
-        return position_ids.reshape(view_shape).expand(*source_position_ids.shape[:-1], -1).clone()
-
-    @staticmethod
-    def _build_padding_routed_experts(source_routed_experts, seq_len: int) -> torch.Tensor | None:
-        """Build a zero routed-experts tensor matching the source per-token expert shape."""
-        if not isinstance(source_routed_experts, torch.Tensor):
-            return None
-        if source_routed_experts.dim() == 0:
-            return torch.zeros_like(source_routed_experts)
-        return torch.zeros(
-            (seq_len, *source_routed_experts.shape[1:]),
-            dtype=source_routed_experts.dtype,
-            device=source_routed_experts.device,
-        )
-
-    def _upsample_batch_to_divisible_size(self, batch: KVBatchMeta, batch_multiple: int) -> KVBatchMeta:
-        """Append synthetic no-op samples so the batch size becomes divisible by batch_multiple.
-
-        The synthetic samples reuse the shortest real sample as a metadata template,
-        but manually construct a minimal prompt_len=1 / response_len=1 sequence and
-        zero out reward-related fields so they do not contribute to PPO, entropy, or
-        KL losses. An is_padding flag is added for the future metrics calculation.
-        """
-        remainder = len(batch) % batch_multiple
-        if remainder == 0:
-            return batch
-
-        # Take the first trajectory as the metadata template for padding data.
-        source_idx = 0
-        source_key = batch.keys[source_idx]
-        source_td = tq.kv_batch_get(keys=[source_key], partition_id=batch.partition_id)[0]
-
-        # Contruct the minimal padding template of one prompt token and one response token
-        template_sample, template_tag = self._construct_minimal_padding_template(source_td, batch.tags[source_idx])
-
-        # All padding data use the same uid (also the same trajectory_id 0 but with ascending session_ids)
-        # This uid is not identical to any of the actual data, so it won't affect the grpo advantage value.
-        pad_uid = f"pad{uuid.uuid4().hex}"
-        template_sample["uid"] = pad_uid
-
-        # Construct the padding samples in a for-loop
-        pad_keys = []
-        pad_tags = []
-        pad_fields = []
-        pad_size = batch_multiple - remainder
-        for local_idx in range(pad_size):
-            sample = copy.deepcopy(template_sample)
-            # Use incremental local_idx as different session_ids
-            pad_keys.append(f"{pad_uid}_{local_idx}_0")
-            if "session_id" in sample:
-                sample["session_id"] = local_idx
-            pad_fields.append(sample)
-            pad_tags.append(copy.deepcopy(template_tag))
-
-        tq.kv_batch_put(
-            keys=pad_keys,
-            partition_id=batch.partition_id,
-            fields=list_of_dict_to_tensordict(pad_fields),
-            tags=pad_tags,
-        )
-        print(
-            f"[DEBUG] Upsampled batch from {len(batch)} to {len(batch) + pad_size} "
-            f"with {pad_size} synthetic padding samples for required_multiple={batch_multiple}"
-        )
-        return KVBatchMeta(
-            keys=batch.keys + pad_keys,
-            tags=batch.tags + pad_tags,
-            partition_id=batch.partition_id,
-            fields=batch.fields,
-            extra_info=batch.extra_info,
-        )
-
     def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
         """Reorder the data on single controller such that each dp rank gets similar total tokens."""
         # get actor dp size
@@ -1159,7 +1029,7 @@ class PPOTrainer:
 
         # Upsampling the batch with padding sequences
         batch_multiple = self._get_required_batch_multiple(dp_size)
-        batch = self._upsample_batch_to_divisible_size(batch, batch_multiple)
+        batch = upsample_batch_to_divisible_size(batch, batch_multiple, self.tokenizer.eos_token_id)
         global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
         workload_lst = calculate_workload(global_seqlen_lst)
 
