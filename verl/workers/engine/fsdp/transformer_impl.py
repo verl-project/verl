@@ -977,7 +977,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 pad_token_id = tu.get_non_tensor_data(data=micro_batch, key="pad_token_id", default=0)
                 batch_size = micro_batch.batch_size[0]
-                seq_len_effective = input_ids.offsets().diff()
+                input_offsets = input_ids.offsets()
+                seq_len_effective = input_offsets.diff()
                 max_seq_len = max(seq_len_effective)
 
                 input_ids_rmpad_rolled = torch.roll(input_ids.values(), shifts=-1, dims=0)
@@ -1008,7 +1009,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     if mm_token_type_ids.dim() != 1:
                         mm_token_type_ids = mm_token_type_ids.reshape(-1)
                     mm_token_type_ids = torch.nested.nested_tensor_from_jagged(
-                        mm_token_type_ids, input_ids.offsets()
+                        mm_token_type_ids, input_offsets
                     )
                     mm_token_type_ids = torch.nested.to_padded_tensor(
                         mm_token_type_ids, padding=0, output_size=(batch_size, max_seq_len)
