@@ -30,7 +30,7 @@ def is_hybrid_res_pool_enabled(config) -> bool:
     return bool(OmegaConf.select(config, "async_training.hybrid_res_pool", default=False))
 
 
-def _parse_partition_chunks(pool_spec: str, *, gpus_per_node: int, field_name: str) -> list[int]:
+def _parse_partition_chunks(pool_spec: str, *, field_name: str) -> list[int]:
     chunks = []
     for chunk_text in pool_spec.split("_"):
         if not chunk_text:
@@ -41,12 +41,23 @@ def _parse_partition_chunks(pool_spec: str, *, gpus_per_node: int, field_name: s
             raise ValueError(f"invalid {field_name} partition: non-integer chunk {chunk_text!r}") from exc
         if chunk <= 0:
             raise ValueError(f"invalid {field_name} partition: chunk {chunk} must be positive")
-        if chunk > gpus_per_node:
-            raise ValueError(
-                f"invalid {field_name} partition: chunk {chunk} exceeds n_gpus_per_node={gpus_per_node}"
-            )
         chunks.append(chunk)
     return chunks
+
+
+def _get_positive_int(config, field_path: str) -> int:
+    value = OmegaConf.select(config, field_path, default=None)
+    if value is None or value <= 0:
+        raise ValueError(f"invalid {field_path}={value!r}")
+    return value
+
+
+def _validate_partition_chunks(chunks: list[int], *, gpus_per_node: int, field_name: str) -> None:
+    for chunk in chunks:
+        if chunk > gpus_per_node:
+            raise ValueError(
+                f"invalid {field_name} partition: chunk {chunk} exceeds physical_gpus_per_node={gpus_per_node}"
+            )
 
 
 def _parse_partition(config) -> tuple[list[int], list[int]]:
@@ -60,23 +71,59 @@ def _parse_partition(config) -> tuple[list[int], list[int]]:
     if not trainer_spec or not rollout_spec:
         raise ValueError(f"invalid partition format {partition!r}, expected non-empty trainer/rollout pools")
 
-    total_nodes = OmegaConf.select(config, "trainer.nnodes", default=None)
-    gpus_per_node = OmegaConf.select(config, "trainer.n_gpus_per_node", default=None)
-    if total_nodes is None or total_nodes <= 0:
-        raise ValueError(f"invalid trainer.nnodes={total_nodes!r}")
-    if gpus_per_node is None or gpus_per_node <= 0:
-        raise ValueError(f"invalid trainer.n_gpus_per_node={gpus_per_node!r}")
+    trainer_chunks = _parse_partition_chunks(trainer_spec, field_name="trainer")
+    rollout_chunks = _parse_partition_chunks(rollout_spec, field_name="rollout")
 
-    trainer_chunks = _parse_partition_chunks(trainer_spec, gpus_per_node=gpus_per_node, field_name="trainer")
-    rollout_chunks = _parse_partition_chunks(rollout_spec, gpus_per_node=gpus_per_node, field_name="rollout")
+    trainer_nodes = _get_positive_int(config, "trainer.nnodes")
+    trainer_gpus_per_node = _get_positive_int(config, "trainer.n_gpus_per_node")
+    rollout_nodes = _get_positive_int(config, "rollout.nnodes")
+    rollout_gpus_per_node = _get_positive_int(config, "rollout.n_gpus_per_node")
 
-    physical_total_gpus = total_nodes * gpus_per_node
+    trainer_total = trainer_nodes * trainer_gpus_per_node
+    rollout_total = rollout_nodes * rollout_gpus_per_node
     partition_total = sum(trainer_chunks) + sum(rollout_chunks)
-    if partition_total != physical_total_gpus:
+
+    if partition_total == trainer_total:
+        if trainer_nodes == rollout_nodes and trainer_gpus_per_node != rollout_gpus_per_node:
+            raise ValueError(
+                "hybrid_res_pool raw mode is ambiguous when trainer.nnodes == rollout.nnodes "
+                "but trainer.n_gpus_per_node != rollout.n_gpus_per_node; "
+                "split-style configs must consume trainer_total + rollout_total"
+            )
+        _validate_partition_chunks(
+            trainer_chunks + rollout_chunks,
+            gpus_per_node=trainer_gpus_per_node,
+            field_name="combined",
+        )
+        return trainer_chunks, rollout_chunks
+
+    expected_split_total = trainer_total + rollout_total
+    if partition_total != expected_split_total:
         raise ValueError(
-            f"invalid partition {partition!r}: expected total GPUs {physical_total_gpus}, got {partition_total}"
+            f"invalid partition {partition!r}: expected total GPUs {trainer_total} (raw mode) "
+            f"or {expected_split_total} (split mode), got {partition_total}"
         )
 
+    if trainer_nodes != rollout_nodes:
+        raise ValueError("hybrid_res_pool split mode requires trainer.nnodes == rollout.nnodes")
+
+    if sum(trainer_chunks) != trainer_total:
+        raise ValueError(
+            "hybrid_res_pool split mode requires trainer partition total "
+            f"{sum(trainer_chunks)} to equal trainer_total={trainer_total}"
+        )
+    if sum(rollout_chunks) != rollout_total:
+        raise ValueError(
+            "hybrid_res_pool split mode requires rollout partition total "
+            f"{sum(rollout_chunks)} to equal rollout_total={rollout_total}"
+        )
+
+    physical_gpus_per_node = trainer_gpus_per_node + rollout_gpus_per_node
+    _validate_partition_chunks(
+        trainer_chunks + rollout_chunks,
+        gpus_per_node=physical_gpus_per_node,
+        field_name="combined",
+    )
     return trainer_chunks, rollout_chunks
 
 
@@ -102,6 +149,14 @@ def build_hybrid_res_pool_layout(config) -> HybridResPoolLayout:
     hybrid_engine = OmegaConf.select(config, "actor_rollout_ref.hybrid_engine", default=None)
     if hybrid_engine is not False:
         raise ValueError("hybrid_res_pool requires actor_rollout_ref.hybrid_engine == False")
+
+    checkpoint_backend = OmegaConf.select(
+        config,
+        "actor_rollout_ref.rollout.checkpoint_engine.backend",
+        default="naive",
+    )
+    if checkpoint_backend != "naive":
+        raise ValueError("hybrid_res_pool requires actor_rollout_ref.rollout.checkpoint_engine.backend == 'naive'")
 
     trainer_chunks, rollout_chunks = _parse_partition(config)
     logical_gpus_per_node = reduce(gcd, trainer_chunks + rollout_chunks)

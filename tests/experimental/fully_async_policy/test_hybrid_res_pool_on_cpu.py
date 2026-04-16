@@ -24,23 +24,35 @@ from verl.experimental.separation.utils import create_resource_pool_manager
 from verl.trainer.ppo.utils import Role
 
 
-def make_config(*, hybrid_res_pool: bool, partition: str | None = None):
+def make_config(
+    *,
+    hybrid_res_pool: bool,
+    partition: str | None = None,
+    trainer_nnodes: int = 2,
+    trainer_gpus_per_node: int = 8,
+    rollout_nnodes: int = 1,
+    rollout_gpus_per_node: int = 8,
+    checkpoint_backend: str = "naive",
+):
     config = {
         "async_training": {
             "hybrid_res_pool": hybrid_res_pool,
         },
         "trainer": {
-            "nnodes": 2,
-            "n_gpus_per_node": 8,
+            "nnodes": trainer_nnodes,
+            "n_gpus_per_node": trainer_gpus_per_node,
         },
         "rollout": {
-            "nnodes": 1,
-            "n_gpus_per_node": 8,
+            "nnodes": rollout_nnodes,
+            "n_gpus_per_node": rollout_gpus_per_node,
         },
         "actor_rollout_ref": {
             "hybrid_engine": False,
             "rollout": {
                 "mode": "async",
+                "checkpoint_engine": {
+                    "backend": checkpoint_backend,
+                },
             },
         },
     }
@@ -83,6 +95,89 @@ def test_build_hybrid_res_pool_layout_requires_partition():
 
     with pytest.raises(ValueError, match="partition"):
         build_hybrid_res_pool_layout(config)
+
+
+def test_build_hybrid_res_pool_layout_requires_naive_checkpoint_backend():
+    config = make_config(hybrid_res_pool=True, partition="8_4-4", checkpoint_backend="nccl")
+
+    with pytest.raises(ValueError, match="checkpoint_engine.backend.*naive"):
+        build_hybrid_res_pool_layout(config)
+
+
+def test_build_hybrid_res_pool_layout_requires_matching_node_counts_for_split_mode():
+    config = make_config(
+        hybrid_res_pool=True,
+        partition="8_4-4",
+        trainer_nnodes=2,
+        trainer_gpus_per_node=6,
+        rollout_nnodes=1,
+        rollout_gpus_per_node=4,
+    )
+
+    with pytest.raises(ValueError, match=r"trainer\.nnodes == rollout\.nnodes"):
+        build_hybrid_res_pool_layout(config)
+
+
+def test_build_hybrid_res_pool_layout_requires_split_mode_side_totals_to_match():
+    config = make_config(
+        hybrid_res_pool=True,
+        partition="8_2-2_4",
+        trainer_nnodes=2,
+        trainer_gpus_per_node=6,
+        rollout_nnodes=2,
+        rollout_gpus_per_node=2,
+    )
+
+    with pytest.raises(ValueError, match="trainer partition total"):
+        build_hybrid_res_pool_layout(config)
+
+
+def test_build_hybrid_res_pool_layout_rejects_ambiguous_split_shaped_raw_total():
+    config = make_config(
+        hybrid_res_pool=True,
+        partition="6-6",
+        trainer_nnodes=2,
+        trainer_gpus_per_node=6,
+        rollout_nnodes=2,
+        rollout_gpus_per_node=2,
+    )
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        build_hybrid_res_pool_layout(config)
+
+
+@pytest.mark.parametrize(
+    ("partition", "trainer_pool", "rollout_pool", "trainer_gpus_per_node", "rollout_gpus_per_node"),
+    [
+        ("8_4-4", [4, 4, 4], [4], 6, 2),
+        ("4-4_8", [4], [4, 4, 4], 2, 6),
+    ],
+)
+def test_normalize_hybrid_res_pool_config_accepts_existing_split_script_semantics(
+    partition,
+    trainer_pool,
+    rollout_pool,
+    trainer_gpus_per_node,
+    rollout_gpus_per_node,
+):
+    config = make_config(
+        hybrid_res_pool=True,
+        partition=partition,
+        trainer_nnodes=2,
+        trainer_gpus_per_node=trainer_gpus_per_node,
+        rollout_nnodes=2,
+        rollout_gpus_per_node=rollout_gpus_per_node,
+    )
+
+    layout = normalize_hybrid_res_pool_config(config)
+
+    assert layout.trainer_pool == trainer_pool
+    assert layout.rollout_pool == rollout_pool
+    assert layout.logical_gpus_per_node == 4
+    assert config.trainer.nnodes == len(trainer_pool)
+    assert config.trainer.n_gpus_per_node == 4
+    assert config.rollout.nnodes == len(rollout_pool)
+    assert config.rollout.n_gpus_per_node == 4
 
 
 def test_normalize_hybrid_res_pool_config_returns_layout_and_rewrites_config():
