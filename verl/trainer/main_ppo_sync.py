@@ -903,7 +903,9 @@ class PPOTrainer:
             if extra_fields_list is not None:
                 n_prior = len(reward_extra_infos_dict["reward"]) - len(extra_fields_list.tolist())
                 for extra_field in extra_fields_list.tolist():
-                    reward_extra_info = extra_field.get("reward_extra_info", {}) if isinstance(extra_field, dict) else {}
+                    reward_extra_info = (
+                        extra_field.get("reward_extra_info", {}) if isinstance(extra_field, dict) else {}
+                    )
                     for key in reward_extra_infos_dict:
                         if key != "reward" and key not in reward_extra_info:
                             reward_extra_infos_dict[key].append(None)
