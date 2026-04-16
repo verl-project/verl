@@ -253,31 +253,40 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         assert mini_batch_size is not None or num_mini_batch is not None
 
-        if mini_batch_size is None:
-            assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
-            mini_batch_size_per_gpu = batch_size_per_dp // num_mini_batch
-        else:
-            assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
-                f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
+        if num_mini_batch is not None and "uid" in data.keys():
+            shuffle = dataloader_kwargs.get("shuffle", True)
+            dataloader = tu.make_grouped_iterator(
+                data,
+                num_mini_batch=num_mini_batch,
+                epochs=epochs,
+                seed=seed + self.engine.get_data_parallel_rank(),
+                shuffle=shuffle,
             )
-            mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
+            total_num_iterations = num_mini_batch * epochs
+        else:
+            if mini_batch_size is None:
+                assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
+                mini_batch_size_per_gpu = batch_size_per_dp // num_mini_batch
+            else:
+                assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
+                    f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
+                )
+                mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
 
-        # make iterator
-        dataloader = tu.make_iterator(
-            data,
-            mini_batch_size=mini_batch_size_per_gpu,
-            epochs=epochs,
-            seed=seed + self.engine.get_data_parallel_rank(),
-            dataloader_kwargs=dataloader_kwargs,
-        )
+            dataloader = tu.make_iterator(
+                data,
+                mini_batch_size=mini_batch_size_per_gpu,
+                epochs=epochs,
+                seed=seed + self.engine.get_data_parallel_rank(),
+                dataloader_kwargs=dataloader_kwargs,
+            )
+            total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
         ):
-            # update
             output_lst = []
-            total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
                 # add global token num
@@ -294,9 +303,24 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 else:
                     global_token_num = None
 
+                local_batch_size = mini_batch_td.batch_size[0]
+                dp_group = self.engine.get_data_parallel_group()
+                dp_world = torch.distributed.get_world_size(dp_group)
+                if dp_world > 1:
+                    global_batch_size_tensor = torch.tensor(
+                        local_batch_size, device=mini_batch_td.device, dtype=torch.long
+                    )
+                    torch.distributed.all_reduce(
+                        global_batch_size_tensor, op=torch.distributed.ReduceOp.SUM, group=dp_group
+                    )
+                    global_batch_size = global_batch_size_tensor.item()
+                else:
+                    global_batch_size = local_batch_size
+
                 tu.assign_non_tensor(
                     mini_batch_td,
                     global_token_num=NonTensorData(global_token_num),
+                    global_batch_size=global_batch_size,
                     update_lr_scheduler=batch_idx == total_num_iterations - 1,
                     disable_auto_offload=True,
                 )
