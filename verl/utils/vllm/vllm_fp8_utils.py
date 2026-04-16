@@ -295,7 +295,17 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         del v, param_lp, param_scale
 
 
-def load_quanted_weights(weights, model_runner):
+def _rename_scales_for_vllm(weights):
+    """Rename _scale_inv to _scale for vLLM v0.11-v0.12 compatibility."""
+    _use_scale_not_scale_inv = version.parse("0.11.0") <= version.parse(vllm.__version__) < version.parse("0.14.0")
+    for k, v in weights:
+        if _use_scale_not_scale_inv and k.endswith("_scale_inv") and "expert" not in k:
+            yield (k[: -len("_scale_inv")] + "_scale", v)
+        else:
+            yield (k, v)
+
+
+def load_quanted_weights(weights, model_runner, pre_quantized=False):
     model = model_runner.model
     quant_config = model_runner.vllm_config.quant_config
     vllm_dtype = model_runner.vllm_config.model_config.dtype
@@ -309,7 +319,12 @@ def load_quanted_weights(weights, model_runner):
         # but the weight_loader expects original shapes.
         restore_mxfp8_weights_for_loading(model)
 
-    weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
+    if pre_quantized:
+        if is_mxfp8_npu:
+            raise NotImplementedError("pre_quantized FP8 is not supported with MXFP8 NPU")
+        weights_quantized = _rename_scales_for_vllm(weights)
+    else:
+        weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
 
     # Monkey patch the param class to their subclass, as certain models
     # will check the param type to call the proper weightloader
