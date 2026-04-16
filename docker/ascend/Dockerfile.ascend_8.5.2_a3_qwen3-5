@@ -5,18 +5,34 @@ ARG SOC_VERSION="ascend910_9392"
 
 RUN set -e && \
     cd /tmp && \
-    wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-toolkit_8.5.2_linux-aarch64.run && \
-    bash Ascend-cann-toolkit_8.5.2_linux-aarch64.run --quiet --install && \
-    rm -f Ascend-cann-toolkit_8.5.2_linux-aarch64.run && \
+    ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-toolkit_8.5.2_linux-aarch64.run && \
+        bash Ascend-cann-toolkit_8.5.2_linux-aarch64.run --quiet --install && \
+        rm -f Ascend-cann-toolkit_8.5.2_linux-aarch64.run && \
 
-    wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-A3-ops_8.5.2_linux-aarch64.run && \
-    bash Ascend-cann-A3-ops_8.5.2_linux-aarch64.run --quiet --install && \
-    rm -f Ascend-cann-A3-ops_8.5.2_linux-aarch64.run && \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-A3-ops_8.5.2_linux-aarch64.run && \
+        bash Ascend-cann-A3-ops_8.5.2_linux-aarch64.run --quiet --install && \
+        rm -f Ascend-cann-A3-ops_8.5.2_linux-aarch64.run && \
 
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-nnal_8.5.2_linux-aarch64.run && \
-    bash Ascend-cann-nnal_8.5.2_linux-aarch64.run --quiet --install && \
-    rm -f Ascend-cann-nnal_8.5.2_linux-aarch64.run && \
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-nnal_8.5.2_linux-aarch64.run && \
+        bash Ascend-cann-nnal_8.5.2_linux-aarch64.run --quiet --install && \
+        rm -f Ascend-cann-nnal_8.5.2_linux-aarch64.run ; \
+    elif [ "$ARCH" = "x86_64" ]; then \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-toolkit_8.5.2_linux-x86_64.run && \
+        bash Ascend-cann-toolkit_8.5.2_linux-x86_64.run --quiet --install && \
+        rm -f Ascend-cann-toolkit_8.5.2_linux-x86_64.run && \
+
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-A3-ops_8.5.2_linux-x86_64.run && \
+        bash Ascend-cann-A3-ops_8.5.2_linux-x86_64.run --quiet --install && \
+        rm -f Ascend-cann-A3-ops_8.5.2_linux-x86_64.run && \
+
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+        wget -v --no-check-certificate https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.2/Ascend-cann-nnal_8.5.2_linux-x86_64.run && \
+        bash Ascend-cann-nnal_8.5.2_linux-x86_64.run --quiet --install && \
+        rm -f Ascend-cann-nnal_8.5.2_linux-x86_64.run ; \
+    fi && \
 
     source /usr/local/Ascend/cann/set_env.sh && \
     rm -rf /tmp/*
