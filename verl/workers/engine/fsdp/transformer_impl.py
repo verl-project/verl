@@ -883,6 +883,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         assert pad_mode == DatasetPadMode.NO_PADDING, f"pad_mode {pad_mode} not supported"
 
         multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
+        mm_token_type_ids = multi_modal_inputs.get("mm_token_type_ids")
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
 
@@ -948,6 +949,18 @@ class FSDPEngineWithLMHead(FSDPEngine):
             output_args["input_ids_rmpad_rolled"] = input_ids_rmpad_rolled
             output_args["temperature_rmpad"] = temperature_rmpad
 
+            if mm_token_type_ids is not None:
+                if mm_token_type_ids.dim() == 1:
+                    mm_token_type_ids = mm_token_type_ids.unsqueeze(0)
+                if self.use_ulysses_sp:
+                    mm_token_type_ids, _, _ = ulysses_pad_and_slice_inputs(
+                        mm_token_type_ids,
+                        position_ids_rmpad=None,
+                        sp_size=self.ulysses_sequence_parallel_size,
+                        pad_value=0,
+                    )
+                multi_modal_inputs["mm_token_type_ids"] = mm_token_type_ids
+
             # only pass input_ids and position_ids to enable flash_attn_varlen
 
             model_inputs = {
@@ -990,6 +1003,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 attention_mask = torch.nested.to_padded_tensor(
                     attention_mask, padding=0, output_size=(batch_size, max_seq_len)
                 )
+
+                if mm_token_type_ids is not None:
+                    if mm_token_type_ids.dim() != 1:
+                        mm_token_type_ids = mm_token_type_ids.reshape(-1)
+                    mm_token_type_ids = torch.nested.nested_tensor_from_jagged(
+                        mm_token_type_ids, input_ids.offsets()
+                    )
+                    mm_token_type_ids = torch.nested.to_padded_tensor(
+                        mm_token_type_ids, padding=0, output_size=(batch_size, max_seq_len)
+                    )
+                    multi_modal_inputs["mm_token_type_ids"] = mm_token_type_ids
 
                 model_inputs = {
                     "input_ids": input_ids,

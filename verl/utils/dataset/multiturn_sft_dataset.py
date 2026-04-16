@@ -158,6 +158,38 @@ def _inject_gemma4_thinking_prefix(
     return input_ids, attention_mask, loss_mask, mm_token_type_ids
 
 
+def _normalize_gemma4_mm_token_type_ids(
+    mm_token_type_ids: Optional[torch.Tensor],
+    input_ids: torch.Tensor,
+    system_prompt_len: int = 0,
+) -> torch.Tensor:
+    """Align Gemma4 mm_token_type_ids with the current per-message input_ids."""
+    if isinstance(mm_token_type_ids, torch.Tensor):
+        if mm_token_type_ids.dim() > 1:
+            mm_token_type_ids = mm_token_type_ids[0]
+        mm_token_type_ids = mm_token_type_ids.to(device=input_ids.device, dtype=input_ids.dtype)
+    else:
+        mm_token_type_ids = torch.zeros_like(input_ids)
+
+    if system_prompt_len > 0 and len(mm_token_type_ids) >= system_prompt_len:
+        mm_token_type_ids = mm_token_type_ids[system_prompt_len:]
+
+    if len(mm_token_type_ids) != len(input_ids):
+        mm_token_type_ids = torch.zeros_like(input_ids)
+
+    return mm_token_type_ids
+
+
+def _concat_gemma4_mm_token_type_ids(mm_token_type_ids_list: list[torch.Tensor]) -> torch.Tensor:
+    """Concatenate per-turn Gemma4 mm_token_type_ids along sequence dimension."""
+    normalized = []
+    for mm_token_type_ids in mm_token_type_ids_list:
+        if mm_token_type_ids.dim() > 1:
+            mm_token_type_ids = mm_token_type_ids[0]
+        normalized.append(mm_token_type_ids)
+    return torch.cat(normalized, dim=0)
+
+
 @once
 def print_assembled_message(tokenizer, message_list, input_ids, loss_mask, attn_mask, tools):
     """
@@ -338,11 +370,23 @@ class MultiTurnSFTDataset(Dataset):
         inputs = dict(inputs)
         input_ids = inputs.pop("input_ids")[0]
         attention_mask = inputs.pop("attention_mask")[0]
+        mm_token_type_ids = None
+        if self.is_gemma4_model:
+            mm_token_type_ids = _normalize_gemma4_mm_token_type_ids(
+                inputs.get("mm_token_type_ids"),
+                input_ids=input_ids,
+            )
 
         # remove system prompt if exists
         if index != 0 and message["role"] != "system":
             input_ids = input_ids[len(self.system_prompt) :]
             attention_mask = attention_mask[len(self.system_prompt) :]
+            if mm_token_type_ids is not None:
+                mm_token_type_ids = _normalize_gemma4_mm_token_type_ids(
+                    mm_token_type_ids,
+                    input_ids=input_ids,
+                    system_prompt_len=len(self.system_prompt),
+                )
 
         if message["role"] == "assistant":
             loss_mask = torch.ones_like(attention_mask)
@@ -352,12 +396,6 @@ class MultiTurnSFTDataset(Dataset):
             loss_mask = torch.zeros_like(attention_mask)
 
         if message["role"] == "assistant" and self.is_gemma4_model and self.gemma4_thinking_prefix_ids:
-            mm_token_type_ids = inputs.get("mm_token_type_ids")
-            if isinstance(mm_token_type_ids, torch.Tensor):
-                mm_token_type_ids = mm_token_type_ids[0]
-            else:
-                mm_token_type_ids = None
-
             input_ids, attention_mask, loss_mask, mm_token_type_ids = _inject_gemma4_thinking_prefix(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -366,8 +404,9 @@ class MultiTurnSFTDataset(Dataset):
                 generation_prompt_ids=self.generation_prompt,
                 thinking_prefix_ids=self.gemma4_thinking_prefix_ids,
             )
-            if mm_token_type_ids is not None:
-                inputs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
+
+        if mm_token_type_ids is not None:
+            inputs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         return input_ids, loss_mask, attention_mask, inputs
 
@@ -461,6 +500,8 @@ class MultiTurnSFTDataset(Dataset):
             if k == "mm_token_type_ids" and not self.is_gemma4_model:
                 keys_to_remove.append(k)
                 continue
+            if k == "mm_token_type_ids" and self.is_gemma4_model:
+                continue
             if len(v) > 0 and v[0] is not None and isinstance(v[0], torch.Tensor):
                 # Check if all tensors in the list have the same shape
                 first_shape = v[0].shape[1:]
@@ -471,7 +512,10 @@ class MultiTurnSFTDataset(Dataset):
             del multi_modal_inputs[k]
 
         for k, v in multi_modal_inputs.items():
-            multi_modal_inputs[k] = torch.concat(v, dim=0)
+            if k == "mm_token_type_ids" and self.is_gemma4_model:
+                multi_modal_inputs[k] = _concat_gemma4_mm_token_type_ids(v)
+            else:
+                multi_modal_inputs[k] = torch.concat(v, dim=0)
 
         # 2. handle position_ids for Qwen-VL series models
         if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
