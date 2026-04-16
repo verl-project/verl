@@ -11,9 +11,17 @@ on:
 jobs:
   build-ascend-image-a3:
     if: ${{ github.repository_owner == 'verl-project' }}
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-build-ascend-image-a3
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.platform }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - name: Remove unnecessary parts in github actions runners to free up disk space
@@ -36,15 +44,15 @@ jobs:
         run: |
           docker system prune -a -f --volumes || true
 
-      - name: Build and push v0.8.0 image to Quay
+      - name: Build image (no push on PR)
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/arm64
+          platforms: ${{ matrix.platform }}
           file: ./docker/ascend/Dockerfile.ascend_8.5.1_a3_qwen3-5
-          push: true
+          push: false  # PR 时不推送，只构建验证
           tags: |
-            quay.io/ascend/verl:verl-8.5.1-a3-ubuntu22.04-py3.11-qwen3-5
+            quay.io/ascend/verl:verl-8.5.1-a3-ubuntu22.04-py3.11-qwen3-5-${{ matrix.platform }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
