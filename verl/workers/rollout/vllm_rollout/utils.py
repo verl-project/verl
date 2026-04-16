@@ -176,7 +176,13 @@ class vLLMColocateWorkerExtension:
         # patch weight loader to support MoE model
         patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self,
+        peft_config: dict = None,
+        base_sync_done=False,
+        use_shm: bool = False,
+        use_speculative_decoding: bool = False,
+    ):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
@@ -216,9 +222,26 @@ class vLLMColocateWorkerExtension:
         )
         receiver.receive_weights(
             on_bucket_received=lambda weights: self._update_weights(
-                weights, peft_config=peft_config, base_sync_done=base_sync_done
+                weights,
+                peft_config=peft_config,
+                base_sync_done=base_sync_done,
             )
         )
+
+        if use_speculative_decoding:
+            # Reload draft weights because they are discarded after each model load.
+            from vllm.model_executor.model_loader import get_model_loader
+
+            loader = get_model_loader(self.model_runner.drafter.vllm_config.load_config)
+            self.model_runner.drafter.model.load_weights(
+                loader.get_all_weights(
+                    self.vllm_config.speculative_config.draft_model_config,
+                    self.model_runner.drafter.model,
+                )
+            )
+
+            # Rebuild RoPE caches because reloading weights clears the cos/sin cache.
+            rebuild_rope_caches(self.model_runner.drafter.model)
 
         if self._is_qat_model:
             # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
@@ -238,6 +261,11 @@ class vLLMColocateWorkerExtension:
             model = self.model_runner.model
             model_config = self.model_runner.vllm_config.model_config
             process_weights_after_loading(model, model_config, self.device)
+
+            if use_speculative_decoding:
+                drafter_model = self.model_runner.drafter.model
+                drafter_model_config = self.model_runner.drafter.vllm_config.model_config
+                process_weights_after_loading(drafter_model, drafter_model_config, self.device)
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
@@ -292,7 +320,13 @@ class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):
 
         return super().__new__(cls)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self,
+        peft_config: dict = None,
+        base_sync_done=False,
+        use_shm: bool = False,
+        use_speculative_decoding: bool = False,
+    ):
         """Update the weights of the rollout model."""
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
@@ -428,3 +462,13 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
 
     result_dict["prompt_ids"] = prompt_ids_ls
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
+
+
+@torch.no_grad()
+def rebuild_rope_caches(root_module: torch.nn.Module):
+    for _, m in root_module.named_modules():
+        if hasattr(m, "rotary_emb"):
+            old = m.rotary_emb.cos_sin_cache
+            cache = m.rotary_emb._compute_cos_sin_cache()
+            cache = cache.to(device=old.device, dtype=old.dtype)
+            m.rotary_emb.cos_sin_cache = cache

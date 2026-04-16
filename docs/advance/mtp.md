@@ -2,7 +2,7 @@
 
 **Author**: `https://github.com/meituan-search`
 
-Last updated: 02/15/2026
+Last updated: 04/08/2026
 
 ## 1. Scope of Support
 
@@ -11,6 +11,8 @@ Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek s
 - **Training Engine**: Only supports the `mbridge/Megatron-Bridge + megatron` combination; other training engines are not compatible at this time;
 
 - **Inference Engine**: Compatible with all engines, but the model must be in the corresponding engine's compatibility list;
+
+- **vLLM Inference-Only Speculative Decoding**: In addition to MTP-based rollout acceleration, vLLM also supports inference-only speculative decoding with external `EAGLE` / `EAGLE3` draft models. This path is currently supported only for vLLM rollout. SGLang is not supported right now;
 
 - **Dependency Versions**:
 
@@ -31,7 +33,8 @@ The MTP training process can be flexibly controlled through the following config
 | Load MTP Parameters Only | `enable=True`                                                                                                                                                                                                                                                                                              | VRAM usage will increase, but the exported parameters include the MTP module and can be directly used for online deployment              |
 | Full-Parameter MTP Training | `enable=True`<br>`enable_train=True`<br>`mtp_loss_scaling_factor=0.1`                                                                                                                                                                                                                              | MTP Loss will apply to all model parameters                            |
 | MTP Parameter-Only Training | `enable=True`<br>`enable_train=True`<br>`detach_encoder=True`                                                                                                                                                                                                                                      | Freeze the Encoder layer, update only MTP module parameters, MTP Loss applies only to MTP parameters |
-| MTP Accelerated Rollout | 1. vLLM configuration:<br>`enable=True`<br>`enable_rollout=True`<br>`method="mtp"`<br>`num_speculative_tokens=1`<br>2. SGLang configuration:<br>`enable=True`<br>`enable_rollout=True`<br>`speculative_algorithm="EAGLE"`<br>`speculative_num_steps=2`<br>`speculative_eagle_topk=2`<br>`speculative_num_draft_tokens=4` | Achieve inference acceleration during the Rollout phase based on MTP                      |
+| MTP Accelerated Rollout | 1. vLLM configuration:<br>`enable=True`<br>`enable_rollout=True`<br>`method="mtp"`<br>`num_speculative_tokens=1`<br>2. SGLang configuration:<br>`enable=True`<br>`enable_rollout=True`<br>`speculative_algorithm="EAGLE"`<br>`speculative_num_steps=2`<br>`speculative_eagle_topk=2`<br>`speculative_num_draft_tokens=4` | Achieve inference acceleration during the Rollout phase based on trainable MTP parameters |
+| vLLM Inference-Only EAGLE / EAGLE3 Rollout Acceleration | `actor_rollout_ref.rollout.speculative_decoding.enable=True`<br>`actor_rollout_ref.rollout.speculative_decoding.method="EAGLE"` or `"EAGLE3"`<br>`actor_rollout_ref.rollout.speculative_decoding.draft_model_path=/path/to/draft/model`<br>`actor_rollout_ref.rollout.speculative_decoding.num_draft_tokens=4`<br>`actor_rollout_ref.rollout.speculative_decoding.draft_tensor_parallel_size=1` or `tensor_model_parallel_size` | Achieve rollout acceleration on vLLM with an external draft model. This does not require trainable MTP parameters. SGLang does not support this path right now. |
 
 ## 3. Experimental Results
 
@@ -109,4 +112,3 @@ The experiment was conducted using following data:
 The result: [wandb link](https://wandb.ai/hou-zg-meituan/mimo-7b-sft-mtp?nw=nwuserhouzg)
 
 The presence of mtp layer has limited effect on main loss. However, when MTP layer is detached, the mtp_loss converges to a higher value.
-

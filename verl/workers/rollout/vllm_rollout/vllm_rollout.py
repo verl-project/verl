@@ -98,6 +98,7 @@ class ServerAdapter(BaseRollout):
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
         self.use_shm = not is_support_ipc()
+        self.use_speculative_decoding = config.speculative_decoding.enable
         if self.use_shm:
             logger.warning(
                 "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
@@ -160,7 +161,7 @@ class ServerAdapter(BaseRollout):
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
-            kwargs={**kwargs, "use_shm": self.use_shm},
+            kwargs={**kwargs, "use_shm": self.use_shm, "use_speculative_decoding": self.use_speculative_decoding},
         )
 
         bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes

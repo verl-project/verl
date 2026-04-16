@@ -265,6 +265,24 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    # speculative decoding
+    if "speculative_decoding_metrics" in batch.meta_info:
+        metrics["speculative_decoding/num_drafts"] = np.mean(
+            batch.meta_info["speculative_decoding_metrics"]["num_drafts"]
+        )
+        metrics["speculative_decoding/num_draft_tokens"] = np.mean(
+            batch.meta_info["speculative_decoding_metrics"]["num_draft_tokens"]
+        )
+        metrics["speculative_decoding/num_accepted_tokens"] = np.mean(
+            batch.meta_info["speculative_decoding_metrics"]["num_accepted_tokens"]
+        )
+        metrics["speculative_decoding/avg_draft_acceptance_rate"] = np.mean(
+            batch.meta_info["speculative_decoding_metrics"]["avg_draft_acceptance_rate"]
+        )
+        metrics["speculative_decoding/mean_acceptance_length"] = np.mean(
+            batch.meta_info["speculative_decoding_metrics"]["mean_acceptance_length"]
+        )
+
     return metrics
 
 

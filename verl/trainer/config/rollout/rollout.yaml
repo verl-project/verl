@@ -444,5 +444,33 @@ quantization_config_file: null
 # MTP configuration, reuse model configuration
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 
+# Speculative decoding configuration for vLLM rollout using an external draft model.
+speculative_decoding:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.rollout.SpeculativeDecodingConfig
+
+  # Whether to enable inference-only speculative decoding for vLLM rollout
+  enable: False
+
+  # Speculative decoding method supported by vLLM, e.g. eagle or eagle3
+  method: eagle3
+
+  # Number of speculative decoding steps
+  num_steps: 1
+
+  # Number of draft tokens proposed by the draft model
+  num_draft_tokens: 4
+
+  # Path to the draft model used for speculative decoding
+  draft_model_path: null
+
+  # Tensor parallel size for the draft model, should be 1 or match tensor_model_parallel_size
+  draft_tensor_parallel_size: 1
+
+  # Whether to scrape and log speculative decoding metrics such as acceptance rate.
+  # Disabled by default because this currently requires Prometheus requests around rollout batches.
+  log_metrics: false
+
 # QAT configuration (inherited from actor's engine config)
 qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}

@@ -30,7 +30,10 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
-from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
+from verl.experimental.agent_loop.prometheus_utils import (
+    read_spec_decoding_metrics_from_prometheus,
+    update_prometheus_config,
+)
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.experimental.teacher_loop import TeacherModelManager
 from verl.protocol import DataProto
@@ -42,18 +45,9 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
-from verl.utils.rollout_trace import (
-    RolloutTraceConfig,
-    rollout_trace_attr,
-    rollout_trace_op,
-)
+from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import (
-    DistillationConfig,
-    DistillationLossConfig,
-    HFModelConfig,
-    RolloutConfig,
-)
+from verl.workers.config import DistillationConfig, DistillationLossConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import DiffusionOutput, TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
@@ -1183,6 +1177,18 @@ class AgentLoopManager:
         """
         if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.wake_up()
+
+        spec_before = None
+        if (
+            self.rollout_config.name == "vllm"
+            and self.rollout_config.speculative_decoding.enable
+            and self.rollout_config.speculative_decoding.log_metrics
+        ):
+            try:
+                spec_before = await read_spec_decoding_metrics_from_prometheus(self.server_addresses)
+            except Exception as e:
+                print(f"speculative decoding unavailable: {e}")
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[
@@ -1199,6 +1205,33 @@ class AgentLoopManager:
         timing = self._performance_metrics(metrics, output)
 
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
+
+        if spec_before is not None:
+            try:
+                spec_after = await read_spec_decoding_metrics_from_prometheus(self.server_addresses)
+                spec_delta = {key: spec_after[key] - spec_before[key] for key in spec_before}
+                acceptance_rate = (
+                    spec_delta["num_accepted_tokens"] / spec_delta["num_draft_tokens"]
+                    if spec_delta["num_draft_tokens"] > 0
+                    else float("inf")
+                )
+
+                mean_acceptance_length = (
+                    1.0 + (spec_delta["num_accepted_tokens"] / spec_delta["num_drafts"])
+                    if spec_delta["num_drafts"] > 0
+                    else 1.0
+                )
+
+                output.meta_info["speculative_decoding_metrics"] = {
+                    "num_drafts": spec_delta["num_drafts"],
+                    "num_draft_tokens": spec_delta["num_draft_tokens"],
+                    "num_accepted_tokens": spec_delta["num_accepted_tokens"],
+                    "avg_draft_acceptance_rate": acceptance_rate,
+                    "mean_acceptance_length": mean_acceptance_length,
+                }
+            except Exception as e:
+                print(f"speculative decoding unavailable: {e}")
+
         return output
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:

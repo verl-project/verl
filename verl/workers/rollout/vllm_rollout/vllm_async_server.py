@@ -290,6 +290,23 @@ class vLLMHttpServer:
             }
             args["speculative_config"] = speculative_config
 
+        # speculative decoding:
+        if self.config.speculative_decoding.enable:
+            if self.config.speculative_decoding.draft_model_path is None:
+                raise ValueError(
+                    "self.config.speculative_decoding._draft_model_path shoul not be None when using with vLLM"
+                )
+
+            speculative_config = {
+                "model": self.config.speculative_decoding.draft_model_path,
+                "max_model_len": self.config.max_model_len,
+                "num_speculative_tokens": self.config.speculative_decoding.num_draft_tokens,
+                "method": self.config.speculative_decoding.method.lower(),
+                "draft_tensor_parallel_size": self.config.speculative_decoding.draft_tensor_parallel_size,
+            }
+
+            args["speculative_config"] = speculative_config
+
         if self.config.data_parallel_size > 1:
             assert self.gpus_per_node % self.config.tensor_model_parallel_size == 0, (
                 "gpus_per_node should be divisible by tensor_model_parallel_size"
