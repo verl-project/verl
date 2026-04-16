@@ -161,6 +161,7 @@ class AsyncLLMServerManager:
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
+        kwargs.pop("validate", None)
         server_id, server = await self._acquire_server(request_id)
         try:
             output: TokenOutput | DiffusionOutput = await server.generate.remote(
@@ -449,6 +450,7 @@ class AgentLoopWorker:
         teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
         teacher_load_balancer_handle: ray.actor.ActorHandle = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        **kwargs: Any,
     ):
         """Initialize agent loop manager.
         Args:
@@ -636,10 +638,11 @@ class AgentLoopWorker:
                 dataset_cls=self.dataset_cls,
                 data_config=DictConfigWrap(self.config.data),
             )
+            kwargs["validate"] = trajectory["validate"]
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-            return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
+            return await self._agent_loop_postprocess(output, **kwargs)
 
-    async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
+    async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
@@ -702,6 +705,14 @@ class AgentLoopWorker:
         if output.response_logprobs is not None:
             pad_size = self.rollout_config.response_length - len(output.response_logprobs)
             response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
+        _es_logprobs = output.extra_fields.pop("engine_server_logprobs", None)
+        if _es_logprobs is not None:
+            pad_size = self.rollout_config.response_length - len(_es_logprobs)
+            output.extra_fields["engine_server_logprobs"] = torch.tensor(_es_logprobs + [0.0] * pad_size).unsqueeze(0)
+        _es_entropys = output.extra_fields.pop("engine_server_entropys", None)
+        if _es_entropys is not None:
+            pad_size = self.rollout_config.response_length - len(_es_entropys)
+            output.extra_fields["engine_server_entropys"] = torch.tensor(_es_entropys + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
         attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)
@@ -749,7 +760,7 @@ class AgentLoopWorker:
             output,
             prompt_ids=output.prompt_ids,
             response_ids=output.response_ids,
-            validate=validate,
+            validate=kwargs.get("validate"),
         )
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
@@ -914,6 +925,14 @@ class AgentLoopWorker:
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
+        if inputs[0].extra_fields.get("engine_server_logprobs") is not None:
+            optional_outputs["engine_server_logprobs"] = torch.cat(
+                [input.extra_fields.pop("engine_server_logprobs") for input in inputs], dim=0
+            )
+        if inputs[0].extra_fields.get("engine_server_entropys") is not None:
+            optional_outputs["engine_server_entropys"] = torch.cat(
+                [input.extra_fields.pop("engine_server_entropys") for input in inputs], dim=0
+            )
         if inputs[0].routed_experts is not None:
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
@@ -1046,6 +1065,7 @@ class AgentLoopManager:
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self.model_engine_server_handle = None
 
         self.teacher_model_manager = teacher_model_manager
         self.distillation_enabled = is_distillation_enabled(self.config.get("distillation", None))
@@ -1162,6 +1182,7 @@ class AgentLoopManager:
                     teacher_servers,
                     teacher_load_balancer_handle,
                     self.reward_loop_worker_handles,
+                    model_engine_server_handle=self.model_engine_server_handle,
                 )
             )
 

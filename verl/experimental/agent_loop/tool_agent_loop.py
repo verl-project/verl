@@ -122,6 +122,7 @@ class ToolAgentLoop(AgentLoopBase):
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        validate = kwargs.pop("validate", False)
         messages = list(kwargs["raw_prompt"])
 
         # extract images and videos from messages
@@ -159,6 +160,7 @@ class ToolAgentLoop(AgentLoopBase):
             interaction=interaction,
             interaction_kwargs=interaction_kwargs,
         )
+        agent_data.extra_fields["validate"] = validate
 
         # Per-sample tool selection: filter global tools by extra_info.tool_selection
         extra_info = kwargs.get("extra_info", {}) or {}
@@ -197,6 +199,12 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.video_data is not None:
             multi_modal_data["videos"] = agent_data.video_data
 
+        extra_fields = agent_data.extra_fields
+        if extra_fields.get("engine_server_logprobs"):
+            extra_fields["engine_server_logprobs"] = extra_fields["engine_server_logprobs"][: self.response_length]
+        if extra_fields.get("engine_server_entropys"):
+            extra_fields["engine_server_entropys"] = extra_fields["engine_server_entropys"][: self.response_length]
+
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
@@ -208,7 +216,7 @@ class ToolAgentLoop(AgentLoopBase):
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             routed_experts=agent_data.routed_experts,
-            extra_fields=agent_data.extra_fields,
+            extra_fields=extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
         return output
@@ -231,6 +239,7 @@ class ToolAgentLoop(AgentLoopBase):
         """Handle the generating state: generate model response and check for tool calls."""
         add_messages: list[dict[str, Any]] = []
 
+        extra_kwargs = {"validate": agent_data.extra_fields.get("validate", False)}
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
@@ -238,6 +247,7 @@ class ToolAgentLoop(AgentLoopBase):
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
+                **extra_kwargs,
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
@@ -246,8 +256,9 @@ class ToolAgentLoop(AgentLoopBase):
         else:
             agent_data.metrics["num_preempted"] += output.num_preempted if output.num_preempted is not None else 0
 
+        _ACCUMULATED_KEYS = {"engine_server_logprobs", "engine_server_entropys"}
         if not agent_data.extra_fields:
-            agent_data.extra_fields.update(output.extra_fields)
+            agent_data.extra_fields.update({k: v for k, v in output.extra_fields.items() if k not in _ACCUMULATED_KEYS})
         else:
             # Multi-round calls, only update the maximum max_global_steps.
             max_global_steps = output.extra_fields.get("max_global_steps", None)
@@ -260,7 +271,12 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
-
+        if output.extra_fields.get("engine_server_logprobs"):
+            agent_data.extra_fields.setdefault("engine_server_logprobs", [])
+            agent_data.extra_fields["engine_server_logprobs"] += output.extra_fields["engine_server_logprobs"]
+        if output.extra_fields.get("engine_server_entropys"):
+            agent_data.extra_fields.setdefault("engine_server_entropys", [])
+            agent_data.extra_fields["engine_server_entropys"] += output.extra_fields["engine_server_entropys"]
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
 
@@ -393,6 +409,10 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.response_mask += [0] * len(response_ids)
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
+        if agent_data.extra_fields.get("engine_server_logprobs"):
+            agent_data.extra_fields["engine_server_logprobs"] += [0.0] * len(response_ids)
+        if agent_data.extra_fields.get("engine_server_entropys"):
+            agent_data.extra_fields["engine_server_entropys"] += [0.0] * len(response_ids)
         agent_data.user_turns += 1
         return AgentState.GENERATING
 
@@ -425,6 +445,10 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.response_mask += [0] * len(response_ids)
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
+        if agent_data.extra_fields.get("engine_server_logprobs"):
+            agent_data.extra_fields["engine_server_logprobs"] += [0.0] * len(response_ids)
+        if agent_data.extra_fields.get("engine_server_entropys"):
+            agent_data.extra_fields["engine_server_entropys"] += [0.0] * len(response_ids)
 
         # double check prompt
         # Check termination condition

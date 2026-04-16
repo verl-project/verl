@@ -157,6 +157,14 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    async def set_param_from_async_generator(self, weight_generator) -> None:
+        """Load weights from an async (name, tensor) generator into the model.
+
+        Args:
+            weight_generator: Async generator yielding (name, tensor) pairs.
+        """
+        raise NotImplementedError
+
     def get_data_parallel_size(self):
         raise NotImplementedError
 

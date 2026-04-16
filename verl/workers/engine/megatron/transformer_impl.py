@@ -737,6 +737,15 @@ class MegatronEngine(BaseEngine):
 
         return per_tensor_param, peft_config
 
+    async def set_param_from_async_generator(self, weight_generator) -> None:
+        """Load weights from an async generator."""
+        if not self.vanilla_bridge:
+            raise NotImplementedError("set_param_from_async_generator is only supported for vanilla mbridge")
+        load_megatron_model_to_gpu(self.module, load_grad=False)
+        await self.bridge.load_weights_from_async_generator(self.module, weight_generator)
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.module)
+
     def disable_adapter(self) -> ContextManager:
         return self.peft_cls.disable_adapter(self.module)
 

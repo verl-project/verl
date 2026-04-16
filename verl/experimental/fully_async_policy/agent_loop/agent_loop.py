@@ -44,6 +44,16 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
     invisible to the AgentLoop.
     """
 
+    def __init__(
+        self,
+        config: DictConfig,
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
+        model_engine_server_handle: ray.actor.ActorHandle = None,
+    ):
+        super().__init__(config=config, servers=servers, load_balancer_handle=load_balancer_handle)
+        self.model_engine_server_handle = model_engine_server_handle
+
     @rollout_trace_op
     async def generate(
         self,
@@ -53,6 +63,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -66,6 +77,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         Returns:
             TokenOutput: token output
         """
+        validate = kwargs.pop("validate", False)
         prompt_ids = normalize_token_ids(prompt_ids)
 
         limit_key = None
@@ -91,11 +103,25 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
                 image_data=image_data,
                 video_data=video_data,
             )
-
+            current_prompt_ids = prompt_ids + final_output.token_ids
+            current_temperature = sampling_params.get("temperature", 1.0)
+            # Skip old log prob computation during validation
+            if not validate:
+                output = await self._compute_old_log_prob(output, current_prompt_ids, current_temperature)
             # 2. merge output into final_output
             final_output.token_ids.extend(output.token_ids)
             if output.log_probs is not None:
                 final_output.log_probs.extend(output.log_probs)
+            if output.extra_fields.get("engine_server_logprobs") is not None:
+                final_output.extra_fields.setdefault("engine_server_logprobs", [])
+                final_output.extra_fields["engine_server_logprobs"].extend(
+                    output.extra_fields["engine_server_logprobs"]
+                )
+            if output.extra_fields.get("engine_server_entropys") is not None:
+                final_output.extra_fields.setdefault("engine_server_entropys", [])
+                final_output.extra_fields["engine_server_entropys"].extend(
+                    output.extra_fields["engine_server_entropys"]
+                )
             if output.routed_experts is not None:
                 if final_output.routed_experts is None:
                     final_output.routed_experts = output.routed_experts
@@ -126,6 +152,23 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         final_output.extra_fields["max_global_steps"] = max_global_steps
         return final_output
 
+    async def _compute_old_log_prob(self, output: TokenOutput, context_prompt_ids, temperature: float):
+        if self.model_engine_server_handle is None:
+            return output
+
+        # Only recompute old_log_probs for newly generated tokens in this turn.
+        if len(output.token_ids) == 0:
+            output.extra_fields["engine_server_logprobs"] = []
+            output.extra_fields["engine_server_entropys"] = []
+            return output
+
+        result = await self.model_engine_server_handle.compute_log_prob.remote(
+            context_prompt_ids, output.token_ids, temperature
+        )
+        output.extra_fields["engine_server_logprobs"] = result["log_probs"]
+        output.extra_fields["engine_server_entropys"] = result["entropy"]
+        return output
+
 
 @ray.remote
 class FullyAsyncAgentLoopWorker(AgentLoopWorker):
@@ -137,8 +180,14 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
         teacher_load_balancer_handle: ray.actor.ActorHandle = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        model_engine_server_handle: ray.actor.ActorHandle = None,
     ):
-        self.server_manager = FullyAsyncLLMServerManager(config, servers, load_balancer_handle)
+        self.server_manager = FullyAsyncLLMServerManager(
+            config,
+            servers,
+            load_balancer_handle,
+            model_engine_server_handle,
+        )
         super().__init__(
             config,
             servers,
@@ -162,6 +211,36 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         super().__init__(config, worker_group, rollout_resource_pool, teacher_model_manager, reward_loop_worker_handles)
         if self.distillation_enabled:
             raise NotImplementedError("Distillation is not implemented in FullyAsyncAgentLoopManager yet.")
+
+    async def _initialize_llm_servers(self):
+        """Extend base class to also create ModelEngineReplica when configured."""
+        await super()._initialize_llm_servers()
+        if self.config.model_engine_server.enable_standalone:
+            await self._init_model_engine_replica()
+
+    async def _init_model_engine_replica(self):
+        """Create ModelEngineReplica, call init_standalone, and append to rollout_replicas.
+
+        ModelEngineReplica.init_standalone() self-allocates a Ray resource pool,
+        spawns ModelEngineWorker actors, calls init_model(), and creates the
+        OldLogProbServer — all in one call, exactly like vLLM/SGLang replicas.
+
+        After this, self.model_engine_server_handle is set so that
+        _init_agent_loop_workers() passes it to every FullyAsyncAgentLoopWorker.
+        """
+        from verl.workers.rollout.model_engine_server import ModelEngineReplica, ModelEngineWorker
+
+        replica = ModelEngineReplica(
+            replica_rank=len(self.rollout_replicas),
+            full_config=self.config,
+            worker_cls=ModelEngineWorker,
+            rollout_config=self.rollout_config,
+        )
+        await replica.init_standalone()
+        self.rollout_replicas.append(replica)
+
+        # Expose the server handle so _init_agent_loop_workers passes it to workers.
+        self.model_engine_server_handle = replica.servers[0]
 
     @auto_await
     async def generate_sequences_single(self, prompts: DataProto) -> DataProto:

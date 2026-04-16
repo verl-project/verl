@@ -53,6 +53,7 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/checkpoint_engine",  # checkpoint engine backend are device specific
     "verl/utils/modelopt/megatron_qat_patch.py",  # appear in torch.cuda.empty_cache()
     "verl/models/mcore/patch.py",  # checkpoint patch only on cuda
+    "verl/verl/workers/rollout/model_engine_server/model_engine_server.py",  # appear in default device_name
 ]
 
 # directory or file path must contain keyword "nccl"

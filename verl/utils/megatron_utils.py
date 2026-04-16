@@ -1551,9 +1551,14 @@ def copy_megatron_model_to_cpu(models):
                 for buffer in buffers:
                     buffer_state = {}
 
-                    # Copy parameter data to CPU
+                    # Keep a CPU snapshot for current params. This follows offload/load
+                    # semantics and also supports already-offloaded param buffers.
                     if buffer.param_data.storage().size() > 0:
-                        buffer_state["param_data"] = buffer.param_data.data.cpu().clone().pin_memory()
+                        buffer_state["param_data"] = buffer.param_data.data.cpu().pin_memory()
+                        buffer_state["param_data_size"] = buffer.param_data.storage().size()
+                    elif hasattr(buffer.param_data, "cpu_data") and buffer.param_data.cpu_data is not None:
+                        buffer_state["param_data"] = buffer.param_data.cpu_data.clone().pin_memory()
+                        buffer_state["param_data_size"] = buffer.param_data.cpu_data.storage().size()
 
                     buffer_list.append(buffer_state)
                 buffer_states.append(buffer_list)
@@ -1567,7 +1572,8 @@ def copy_megatron_model_to_cpu(models):
                 model_state[name] = param_state
 
             cpu_state[f"model_chunk_{model_idx}"] = {"model_state": model_state, "is_ddp": False}
-
+    gc.collect()
+    get_torch_device().empty_cache()
     return cpu_state
 
 
@@ -1596,7 +1602,12 @@ def restore_megatron_model_from_cpu(models, cpu_state):
                 for buffer, buffer_state in zip(buffers, buffer_list, strict=False):
                     # Restore parameter data
                     if "param_data" in buffer_state:
-                        buffer.param_data.data.copy_(buffer_state["param_data"].to(buffer.param_data.device))
+                        if buffer.param_data.storage().size() == 0:
+                            restore_size = buffer_state.get(
+                                "param_data_size", buffer_state["param_data"].storage().size()
+                            )
+                            buffer.param_data.storage().resize_(restore_size)
+                        buffer.param_data.copy_(buffer_state["param_data"], non_blocking=True)
 
         elif not chunk_state["is_ddp"] and not isinstance(model_chunk, DDP):
             # Restore non-DDP models
@@ -1604,4 +1615,6 @@ def restore_megatron_model_from_cpu(models, cpu_state):
             for name, param in model_chunk.named_parameters():
                 if name in model_state:
                     param_state = model_state[name]
-                    param.data.copy_(param_state["data"].to(param.device))
+                    param.data.copy_(param_state["data"], non_blocking=True)
+    gc.collect()
+    get_torch_device().empty_cache()

@@ -4,6 +4,9 @@ hydra:
 
 defaults:
   - ppo_megatron_trainer
+
+  - model_engine_server@model_engine_server: megatron_model_engine_server
+
   - _self_
 
 trainer:

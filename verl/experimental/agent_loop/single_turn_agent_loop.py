@@ -55,6 +55,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         )
 
         # 3. generate sequences
+        extra_kwargs = {"validate": kwargs.pop("validate", False)}
         metrics = {}
         with simple_timer("generate_sequences", metrics):
             output: TokenOutput = await self.server_manager.generate(
@@ -63,10 +64,17 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
+                **extra_kwargs,
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
         response_mask = [1] * len(output.token_ids)
+
+        extra_fields = output.extra_fields
+        if extra_fields.get("engine_server_logprobs"):
+            extra_fields["engine_server_logprobs"] = extra_fields["engine_server_logprobs"][: self.response_length]
+        if extra_fields.get("engine_server_entropys"):
+            extra_fields["engine_server_entropys"] = extra_fields["engine_server_entropys"][: self.response_length]
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
@@ -81,7 +89,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
             multi_modal_data=multi_modal_data,
             num_turns=2,
             metrics=metrics,
-            extra_fields=output.extra_fields,
+            extra_fields=extra_fields,
         )
 
         # keeping the schema consistent with tool_agent_loop
