@@ -461,10 +461,11 @@ class AgentLoopManagerTQ(AgentLoopManager):
         await instance._initialize_llm_servers()
         await instance._init_global_load_balancer()
         await instance._init_agent_loop_workers()
+        if instance.stream_teacher_with_rollout:
+            await instance.teacher_model_manager.wake_up()
         return instance
 
-    @auto_await
-    async def generate_sequences(self, prompts: TensorDict) -> None:
+    def generate_sequences(self, prompts: TensorDict) -> None:
         """
         Dispatch input batch to agent loop workers without blocking. Workers should put agent loop outputs
         into TransferQueue once an agent loop finished.
@@ -472,9 +473,6 @@ class AgentLoopManagerTQ(AgentLoopManager):
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
         """
-        if self.stream_teacher_with_rollout:
-            await self.teacher_model_manager.wake_up()
-
         # mark prompts as pending in replay buffer
         global_steps = prompts["global_steps"]
         partition_id = "train" if "validate" not in prompts else "val"
@@ -488,11 +486,6 @@ class AgentLoopManagerTQ(AgentLoopManager):
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
             ]
         )
-
-        # Ignore teacher model sleep because the above ray.get only makesure all the tasks were dispatched,
-        # not completed.
-        # if self.stream_teacher_with_rollout:
-        #     await self.teacher_model_manager.sleep()
 
 
 # ======================================= USER SECTION END =======================================
