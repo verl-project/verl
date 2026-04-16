@@ -126,7 +126,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.val_before_train=False \
     trainer.test_freq=-1 \
     trainer.save_freq=100 \
-    trainer.device='npu' \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
