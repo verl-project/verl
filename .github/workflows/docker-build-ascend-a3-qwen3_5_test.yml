@@ -17,8 +17,10 @@ jobs:
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
+            tag-suffix: amd64
           - platform: linux/arm64
             runner: ubuntu-22.04-arm
+            tag-suffix: arm64
     runs-on: ${{ matrix.runner }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.platform }}
@@ -52,7 +54,7 @@ jobs:
           file: ./docker/ascend/Dockerfile.ascend_8.5.1_a3_qwen3-5
           push: false  # PR 时不推送，只构建验证
           tags: |
-            quay.io/ascend/verl:verl-8.5.1-a3-ubuntu22.04-py3.11-qwen3-5-${{ matrix.platform }}
+            quay.io/ascend/verl:verl-8.5.1-a3-ubuntu22.04-py3.11-qwen3-5-${{ matrix.tag-suffix }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
