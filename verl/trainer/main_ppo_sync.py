@@ -875,7 +875,16 @@ class PPOTrainer:
             final_indices = sorted(pos for _, pos in session_max.values())
             final_keys = [batch.keys[i] for i in final_indices]
 
-            fields = ["uid", "prompts", "responses", "rm_scores", "num_turns", "reward_model", "data_source"]
+            fields = [
+                "uid",
+                "prompts",
+                "responses",
+                "rm_scores",
+                "num_turns",
+                "reward_model",
+                "data_source",
+                "extra_fields",
+            ]
             data = tq.kv_batch_get(keys=final_keys, partition_id=batch.partition_id, select_fields=fields)
             data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
             data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
@@ -889,6 +898,20 @@ class PPOTrainer:
             sample_scores.extend(scores)
             sample_turns.extend(data.pop("num_turns").tolist())
             reward_extra_infos_dict["reward"].extend(scores)
+
+            extra_fields_list = data.pop("extra_fields", None)
+            if extra_fields_list is not None:
+                n_prior = len(reward_extra_infos_dict["reward"]) - len(extra_fields_list.tolist())
+                for extra_field in extra_fields_list.tolist():
+                    reward_extra_info = extra_field.get("reward_extra_info", {}) if isinstance(extra_field, dict) else {}
+                    for key in reward_extra_infos_dict:
+                        if key != "reward" and key not in reward_extra_info:
+                            reward_extra_infos_dict[key].append(None)
+                    for key, value in reward_extra_info.items():
+                        if key not in reward_extra_infos_dict:
+                            reward_extra_infos_dict[key] = [None] * n_prior
+                        reward_extra_infos_dict[key].append(value)
+                    n_prior += 1
 
             reward_model = data.pop("reward_model", None)
             if reward_model is not None:
