@@ -155,7 +155,7 @@ class MultiTeacherModelManager:
 
     def _initialize_teacher_model_managers(self):
         teacher_models = self.distillation_config.teacher_models
-        split_sizes = [teacher.n_gpus_per_node for teacher in teacher_models.values()]
+        split_sizes = [teacher.world_size for teacher in teacher_models.values()]
         split_pools = split_resource_pool(self.resource_pool, split_size=split_sizes)
         assert len(split_pools) == len(teacher_models), (
             f"split_resource_pool returned {len(split_pools)} pools for {len(teacher_models)} teachers."

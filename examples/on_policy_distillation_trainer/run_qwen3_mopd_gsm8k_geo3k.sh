@@ -30,11 +30,10 @@ USE_DYNAMIC_BSZ=False
 
 STUDENT_WORLD_SIZE=2
 
-# Each teacher will grab TEACHER_N_GPUS_PER_NODE of the teacher pool; the pool's total per-node
-# size must equal the sum of the per-teacher counts below.
-TEACHER_N_GPUS_PER_NODE_GSM8K=1
-TEACHER_N_GPUS_PER_NODE_GEO3K=1
-TEACHER_POOL_N_GPUS_PER_NODE=$(( TEACHER_N_GPUS_PER_NODE_GSM8K + TEACHER_N_GPUS_PER_NODE_GEO3K ))
+# Total GPUs each teacher gets; the teacher pool's total size must equal the sum.
+TEACHER_WORLD_SIZE_GSM8K=1
+TEACHER_WORLD_SIZE_GEO3K=1
+TEACHER_POOL_WORLD_SIZE=$(( TEACHER_WORLD_SIZE_GSM8K + TEACHER_WORLD_SIZE_GEO3K ))
 
 SP=1
 
@@ -78,12 +77,12 @@ MODEL=(
 DISTILLATION=(
     distillation.enabled=True
     distillation.teacher_key=data_source
-    distillation.n_gpus_per_node=$TEACHER_POOL_N_GPUS_PER_NODE
+    distillation.n_gpus_per_node=$TEACHER_POOL_WORLD_SIZE
     distillation.nnodes=1
     # --- gsm8k teacher ---
     +distillation.teacher_models.gsm8k.key="openai/gsm8k"
     +distillation.teacher_models.gsm8k.model_path="${FAMILY}/${GSM8K_TEACHER_MODEL}"
-    +distillation.teacher_models.gsm8k.n_gpus_per_node=$TEACHER_N_GPUS_PER_NODE_GSM8K
+    +distillation.teacher_models.gsm8k.world_size=$TEACHER_WORLD_SIZE_GSM8K
     +distillation.teacher_models.gsm8k.inference.name=$ROLLOUT_NAME
     +distillation.teacher_models.gsm8k.inference.tensor_model_parallel_size=1
     +distillation.teacher_models.gsm8k.inference.gpu_memory_utilization=0.8
@@ -94,7 +93,7 @@ DISTILLATION=(
     # --- geo3k teacher (VL) ---
     +distillation.teacher_models.geo3k.key="hiyouga/geometry3k"
     +distillation.teacher_models.geo3k.model_path="${FAMILY}/${GEO3K_TEACHER_MODEL}"
-    +distillation.teacher_models.geo3k.n_gpus_per_node=$TEACHER_N_GPUS_PER_NODE_GEO3K
+    +distillation.teacher_models.geo3k.world_size=$TEACHER_WORLD_SIZE_GEO3K
     +distillation.teacher_models.geo3k.inference.name=$ROLLOUT_NAME
     +distillation.teacher_models.geo3k.inference.tensor_model_parallel_size=1
     +distillation.teacher_models.geo3k.inference.gpu_memory_utilization=0.8
