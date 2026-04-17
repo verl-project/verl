@@ -298,6 +298,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             )
             self.resource_pool_to_cls[resource_pool][str(role)] = role_cls
 
+    def _create_reward_model_class(self):
+        # In fully async mode, RM is managed by RewardLoopManager (standalone),
+        # not by the worker group system. Skip worker group creation for RM.
+        pass
+
     def _init_models(self):
         if self.use_critic:
             self.critic_wg = self.all_wg[str(Role.Critic)]
@@ -307,9 +312,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
             self.ref_policy_wg.init_model()
 
-        if self.use_rm:
-            self.rm_wg = self.all_wg[str(Role.RewardModel)]
-            self.rm_wg.init_model()
+        # Skip RM worker group — RM is initialized via _init_reward_loop -> RewardLoopManager
 
         self.actor_wg = self.all_wg[str(self.train_role)]
         self.actor_wg.init_model()
@@ -325,13 +328,29 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self._create_worker_classes()
         self._init_worker_groups()
         self._init_models()
-        self._init_reward_loop()
+        await self._init_reward_loop()
         await self._init_async_rollout_manager()
 
-    def _init_reward_loop(self):
+    async def _init_reward_loop(self):
+        """Only create RewardLoopManager if trainer does its own validation.
+
+        The GenRM server and reward_loop_workers are owned by the rollouter.
+        The trainer only needs its own RewardLoopManager when use_trainer_do_validate=True.
+        """
         if self.config.async_training.use_trainer_do_validate:
             print("[FullyAsyncTrainer] Init reward loop")
-            super()._init_reward_loop()
+            from verl.experimental.reward_loop import RewardLoopManager
+
+            # RewardModelManager.__init__ uses asyncio.run() internally, which conflicts
+            # with the already-running event loop (since init_workers is async).
+            # Run in a thread executor so it gets its own event loop.
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            self.reward_loop_manager = await loop.run_in_executor(
+                None,
+                lambda: RewardLoopManager(config=self.config, rm_resource_pool=None),
+            )
 
     async def _init_async_rollout_manager(self):
         # use async rollout do validate

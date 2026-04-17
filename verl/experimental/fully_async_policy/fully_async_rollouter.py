@@ -33,7 +33,7 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.utils import Role, WorkerType
+from verl.trainer.ppo.utils import Role, WorkerType, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -75,7 +75,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = False
 
-        self.use_rm = False
+        self.use_rm = need_reward_model(self.config)
+        if self.use_rm:
+            assert self.config.reward.reward_model.enable_resource_pool, (
+                "GenRM/DisRM in fully async mode requires standalone mode (enable_resource_pool=True). "
+                "Colocate mode is not supported because async rollout never pauses."
+            )
 
         self.use_critic = False
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -380,11 +385,36 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
         self._init_async_objects()
         self._create_worker_classes()
-        self._init_reward_loop()
+        await self._init_reward_loop()
         await self._init_async_rollout_manager()
+
+    async def _init_reward_loop(self):
+        """Override parent: rollouter owns the GenRM server and reward loop workers.
+
+        In fully async mode with GenRM, only the rollouter creates the RewardLoopManager
+        (which starts the GenRM vLLM server + reward_loop_workers). The trainer does NOT
+        create one (unless use_trainer_do_validate=True) to avoid duplicate named actors.
+
+        RewardModelManager.__init__ uses asyncio.run() internally, which conflicts
+        with the already-running event loop. Run in a thread executor to avoid this.
+        """
+        import asyncio
+
+        from verl.experimental.reward_loop import RewardLoopManager
+
+        loop = asyncio.get_running_loop()
+        self.reward_loop_manager = await loop.run_in_executor(
+            None,
+            lambda: RewardLoopManager(config=self.config, rm_resource_pool=None),
+        )
 
     def _create_actor_rollout_classes(self):
         # Skip rollout creation and let agentloop handle it
+        pass
+
+    def _create_reward_model_class(self):
+        # In fully async mode, RM is managed by RewardLoopManager (standalone),
+        # not by the worker group system. Skip worker group creation for RM.
         pass
 
     def _init_models(self):

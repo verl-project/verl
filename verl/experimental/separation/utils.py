@@ -16,7 +16,7 @@
 import ray
 
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.utils import Role, need_reference_policy
+from verl.trainer.ppo.utils import Role, need_reference_policy, need_reward_model
 
 
 def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
@@ -34,17 +34,31 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
     mapping = {}
 
     # Actor/Critic resource pool
-    if any(role in roles for role in [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy, Role.RewardModel]):
+    training_roles = [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy]
+    if any(role in roles for role in training_roles):
         assert config.trainer.n_gpus_per_node > 0, "config.trainer.n_gpus_per_node must be greater than 0"
         assert config.trainer.nnodes > 0, "config.trainer.nnodes must be greater than 0"
 
         trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
         resource_pool_spec["trainer_pool"] = trainer_pool
 
-        # Map training-related roles to the same resource pool
-        for role in [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy, Role.RewardModel]:
+        for role in training_roles:
             if role in roles:
                 mapping[role] = "trainer_pool"
+
+    # RewardModel resource pool (standalone when enable_resource_pool=True, else colocate with trainer)
+    if Role.RewardModel in roles:
+        rm_cfg = config.reward.reward_model
+        if rm_cfg.get("enable_resource_pool", False):
+            rm_pool = [rm_cfg.n_gpus_per_node] * rm_cfg.nnodes
+            resource_pool_spec["rm_pool"] = rm_pool
+            mapping[Role.RewardModel] = "rm_pool"
+        else:
+            # Colocate with trainer pool
+            if "trainer_pool" not in resource_pool_spec:
+                trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
+                resource_pool_spec["trainer_pool"] = trainer_pool
+            mapping[Role.RewardModel] = "trainer_pool"
 
     # Rollout resource pool
     if Role.Rollout in roles:
