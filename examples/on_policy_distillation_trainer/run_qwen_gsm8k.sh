@@ -33,7 +33,6 @@ USE_DYNAMIC_BSZ=True
 
 STUDENT_WORLD_SIZE=2
 
-TEACHER_RESOURCE_POOL=False
 TEACHER_WORLD_SIZE=4
 
 SP=1
@@ -75,7 +74,6 @@ MODEL=(
 DISTILLATION=(
     distillation.enabled=True
     distillation.num_workers=8
-    distillation.teacher_model.enable_resource_pool=$TEACHER_RESOURCE_POOL
     distillation.teacher_model.n_gpus_per_node=$TEACHER_WORLD_SIZE
     distillation.teacher_model.nnodes=1
     distillation.teacher_model.model_path="${FAMILY}/${TEACHER_MODEL}"

@@ -115,8 +115,6 @@ class DistillationLossConfig(BaseConfig):
 class DistillationTeacherModelConfig(BaseConfig):
     """Configuration for on-policy distillation teacher.
 
-    enable_resource_pool (bool):
-        Whether to enable separate resource pool for teacher model(s).
     n_gpus_per_node (int):
         Number of GPUs per node to use for distillation teacher model(s).
     nnodes (int):
@@ -129,7 +127,6 @@ class DistillationTeacherModelConfig(BaseConfig):
 
     _mutable_fields = BaseConfig._mutable_fields
 
-    enable_resource_pool: bool = False
     n_gpus_per_node: int = 0
     nnodes: int = 0
     model_path: Optional[str] = None

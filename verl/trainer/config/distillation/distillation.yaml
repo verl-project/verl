@@ -62,9 +62,6 @@ distillation_loss:
 teacher_model:
   _target_: verl.workers.config.DistillationTeacherModelConfig
 
-  # Whether to enable separate resource pool for teacher model(s)
-  enable_resource_pool: false
-
   # Number of GPUs per node to use for distillation teacher model(s)
   n_gpus_per_node: 8
 

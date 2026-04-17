@@ -34,22 +34,21 @@ class TeacherModelManager:
     def __init__(
         self,
         config: DictConfig,
-        resource_pool: RayResourcePool = None,
+        resource_pool: RayResourcePool,
     ):
         """
         Initialize the teacher model manager.
 
         Args:
             config (DictConfig): Teacher model configuration.
-            resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
+            resource_pool (RayResourcePool): Dedicated teacher resource pool.
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
         self.config: DistillationConfig = omega_conf_to_dataclass(config)
         self.resource_pool = resource_pool
         self._initialize_llm_servers()
-        self._initialize_async_server_manager()
-        self._initialize_router()
+        self._initialize_load_balancer()
 
         self.sleep()
 
@@ -60,21 +59,13 @@ class TeacherModelManager:
             * teacher_model_config.inference.data_parallel_size
             * teacher_model_config.inference.pipeline_model_parallel_size
         )
-        world_size = (
-            self.resource_pool.world_size
-            if self.resource_pool  # colocate mode
-            else teacher_model_config.n_gpus_per_node * teacher_model_config.nnodes  # standalone mode
-        )
-        num_replicas = world_size // teacher_world_size
+        num_replicas = self.resource_pool.world_size // teacher_world_size
 
         rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
         rollout_config = teacher_model_config.inference
         model_config = HFModelConfig(path=teacher_model_config.model_path)
-        self.tokenizer = model_config.get_processor()
-        text_tokenizer = model_config.tokenizer
         if model_config.tokenizer is None:
             raise ValueError(f"Tokenizer is required for teacher model {teacher_model_config.model_path}")
-        self.pad_token_id = text_tokenizer.pad_token_id
         self.rollout_replicas = [
             rollout_replica_class(
                 replica_rank=replica_rank,
@@ -85,51 +76,23 @@ class TeacherModelManager:
             )
             for replica_rank in range(num_replicas)
         ]
-        if self.resource_pool:
-            split_resource_pools = split_resource_pool(self.resource_pool, split_size=teacher_world_size)
-            assert len(split_resource_pools) == len(self.rollout_replicas)
-            self._run_all(
-                [
-                    server.init_colocated(resource_pool)
-                    for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
-                ]
-            )
-        else:
-            self._run_all([server.init_standalone() for server in self.rollout_replicas])
+        split_resource_pools = split_resource_pool(self.resource_pool, split_size=teacher_world_size)
+        assert len(split_resource_pools) == len(self.rollout_replicas)
+        self._run_all(
+            [
+                server.init_colocated(resource_pool)
+                for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
+            ]
+        )
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
-    def _initialize_async_server_manager(self):
+    def _initialize_load_balancer(self):
         from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer
-        from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
         self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
             server_actor_ids=self.server_addresses,
         )
-        self.server_manager = AsyncTeacherLLMServerManager(
-            config=self.config,
-            servers=list(zip(self.server_addresses, self.server_handles, strict=True)),
-            load_balancer_handle=self.load_balancer_handle,
-            distillation_config=self.config,
-            pad_token_id=self.pad_token_id,
-        )
-
-    def _initialize_router(self):
-        worker_urls = [f"http://{server_address}" for server_address in self.server_addresses]
-
-        from ..reward_loop.router.naive_router import launch_router_process
-
-        self.router_address, _ = launch_router_process(worker_urls=worker_urls)
-
-    def get_router_address(self):
-        return self.router_address
-
-    def compute_logprobs(self, data):
-        self.wake_up()
-        try:
-            return self._run_single(self.server_manager.compute_teacher_logprobs_batch(data))
-        finally:
-            self.sleep()
 
     @auto_await
     async def wake_up(self):
@@ -144,9 +107,3 @@ class TeacherModelManager:
     @auto_await
     async def _run_all(self, tasks: list[asyncio.Task]):
         await asyncio.gather(*tasks)
-
-    def _run_single(self, task):
-        async def run():
-            return await task
-
-        return asyncio.run(run())

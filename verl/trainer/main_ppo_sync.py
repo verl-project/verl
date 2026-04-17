@@ -1667,11 +1667,6 @@ class TaskRunner:
 
         distillation_config = config.get("distillation")
         if is_distillation_enabled(distillation_config):
-            if not distillation_config.teacher_model.enable_resource_pool:
-                raise ValueError(
-                    "Only support using dedicated resource_pool for teacher_model! Please set "
-                    "`distillation.teacher_model.enable_resource_pool=True`"
-                )
             if distillation_config.teacher_model.n_gpus_per_node <= 0:
                 raise ValueError("config.distillation.teacher_model.n_gpus_per_node must be greater than 0")
             if distillation_config.teacher_model.nnodes <= 0:
