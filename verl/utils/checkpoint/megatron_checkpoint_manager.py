@@ -595,13 +595,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             "_pg_collection",
         ]
         backup = {}
-        for k in bypass_keys:
-            if hasattr(self.transformer_config, k):
-                backup[k] = getattr(self.transformer_config, k, None)
-                delattr(self.transformer_config, k)
-        transformer_config_dict = asdict(self.transformer_config)
-        for k in backup:
-            setattr(self.transformer_config, k, backup[k])
+        try:
+            for k in bypass_keys:
+                if hasattr(self.transformer_config, k):
+                    backup[k] = getattr(self.transformer_config, k, None)
+                    delattr(self.transformer_config, k)
+            transformer_config_dict = asdict(self.transformer_config)
+        finally:
+            for k in backup:
+                setattr(self.transformer_config, k, backup[k])
         to_convert_types = {torch.dtype: str, AttnBackend: str}
         ignore_types = [Callable]
         pop_keys = []
