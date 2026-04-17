@@ -595,6 +595,24 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
             else:
                 position_ids = position_ids.values().unsqueeze(0)
 
+            # Pad sequence length to be divisible by cp_world_size * BLOCK_SIZE
+            # for context parallel block mask alignment requirement
+            if self.parallel_dims.cp_enabled:
+                cp_world_size = self.parallel_dims.get_mesh("cp").size(0)
+                # FlexAttention CP uses BLOCK_SIZE=128 for block masks
+                alignment = cp_world_size * 128
+                seq_len = input_ids.shape[-1]
+                output_args["cp_original_seq_len"] = seq_len
+                if seq_len % alignment != 0:
+                    pad_len = alignment - (seq_len % alignment)
+                    input_ids = torch.nn.functional.pad(input_ids, (0, pad_len), value=0)
+                    if position_ids.dim() == 2:
+                        # position_ids shape: [1, total_tokens]
+                        position_ids = torch.nn.functional.pad(position_ids, (0, pad_len), value=0)
+                    else:
+                        # position_ids shape: [total_tokens, 1, num_heads]
+                        position_ids = torch.nn.functional.pad(position_ids, (0, 0, 0, 0, 0, pad_len), value=0)
+
             labels = torch.roll(input_ids, shifts=-1, dims=1)
             attn_type = self.trainer.model_config.layer.attention.attn_backend
             attention_mask = get_attention_masks(
@@ -607,6 +625,13 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
             pad_token_id = tu.get_non_tensor_data(data=micro_batch, key="pad_token_id", default=0)
             batch_size = micro_batch.batch_size[0]
             max_seq_len = max(input_ids.offsets().diff())
+
+            # Round up max_seq_len to CP alignment requirement
+            if self.parallel_dims.cp_enabled:
+                cp_world_size = self.parallel_dims.get_mesh("cp").size(0)
+                # FlexAttention CP uses BLOCK_SIZE=128 for block masks
+                alignment = cp_world_size * 128
+                max_seq_len = (max_seq_len + alignment - 1) // alignment * alignment
 
             labels = torch.roll(input_ids.values(), shifts=-1, dims=0)
             input_ids = torch.nested.to_padded_tensor(
@@ -644,11 +669,44 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 self.trainer.device,
                 self.trainer.config.parallelism.context_parallel_load_balancer,
             )
+            # prepare_context_parallel_input adds CP-sharded 'positions' to
+            # extra_kwargs; move it to extra_inputs to avoid duplicate kwarg
+            # when both dicts are unpacked in model_forward_step
+            extra_inputs["positions"] = extra_kwargs.pop("positions")
 
         # TODO(jessicazhong): multimodal is not yet supported for Torchtitan engine
         extra_inputs.update(multi_modal_inputs)
         output_args["labels"] = labels
         return input_ids, extra_inputs, extra_kwargs, output_args
+
+    def _cp_unshard_1d(self, sharded_tensor: torch.Tensor, original_seq_len: int) -> torch.Tensor:
+        """All-gather a 1D CP-sharded tensor and undo load balancer reordering + padding.
+
+        Args:
+            sharded_tensor: 1D tensor of shape [local_seq_len] from this CP rank's shard.
+            original_seq_len: The sequence length before CP alignment padding was added.
+
+        Returns:
+            1D tensor of shape [original_seq_len] with elements in original order.
+        """
+        from torch.distributed.tensor.experimental._context_parallel._load_balancer import _HeadTailLoadBalancer
+
+        cp_mesh = self.parallel_dims.get_mesh("cp")
+        cp_world_size = cp_mesh.size(0)
+        local_seq_len = sharded_tensor.shape[0]
+        padded_seq_len = local_seq_len * cp_world_size
+
+        # All-gather across CP ranks
+        gathered = torch.empty(padded_seq_len, dtype=sharded_tensor.dtype, device=sharded_tensor.device)
+        torch.distributed.all_gather_into_tensor(gathered, sharded_tensor.contiguous(), group=cp_mesh.get_group())
+
+        # Undo load balancer reordering
+        load_balancer = _HeadTailLoadBalancer(padded_seq_len, cp_world_size, sharded_tensor.device)
+        restore_indices = load_balancer._generate_indices(restore=True).squeeze(0)
+        gathered = gathered[restore_indices]
+
+        # Trim CP alignment padding
+        return gathered[:original_seq_len]
 
     def prepare_model_outputs(self, logits, output_args, micro_batch: TensorDict):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
@@ -682,6 +740,14 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                     entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
                 else:
                     entropy_rmpad = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad)
+
+            # With CP, log_probs are for the local shard only. All-gather and
+            # undo load balancer reordering to reconstruct the full sequence.
+            if self.parallel_dims.cp_enabled:
+                original_seq_len = output_args["cp_original_seq_len"]
+                log_probs = self._cp_unshard_1d(log_probs.squeeze(0), original_seq_len)
+                if calculate_entropy:
+                    entropy_rmpad = self._cp_unshard_1d(entropy_rmpad, original_seq_len)
 
             log_probs = torch.nested.nested_tensor_from_jagged(log_probs.squeeze(0), cu_seqlens)
             if calculate_entropy:
