@@ -44,6 +44,7 @@ from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
+    Token2TextField,
     rollout_trace_attr,
     rollout_trace_op,
 )
@@ -140,7 +141,12 @@ class AsyncLLMServerManager:
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
         self._load_balancer.release_server.remote(server_id=server_id)
 
-    @rollout_trace_op
+    @rollout_trace_op(
+        token2text_fields=[
+            Token2TextField(source="input", field="prompt_ids", decode_to="prompt_text"),
+            Token2TextField(source="output", field="token_ids", decode_to="response_text"),
+        ]
+    )
     async def generate(
         self,
         request_id,
@@ -522,6 +528,7 @@ class AgentLoopWorker:
             trace_config.get("backend"),
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
+            tokenizer=self.tokenizer,
         )
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:

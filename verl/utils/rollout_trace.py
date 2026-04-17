@@ -17,6 +17,7 @@ import functools
 import inspect
 import os
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Optional
 
 from pydantic import BaseModel
@@ -24,6 +25,39 @@ from pydantic import BaseModel
 from verl.utils.ray_utils import get_event_loop
 
 _trace_enabled: ContextVar[bool] = ContextVar("_trace_enabled", default=True)
+
+
+@dataclass
+class Token2TextField:
+    """Configuration for a single token-to-text field mapping in rollout tracing.
+
+    When ``token2text`` is enabled globally via :class:`RolloutTraceConfig`,
+    each :class:`Token2TextField` tells the :func:`rollout_trace_op` decorator
+    where to find a list of token IDs and what name to give the decoded text in
+    the trace output.
+
+    Args:
+        source: Where to find the token IDs -- ``"input"`` to read from the
+            decorated function's arguments, ``"output"`` to read from its
+            return value.
+        field: Name of the field containing the token IDs.
+        decode_to: Name of the target field for the decoded text that will
+            appear in the trace output.
+    """
+
+    source: str  # "input" or "output"
+    field: str
+    decode_to: str
+
+
+# Default fields used when ``token2text_fields`` is not explicitly provided to
+# ``rollout_trace_op``.  This preserves backward compatibility with the
+# original hard-coded behaviour that looked for ``result.prompt_ids`` and
+# ``result.response_ids``.
+_DEFAULT_TOKEN2TEXT_FIELDS = [
+    Token2TextField(source="output", field="prompt_ids", decode_to="prompt_text"),
+    Token2TextField(source="output", field="response_ids", decode_to="response_text"),
+]
 
 
 class RolloutTraceConfig:
@@ -52,6 +86,7 @@ class RolloutTraceConfig:
     project_name: str = None
     experiment_name: str = None
     max_samples_per_step_per_worker: Optional[int] = None
+    tokenizer: Optional[object] = None
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -73,6 +108,7 @@ class RolloutTraceConfig:
         backend: str,
         token2text: bool = False,
         max_samples_per_step_per_worker: Optional[int] = None,
+        tokenizer: Optional[object] = None,
     ):
         config = cls.get_instance()
         if config._initialized:
@@ -83,6 +119,7 @@ class RolloutTraceConfig:
         config.project_name = project_name
         config.experiment_name = experiment_name
         config.max_samples_per_step_per_worker = max_samples_per_step_per_worker
+        config.tokenizer = tokenizer
 
         if backend == "weave":
             import weave
@@ -114,6 +151,10 @@ class RolloutTraceConfig:
     @classmethod
     def enable_token2text(cls) -> Optional[bool]:
         return cls.get_instance().token2text
+
+    @classmethod
+    def get_tokenizer(cls) -> Optional[object]:
+        return cls.get_instance().tokenizer
 
     @classmethod
     def reset(cls):
@@ -179,113 +220,218 @@ def rollout_trace_attr(
         yield
 
 
-def rollout_trace_op(func):
-    @functools.wraps(func)
-    async def async_wrapper(self, *args, **kwargs):
-        if not _trace_enabled.get():
-            return await func(self, *args, **kwargs)
+def _resolve_tokenizer(self):
+    """Resolve the tokenizer to use for token2text decoding.
 
-        backend = RolloutTraceConfig.get_backend()
-        enable_token2text = RolloutTraceConfig.enable_token2text()
-        if backend is None:
-            return await func(self, *args, **kwargs)
+    Resolution order:
+    1. ``self.tokenizer`` — per-instance tokenizer (supports multi-model setups
+       where different traced objects use different tokenizers).
+    2. ``RolloutTraceConfig.get_tokenizer()`` — global fallback set once per
+       worker at init time (for classes that don't carry their own tokenizer,
+       e.g. ``AsyncLLMServerManager``).
 
-        sig = inspect.signature(func)
-        bound_args = sig.bind(self, *args, **kwargs)
-        bound_args.apply_defaults()
-        inputs = dict(bound_args.arguments)
-        del inputs["self"]
+    Returns:
+        A tokenizer object with a ``decode`` method, or ``None``.
+    """
+    tokenizer = getattr(self, "tokenizer", None)
+    if tokenizer is not None and hasattr(tokenizer, "decode"):
+        return tokenizer
+    tokenizer = RolloutTraceConfig.get_tokenizer()
+    if tokenizer is not None and hasattr(tokenizer, "decode"):
+        return tokenizer
+    return None
 
-        async def add_token2text(self, result):
-            if hasattr(result, "prompt_ids") and hasattr(self, "tokenizer") and hasattr(self.tokenizer, "decode"):
-                # Use model_dump() for Pydantic models to get a proper copy,
-                # otherwise vars() returns a reference to internal __dict__ which
-                # can cause serialization issues with MLflow
-                if isinstance(result, BaseModel):
-                    _result = result.model_dump()
-                else:
-                    _result = dict(vars(result))
-                loop = get_event_loop()
-                if hasattr(result, "prompt_ids"):
-                    prompt_text = await loop.run_in_executor(None, self.tokenizer.decode, result.prompt_ids)
-                    _result["prompt_text"] = prompt_text
 
-                if hasattr(result, "response_ids"):
-                    response_text = await loop.run_in_executor(None, self.tokenizer.decode, result.response_ids)
-                    _result["response_text"] = response_text
-                return _result
-            return result
+async def _add_token2text(self, result, inputs, token2text_fields):
+    """Decode token ID fields into text and return an enriched copy for tracing.
 
-        if backend == "weave":
-            tracer = RolloutTraceConfig.get_client()
-            from weave.trace.context import call_context
+    This is used internally by :func:`rollout_trace_op` to convert token IDs
+    (from either the function's inputs or outputs) into human-readable text
+    that gets recorded in the trace.
 
-            cur_attributes = {**call_context.call_attributes.get()}
-            call = tracer.create_call(op=func.__qualname__, inputs=inputs, attributes=cur_attributes)
-            try:
-                result = await func(self, *args, **kwargs)
+    Args:
+        self: The class instance.  If it has a ``tokenizer`` attribute with a
+            ``decode`` method, that tokenizer is used; otherwise falls back to
+            the global tokenizer stored in :class:`RolloutTraceConfig`.
+        result: The return value of the decorated function.
+        inputs: Dict of the decorated function's bound arguments (excluding
+            ``self``).
+        token2text_fields: List of :class:`Token2TextField` describing which
+            fields to decode.  If ``None``, falls back to
+            :data:`_DEFAULT_TOKEN2TEXT_FIELDS`.
 
-                if enable_token2text:
-                    _result = await add_token2text(self, result)
-                    tracer.finish_call(call, output=_result)
-                else:
+    Returns:
+        A dict copy of *result* enriched with decoded text fields, or the
+        original *result* unchanged when no fields could be decoded.
+    """
+    tokenizer = _resolve_tokenizer(self)
+    if tokenizer is None:
+        return result
+
+    effective_fields = token2text_fields if token2text_fields is not None else _DEFAULT_TOKEN2TEXT_FIELDS
+
+    loop = get_event_loop()
+    decoded: dict[str, str] = {}
+
+    for field_cfg in effective_fields:
+        token_ids = None
+        if field_cfg.source == "input":
+            token_ids = inputs.get(field_cfg.field)
+        elif field_cfg.source == "output":
+            if hasattr(result, field_cfg.field):
+                token_ids = getattr(result, field_cfg.field)
+            elif isinstance(result, dict):
+                token_ids = result.get(field_cfg.field)
+
+        if token_ids is not None:
+            text = await loop.run_in_executor(None, tokenizer.decode, token_ids)
+            decoded[field_cfg.decode_to] = text
+
+    if not decoded:
+        return result
+
+    # Create a mutable dict copy of the result and add decoded fields.
+    # Use model_dump() for Pydantic models to get a proper copy;
+    # otherwise vars() returns a reference to internal __dict__ which
+    # can cause serialization issues with MLflow.
+    if isinstance(result, BaseModel):
+        _result = result.model_dump()
+    elif isinstance(result, dict):
+        _result = dict(result)
+    else:
+        _result = dict(vars(result))
+
+    _result.update(decoded)
+    return _result
+
+
+def rollout_trace_op(func=None, *, token2text_fields=None):
+    """Decorator that traces function calls with the configured tracing backend.
+
+    Can be used in two forms:
+
+    1. Without arguments (backward compatible)::
+
+        @rollout_trace_op
+        async def run(self, ...): ...
+
+    2. With explicit token-to-text field mappings::
+
+        @rollout_trace_op(token2text_fields=[
+            Token2TextField(source="input", field="prompt_ids", decode_to="prompt_text"),
+            Token2TextField(source="output", field="token_ids", decode_to="response_text"),
+        ])
+        async def generate(self, ...): ...
+
+    When ``token2text`` is enabled globally (via :class:`RolloutTraceConfig`)
+    and ``token2text_fields`` is provided, the decorator decodes the specified
+    token ID fields and includes the decoded text in the trace output.  When
+    ``token2text_fields`` is ``None`` (the default), it falls back to the
+    legacy behaviour of looking for ``result.prompt_ids`` and
+    ``result.response_ids``.
+
+    Args:
+        func: The function being decorated (set automatically when used
+            without parentheses).
+        token2text_fields: Optional list of :class:`Token2TextField`
+            specifying which fields to decode.  ``None`` means use defaults.
+    """
+
+    def _decorator(fn):
+        fields = token2text_fields  # capture in closure
+
+        @functools.wraps(fn)
+        async def async_wrapper(self, *args, **kwargs):
+            if not _trace_enabled.get():
+                return await fn(self, *args, **kwargs)
+
+            backend = RolloutTraceConfig.get_backend()
+            enable_token2text = RolloutTraceConfig.enable_token2text()
+            if backend is None:
+                return await fn(self, *args, **kwargs)
+
+            sig = inspect.signature(fn)
+            bound_args = sig.bind(self, *args, **kwargs)
+            bound_args.apply_defaults()
+            inputs = dict(bound_args.arguments)
+            del inputs["self"]
+
+            if backend == "weave":
+                tracer = RolloutTraceConfig.get_client()
+                from weave.trace.context import call_context
+
+                cur_attributes = {**call_context.call_attributes.get()}
+                call = tracer.create_call(op=fn.__qualname__, inputs=inputs, attributes=cur_attributes)
+                try:
+                    result = await fn(self, *args, **kwargs)
+
+                    if enable_token2text:
+                        _result = await _add_token2text(self, result, inputs, fields)
+                        tracer.finish_call(call, output=_result)
+                    else:
+                        tracer.finish_call(call, output=result)
+
+                    return result
+
+                except Exception as e:
+                    tracer.finish_call(call, exception=e)
+                    raise e
+            elif backend == "mlflow":
+                import mlflow
+
+                with mlflow.start_span(name=fn.__qualname__) as span:
+                    span.set_inputs(inputs)
+                    result = await fn(self, *args, **kwargs)
+                    if enable_token2text:
+                        _result = await _add_token2text(self, result, inputs, fields)
+                        span.set_outputs(_result)
+                    else:
+                        span.set_outputs(result)
+
+                return result
+
+            else:
+                return await fn(self, *args, **kwargs)
+
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            if not _trace_enabled.get():
+                return fn(self, *args, **kwargs)
+
+            backend = RolloutTraceConfig.get_backend()
+            if backend is None:
+                return fn(self, *args, **kwargs)
+
+            sig = inspect.signature(fn)
+            bound_args = sig.bind(self, *args, **kwargs)
+            bound_args.apply_defaults()
+            inputs = dict(bound_args.arguments)
+            del inputs["self"]
+
+            if backend == "weave":
+                tracer = RolloutTraceConfig.get_client()
+                from weave.trace.context import call_context
+
+                cur_attributes = {**call_context.call_attributes.get()}
+                call = tracer.create_call(op=fn.__qualname__, inputs=inputs, attributes=cur_attributes)
+                try:
+                    result = fn(self, *args, **kwargs)
                     tracer.finish_call(call, output=result)
+                    return result
+                except Exception as e:
+                    tracer.finish_call(call, exception=e)
+                    raise e
+            elif backend == "mlflow":
+                import mlflow
 
-                return result
+                return mlflow.trace(fn)(self, *args, **kwargs)
+            else:
+                return fn(self, *args, **kwargs)
 
-            except Exception as e:
-                tracer.finish_call(call, exception=e)
-                raise e
-        elif backend == "mlflow":
-            import mlflow
+        return async_wrapper if inspect.iscoroutinefunction(fn) else wrapper
 
-            with mlflow.start_span(name=func.__qualname__) as span:
-                span.set_inputs(inputs)
-                result = await func(self, *args, **kwargs)
-                if enable_token2text:
-                    _result = await add_token2text(self, result)
-                    span.set_outputs(_result)
-                else:
-                    span.set_outputs(result)
-
-            return result
-
-        else:
-            return await func(self, *args, **kwargs)
-
-    @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):
-        if not _trace_enabled.get():
-            return func(self, *args, **kwargs)
-
-        backend = RolloutTraceConfig.get_backend()
-        if backend is None:
-            return func(self, *args, **kwargs)
-
-        sig = inspect.signature(func)
-        bound_args = sig.bind(self, *args, **kwargs)
-        bound_args.apply_defaults()
-        inputs = dict(bound_args.arguments)
-        del inputs["self"]
-
-        if backend == "weave":
-            tracer = RolloutTraceConfig.get_client()
-            from weave.trace.context import call_context
-
-            cur_attributes = {**call_context.call_attributes.get()}
-            call = tracer.create_call(op=func.__qualname__, inputs=inputs, attributes=cur_attributes)
-            try:
-                result = func(self, *args, **kwargs)
-                tracer.finish_call(call, output=result)
-                return result
-            except Exception as e:
-                tracer.finish_call(call, exception=e)
-                raise e
-        elif backend == "mlflow":
-            import mlflow
-
-            return mlflow.trace(func)(self, *args, **kwargs)
-        else:
-            return func(self, *args, **kwargs)
-
-    return async_wrapper if inspect.iscoroutinefunction(func) else wrapper
+    if func is not None:
+        # Called as @rollout_trace_op (without parentheses)
+        return _decorator(func)
+    # Called as @rollout_trace_op(...) (with parentheses)
+    return _decorator
