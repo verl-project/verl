@@ -17,6 +17,7 @@ from uuid import uuid4
 import ray
 import torch
 from omegaconf import DictConfig
+from torch.nn import functional as F
 
 from verl.experimental.agent_loop import AsyncLLMServerManager
 from verl.utils.config import omega_conf_to_dataclass
@@ -37,6 +38,25 @@ def _get_teacher_sampling_params(
         "temperature": distillation_config.teacher_model.inference.temperature,
         "prompt_logprobs": num_logprobs,
     }
+
+
+def _pad_teacher_outputs(
+    teacher_ids: torch.Tensor,
+    teacher_logprobs: torch.Tensor,
+    prompt_width: int,
+    response_width: int,
+    prompt_length: int,
+    response_length: int,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # TODO(wuxibin): remove padding and use tensordict.
+    left_pad_size = prompt_width - prompt_length
+    right_pad_size = response_width - response_length
+    padding = (0, 0, left_pad_size, right_pad_size)
+    return (
+        F.pad(teacher_ids, padding, value=pad_token_id).unsqueeze(0),
+        F.pad(teacher_logprobs, padding, value=0.0).unsqueeze(0),
+    )
 
 
 class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
