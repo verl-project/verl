@@ -16,7 +16,7 @@
 import ray
 
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.utils import Role, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, need_reference_policy
 
 
 def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
@@ -46,24 +46,16 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
             if role in roles:
                 mapping[role] = "trainer_pool"
 
-    # RewardModel resource pool (standalone when enable_resource_pool=True, else colocate with trainer)
-    if Role.RewardModel in roles:
-        rm_cfg = config.reward.reward_model
-        if rm_cfg.get("enable_resource_pool", False):
-            rm_pool = [rm_cfg.n_gpus_per_node] * rm_cfg.nnodes
-            resource_pool_spec["rm_pool"] = rm_pool
-            mapping[Role.RewardModel] = "rm_pool"
-        else:
-            # Colocate with trainer pool
-            if "trainer_pool" not in resource_pool_spec:
-                trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
-                resource_pool_spec["trainer_pool"] = trainer_pool
-            mapping[Role.RewardModel] = "trainer_pool"
-
-    # Rollout resource pool
+    # Rollout — not allocated here; GPU managed via RolloutReplica.init_standalone()
     if Role.Rollout in roles:
         assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
         assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
+
+    # RewardModel — not allocated here; GPU managed via RolloutReplica.init_standalone()
+    if Role.RewardModel in roles:
+        rm_cfg = config.reward.reward_model
+        assert rm_cfg.n_gpus_per_node > 0, "config.reward.reward_model.n_gpus_per_node must be greater than 0"
+        assert rm_cfg.nnodes > 0, "config.reward.reward_model.nnodes must be greater than 0"
 
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
