@@ -501,12 +501,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # TODO: align ref config with actor config
             with open_dict(self.config.ref):
                 self.config.ref.ppo_mini_batch_size = self.config.actor.ppo_mini_batch_size
-                if not is_diffusion:
-                    self.config.ref.ppo_micro_batch_size = self.config.ref.pop("log_prob_micro_batch_size", None)
                 self.config.ref.ppo_micro_batch_size_per_gpu = self.config.ref.pop(
                     "log_prob_micro_batch_size_per_gpu", None
                 )
                 if not is_diffusion:
+                    self.config.ref.ppo_micro_batch_size = self.config.ref.pop("log_prob_micro_batch_size", None)
                     self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                     self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop(
                         "log_prob_max_token_len_per_gpu", None
@@ -527,15 +526,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # assign engine configs
+            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
+                self.config.ref.ppo_micro_batch_size_per_gpu
+            )
+            ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
             if not is_diffusion:
                 ref_training_config.engine_config.use_dynamic_bsz = self.config.ref.use_dynamic_bsz
                 ref_training_config.engine_config.infer_max_token_len_per_gpu = (
                     self.config.ref.ppo_max_token_len_per_gpu
                 )
-            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
-                self.config.ref.ppo_micro_batch_size_per_gpu
-            )
-            ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
 
             self.ref = TrainingWorker(config=ref_training_config)
             self.ref.reset()
@@ -559,7 +558,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             if is_diffusion:
                 # Diffusion models don't use dynamic batching or token packing.
-                # Only micro_batch_size_per_gpu is needed.
+                # Only micro_batch_size_per_gpu configs are needed.
                 actor_training_config.engine_config.micro_batch_size_per_gpu = (
                     self.config.actor.ppo_micro_batch_size_per_gpu
                 )
