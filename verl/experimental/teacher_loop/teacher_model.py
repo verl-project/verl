@@ -34,7 +34,14 @@ async def _run_all(tasks: list[asyncio.Task]):
 
 
 class TeacherModelManager:
-    """Teacher model manager."""
+    """Owns the rollout replicas for a single distillation teacher.
+
+    Splits `resource_pool` into per-replica chunks sized by
+    `teacher_model_config.inference` parallelism, launches a colocated inference replica
+    on each chunk, and exposes the resulting server handles and addresses, a
+    `GlobalRequestLoadBalancer`, and a router address for use by
+    `AsyncTeacherLLMServerManager`.
+    """
 
     def __init__(
         self,
@@ -46,8 +53,12 @@ class TeacherModelManager:
         Initialize the teacher model manager.
 
         Args:
-            teacher_model_config (DistillationTeacherModelConfig): Teacher model configuration.
-            resource_pool (RayResourcePool): Resource pool.
+            distillation_config (DistillationConfig): Full distillation config; stored
+                for use alongside the per-teacher config.
+            teacher_model_config (DistillationTeacherModelConfig): Config for this
+                teacher (model path, routing key, inference parallelism).
+            resource_pool (RayResourcePool): Sub-pool already sized for this teacher
+                (`teacher_model_config.world_size` bundles).
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
