@@ -403,7 +403,8 @@ def test_grad_norm_alignment(test_config):
         ref_grad_norm,
         rtol=1e-2,
         atol=1e-4,
-        msg=f"Grad norm mismatch [{test_config.description}]: dcp={dcp_grad_norm.item():.6f}, ref={ref_grad_norm.item():.6f}",
+        msg=f"Grad norm mismatch [{test_config.description}]:" \
+            f"dcp={dcp_grad_norm.item():.6f}, ref={ref_grad_norm.item():.6f}",
     )
     if rank == 0:
         print(f"  PASS [{test_config.description}] cp={local_cp_size}, grad_norm={ref_grad_norm.item():.6f}")

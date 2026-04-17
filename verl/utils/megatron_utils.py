@@ -1422,10 +1422,8 @@ def dynamic_cp_split_batch(
         end_idx = start_idx + count
         selected_indices = list(range(start_idx, end_idx))
         batch = tu.index_select_tensor_dict(batch, selected_indices)
-        decision = "split"
     else:
         selected_indices = list(range(num_seqs))
-        decision = "no_split_full_cp"
 
     # --- attach metadata used by downstream model forward and loss ---
     tu.assign_non_tensor_data(batch, "local_cp_size", local_cp_size)
