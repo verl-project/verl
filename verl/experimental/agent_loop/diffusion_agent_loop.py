@@ -24,6 +24,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 
+from verl.base_config import BaseConfig
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopMetrics,
     AsyncLLMServerManager,
@@ -35,7 +36,14 @@ from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import get_dataset_class
+from verl.utils.profiler import simple_timer
 from verl.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+
+
+def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
+    if config is None:
+        return {}
+    return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
 class DiffusionAgentLoopOutput(BaseModel):
@@ -68,10 +76,6 @@ class _InternalDiffusionAgentLoopOutput(DiffusionAgentLoopOutput):
     """Padded prompt token ids."""
     response_diffusion_output: torch.Tensor
     """Response diffusion output: image (NCHW format) / video (NTCHW format)."""
-    input_ids: torch.Tensor
-    """Padded input ids(prompt_ids)."""
-    attention_mask: torch.Tensor
-    """Padded attention mask."""
     response_logprobs: Optional[torch.Tensor] = None
     """Log probabilities over denoising timesteps."""
     extra_fields: dict[str, Any] = {}
@@ -117,9 +121,7 @@ class DiffusionAgentLoopWorker:
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
 
-        self.max_prompt_embed_length = self.rollout_config.extra_configs.get(
-            "max_sequence_length", self.rollout_config.prompt_length
-        )
+        self.max_prompt_embed_length = self.rollout_config.max_sequence_length
 
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
@@ -150,17 +152,19 @@ class DiffusionAgentLoopWorker:
         """
         config = self.rollout_config
 
-        sampling_params = dict(config.extra_configs)
-        sampling_params.update(
-            height=config.height,
-            width=config.width,
-            num_inference_steps=config.num_inference_steps,
-            logprobs=config.calculate_log_probs,
-        )
+        sampling_params = {
+            "true_cfg_scale": config.true_cfg_scale,
+            "max_sequence_length": config.max_sequence_length,
+            "height": config.height,
+            "width": config.width,
+            "num_inference_steps": config.num_inference_steps,
+            "logprobs": config.calculate_log_probs,
+            **_config_to_sampling_dict(config.algo),
+        }
 
         # override sampling params for validation
         if batch.meta_info.get("validate", False):
-            sampling_params.update(config.val_kwargs.extra_configs)
+            sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
             sampling_params["num_inference_steps"] = config.val_kwargs.num_inference_steps
             sampling_params["seed"] = config.val_kwargs.seed
 
@@ -226,11 +230,10 @@ class DiffusionAgentLoopWorker:
             padding="max_length",
             max_length=self.rollout_config.prompt_length,
             return_tensors="pt",
-            return_attention_mask=True,
+            return_attention_mask=False,
         )
         if prompt_output["input_ids"].dim() == 1:
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
-            prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
         response_diffusion_output = output.response_diffusion_output.unsqueeze(0)
 
@@ -238,15 +241,12 @@ class DiffusionAgentLoopWorker:
         if output.response_logprobs is not None:
             response_logprobs = output.response_logprobs.unsqueeze(0)
 
-        attention_mask = prompt_output["attention_mask"]
-        input_ids = prompt_output["input_ids"]
+        prompt_ids = prompt_output["input_ids"]
 
         await self._compute_score(
             output,
-            prompts=input_ids,
+            prompts=prompt_ids,
             responses=response_diffusion_output,
-            attention_mask=attention_mask,
-            input_ids=input_ids,
             kwargs=kwargs,
         )
 
@@ -254,10 +254,8 @@ class DiffusionAgentLoopWorker:
             extra_fields["reward_extra_info"] = output.extra_fields["reward_extra_info"]
 
         return _InternalDiffusionAgentLoopOutput(
-            prompt_ids=input_ids,
+            prompt_ids=prompt_ids,
             response_diffusion_output=response_diffusion_output,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
             response_logprobs=response_logprobs,
             reward_score=output.reward_score,
             num_turns=output.num_turns,
@@ -265,34 +263,35 @@ class DiffusionAgentLoopWorker:
             extra_fields=extra_fields,
         )
 
-    async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, kwargs):
+    async def _compute_score(self, output, prompts, responses, kwargs):
         """Compute reward score for single sample."""
         enable_async_reward = self.reward_loop_worker_handles is not None
 
         if output.reward_score is None and enable_async_reward:
-            batch = TensorDict(
-                {
-                    "prompts": prompts,  # [1, prompt_length]
-                    "responses": responses,  # [1, C, H, W] or [1, T, C, H, W]
-                    "attention_mask": attention_mask,  # [1, prompt_length]
-                    "input_ids": input_ids,  # [1, prompt_length]
-                },
-                batch_size=1,
-            )
-            non_tensor_batch = {
-                **{k: np.array([v]) for k, v in kwargs.items()},
-                "__num_turns__": np.array([output.num_turns]),
-                "tool_extra_fields": np.array([output.extra_fields], dtype=object),
-            }
+            timing = {}
+            with simple_timer("compute_score", timing):
+                batch = TensorDict(
+                    {
+                        "prompts": prompts,  # [1, prompt_length]
+                        "responses": responses,  # [1, C, H, W] or [1, T, C, H, W]
+                    },
+                    batch_size=1,
+                )
+                non_tensor_batch = {
+                    **{k: np.array([v]) for k, v in kwargs.items()},
+                    "__num_turns__": np.array([output.num_turns]),
+                    "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+                }
 
-            data = DataProto(
-                batch=batch,
-                non_tensor_batch=non_tensor_batch,
-            )
-            selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
-            result = await selected_reward_loop_worker_handle.compute_score.remote(data)
-            output.reward_score = result["reward_score"]
-            output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+                data = DataProto(
+                    batch=batch,
+                    non_tensor_batch=non_tensor_batch,
+                )
+                selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
+                result = await selected_reward_loop_worker_handle.compute_score.remote(data)
+                output.reward_score = result["reward_score"]
+                output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            output.metrics.compute_score = timing["compute_score"]
 
     def _postprocess(
         self,
@@ -303,8 +302,6 @@ class DiffusionAgentLoopWorker:
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
         response_diffusion_output = torch.cat([input.response_diffusion_output for input in inputs], dim=0)
-        attention_mask = torch.cat([input.attention_mask for input in inputs], dim=0)
-        input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
@@ -320,8 +317,6 @@ class DiffusionAgentLoopWorker:
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
                 "responses": response_diffusion_output,  # [bsz, C, H, W] or [bsz, T, C, H, W]
-                "input_ids": input_ids,  # [bsz, prompt_length]
-                "attention_mask": attention_mask,  # [bsz, prompt_length]
                 **optional_outputs,
             },
             batch_size=len(inputs),

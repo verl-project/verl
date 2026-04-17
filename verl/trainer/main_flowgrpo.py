@@ -22,11 +22,9 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.diffusion.ray_diffusion_trainer import RayFlowGRPOTrainer
 from verl.trainer.ppo.utils import need_reference_policy
-from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
 
 
@@ -39,7 +37,6 @@ def main(config):
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
-    config = migrate_legacy_reward_impl(config)
     run_flowgrpo(config)
 
 
@@ -192,13 +189,6 @@ class TaskRunner:
 
         # Add a reference policy worker if KL loss is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
-
-        # validate config
-        validate_config(
-            config=config,
-            use_reference_policy=need_reference_policy(config),
-            use_critic=False,
-        )
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on

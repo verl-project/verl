@@ -67,7 +67,6 @@ def test_trainer_config_doc():
         "verl/trainer/config/ref/ref.yaml",
         "verl/trainer/config/ref/dp_ref.yaml",
         "verl/trainer/config/rollout/rollout.yaml",
-        "verl/trainer/config/rollout/diffusion_rollout.yaml",
     ]
     success = True
     for yaml_to_inspect in yamls_to_inspect:

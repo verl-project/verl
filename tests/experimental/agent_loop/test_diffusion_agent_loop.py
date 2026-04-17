@@ -18,7 +18,7 @@ import tempfile
 import numpy as np
 import pytest
 import ray
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
@@ -79,21 +79,18 @@ def init_config() -> DictConfig:
         prompt_template_encode_start_idx = 34
         max_length = tokenizer_max_length + prompt_template_encode_start_idx
 
-        with open_dict(config.actor_rollout_ref.rollout.extra_configs):
-            config.actor_rollout_ref.rollout.extra_configs.true_cfg_scale = 4.0
-            config.actor_rollout_ref.rollout.extra_configs.max_sequence_length = max_length
-            config.actor_rollout_ref.rollout.extra_configs.noise_level = 1.0
-            config.actor_rollout_ref.rollout.extra_configs.sde_window_size = 2
-            config.actor_rollout_ref.rollout.extra_configs.sde_window_range = [0, 5]
+        config.actor_rollout_ref.rollout.algo.noise_level = 1.0
+        config.actor_rollout_ref.rollout.algo.sde_window_size = 2
+        config.actor_rollout_ref.rollout.algo.sde_window_range = [0, 5]
 
+        config.actor_rollout_ref.rollout.true_cfg_scale = 4.0
+        config.actor_rollout_ref.rollout.max_sequence_length = max_length
         config.actor_rollout_ref.rollout.nnodes = 1
 
-        qwen_pipeline = "examples.flowgrpo_trainer.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb"
-        config.actor_rollout_ref.rollout.engine_kwargs.vllm_omni = {"custom_pipeline": qwen_pipeline}
+        config.actor_rollout_ref.rollout.external_lib = "examples.flowgrpo_trainer.vllm_omni_impl"
         config.reward.reward_manager.name = "image"
         config.trainer.n_gpus_per_node = 4
 
-        config.data.apply_chat_template_kwargs = dict(max_length=max_length, padding=True, truncation=True)
         config.data.max_prompt_length = max_length
         config.actor_rollout_ref.rollout.max_model_len = max_length
 
@@ -158,8 +155,6 @@ def test_single_turn(init_config):
             "all_timesteps",
             "prompt_embeds",
             "prompt_embeds_mask",
-            "input_ids",
-            "attention_mask",
             "rollout_log_probs",
         ]
         for key in expected_batch_keys:

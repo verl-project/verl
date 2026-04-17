@@ -4,7 +4,7 @@
 # 3. Inline comments (after a field on the same line) are not allowed.
 # 4. Indentation level is respected for nested fields.
 
-_target_: verl.workers.config.DiffusionModelConfig
+_target_: verl.workers.config.diffusion.DiffusionModelConfig
 
 # path to the huggingface model
 path: ~/models/Qwen/Qwen-Image
@@ -48,6 +48,13 @@ exclude_modules: null
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 
+# MTP
+mtp: 
+
+  _target_: verl.workers.config.MtpConfig
+
+  enable: False
+
 # image/video height
 height: ${oc.select:actor_rollout_ref.rollout.height,512}
 
@@ -57,5 +64,29 @@ width: ${oc.select:actor_rollout_ref.rollout.width,512}
 # inference steps
 num_inference_steps: ${oc.select:actor_rollout_ref.rollout.num_inference_steps,10}
 
-# extra configs for algorithm specific features.
-extra_configs: ${oc.select:actor_rollout_ref.rollout.extra_configs,{}}
+# Classifier-free guidance scale
+true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.true_cfg_scale,4.0}
+
+# Maximum text-encoder token sequence length
+max_sequence_length: ${oc.select:actor_rollout_ref.rollout.max_sequence_length,512}
+
+# Distilled guidance scale
+guidance_scale: ${oc.select:actor_rollout_ref.rollout.guidance_scale,null}
+
+# Rollout Algorithm configuration
+algo:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
+  # Magnitude of SDE noise injected inside the active window
+  noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
+
+  # SDE variant: "sde" or "cps"
+  sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
+
+  # Number of consecutive denoising steps in the active SDE window; null = all steps
+  sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
+
+  # [start, end) range for random window start-index sampling
+  sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}

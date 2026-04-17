@@ -23,7 +23,7 @@ from diffusers.models.transformers.transformer_qwenimage import QwenImageTransfo
 from diffusers.pipelines.qwenimage.pipeline_qwenimage import calculate_shift
 from tensordict import TensorDict
 
-from verl.models.diffusers_model import DiffusionModelBase
+from verl.models.diffusion_model import DiffusionModelBase
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
 from verl.workers.config import DiffusionModelConfig
@@ -78,7 +78,7 @@ class QwenImage(DiffusionModelBase):
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)
         img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]] * latents.shape[0]
 
-        guidance_scale = model_config.extra_configs.get("guidance_scale", None)
+        guidance_scale = model_config.guidance_scale
         if getattr(module.config, "guidance_embeds", False):
             guidance = torch.full([1], guidance_scale, device=timesteps.device, dtype=torch.float32)
         else:
@@ -125,7 +125,7 @@ class QwenImage(DiffusionModelBase):
         timesteps = scheduler_inputs["all_timesteps"]
 
         noise_pred = module(**model_inputs)[0]
-        true_cfg_scale = model_config.extra_configs.get("true_cfg_scale", 1.0)
+        true_cfg_scale = model_config.true_cfg_scale
         if true_cfg_scale > 1.0:
             assert negative_model_inputs is not None
             neg_noise_pred = module(**negative_model_inputs)[0]
@@ -138,9 +138,9 @@ class QwenImage(DiffusionModelBase):
             sample=latents[:, step].float(),
             model_output=noise_pred.float(),
             timestep=timesteps[:, step],
-            noise_level=model_config.extra_configs.get("noise_level", None),
+            noise_level=model_config.algo.noise_level,
             prev_sample=latents[:, step + 1].float(),
-            sde_type=model_config.extra_configs.get("sde_type", None),
+            sde_type=model_config.algo.sde_type,
             return_logprobs=True,
         )
         return log_prob, prev_sample_mean, std_dev_t

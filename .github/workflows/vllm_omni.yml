@@ -125,9 +125,6 @@ jobs:
         run: |
           ray stop --force
           pytest tests/experimental/agent_loop/test_diffusion_agent_loop.py -v -s
-      - name: Install diffusers for e2e training
-        run: |
-          pip3 install diffusers==0.37.0
       - name: Prepare dummy diffusion dataset
         run: |
           python3 tests/special_e2e/create_dummy_diffusion_data.py

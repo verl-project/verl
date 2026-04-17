@@ -1,0 +1,95 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Target class for this configuration
+_target_: verl.workers.config.diffusion.DiffusionActorConfig
+
+# Number of rollouts per update (mirrors actor rollout_n)
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# the abstract actor configs
+# fsdp, fsdp2 or megatron. must be set.
+strategy: ???
+
+# Split each sample into sub-batches of this size for PPO
+ppo_mini_batch_size: 256
+
+# Local per-GPU micro batch size
+ppo_micro_batch_size_per_gpu: null
+
+# diffusion loss config
+diffusion_loss:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.diffusion.DiffusionLossConfig
+
+  # Loss function mode for diffusion: flow_grpo
+  loss_mode: "flow_grpo"
+
+  # PPO clip ratio
+  clip_ratio: 0.0001
+
+  # Maximum value to clamp advantages before computing policy loss
+  adv_clip_max: 5.0
+
+# loss scale factor for diffusion loss, if applicable. If set to null, it will not be applied.
+loss_scale_factor: null
+
+# Whether to use KL loss
+use_kl_loss: false
+
+# KL loss coefficient when use_kl_loss is enabled. For FlowGRPO
+kl_loss_coef: 0.001
+
+# Number of PPO epochs per batch
+ppo_epochs: 1
+
+# Shuffle training data across PPO epochs
+shuffle: false
+
+# The seed used to construct mini-batch
+data_loader_seed: 42
+
+# checkpoint configs
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.trainer.config.CheckpointConfig
+
+  # What to include in saved checkpoints
+  save_contents: ['model', 'optimizer', 'extra']
+
+  # For more flexibility, you can specify the contents to load from the checkpoint.
+  # .xxx refers to the local variable xxx from the same level of hierarchy similar to python pkg
+  load_contents: ${.save_contents}
+
+  # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
+  async_save: False
+
+  # Mbridge config extension.
+  # when vanilla_mbridge=True, and your filesystem is a distributed filesystem,(which means you write a file in node A
+  # and you can read the file in node B immediately)
+  # set `mbridge_config.distributed_filesystem=True` and `mbridge_config.memory_efficient=True` to 
+  # speed up the checkpoint saving by 10x speed.
+  mbridge_config: {}
+
+# optimizer configs
+optim:
+
+  # Learning rate
+  lr: 1e-6
+
+  # Warmup steps ratio (used if lr_warmup_steps is 0 or negative)
+  lr_warmup_steps_ratio: 0.0
+
+  # Total training steps (must be overridden at runtime)
+  total_training_steps: -1
+
+  # Weight decay
+  weight_decay: 0.01
+
+  # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
+  lr_warmup_steps: -1

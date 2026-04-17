@@ -46,13 +46,10 @@ class DiffusionModelBase(ABC):
     ---------------------------------
     Implementations live outside the core verl package (e.g. under
     ``examples/``).  Set ``external_lib`` on ``DiffusionModelConfig``
-    to the module that contains your subclass so it is imported (and
-    thus registered) before the registry is queried::
+    to the dotted module path so it is imported (and thus registered)
+    before the registry is queried::
 
-        DiffusionModelConfig(
-            ...,
-            external_lib="examples.flowgrpo_trainer.diffusers.qwen_image",
-        )
+        actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers_impl"
     """
 
     _registry: dict[str, type["DiffusionModelBase"]] = {}
@@ -168,3 +165,57 @@ class DiffusionModelBase(ABC):
             step (int): the current step in the diffusion process.
         """
         pass
+
+
+class VllmOmniPipelineBase:
+    """Registry base for vllm-omni custom diffusion pipeline classes.
+
+    Registration
+    ------------
+    Decorate your custom pipeline class with
+    ``@VllmOmniPipelineBase.register("name")``.
+    The *name* must match the ``_class_name`` value in the pipeline's
+    ``model_index.json`` (which is auto-detected into
+    ``DiffusionModelConfig.architecture``).
+
+    Example::
+
+        @VllmOmniPipelineBase.register("QwenImagePipeline")
+        class QwenImagePipelineWithLogProb(QwenImagePipeline):
+            ...
+
+    Loading external implementations
+    ---------------------------------
+    Implementations live outside the core verl package (e.g. under
+    ``examples/``).  Ensure the module containing your subclass is imported
+    before the registry is queried.  Set ``external_lib`` on
+    ``DiffusionRolloutConfig`` to the dotted module path so it is imported
+    just before the registry is queried in ``run_server``::
+
+        actor_rollout_ref.rollout.external_lib="examples.flowgrpo_trainer.vllm_omni_impl"
+    """
+
+    _registry: dict[str, type] = {}
+
+    @classmethod
+    def register(cls, name: str):
+        """Class decorator that registers a pipeline subclass under *name*."""
+
+        def decorator(subclass: type) -> type:
+            cls._registry[name] = subclass
+            return subclass
+
+        return decorator
+
+    @classmethod
+    def get_class(cls, architecture: str) -> type | None:
+        """Return the registered pipeline class for *architecture*, or ``None``."""
+        return cls._registry.get(architecture)
+
+    @classmethod
+    def get_pipeline_path(cls, architecture: str) -> str | None:
+        """Return the fully-qualified dotted import path for *architecture*, or ``None``."""
+        pipeline_cls = cls._registry.get(architecture)
+        if pipeline_cls is None:
+            return None
+        return f"{pipeline_cls.__module__}.{pipeline_cls.__qualname__}"

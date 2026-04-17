@@ -16,13 +16,13 @@
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.diffusion.diffusion_algos import kl_penalty_image
+from verl.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn, kl_penalty_image
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
-from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.config import ActorConfig, CriticConfig, DiffusionActorConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
 
@@ -187,7 +187,7 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     return vf_loss, metrics
 
 
-def diffusion_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
     """Compute loss for diffusion model"""
     log_prob = model_output["log_probs"]
 
@@ -195,24 +195,18 @@ def diffusion_loss(config: ActorConfig, model_output, data: TensorDict, dp_group
 
     metrics = {}
 
-    response_mask = data["response_mask"].to(bool)
     # compute policy loss
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
 
-    loss_agg_mode = config.loss_agg_mode
+    loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
 
-    loss_mode = config.policy_loss.get("loss_mode", "flow_grpo")
-
-    policy_loss_fn = get_policy_loss_fn(loss_mode)
+    policy_loss_fn = get_diffusion_loss_fn(loss_mode)
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
         advantages=advantages,
-        response_mask=response_mask,
-        loss_agg_mode=loss_agg_mode,
         config=config,
-        rollout_is_weights=None,
     )
 
     pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)

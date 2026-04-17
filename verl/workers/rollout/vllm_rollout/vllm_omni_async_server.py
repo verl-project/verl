@@ -27,7 +27,9 @@ from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
+from verl.models.diffusion_model import VllmOmniPipelineBase
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.import_utils import import_external_libs
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl.workers.rollout.replica import DiffusionOutput
@@ -78,10 +80,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_engine_kwargs_key(self) -> str:
         return "vllm_omni"
 
-    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        # custom_pipeline is passed directly to run_server; not supported via CLI yet
-        engine_kwargs.pop("custom_pipeline", None)
-
     def _get_worker_extension_cls(self) -> str:
         return "verl.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
 
@@ -99,13 +97,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
-        # TODO (mike): read custom_pipeline from CLI
-        custom_pipeline = self.config.engine_kwargs.get("vllm_omni", {}).get("custom_pipeline", None)
-        if custom_pipeline is not None:
+        import_external_libs(self.config.external_lib)
+        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(self.model_config.architecture)
+        # TODO (mike): read custom_pipeline from engine_args
+        if pipeline_path is not None:
             engine_args["enable_dummy_pipeline"] = True
-            engine_args["custom_pipeline_args"] = {"pipeline_class": custom_pipeline}
+            engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
-        # TODO (mike): support parsing engine config from CLI
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)

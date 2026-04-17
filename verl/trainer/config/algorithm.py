@@ -675,5 +675,5 @@ class DiffusionAlgoConfig(BaseConfig):
 
     adv_estimator: str = "flow_grpo"
     norm_adv_by_std_in_grpo: bool = True
-    rollout_correction: Optional[RolloutCorrectionConfig] = None
+    bypass_mode: bool = False
     global_std: bool = True
