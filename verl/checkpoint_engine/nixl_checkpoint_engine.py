@@ -33,6 +33,7 @@ import zmq.asyncio
 
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -372,7 +373,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
 
         # For trainer workers other than rank 0, just consume weights and do nothing.
         if self.rank < 0:
-            for name, weight in weights:
+            async for name, weight in ensure_async_iterator(weights):
                 pass
             return
 
@@ -384,7 +385,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
         start_time = time.time()
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
-        for name, weight in weights:
+        async for name, weight in ensure_async_iterator(weights):
             # fill the tensor bucket
             if offset + weight.nbytes > self.bucket_size:
                 torch.cuda.synchronize()

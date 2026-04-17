@@ -676,6 +676,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if self.config.rollout.checkpoint_engine.backend != "naive":
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+            if self.config.rollout.get("trainer_quantize_fp8", False):
+                from verl.utils.fp8_utils import FP8QuantizerHelper
+
+                quant_config = getattr(self.actor.model_config.hf_config, "quantization_config", None)
+                if quant_config is None:
+                    raise ValueError(
+                        "trainer_quantize_fp8=True but model has no quantization_config in hf_config. "
+                        "Ensure the model config includes quantization_config with weight_block_size."
+                    )
+                fp8_quantizer = FP8QuantizerHelper(quant_config)
+                per_tensor_param = fp8_quantizer.quant_weights_by_name(per_tensor_param, dtype=torch.bfloat16)
+                logger.info("FP8 trainer-side quantization enabled (disaggregated)")
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
@@ -692,6 +704,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon, base_sync_done=True
         )
 
+        # FP8: quantize weights on trainer side before sending to rollout
+        _pre_quantized_fp8 = False
+        fp8_quantizer = None
+        if self.config.rollout.get("trainer_quantize_fp8", False) and (peft_config is None or self.peft_merge):
+            from verl.utils.fp8_utils import FP8QuantizerHelper
+
+            fp8_quantizer = FP8QuantizerHelper(self.rollout.model_config.hf_config.quantization_config)
+            per_tensor_param = fp8_quantizer.quant_weights_by_name(per_tensor_param, dtype=torch.bfloat16)
+            _pre_quantized_fp8 = True
+            logger.info("FP8 trainer-side quantization enabled")
+
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
             self.rollout.sleep_level = 1
@@ -702,12 +725,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon, base_sync_done=False
             )
+            if _pre_quantized_fp8:
+                per_tensor_param_base = fp8_quantizer.quant_weights_by_name(per_tensor_param_base, dtype=torch.bfloat16)
             await self.rollout.update_weights(
-                per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
+                per_tensor_param_base,
+                peft_config=peft_config,
+                base_sync_done=False,
+                global_steps=global_steps,
+                pre_quantized_fp8=_pre_quantized_fp8,
             )
 
         await self.rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            per_tensor_param,
+            peft_config=peft_config,
+            base_sync_done=True,
+            global_steps=global_steps,
+            pre_quantized_fp8=_pre_quantized_fp8,
         )
 
         log_gpu_memory_usage("After update_weights", logger=logger)

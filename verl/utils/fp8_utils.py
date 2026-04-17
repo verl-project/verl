@@ -110,7 +110,7 @@ class FP8QuantizerHelper:
 
             # Quantize to FP8
             try:
-                if torch.distributed.get_rank() == 0:
+                if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
                     logger.debug(f"Quantizing to FP8 blockwise: {k}")
 
                 param_lp, param_scale = scaled_fp8_blockwise(

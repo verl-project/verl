@@ -13,7 +13,7 @@
 # limitations under the License.
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Generator, TypedDict
+from typing import Any, AsyncGenerator, Generator, TypedDict
 
 import ray
 import torch
@@ -160,7 +160,9 @@ class CheckpointEngine(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None] | AsyncGenerator[tuple[str, torch.Tensor], None]
+    ):
         """Send the weights of the model.
 
         Args:
@@ -230,6 +232,10 @@ class ColocatedCheckpointEngine(CheckpointEngine):
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
         """
+        assert not hasattr(weights, "__aiter__"), (
+            "ColocatedCheckpointEngine does not support AsyncGenerator. "
+            "Use a disaggregated checkpoint engine (nccl/nixl/hccl) for async weight generators."
+        )
         self.weights = weights
 
     def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
@@ -289,7 +295,10 @@ class CheckpointEngineWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
         weights = self.checkpoint_engine.receive_weights()
-        await self.server_adapter.update_weights(weights, global_steps=global_steps)
+        pre_quantized_fp8 = self.rollout_config.get("trainer_quantize_fp8", False)
+        await self.server_adapter.update_weights(
+            weights, global_steps=global_steps, pre_quantized_fp8=pre_quantized_fp8
+        )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
