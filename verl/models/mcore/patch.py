@@ -496,7 +496,7 @@ def apply_patch_megatron_recomputation_backward():
     # Only apply patch if megatron CheckpointFunction has saved_objects support
     # (i.e., has _recover_function_args). Older megatron versions don't save
     # non-tensor args and this patch would crash on ctx.saved_objects access.
-    if not hasattr(rd.CheckpointFunction, '_recover_function_args'):
+    if not hasattr(rd.CheckpointFunction, "_recover_function_args"):
         return
 
     _fork_rng = rd._fork_rng

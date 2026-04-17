@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional
 
-import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -156,9 +155,7 @@ class TestLocalCPSizeComputation:
         for max_sl in [100, 500, 1000, 1500, 2000, 3000, 5000, 10000]:
             for num_seqs in [1, 2, 3, 4, 7, 8, 16]:
                 for dp in [2, 4, 8]:
-                    cp = self._get_cp_size(
-                        [max_sl] * num_seqs, dp_size=dp, dp_rank=0, max_seqlen_per_dp_cp_rank=1024
-                    )
+                    cp = self._get_cp_size([max_sl] * num_seqs, dp_size=dp, dp_rank=0, max_seqlen_per_dp_cp_rank=1024)
                     assert cp & (cp - 1) == 0, f"cp={cp} not power-of-2 for max_sl={max_sl}, n={num_seqs}, dp={dp}"
                     assert 1 <= cp <= dp
 
@@ -170,7 +167,7 @@ class TestLocalCPSizeComputation:
             (4096, 8, 8, 1024, 4),
             (8192, 8, 8, 1024, 8),
             (512, 4, 4, 1024, 1),
-            (512, 1, 4, 1024, 4),   # coverage constraint
+            (512, 1, 4, 1024, 4),  # coverage constraint
             (2048, 2, 8, 1024, 4),  # max(2, 4) = 4 due to coverage
         ],
     )
@@ -346,7 +343,10 @@ def test_loss_alignment(test_config):
     dcp_loss_avg = dcp_loss_reduced / world_size
 
     torch.testing.assert_close(
-        dcp_loss_avg, ref_loss_val, rtol=1e-4, atol=1e-4,
+        dcp_loss_avg,
+        ref_loss_val,
+        rtol=1e-4,
+        atol=1e-4,
         msg=f"Loss mismatch [{test_config.description}]: dcp={dcp_loss_avg.item():.6f}, ref={ref_loss_val.item():.6f}",
     )
     if rank == 0:
@@ -399,7 +399,10 @@ def test_grad_norm_alignment(test_config):
     dcp_grad_norm = torch.nn.utils.clip_grad_norm_(dcp_model.parameters(), float("inf"))
 
     torch.testing.assert_close(
-        dcp_grad_norm, ref_grad_norm, rtol=1e-2, atol=1e-4,
+        dcp_grad_norm,
+        ref_grad_norm,
+        rtol=1e-2,
+        atol=1e-4,
         msg=f"Grad norm mismatch [{test_config.description}]: dcp={dcp_grad_norm.item():.6f}, ref={ref_grad_norm.item():.6f}",
     )
     if rank == 0:
@@ -472,7 +475,6 @@ def test_loss_consistent_across_cp_sizes():
 
 
 class TestEdgeCases:
-
     def _get_cp_dp(self, seq_lens, dp_size, dp_rank, max_per_rank):
         torch.manual_seed(0)
         batch = make_batch(seq_lens, device="cpu")
