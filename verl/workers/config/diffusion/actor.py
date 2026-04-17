@@ -57,7 +57,7 @@ class DiffusionActorConfig(BaseConfig):
     ppo_mini_batch_size: int = 256
     ppo_micro_batch_size_per_gpu: Optional[int] = None
     diffusion_loss: DiffusionLossConfig = field(default_factory=DiffusionLossConfig)
-    loss_scale_factor: Optional[int] = None
+    loss_scale_factor: Optional[float] = None
     use_kl_loss: bool = False
     kl_loss_coef: float = 0.001
     ppo_epochs: int = 1
