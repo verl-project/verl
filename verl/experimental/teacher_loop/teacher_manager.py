@@ -89,8 +89,7 @@ class AsyncTeacherLLMServerManager:
         expected = set(teacher_model_configs_by_key)
         if set(servers_by_key.keys()) != expected:
             raise ValueError(
-                f"servers_by_key keys {sorted(servers_by_key)} do not match teacher routing keys "
-                f"{sorted(expected)}."
+                f"servers_by_key keys {sorted(servers_by_key)} do not match teacher routing keys {sorted(expected)}."
             )
         if set(load_balancer_handle_by_key.keys()) != expected:
             raise ValueError(

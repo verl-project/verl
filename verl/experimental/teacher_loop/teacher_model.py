@@ -132,8 +132,7 @@ class TeacherModelManager:
 
         Teacher B's one replica (W=4) is expected to stay on a single node,
         but the linear split dropped it on bundles 3-6 — straddling nodes 0
-        and 1. This check rejects that sub-pool instead of letting vLLM's
-        launch loop silently produce an inconsistent per-node worker layout.
+        and 1.
         """
         key = self.teacher_model_config.key
         P = gpus_per_node
