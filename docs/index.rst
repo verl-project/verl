@@ -173,6 +173,8 @@ verl is fast with:
    ascend_tutorial/examples/ascend_sglang_best_practices.rst
    ascend_tutorial/examples/ascend_retool_best_pratice.rst
    ascend_tutorial/examples/run_qwen3_32B_megatron_1k_256k_npu.md
+   ascend_tutorial/examples/NPU Performance Optimization Practices of Qwen3-30B-A3B Model.md
+   ascend_tutorial/examples/Qwen3-235B: Practice in Optimizing Training Performance of Long Sequence Reinforcement Learning.md
    ascend_tutorial/faq/faq.rst
 
 .. toctree::
