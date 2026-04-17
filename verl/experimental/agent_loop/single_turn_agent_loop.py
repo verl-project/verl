@@ -43,16 +43,6 @@ class SingleTurnAgentLoop(AgentLoopBase):
         images = multi_modal_data.get("images")
         videos = multi_modal_data.get("videos")
 
-        # Debug: log multi-modal data extraction
-        num_images = len(images) if images else 0
-        num_videos = len(videos) if videos else 0
-        if num_images > 0 or num_videos > 0:
-            print(
-                f"[SingleTurnAgentLoop] Multi-modal data extracted: "
-                f"images={num_images}, videos={num_videos}, "
-                f"image_types={[type(img).__name__ for img in images] if images else []}"
-            )
-
         # 2. apply chat template and tokenize
         prompt_ids = await self.apply_chat_template(
             messages,

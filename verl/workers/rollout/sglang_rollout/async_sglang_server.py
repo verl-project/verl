@@ -586,18 +586,7 @@ class SGLangHttpServer:
         if self.model_config.lora_rank > 0:
             generate_request.lora_path = SGLANG_LORA_NAME
 
-        logger.info(
-            f"[AsyncSGLangServer] Before generate_request: "
-            f"image_data is None={image_data is None}, "
-            f"generate_request.image_data is None={generate_request.image_data is None}, "
-            f"image_data type={type(image_data)}, "
-            f"image_data len={len(image_data) if isinstance(image_data, (list, tuple)) else 'N/A'}"
-        )
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
-        logger.info(
-            f"[AsyncSGLangServer] After generate_request: "
-            f"output keys={list(output.keys()) if isinstance(output, dict) else type(output)}"
-        )
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
         finish_reason = finish_reason["type"] if finish_reason else None

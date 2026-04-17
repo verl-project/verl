@@ -36,9 +36,9 @@ total_rollout_steps=$(((512*100)))
 total_epochs=200
 test_freq=5
 
-staleness_threshold=0
-trigger_parameter_sync_step=1
-partial_rollout=False
+staleness_threshold=0.5
+trigger_parameter_sync_step=2
+partial_rollout=True
 
 # FSDP specific parameters
 actor_offload=False
