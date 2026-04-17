@@ -299,8 +299,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.resource_pool_to_cls[resource_pool][str(role)] = role_cls
 
     def _create_reward_model_class(self):
-        # In fully async mode, RM is managed by RewardLoopManager (standalone),
-        # Skip worker group creation for RM.
+        # In fully async mode, RM is managed by RewardLoopManager (standalone). Skip worker group creation for RM.
         pass
 
     def _init_models(self):

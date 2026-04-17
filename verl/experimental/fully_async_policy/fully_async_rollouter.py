@@ -385,18 +385,15 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """
         self._init_async_objects()
         self._create_worker_classes()
-        await self._init_reward_loop()
+        await self._create_reward_loop_manager()
         await self._init_async_rollout_manager()
 
-    async def _init_reward_loop(self):
-        """Override parent: rollouter owns the GenRM server and reward loop workers.
+    async def _create_reward_loop_manager(self):
+        """Create RewardLoopManager for the rollouter.
 
-        In fully async mode with GenRM, only the rollouter creates the RewardLoopManager
-        (which starts the GenRM vLLM server + reward_loop_workers). The trainer does NOT
-        create one (unless use_trainer_do_validate=True) to avoid duplicate named actors.
-
-        RewardModelManager.__init__ uses asyncio.run() internally, which conflicts
-        with the already-running event loop. Run in a thread executor to avoid this.
+        TODO: RewardModelManager.__init__ uses asyncio.run() which forces us to use
+        run_in_executor here. Upstream should provide an async init method so this
+        can be a simple await call instead.
         """
         import asyncio
 
@@ -413,8 +410,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         pass
 
     def _create_reward_model_class(self):
-        # In fully async mode, RM is managed by RewardLoopManager (standalone),
-        # not by the worker group system. Skip worker group creation for RM.
+        # In fully async mode, RM is managed by RewardLoopManager (standalone). Skip worker group creation for RM.
         pass
 
     def _init_models(self):
