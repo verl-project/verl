@@ -66,6 +66,87 @@ class AgentLoopWithContextManagement(AgentLoopBase, ABC):
         output.extra_fields.update({"turn_scores": [], "tool_rewards": []})
         return output
 
+    async def _generate_next_state(
+        self,
+        *,
+        state: ContextState,
+        request_id: str,
+        sampling_params: dict[str, Any],
+        image_data=None,
+        video_data=None,
+        accumulate_metrics: bool = True,
+        preserve_extra_fields: bool = True,
+        preserve_routed_experts: bool = True,
+    ) -> tuple[ContextState, list[int]]:
+        """Call the LLM once and append assistant tokens to the context state.
+
+        Returns the updated state and the raw assistant response ids. Tool loops pass
+        those ids to the tool parser, while non-tool loops can ignore them.
+        """
+        metrics = state.metrics.model_dump() if accumulate_metrics else {}
+        prompt_ids = state.trajectory_ids
+
+        with simple_timer("generate_sequences", metrics):
+            output: TokenOutput = await self.server_manager.generate(
+                request_id=request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+            )
+
+        num_preempted = output.num_preempted if output.num_preempted is not None else -1
+        if metrics.get("num_preempted", -1) < 0:
+            metrics["num_preempted"] = num_preempted
+        elif num_preempted > 0:
+            metrics["num_preempted"] += num_preempted
+
+        response_text = self.tokenizer.decode(output.token_ids, skip_special_tokens=True)
+        messages = [dict(message) for message in state.messages]
+        messages.append({"role": "assistant", "content": response_text})
+
+        response_mask = list(state.response_mask) + [1] * len(output.token_ids)
+        if state.response_logprobs or output.log_probs:
+            prefix_logprobs = (
+                list(state.response_logprobs) if state.response_logprobs else [0.0] * len(state.response_mask)
+            )
+            current_logprobs = output.log_probs if output.log_probs is not None else [0.0] * len(output.token_ids)
+            response_logprobs = prefix_logprobs + current_logprobs
+        else:
+            response_logprobs = []
+
+        if preserve_extra_fields:
+            extra_fields = dict(state.extra_fields)
+            if not extra_fields:
+                extra_fields.update(output.extra_fields)
+            else:
+                max_global_steps = output.extra_fields.get("max_global_steps")
+                if max_global_steps:
+                    extra_fields["max_global_steps"] = max_global_steps
+        else:
+            extra_fields = dict(output.extra_fields)
+
+        if output.routed_experts is not None:
+            routed_experts = output.routed_experts[: len(prompt_ids) + self.response_length]
+        elif preserve_routed_experts:
+            routed_experts = state.routed_experts
+        else:
+            routed_experts = None
+
+        next_state = ContextState(
+            messages=messages,
+            trajectory_ids=list(state.trajectory_ids) + output.token_ids,
+            response_mask=response_mask,
+            response_logprobs=response_logprobs,
+            multi_modal_data=dict(state.multi_modal_data),
+            routed_experts=routed_experts,
+            reward_score=state.reward_score,
+            num_turns=sum(1 for message in messages if message.get("role") != "system"),
+            metrics=AgentLoopMetrics(**metrics),
+            extra_fields=extra_fields,
+        )
+        return next_state, output.token_ids
+
     @abstractmethod
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> list[AgentLoopOutput]:
         raise NotImplementedError
@@ -84,59 +165,6 @@ class SummarizerAgentLoop(AgentLoopWithContextManagement):
         self.context_manager = SummarizerContextManager(
             tokenizer=self.tokenizer,
             apply_chat_template_kwargs=self.apply_chat_template_kwargs,
-        )
-
-    async def _generate_next_state(
-        self,
-        *,
-        state: ContextState,
-        request_id: str,
-        sampling_params: dict[str, Any],
-        images,
-        videos,
-    ) -> ContextState:
-        metrics = {}
-        prompt_ids = state.trajectory_ids
-
-        with simple_timer("generate_sequences", metrics):
-            output: TokenOutput = await self.server_manager.generate(
-                request_id=request_id,
-                prompt_ids=prompt_ids,
-                sampling_params=sampling_params,
-                image_data=images,
-                video_data=videos,
-            )
-        metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
-
-        response_text = self.tokenizer.decode(output.token_ids, skip_special_tokens=True)
-        messages = list(state.messages)
-        messages.append({"role": "assistant", "content": response_text})
-
-        response_mask = list(state.response_mask) + [1] * len(output.token_ids)
-        if state.response_logprobs or output.log_probs:
-            prefix_logprobs = (
-                list(state.response_logprobs) if state.response_logprobs else [0.0] * len(state.response_mask)
-            )
-            current_logprobs = output.log_probs if output.log_probs is not None else [0.0] * len(output.token_ids)
-            response_logprobs = prefix_logprobs + current_logprobs
-        else:
-            response_logprobs = []
-
-        return ContextState(
-            messages=messages,
-            trajectory_ids=list(state.trajectory_ids) + output.token_ids,
-            response_mask=response_mask,
-            response_logprobs=response_logprobs,
-            multi_modal_data=dict(state.multi_modal_data),
-            routed_experts=(
-                output.routed_experts[: len(prompt_ids) + self.response_length]
-                if output.routed_experts is not None
-                else None
-            ),
-            reward_score=state.reward_score,
-            num_turns=sum(1 for message in messages if message.get("role") != "system"),
-            metrics=AgentLoopMetrics(**metrics),
-            extra_fields=dict(output.extra_fields),
         )
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> list[AgentLoopOutput]:
@@ -159,12 +187,15 @@ class SummarizerAgentLoop(AgentLoopWithContextManagement):
         request_id = uuid4().hex
         compression_count = 0
         while True:
-            state = await self._generate_next_state(
+            state, _ = await self._generate_next_state(
                 state=state,
                 request_id=request_id,
                 sampling_params=sampling_params,
-                images=images,
-                videos=videos,
+                image_data=images,
+                video_data=videos,
+                accumulate_metrics=False,
+                preserve_extra_fields=False,
+                preserve_routed_experts=False,
             )
             outputs.append(self._build_output_from_state(state))
 
@@ -259,12 +290,16 @@ class ToolSlidingWindowAgentLoop(AgentLoopWithContextManagement):
 
         def build_output(current_state: ContextState) -> AgentLoopOutput:
             """Closure that captures the current reward/compression counters."""
-            return self._build_tool_output_from_state(
-                state=current_state,
-                trajectory_tool_rewards=trajectory_tool_rewards,
-                session_tool_rewards=session_tool_rewards,
-                compression_count=compression_count,
+            output = self._build_output_from_state(current_state)
+            output.extra_fields.update(
+                {
+                    "tool_rewards": list(trajectory_tool_rewards),
+                    "session_tool_rewards": list(session_tool_rewards),
+                    "context_compression_count": compression_count,
+                    "agent_loop_impl": "ToolSlidingWindowAgentLoop",
+                }
             )
+            return output
 
         # Main generate-tool-compress loop
         while True:
@@ -313,78 +348,6 @@ class ToolSlidingWindowAgentLoop(AgentLoopWithContextManagement):
                     trajectory_tool_rewards = []  # reset for the new trajectory
 
         return outputs
-
-    async def _generate_next_state(
-        self,
-        *,
-        state: ContextState,
-        request_id: str,
-        sampling_params: dict[str, Any],
-    ) -> tuple[ContextState, list[int]]:
-        """Call the LLM and return (updated state, raw response token ids).
-
-        The raw response ids are returned separately so the caller can pass them
-        directly to ``extract_tool_calls`` without re-slicing from state.
-        Metrics (generate_sequences timing, num_preempted) are accumulated across turns.
-        """
-        # Carry forward metrics from previous turns
-        metrics = state.metrics.model_dump()
-        prompt_ids = state.trajectory_ids
-
-        with simple_timer("generate_sequences", metrics):
-            output: TokenOutput = await self.server_manager.generate(
-                request_id=request_id,
-                prompt_ids=prompt_ids,
-                sampling_params=sampling_params,
-            )
-
-        # Accumulate num_preempted across turns (first turn initializes, subsequent turns add)
-        num_preempted = output.num_preempted if output.num_preempted is not None else -1
-        if metrics.get("num_preempted", -1) < 0:
-            metrics["num_preempted"] = num_preempted
-        elif num_preempted > 0:
-            metrics["num_preempted"] += num_preempted
-
-        response_text = self.tokenizer.decode(output.token_ids, skip_special_tokens=True)
-        messages = [dict(message) for message in state.messages]
-        messages.append({"role": "assistant", "content": response_text})
-
-        # All generated tokens are mask=1 (model-generated, contribute to gradient)
-        response_mask = list(state.response_mask) + [1] * len(output.token_ids)
-        if state.response_logprobs or output.log_probs:
-            prefix_logprobs = (
-                list(state.response_logprobs) if state.response_logprobs else [0.0] * len(state.response_mask)
-            )
-            current_logprobs = output.log_probs if output.log_probs is not None else [0.0] * len(output.token_ids)
-            response_logprobs = prefix_logprobs + current_logprobs
-        else:
-            response_logprobs = []
-
-        # Preserve extra_fields across turns; only update max_global_steps from new output
-        extra_fields = dict(state.extra_fields)
-        if not extra_fields:
-            extra_fields.update(output.extra_fields)
-        else:
-            max_global_steps = output.extra_fields.get("max_global_steps")
-            if max_global_steps:
-                extra_fields["max_global_steps"] = max_global_steps
-
-        next_state = ContextState(
-            messages=messages,
-            trajectory_ids=list(state.trajectory_ids) + output.token_ids,
-            response_mask=response_mask,
-            response_logprobs=response_logprobs,
-            routed_experts=(
-                output.routed_experts[: len(prompt_ids) + self.response_length]
-                if output.routed_experts is not None
-                else state.routed_experts
-            ),
-            reward_score=state.reward_score,
-            num_turns=sum(1 for message in messages if message.get("role") != "system"),
-            metrics=AgentLoopMetrics(**metrics),
-            extra_fields=extra_fields,
-        )
-        return next_state, output.token_ids
 
     async def _append_tool_responses(
         self,
@@ -495,27 +458,6 @@ class ToolSlidingWindowAgentLoop(AgentLoopWithContextManagement):
 
         length = self.max_tool_response_length // 2
         return text[:length] + "...(truncated)..." + text[-length:]
-
-    def _build_tool_output_from_state(
-        self,
-        *,
-        state: ContextState,
-        trajectory_tool_rewards: list[float],
-        session_tool_rewards: list[float],
-        compression_count: int,
-    ) -> AgentLoopOutput:
-        """Build output with tool-specific extra_fields for downstream metrics."""
-        output = self._build_output_from_state(state)
-        output.extra_fields.update(
-            {
-                "turn_scores": [],
-                "tool_rewards": list(trajectory_tool_rewards),
-                "session_tool_rewards": list(session_tool_rewards),
-                "context_compression_count": compression_count,
-                "agent_loop_impl": "ToolSlidingWindowAgentLoop",
-            }
-        )
-        return output
 
     def _should_terminate_after_generation(
         self,
