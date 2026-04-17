@@ -233,8 +233,19 @@ class DistillationConfig(BaseConfig):
                 f"Sum of teacher world_size ({teacher_world_size_sum}) must match the distillation "
                 f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {total_pool_size})."
             )
-        if len(self.teacher_models) != 1:
-            raise NotImplementedError("Multiple teacher models are not supported yet in the runtime path.")
+        if len(self.teacher_models) > 1 and self.nnodes != 1:
+            raise NotImplementedError(
+                f"Multi-teacher distillation currently supports nnodes=1 only, got nnodes={self.nnodes}."
+            )
+
+        # Each teacher's `key` selects which samples go to it, by looking up
+        # `teacher_key` (e.g. "data_source") on each sample's non-tensor batch.
+        teacher_model_keys = {teacher.key for teacher in self.teacher_models.values()}
+        if len(teacher_model_keys) != len(self.teacher_models):
+            raise ValueError(
+                f"Each teacher model must have a unique `key`, but got {teacher_model_keys} "
+                f"for {len(self.teacher_models)} teachers."
+            )
 
     def get_single_teacher_model(self) -> DistillationTeacherModelConfig:
         if len(self.teacher_models) != 1:

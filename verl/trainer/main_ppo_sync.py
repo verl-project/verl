@@ -382,6 +382,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             prompt_ids=output.prompt_ids,
             response_ids=output.response_ids,
             validate=validate,
+            sample_kwargs=kwargs,
         )
 
         if final_output.reward_score is not None:

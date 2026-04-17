@@ -125,7 +125,7 @@ class TeacherModelManager:
 
 
 class MultiTeacherModelManager:
-    """Multi Teacher model manager."""
+    """Manages one inner `TeacherModelManager` per teacher model, keyed by each teacher's `key`."""
 
     def __init__(
         self,
@@ -133,46 +133,50 @@ class MultiTeacherModelManager:
         resource_pool: RayResourcePool,
     ):
         """
-        Initialize the teacher model manager.
+        Initialize the multi-teacher model manager.
 
         Args:
-            config (DictConfig): Full configuration.
-            resource_pool (RayResourcePool): Resource pool.
+            config (DictConfig): Full configuration (needed so AsyncTeacherLLMServerManager callers
+                can read `distillation` / `teacher_key` without reconstructing the config).
+            resource_pool (RayResourcePool): Combined resource pool for all teachers.
         """
-
-        # Need dataclass conversion for max_logprobs handling in post_init
         self.config = config
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
 
         self.resource_pool = resource_pool
+        self.teacher_model_managers: dict[str, TeacherModelManager] = {}
+        self.server_addresses: dict[str, list[str]] = {}
+        self.server_handles: dict[str, list] = {}
+        self.load_balancer_handle: dict[str, object] = {}
+
         self._initialize_teacher_model_managers()
-        self._initialize_load_balancer_handle()
 
     def _initialize_teacher_model_managers(self):
-        """TODO: MOPD -- split resource pool across teachers and init one TeacherModelManager per teacher."""
-        teacher_model_config = self.distillation_config.get_single_teacher_model()
-        self.teacher_model_manager = TeacherModelManager(
-            distillation_config=self.distillation_config,
-            teacher_model_config=teacher_model_config,
-            resource_pool=self.resource_pool,
+        teacher_models = self.distillation_config.teacher_models
+        split_sizes = [teacher.n_gpus_per_node for teacher in teacher_models.values()]
+        split_pools = split_resource_pool(self.resource_pool, split_size=split_sizes)
+        assert len(split_pools) == len(teacher_models), (
+            f"split_resource_pool returned {len(split_pools)} pools for {len(teacher_models)} teachers."
         )
-        self.server_addresses = self.teacher_model_manager.server_addresses
-        self.server_handles = self.teacher_model_manager.server_handles
 
-    def _initialize_load_balancer_handle(self):
-        """TODO: MOPD -- balancers become a dict (one per teacher)"""
-        self.load_balancer_handle = self.teacher_model_manager.load_balancer_handle
+        for (_, teacher_model_config), teacher_pool in zip(teacher_models.items(), split_pools, strict=True):
+            manager = TeacherModelManager(
+                distillation_config=self.distillation_config,
+                teacher_model_config=teacher_model_config,
+                resource_pool=teacher_pool,
+            )
+            key = teacher_model_config.key
+            self.teacher_model_managers[key] = manager
+            self.server_addresses[key] = manager.server_addresses
+            self.server_handles[key] = manager.server_handles
+            self.load_balancer_handle[key] = manager.load_balancer_handle
 
     @auto_await
     async def wake_up(self):
-        """Wake up all rollout replica instances.
-        TODO: MOPD -- wake up each of the teacher model managers.
-        """
-        await _run_all([manager.wake_up() for manager in [self.teacher_model_manager]])
+        """Wake up every teacher's rollout replicas."""
+        await _run_all([manager.wake_up() for manager in self.teacher_model_managers.values()])
 
     @auto_await
     async def sleep(self):
-        """Sleep all rollout replica instances.
-        TODO: MOPD -- sleep each of the teacher model managers.
-        """
-        await _run_all([manager.sleep() for manager in [self.teacher_model_manager]])
+        """Sleep every teacher's rollout replicas."""
+        await _run_all([manager.sleep() for manager in self.teacher_model_managers.values()])

@@ -25,7 +25,6 @@ from verl.workers.config import (
     DistillationConfig,
     DistillationLossConfig,
     DistillationTeacherModelConfig,
-    HFModelConfig,
 )
 
 
@@ -66,53 +65,74 @@ def _pad_teacher_outputs(
 
 class AsyncTeacherLLMServerManager:
     """Teacher-specific async client used for distillation logprob computation.
-    TODO: MOPD -- servers and load_balance_handle become a dict (one per teacher)
+
+    Holds one inner `AsyncLLMServerManager` per teacher (keyed by each teacher's `key`) and
+    dispatches each request to the matching teacher based on the supplied routing key.
     """
 
     def __init__(
         self,
         config: DictConfig,
-        servers: list[tuple[str, ray.actor.ActorHandle]],
-        load_balancer_handle: ray.actor.ActorHandle,
+        servers_by_key: dict[str, list[tuple[str, ray.actor.ActorHandle]]],
+        load_balancer_handle_by_key: dict[str, ray.actor.ActorHandle],
     ):
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
-        teacher_model_config: DistillationTeacherModelConfig = self.distillation_config.get_single_teacher_model()
-        self.teacher_model_config = teacher_model_config
+        self.teacher_key: str = self.distillation_config.teacher_key
 
-        # Get pad token ID
-        model_config = HFModelConfig(path=teacher_model_config.model_path)
-        text_tokenizer = model_config.tokenizer
-        if text_tokenizer is None:
-            raise ValueError(f"Tokenizer is required for teacher model {teacher_model_config.model_path}")
-        self.pad_token_id = text_tokenizer.pad_token_id
-        self._initialize_teacher_server_managers(
-            config=config, servers=servers, load_balancer_handle=load_balancer_handle
-        )
+        teacher_models = self.distillation_config.teacher_models
+        if set(servers_by_key.keys()) != set(teacher_models.keys()):
+            raise ValueError(
+                f"servers_by_key keys {sorted(servers_by_key)} do not match teacher_models keys "
+                f"{sorted(teacher_models)}."
+            )
+        if set(load_balancer_handle_by_key.keys()) != set(teacher_models.keys()):
+            raise ValueError(
+                f"load_balancer_handle_by_key keys {sorted(load_balancer_handle_by_key)} do not match "
+                f"teacher_models keys {sorted(teacher_models)}."
+            )
 
-    def _initialize_teacher_server_managers(
-        self,
-        config: DictConfig,
-        servers: list[tuple[str, ray.actor.ActorHandle]],
-        load_balancer_handle: ray.actor.ActorHandle,
-    ):
-        # TODO: MOPD -- balancers/servers become a dict (one per teacher)
-        self.server_manager = AsyncLLMServerManager(
-            config=config, servers=servers, load_balancer_handle=load_balancer_handle
-        )
+        self.teacher_model_configs: dict[str, DistillationTeacherModelConfig] = teacher_models
+        self.server_managers: dict[str, AsyncLLMServerManager] = {
+            key: AsyncLLMServerManager(
+                config=config,
+                servers=servers_by_key[key],
+                load_balancer_handle=load_balancer_handle_by_key[key],
+            )
+            for key in teacher_models
+        }
+
+    def _resolve_teacher_key(self, routing_key: Optional[str]) -> str:
+        if len(self.teacher_model_configs) == 1:
+            # Single-teacher path: route everything to the one teacher regardless of the sample's key.
+            return next(iter(self.teacher_model_configs))
+        if routing_key is None:
+            raise ValueError(
+                f"Routing key is required for multi-teacher distillation "
+                f"(configured via distillation.teacher_key={self.teacher_key!r})."
+            )
+        if routing_key not in self.teacher_model_configs:
+            raise ValueError(
+                f"No teacher configured for routing key {routing_key!r}. "
+                f"Configured teachers: {sorted(self.teacher_model_configs)}."
+            )
+        return routing_key
 
     async def compute_teacher_logprobs_single(
         self,
         sequence_ids: list[int],
         multi_modal_data: Optional[dict[str, Any]] = None,
+        routing_key: Optional[str] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
-        # TODO: MOPD -- select server manager from server manager dict based on example task key
-        teacher_output = await self.server_manager.generate(
+        teacher_key = self._resolve_teacher_key(routing_key)
+        teacher_model_config = self.teacher_model_configs[teacher_key]
+        server_manager = self.server_managers[teacher_key]
+        teacher_output = await server_manager.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
-            sampling_params=_get_teacher_sampling_params(self.teacher_model_config, self.distillation_loss_config),
+            sampling_params=_get_teacher_sampling_params(teacher_model_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
         )
