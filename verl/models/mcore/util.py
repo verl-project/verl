@@ -102,6 +102,18 @@ def preprocess_packed_seqs(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i, attention_mask[i]]
+            
+            # If the number of elements in `d` is smaller than the required
+            # alignment size, pad the tensor with zeros so that its total
+            # length matches `align_size`. 
+            if d.numel() < align_size:
+                original_size = d.numel()
+                pad = torch.zeros(align_size - d.numel(), dtype=d.dtype, device=d.device)
+                d = torch.cat([d, pad], dim=0)
+                logger.warning_once(
+                    f"Padding tensor for context parallel alignment, original_size={original_size}, "
+                    f"align_size={align_size}"
+                )
             input_ids_rmpad[start_idx : start_idx + half_seqlen] = d[
                 half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)
             ]
