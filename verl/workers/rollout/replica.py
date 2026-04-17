@@ -385,11 +385,18 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
+def _load_vexact():
+    from verl.workers.rollout.vexact_rollout.async_server import VExactReplica
+
+    return VExactReplica
+
+
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
 RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
+RolloutReplicaRegistry.register("vexact", _load_vexact)
 
 
 # Original function for backward compatibility
