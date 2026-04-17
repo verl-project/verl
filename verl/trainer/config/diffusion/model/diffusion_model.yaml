@@ -28,7 +28,7 @@ external_lib: null
 enable_gradient_checkpointing: True
 
 # Set to positive value to enable LoRA (e.g., 32)
-lora_rank: 32
+lora_rank: 0
 
 # LoRA scaling factor
 lora_alpha: 64

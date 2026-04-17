@@ -66,7 +66,7 @@ class DiffusionModelConfig(BaseConfig):
 
     enable_gradient_checkpointing: bool = True
 
-    lora_rank: int = 32
+    lora_rank: int = 0
     lora_alpha: int = 64
     lora_init_weights: str = "gaussian"
     target_modules: Optional[Any] = "all-linear"  # allow both "all-linear" and ["q_proj","k_proj"]
