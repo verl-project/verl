@@ -103,7 +103,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
                     final_output.routed_experts = output.routed_experts
                 else:
                     final_output.routed_experts = torch.cat(
-                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids):]],
+                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
                         dim=0,
                     )
             if output.num_preempted is not None:
