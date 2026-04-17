@@ -34,16 +34,7 @@ async def _run_all(tasks: list[asyncio.Task]):
 
 
 class TeacherModelManager:
-    """Owns the rollout replicas for a single distillation teacher.
-
-    Splits `resource_pool` into per-replica chunks sized by
-    `teacher_model_config.inference` parallelism, launches a colocated inference replica
-    on each chunk, and exposes the resulting server handles and addresses plus a
-    `GlobalRequestLoadBalancer` for use by `AsyncTeacherLLMServerManager`. Rejects
-    placements where a replica's sub-pool straddles node boundaries (see
-    `_validate_replica_node_alignment`). `MultiTeacherModelManager` owns one instance
-    per routing key.
-    """
+    """Teacher model manager."""
 
     def __init__(
         self,
@@ -55,15 +46,9 @@ class TeacherModelManager:
         Initialize the teacher model manager.
 
         Args:
-            distillation_config (DistillationConfig): Full distillation config; only
-                `n_gpus_per_node` is read here, to pass through to the rollout replicas
-                so they compute `nnodes` correctly for teachers that span multiple nodes.
-            teacher_model_config (DistillationTeacherModelConfig): Config for this
-                teacher (model path, routing key, inference parallelism). The routing
-                key is used as the Ray actor `name_suffix` so replicas for different
-                teachers don't collide.
-            resource_pool (RayResourcePool): Sub-pool already sized for this teacher
-                (`teacher_model_config.world_size` bundles).
+            distillation_config (DistillationConfig): Distillation configuration.
+            teacher_model_config (DistillationTeacherModelConfig): Teacher model configuration.
+            resource_pool (RayResourcePool): Dedicated teacher resource pool.
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
