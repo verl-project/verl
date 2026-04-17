@@ -723,7 +723,6 @@ distillation:
     clip_ratio_high: 0.2
   teacher_model:
     _target_: verl.workers.config.DistillationTeacherModelConfig
-    enable_resource_pool: false
     n_gpus_per_node: 8
     nnodes: 0
     model_path: null
