@@ -830,11 +830,11 @@ class RayPPOTrainer:
 
         # initialize teacher loop manager
         if self.use_teacher_policy:
-            from verl.experimental.teacher_loop import TeacherModelManager
+            from verl.experimental.teacher_loop import MultiTeacherModelManager
 
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
-            self.teacher_model_manager = TeacherModelManager(
-                config=self.config.distillation,
+            self.teacher_model_manager = MultiTeacherModelManager(
+                config=self.config,
                 resource_pool=teacher_resource_pool,
             )
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
@@ -1213,9 +1213,7 @@ class RayPPOTrainer:
             batch_td = batch.to_tensordict()
             # step 2: convert from padding to no-padding
             batch_td = left_right_2_no_padding(batch_td)
-            calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
-                self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
-            )
+            calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
             distillation_use_topk = (
                 self.distillation_config.distillation_loss.loss_settings.use_topk
                 if is_distillation_enabled(self.config.get("distillation"))

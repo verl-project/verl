@@ -21,21 +21,26 @@ from torch.nn import functional as F
 
 from verl.experimental.agent_loop import AsyncLLMServerManager
 from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.config import DistillationConfig, DistillationLossConfig
+from verl.workers.config import (
+    DistillationConfig,
+    DistillationLossConfig,
+    DistillationTeacherModelConfig,
+    HFModelConfig,
+)
 
 
 def _get_teacher_sampling_params(
-    distillation_config: DistillationConfig,
+    teacher_model_config: DistillationTeacherModelConfig,
     distillation_loss_config: DistillationLossConfig,
 ) -> dict[str, Any]:
     """Get sampling parameters for teacher model when computing log probabilities for distillation."""
-    if distillation_config.teacher_model.inference.temperature != 1.0:
+    if teacher_model_config.inference.temperature != 1.0:
         raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
 
     num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
     return {
         "max_tokens": 1,
-        "temperature": distillation_config.teacher_model.inference.temperature,
+        "temperature": teacher_model_config.inference.temperature,
         "prompt_logprobs": num_logprobs,
     }
 
@@ -59,22 +64,42 @@ def _pad_teacher_outputs(
     )
 
 
-class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
-    """Teacher-specific async client used for distillation logprob computation."""
+class AsyncTeacherLLMServerManager:
+    """Teacher-specific async client used for distillation logprob computation.
+    TODO: MOPD -- servers and load_balance_handle become a dict (one per teacher)
+    """
 
     def __init__(
         self,
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
-        distillation_config: DictConfig | DistillationConfig,
     ):
-        super().__init__(config=config, servers=servers, load_balancer_handle=load_balancer_handle)
-        if isinstance(distillation_config, DistillationConfig):
-            self.distillation_config = distillation_config
-        else:
-            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(distillation_config)
+        self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+        teacher_model_config: DistillationTeacherModelConfig = self.distillation_config.get_single_teacher_model()
+        self.teacher_model_config = teacher_model_config
+
+        # Get pad token ID
+        model_config = HFModelConfig(path=teacher_model_config.model_path)
+        text_tokenizer = model_config.tokenizer
+        if text_tokenizer is None:
+            raise ValueError(f"Tokenizer is required for teacher model {teacher_model_config.model_path}")
+        self.pad_token_id = text_tokenizer.pad_token_id
+        self._initialize_teacher_server_managers(
+            config=config, servers=servers, load_balancer_handle=load_balancer_handle
+        )
+
+    def _initialize_teacher_server_managers(
+        self,
+        config: DictConfig,
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
+    ):
+        # TODO: MOPD -- balancers/servers become a dict (one per teacher)
+        self.server_manager = AsyncLLMServerManager(
+            config=config, servers=servers, load_balancer_handle=load_balancer_handle
+        )
 
     async def compute_teacher_logprobs_single(
         self,
@@ -83,10 +108,11 @@ class AsyncTeacherLLMServerManager(AsyncLLMServerManager):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
-        teacher_output = await self.generate(
+        # TODO: MOPD -- select server manager from server manager dict based on example task key
+        teacher_output = await self.server_manager.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
-            sampling_params=_get_teacher_sampling_params(self.distillation_config, self.distillation_loss_config),
+            sampling_params=_get_teacher_sampling_params(self.teacher_model_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
         )

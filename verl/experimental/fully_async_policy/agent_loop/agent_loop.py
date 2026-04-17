@@ -26,7 +26,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AsyncLLMServerManager,
     TokenOutput,
 )
-from verl.experimental.teacher_loop import TeacherModelManager
+from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
@@ -160,7 +160,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        teacher_model_manager: TeacherModelManager = None,
+        teacher_model_manager: MultiTeacherModelManager = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker

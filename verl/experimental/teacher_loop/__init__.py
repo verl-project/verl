@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .teacher_model import TeacherModelManager
+from .teacher_model import MultiTeacherModelManager
 
-__all__ = ["TeacherModelManager"]
+__all__ = ["MultiTeacherModelManager"]
