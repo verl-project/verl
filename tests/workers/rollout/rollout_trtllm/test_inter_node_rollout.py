@@ -51,7 +51,6 @@ async def test_inter_node_trtllm_rollout(init_config):
     inter-node code path in get_pgs_and_bundle_indices() and launch_servers().
     """
     tp_size = 2  # fixed: only valid TP for Qwen2.5-0.5B-Instruct (2 KV heads)
-    os.environ.setdefault("TLLM_RAY_FORCE_LOCAL_CLUSTER", "1")
     ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
 
     try:
