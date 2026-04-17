@@ -24,12 +24,14 @@ from verl.tools.utils.mcp_clients.McpClientManager import ClientManager
 from verl.utils.rollout_trace import rollout_trace_op
 
 from .base_tool import BaseTool
+from .registry import register_tool
 from .schemas import OpenAIFunctionToolSchema, ToolResponse
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+@register_tool("mcp_base")
 class MCPBaseTool(BaseTool):
     def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
         super().__init__(config, tool_schema)
