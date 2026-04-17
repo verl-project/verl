@@ -334,12 +334,12 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 megatron_config.distrib_optim_fully_reshardable_mem_efficient
             )
             if dist_ckpt_optim_fully_reshardable:
-                metadata["distrib_optim_sharding_type"] = "fully_reshardable"
+                metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
                 metadata["distrib_optim_fully_reshardable_mem_efficient"] = (
                     distrib_optim_fully_reshardable_mem_efficient
                 )
             else:
-                metadata["distrib_optim_sharding_type"] = "dp_reshardable"
+                metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
 
         metadata["singleton_local_shards"] = False
         metadata["chained_optim_avoid_prefix"] = True
@@ -421,6 +421,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             # For backward compatibility
             sharded_sd_metadata = None
         else:
+           try:
+                from mindspeed.core.optimizer.adamw import AdamW as MindSpeedAdamW
+                torch.serialization.add_safe_globals([MindSpeedAdamW])
+            except ImportError:
+                pass
             sharded_sd_metadata = load_content_metadata(checkpoint_dir=dist_checkpoint_path)
         if sharded_sd_metadata is None:
             if self.use_distributed_optimizer:
