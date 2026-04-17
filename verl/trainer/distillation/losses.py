@@ -132,7 +132,7 @@ def compute_topk_loss(
     - teacher_mass: (bsz, seqlen/cp_size)
     """
     match config.strategy:
-        case "fsdp":
+        case "fsdp" | "veomni":
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
             distillation_loss_fn = fsdp_losses.compute_forward_kl_topk

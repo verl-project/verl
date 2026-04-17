@@ -523,13 +523,15 @@ class OmniSequenceShardCollator:
     padding_features: dict[str, int] = field(
         default_factory=lambda: {
             "pixel_values": 0,
+            "pixel_values_videos": 0,
         },
         metadata={"help": "features to padding sequence dimension."},
     )
 
     # padding scale for padding features
     padding_scale: dict[str, int] = field(
-        default_factory=lambda: {"pixel_values": 4}, metadata={"help": "padding scale for padding features."}
+        default_factory=lambda: {"pixel_values": 4, "pixel_values_videos": 4},
+        metadata={"help": "padding scale for padding features."},
     )
 
     def __post_init__(self):
@@ -561,8 +563,8 @@ class OmniSequenceShardCollator:
         return torch.cat((tensor, pad), dim=dim)
 
     def __call__(self, batch: Sequence[dict[str, "torch.Tensor"]]) -> dict[str, "torch.Tensor"]:
-        for key in batch.keys():
-            if key in self.padding_features.keys():
+        for key in list(batch.keys()):
+            if key in self.padding_features:
                 batch[key] = self.sp_padding(
                     batch[key],
                     dim=self.sp_slice_features.get(key, -1),
@@ -582,27 +584,44 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
     """Normalize packed position_ids layout and derive varlen FlashAttention kwargs.
 
     Supported formats for use_remove_padding=true:
+        - 1D: (total_nnz,) - flat packed format
         - 2D: (1, total_nnz) - standard packed format
-        - 3D: (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
+        - 3D: (rope_dim, 1, total_nnz) or (1, rope_dim, total_nnz) - VeRL mRoPE packed format
     """
-    if position_ids.dim() == 2:
-        # (1, total_nnz) - standard packed format
+    if position_ids.dim() == 1:
+        fa_position_ids = position_ids.unsqueeze(0)
+    elif position_ids.dim() == 2:
         fa_position_ids = position_ids
     elif position_ids.dim() == 3:
-        # (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
+        # For mRoPE models, position_ids can have various 3D layouts.
+        # We use heuristics to identify the rope_dim axis (typically 3 or 4)
+        # and extract a single-dim view for cu_seq_lens computation.
         if position_ids.shape[1] == 1:
+            # (rope_dim, 1, total_nnz) - VeRL mRoPE packed format
             fa_position_ids = position_ids[0]
+        elif position_ids.shape[0] == 1:
+            # (1, rope_dim, total_nnz) - alternative layout
+            fa_position_ids = position_ids[:, 0, :]
+        elif position_ids.shape[0] in (3, 4):
+            # (rope_dim, batch, total_nnz) - rope_dim is 3 (Qwen2.5-VL) or 4 (Qwen3.5-VL)
+            fa_position_ids = position_ids[0]
+        elif position_ids.shape[1] in (3, 4):
+            # (batch, rope_dim, total_nnz) - transposed layout
+            fa_position_ids = position_ids[:, 0, :]
         else:
             raise ValueError(
-                f"Unsupported 3D position_ids shape: {tuple(position_ids.shape)}, expected (rope_dim, 1, total_nnz)"
+                f"Unsupported 3D position_ids shape: {tuple(position_ids.shape)}, "
+                f"expected (rope_dim, 1, total_nnz) or (1, rope_dim, total_nnz)"
             )
     else:
         raise ValueError(
             f"Unsupported position_ids rank: {position_ids.dim()}, "
-            f"expected 2 (1, total_nnz) or 3 (rope_dim, 1, total_nnz)"
+            f"expected 1, 2, or 3"
         )
 
-    (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = prepare_fa_kwargs_from_position_ids(fa_position_ids)
+    (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = prepare_fa_kwargs_from_position_ids(
+        fa_position_ids
+    )
     return {
         "cu_seq_lens_q": cu_seq_lens_q,
         "cu_seq_lens_k": cu_seq_lens_k,
@@ -614,7 +633,6 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
-        # TODO: Cannot work properly for qwen_vl ulysses
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         input_ids_rmpad = model_inputs["input_ids"]
         sp_enabled = parallel_state.get_parallel_state().sp_enabled
