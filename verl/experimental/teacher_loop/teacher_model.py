@@ -148,7 +148,6 @@ class MultiTeacherModelManager:
         self.resource_pool = resource_pool
         self._initialize_teacher_model_managers()
         self._initialize_load_balancer_handle()
-        self.sleep()
 
     def _initialize_teacher_model_managers(self):
         """TODO: MOPD -- split resource pool across teachers and init one TeacherModelManager per teacher."""
