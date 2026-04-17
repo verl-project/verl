@@ -102,29 +102,5 @@ class TestAsyncRollouterRMAssert(unittest.TestCase):
             self._validate_async_rm_config(config)
 
 
-class TestTrainerInitRewardLoopCondition(unittest.TestCase):
-    """Test that FullyAsyncTrainer._init_reward_loop triggers under the right conditions.
-
-    Replicates the condition: `if self.use_rm or self.config.async_training.use_trainer_do_validate`
-    """
-
-    @staticmethod
-    def _should_init_reward_loop(use_rm, use_trainer_do_validate):
-        """Replicate the condition from FullyAsyncTrainer._init_reward_loop."""
-        return use_rm or use_trainer_do_validate
-
-    def test_both_false(self):
-        assert self._should_init_reward_loop(False, False) is False
-
-    def test_use_rm_true(self):
-        assert self._should_init_reward_loop(True, False) is True
-
-    def test_use_trainer_do_validate_true(self):
-        assert self._should_init_reward_loop(False, True) is True
-
-    def test_both_true(self):
-        assert self._should_init_reward_loop(True, True) is True
-
-
 if __name__ == "__main__":
     unittest.main()

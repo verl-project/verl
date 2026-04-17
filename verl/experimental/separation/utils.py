@@ -46,12 +46,11 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
             if role in roles:
                 mapping[role] = "trainer_pool"
 
-    # Rollout — not allocated here; GPU managed via RolloutReplica.init_standalone()
+    # Rollout resource pool
     if Role.Rollout in roles:
         assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
         assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
 
-    # RewardModel — not allocated here; GPU managed via RolloutReplica.init_standalone()
     if Role.RewardModel in roles:
         rm_cfg = config.reward.reward_model
         assert rm_cfg.n_gpus_per_node > 0, "config.reward.reward_model.n_gpus_per_node must be greater than 0"
