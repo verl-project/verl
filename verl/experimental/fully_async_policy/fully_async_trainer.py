@@ -300,7 +300,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     def _create_reward_model_class(self):
         # In fully async mode, RM is managed by RewardLoopManager (standalone),
-        # not by the worker group system. Skip worker group creation for RM.
+        # Skip worker group creation for RM.
         pass
 
     def _init_models(self):
@@ -311,8 +311,6 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
             self.ref_policy_wg.init_model()
-
-        # Skip RM worker group — RM is initialized via _init_reward_loop -> RewardLoopManager
 
         self.actor_wg = self.all_wg[str(self.train_role)]
         self.actor_wg.init_model()

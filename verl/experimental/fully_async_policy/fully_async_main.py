@@ -201,6 +201,16 @@ def main(config):
 
     assert config.async_training.use_trainer_do_validate is False, "use_trainer_do_validate is not ready to use."
 
+    # TODO: support use_trainer_do_validate with GenRM/DisRM. Currently the trainer cannot
+    # connect to the rollouter's GenRM server for validation reward computation.
+    from verl.trainer.ppo.utils import need_reward_model
+
+    if need_reward_model(config) and config.async_training.use_trainer_do_validate:
+        raise NotImplementedError(
+            "use_trainer_do_validate with GenRM/DisRM is not yet supported. "
+            "The trainer currently cannot share the rollouter's reward model server for validation."
+        )
+
     from time import time
 
     start_time = time()
