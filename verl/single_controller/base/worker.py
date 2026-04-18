@@ -218,6 +218,20 @@ class Worker(WorkerHelper):
         self.fused_worker_dict = {}
         self.__dispatch_dp_rank = {}
         self.__collect_dp_rank = {}
+        
+        # Initialize logging for worker
+        import logging
+        import os
+        
+        # Set up logging with appropriate level
+        logging.basicConfig(
+            level=os.getenv("VERL_LOGGING_LEVEL", "INFO"),
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        
+        self.logger = logging.getLogger(f"verl.worker.rank{rank}")
+        self.logger.info(f"Worker initialized with rank={rank}, world_size={world_size}, local_rank={local_rank}")
 
     def get_fused_worker_by_name(self, worker_name: str):
         """Get a fused worker by its name.
