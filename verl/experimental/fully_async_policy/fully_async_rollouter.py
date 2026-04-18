@@ -390,7 +390,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         TODO: TeacherModelManager.__init__ uses asyncio.run() internally via _run_all,
         which conflicts with the already-running event loop. Run in a thread executor.
         """
-        from verl.workers.config.distillation import is_distillation_enabled
+        from verl.trainer.distillation.losses import is_distillation_enabled
 
         self.teacher_model_manager = None
         if is_distillation_enabled(self.config.get("distillation")):

@@ -84,7 +84,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.use_rm = need_reward_model(self.config)
 
         # distillation config for OPD
-        from verl.workers.config.distillation import is_distillation_enabled
+        from verl.trainer.distillation.losses import is_distillation_enabled
 
         self.use_teacher_policy = is_distillation_enabled(self.config.get("distillation"))
         if self.use_teacher_policy:
