@@ -165,8 +165,6 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
     ):
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
         super().__init__(config, worker_group, rollout_resource_pool, teacher_model_manager, reward_loop_worker_handles)
-        if self.distillation_enabled:
-            raise NotImplementedError("Distillation is not implemented in FullyAsyncAgentLoopManager yet.")
 
     @auto_await
     async def generate_sequences_single(self, prompts: DataProto) -> DataProto:

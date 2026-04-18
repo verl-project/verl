@@ -34,14 +34,15 @@ class TeacherModelManager:
     def __init__(
         self,
         config: DictConfig,
-        resource_pool: RayResourcePool,
+        resource_pool: RayResourcePool = None,
     ):
         """
         Initialize the teacher model manager.
 
         Args:
             config (DictConfig): Teacher model configuration.
-            resource_pool (RayResourcePool): Dedicated teacher resource pool.
+            resource_pool (RayResourcePool, optional): Dedicated teacher resource pool.
+                If None, each replica will create its own resource pool via init_standalone().
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
@@ -57,7 +58,11 @@ class TeacherModelManager:
             * teacher_model_config.inference.data_parallel_size
             * teacher_model_config.inference.pipeline_model_parallel_size
         )
-        num_replicas = self.resource_pool.world_size // teacher_world_size
+        if self.resource_pool:
+            world_size = self.resource_pool.world_size
+        else:
+            world_size = teacher_model_config.n_gpus_per_node * teacher_model_config.nnodes
+        num_replicas = world_size // teacher_world_size
 
         rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
         rollout_config = teacher_model_config.inference
@@ -74,14 +79,17 @@ class TeacherModelManager:
             )
             for replica_rank in range(num_replicas)
         ]
-        split_resource_pools = split_resource_pool(self.resource_pool, split_size=teacher_world_size)
-        assert len(split_resource_pools) == len(self.rollout_replicas)
-        self._run_all(
-            [
-                server.init_colocated(resource_pool)
-                for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
-            ]
-        )
+        if self.resource_pool:
+            split_resource_pools = split_resource_pool(self.resource_pool, split_size=teacher_world_size)
+            assert len(split_resource_pools) == len(self.rollout_replicas)
+            self._run_all(
+                [
+                    server.init_colocated(resource_pool)
+                    for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
+                ]
+            )
+        else:
+            self._run_all([server.init_standalone() for server in self.rollout_replicas])
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
