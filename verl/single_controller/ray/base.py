@@ -31,6 +31,8 @@ from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
 from verl.utils.device import get_device_name, is_torch_npu_available
 from verl.utils.py_functional import temp_env_var
 
+from .topology_aware import topology_aware_schedule
+
 __all__ = ["Worker"]
 
 logger = logging.getLogger(__file__)
@@ -153,6 +155,8 @@ class RayResourcePool(ResourcePool):
             placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime)
             for idx, bundles in enumerate(pg_scheme)
         ]
+
+        pgs = topology_aware_schedule(pgs, strategy, pg_name_prefix, lifetime)
 
         ray.get([pg.ready() for pg in pgs])
 
