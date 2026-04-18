@@ -339,6 +339,7 @@ class FSDPEngine(BaseEngine):
             buffer_dtype = torch.float32
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+        self._autocast_dtype = param_dtype
 
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=module,
@@ -1139,7 +1140,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
-        with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device_name, dtype=self._autocast_dtype):
             raw_output = self.module(
                 **model_inputs,
                 use_cache=False,
