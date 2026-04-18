@@ -33,17 +33,16 @@ from tqdm import tqdm
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
-from verl.single_controller.ray import (RayClassWithInitArgs, RayWorkerGroup,
-                                        ResourcePoolManager)
+from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
-from verl.trainer.ppo.metric_utils import (compute_data_metrics,
-                                           compute_throughout_metrics,
-                                           compute_timing_metrics,
-                                           compute_variance_proxy_metrics)
-from verl.trainer.ppo.ray_trainer import (RayPPOTrainer, apply_kl_penalty,
-                                          compute_advantage,
-                                          compute_response_mask)
+from verl.trainer.ppo.metric_utils import (
+    compute_data_metrics,
+    compute_throughout_metrics,
+    compute_timing_metrics,
+    compute_variance_proxy_metrics,
+)
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage, compute_response_mask
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
@@ -526,8 +525,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 batch = batch.union(old_log_prob)
                 if "rollout_log_probs" in batch.batch.keys():
                     # TODO: we may want to add diff of probs too.
-                    from verl.utils.debug.metrics import \
-                        calculate_debug_metrics
+                    from verl.utils.debug.metrics import calculate_debug_metrics
 
                     metrics.update(calculate_debug_metrics(batch))
 
@@ -583,8 +581,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 and "rollout_log_probs" in batch.batch
                 and not bypass_recomputing_logprobs  # Only in decoupled mode
             ):
-                from verl.trainer.ppo.rollout_corr_helper import \
-                    compute_rollout_correction_and_add_to_batch
+                from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 
                 # Compute IS weights, apply rejection sampling, compute metrics
                 batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)

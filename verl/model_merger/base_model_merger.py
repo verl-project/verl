@@ -21,8 +21,7 @@ from typing import Optional
 
 import torch
 from accelerate import init_empty_weights
-from transformers import (AutoConfig, AutoModelForCausalLM,
-                          AutoModelForTokenClassification, GenerationConfig)
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification, GenerationConfig
 
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
@@ -403,8 +402,7 @@ class BaseModelMerger(ABC):
     def upload_to_huggingface(self):
         import requests
         from huggingface_hub import HfApi
-        from huggingface_hub.utils import (HfHubHTTPError,
-                                           RepositoryNotFoundError)
+        from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
 
         api = HfApi()
         try:

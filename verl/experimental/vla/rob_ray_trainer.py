@@ -34,12 +34,13 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.metric_utils import (compute_data_metrics,
-                                           compute_throughout_metrics,
-                                           compute_timing_metrics,
-                                           process_validation_metrics)
-from verl.trainer.ppo.ray_trainer import (RayPPOTrainer, apply_kl_penalty,
-                                          compute_advantage)
+from verl.trainer.ppo.metric_utils import (
+    compute_data_metrics,
+    compute_throughout_metrics,
+    compute_timing_metrics,
+    process_validation_metrics,
+)
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage
 from verl.trainer.ppo.reward import compute_reward
 from verl.trainer.ppo.utils import Role
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
@@ -362,8 +363,7 @@ class RobRayPPOTrainer(RayPPOTrainer):
 
                         if "rollout_log_probs" in batch.batch.keys():
                             # TODO: we may want to add diff of probs too.
-                            from verl.utils.debug.metrics import \
-                                calculate_debug_metrics
+                            from verl.utils.debug.metrics import calculate_debug_metrics
 
                             metrics.update(calculate_debug_metrics(batch))
 
