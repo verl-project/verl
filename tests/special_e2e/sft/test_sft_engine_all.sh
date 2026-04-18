@@ -33,6 +33,14 @@ BACKEND=veomni SP_SIZE=2 FSDP_SIZE=4 NUM_GPUS=8 FSDP_STRATEGY=fsdp2 bash tests/s
 echo "run with tp2 pp2 vpp2 cp2 num_gpus8"
 BACKEND=megatron TP_SIZE=2 PP_SIZE=2 VPP_SIZE=${VPP_SIZE} CP_SIZE=2 NUM_GPUS=8 bash tests/special_e2e/sft/run_sft_engine.sh
 
+# test with megatron_fsdp
+echo "run with megatron_fsdp tp1 pp1 num_gpus8"
+BACKEND=megatron_fsdp TP_SIZE=1 PP_SIZE=1 NUM_GPUS=8 bash tests/special_e2e/sft/run_sft_engine.sh
+
+# test with megatron_fsdp without remove_padding
+echo "run with megatron_fsdp tp1 pp1 num_gpus8 use_remove_padding False"
+BACKEND=megatron_fsdp TP_SIZE=1 PP_SIZE=1 NUM_GPUS=8 USE_REMOVE_PADDING=False bash tests/special_e2e/sft/run_sft_engine.sh
+
 # test with cp in ray
 echo "run with tp2 pp2 vpp2 cp2 num_gpus8 mode=ray"
 BACKEND=megatron TP_SIZE=2 PP_SIZE=2 VPP_SIZE=${VPP_SIZE} CP_SIZE=2 NUM_GPUS=8 mode=ray bash tests/special_e2e/sft/run_sft_engine.sh

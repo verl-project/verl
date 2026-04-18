@@ -983,9 +983,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def async_calls_finalize_fn_exec(self, blocking=False):
-        from megatron.core.dist_checkpointing.strategies.base import async_calls
+        from verl.utils.megatron.dist_checkpointing import finalize_async_save
 
-        async_calls.maybe_finalize_async_calls(blocking=blocking)
+        finalize_async_save(blocking=blocking)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def start_profile(self, **kwargs) -> None:

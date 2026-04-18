@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
+
 import megatron.core
 import torch
 from megatron.core import dist_checkpointing, mpu
@@ -24,6 +26,32 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelSaveStrategyWrapper,
 )
 from packaging import version
+
+_async_calls_queue = None
+
+
+def _get_async_calls_queue():
+    global _async_calls_queue
+    if _async_calls_queue is None:
+        try:
+            from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
+
+            _async_calls_queue = AsyncCallsQueue(persistent=False)
+        except ImportError:
+            from megatron.core.dist_checkpointing.strategies.base import async_calls
+
+            _async_calls_queue = async_calls
+    return _async_calls_queue
+
+
+def schedule_async_save_request(async_save_request):
+    """Schedule an async checkpoint save across Megatron versions."""
+    _get_async_calls_queue().schedule_async_request(async_save_request)
+
+
+def finalize_async_save(blocking=False):
+    """Finalize async checkpoint saves across Megatron versions."""
+    _get_async_calls_queue().maybe_finalize_async_calls(blocking=blocking)
 
 
 def save_dist_checkpointing(
@@ -47,6 +75,10 @@ def save_dist_checkpointing(
         async_sharded_save=async_save,
         validate_access_integrity=validate_sharding_integrity,
     )
+
+    if async_save and "async_strategy" in inspect.signature(dist_checkpointing.save).parameters:
+        save_kwargs["async_strategy"] = "mcore"
+
     if content_metadata is not None:
         if mcore_ge_014:
             save_kwargs["content_metadata"] = content_metadata
