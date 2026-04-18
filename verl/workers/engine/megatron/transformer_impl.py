@@ -594,12 +594,25 @@ class MegatronEngine(BaseEngine):
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
         # compute num_tokens in global batch for loss normalization
+        # When static context parallelism is enabled, each CP rank holds a portion of
+        # the sequence. We must reduce over the DP+CP group (not pure DP) so all ranks
+        # share the same total token count, consistent with MTP loss aggregation
+        # (see mtp_patch.py). Dynamic CP has its own batch splitting logic that runs
+        # later, so we preserve existing behavior for that path.
+        if self.engine_config.dynamic_context_parallel:
+            loss_reduce_group = self.get_data_parallel_group()
+            dp_size = self.get_data_parallel_size()
+        else:
+            loss_reduce_group = mpu.get_data_parallel_group(with_context_parallel=True)
+            dp_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
         batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
         torch.distributed.all_reduce(
-            batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+            batch_num_tokens,
+            op=torch.distributed.ReduceOp.SUM,
+            group=loss_reduce_group,
         )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
-        tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+        tu.assign_non_tensor(data, dp_size=dp_size)
 
         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
         if vpp_size is not None and vpp_size > 1:
