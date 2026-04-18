@@ -666,7 +666,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
     async def _should_pause_generation(self) -> bool:
         """Determine whether the build should be paused"""
-        queue_stats = self.message_queue_client.get_statistics_sync()
+        queue_stats = await self.message_queue_client.get_statistics()
         queue_size = queue_stats["queue_size"]
 
         if queue_size >= self.max_queue_size:
@@ -689,7 +689,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return False
 
     async def get_statistics(self) -> dict:
-        queue_stats = self.message_queue_client.get_statistics_sync()
+        queue_stats = await self.message_queue_client.get_statistics()
 
         stats = {
             # monitor stats
