@@ -198,11 +198,7 @@ class DistillationConfig(BaseConfig):
     nnodes (int):
         Number of nodes in the teacher resource pool.
     teacher_models (dict[str, TeacherModelConfig]):
-        Configurations for teacher models used for multi-teacher distillation. After
-        `__post_init__`, this dict is keyed by each teacher's routing key (`.key`) —
-        the same value samples carry on `teacher_key` (e.g. `data_source`) — rather
-        than by the YAML entry name. The YAML entry name is only used during config
-        loading.
+        Configurations for teacher models used for multi-teacher distillation.
     teacher_key (str):
         Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in
         the data proto, e.g., data_source.
@@ -258,17 +254,12 @@ class DistillationConfig(BaseConfig):
             # Multiple teachers: remove default single teacher config
             self.teacher_models.pop("teacher_model")
 
-        # Rekey by each teacher's routing key (`.key`) so downstream consumers can look
-        # teachers up directly by the value samples carry on `teacher_key` (e.g.
-        # data_source), without re-deriving a routing-keyed lookup dict themselves.
-        converted = [
-            omega_conf_to_dataclass(teacher, dataclass_type=DistillationTeacherModelConfig)
-            for teacher in self.teacher_models.values()
-        ]
-        for teacher in converted:
-            teacher.check_configured()
-        routing_keys = [teacher.key for teacher in converted]
-        duplicates = sorted({key for key in routing_keys if routing_keys.count(key) > 1})
-        if duplicates:
-            raise ValueError(f"Teacher routing keys must be unique; duplicates: {duplicates}.")
-        return {teacher.key: teacher for teacher in converted}
+        # Teacher models dict is keyed by teacher_key instead of YAML entry name
+        teacher_models = {}
+        for teacher_config in self.teacher_models.values():
+            teacher_config = omega_conf_to_dataclass(teacher_config, dataclass_type=DistillationTeacherModelConfig)
+            teacher_config.check_configured()
+            if teacher_config.key in teacher_models:
+                raise ValueError(f"Duplicate teacher key {teacher_config.key} found in teacher models.")
+            teacher_models[teacher_config.key] = teacher_config
+        return teacher_models
