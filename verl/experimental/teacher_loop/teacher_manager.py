@@ -64,11 +64,7 @@ def _pad_teacher_outputs(
 
 
 class AsyncTeacherLLMServerManager:
-    """Teacher-specific async client used for distillation logprob computation.
-
-    Holds one inner `AsyncLLMServerManager` per teacher (keyed by each teacher's `key`) and
-    dispatches each request to the matching teacher based on the supplied routing key.
-    """
+    """Teacher-specific async client used for distillation logprob computation."""
 
     def __init__(
         self,

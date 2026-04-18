@@ -72,14 +72,10 @@ class TeacherModelManager:
             )
         num_replicas = world_size // teacher_world_size
 
-        # Per-node GPU count for the teacher resource pool. Passed to RolloutReplica so it
-        # computes nnodes correctly for replicas that span multiple nodes.
         gpus_per_node = self.distillation_config.n_gpus_per_node
-
         rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
         rollout_config = teacher_model_config.inference
         model_config = HFModelConfig(path=teacher_model_config.model_path)
-        self.tokenizer = model_config.get_processor()
         name_suffix = (teacher_model_config.key or "").replace("/", "_")
         self.rollout_replicas = [
             rollout_replica_class(
