@@ -454,8 +454,8 @@ class AgentLoopWorker:
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
-        teacher_servers_by_key: Optional[dict[str, list[tuple[str, ray.actor.ActorHandle]]]] = None,
-        teacher_load_balancer_handle_by_key: Optional[dict[str, ray.actor.ActorHandle]] = None,
+        teacher_servers: Optional[dict[str, list[tuple[str, ray.actor.ActorHandle]]]] = None,
+        teacher_load_balancer_handle: Optional[dict[str, ray.actor.ActorHandle]] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
@@ -464,8 +464,8 @@ class AgentLoopWorker:
             servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
             reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-            teacher_servers_by_key: for each teacher key, the (address, handle) pairs of its LLM servers.
-            teacher_load_balancer_handle_by_key: for each teacher key, the shared load balancer actor.
+            teacher_servers: for each teacher key, the (address, handle) pairs of its LLM servers.
+            teacher_load_balancer_handle: for each teacher key, the shared load balancer actor.
         """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
@@ -478,17 +478,17 @@ class AgentLoopWorker:
             self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
             self.teacher_key: str = self.distillation_config.teacher_key
 
-            if not teacher_servers_by_key:
+            if not teacher_servers:
                 raise ValueError("Distillation is enabled but no teacher servers were provided.")
-            if not teacher_load_balancer_handle_by_key:
+            if not teacher_load_balancer_handle:
                 raise ValueError("Distillation is enabled but no teacher load balancer was provided.")
             if not hasattr(self, "teacher_server_manager"):
                 from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
                 self.teacher_server_manager = AsyncTeacherLLMServerManager(
                     config=config,
-                    servers_by_key=teacher_servers_by_key,
-                    load_balancer_handle_by_key=teacher_load_balancer_handle_by_key,
+                    servers=teacher_servers,
+                    load_balancer_handle=teacher_load_balancer_handle,
                 )
 
         # for recipe to change
@@ -1147,7 +1147,7 @@ class AgentLoopManager:
 
         if self.distillation_enabled:
             # teacher_model_manager exposes per-teacher dicts keyed by teacher key.
-            teacher_servers_by_key = {
+            teacher_servers = {
                 key: list(
                     zip(
                         self.teacher_model_manager.server_addresses[key],
@@ -1157,10 +1157,10 @@ class AgentLoopManager:
                 )
                 for key in self.teacher_model_manager.server_addresses
             }
-            teacher_load_balancer_handle_by_key = dict(self.teacher_model_manager.load_balancer_handle)
+            teacher_load_balancer_handle = dict(self.teacher_model_manager.load_balancer_handle)
         else:
-            teacher_servers_by_key = None
-            teacher_load_balancer_handle_by_key = None
+            teacher_servers = None
+            teacher_load_balancer_handle = None
 
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         for i in range(num_workers):
@@ -1176,8 +1176,8 @@ class AgentLoopManager:
                     self.config,
                     servers,
                     load_balancer_handle,
-                    teacher_servers_by_key,
-                    teacher_load_balancer_handle_by_key,
+                    teacher_servers,
+                    teacher_load_balancer_handle,
                     self.reward_loop_worker_handles,
                 )
             )

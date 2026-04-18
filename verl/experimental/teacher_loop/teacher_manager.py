@@ -73,8 +73,8 @@ class AsyncTeacherLLMServerManager:
     def __init__(
         self,
         config: DictConfig,
-        servers_by_key: dict[str, list[tuple[str, ray.actor.ActorHandle]]],
-        load_balancer_handle_by_key: dict[str, ray.actor.ActorHandle],
+        servers: dict[str, list[tuple[str, ray.actor.ActorHandle]]],
+        load_balancer_handle: dict[str, ray.actor.ActorHandle],
     ):
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
@@ -82,21 +82,19 @@ class AsyncTeacherLLMServerManager:
 
         self.teacher_model_configs: dict[str, DistillationTeacherModelConfig] = self.distillation_config.teacher_models
         expected = set(self.teacher_model_configs)
-        if set(servers_by_key.keys()) != expected:
+        if set(servers.keys()) != expected:
+            raise ValueError(f"server keys {sorted(servers)} do not match teacher routing keys {sorted(expected)}.")
+        if set(load_balancer_handle.keys()) != expected:
             raise ValueError(
-                f"servers_by_key keys {sorted(servers_by_key)} do not match teacher routing keys {sorted(expected)}."
-            )
-        if set(load_balancer_handle_by_key.keys()) != expected:
-            raise ValueError(
-                f"load_balancer_handle_by_key keys {sorted(load_balancer_handle_by_key)} do not match "
+                f"load_balancer_handle keys {sorted(load_balancer_handle)} do not match "
                 f"teacher routing keys {sorted(expected)}."
             )
 
         self.server_managers: dict[str, AsyncLLMServerManager] = {
             key: AsyncLLMServerManager(
                 config=config,
-                servers=servers_by_key[key],
-                load_balancer_handle=load_balancer_handle_by_key[key],
+                servers=servers[key],
+                load_balancer_handle=load_balancer_handle[key],
             )
             for key in self.teacher_model_configs
         }
