@@ -1,0 +1,5 @@
+# Atropos integration dependencies
+# Core verl dependencies are assumed to be installed
+requests>=2.28.0
+tqdm>=4.64.0
+atroposlib  # Atropos environment server
