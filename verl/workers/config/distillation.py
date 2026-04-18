@@ -233,10 +233,6 @@ class DistillationConfig(BaseConfig):
                 f"Sum of teacher world_size ({teacher_world_size_sum}) must match the distillation "
                 f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {total_pool_size})."
             )
-        if len(self.teacher_models) > 1 and self.nnodes != 1:
-            raise NotImplementedError(
-                f"Multi-teacher distillation currently supports nnodes=1 only, got nnodes={self.nnodes}."
-            )
 
     def get_single_teacher_model(self) -> DistillationTeacherModelConfig:
         if len(self.teacher_models) != 1:
