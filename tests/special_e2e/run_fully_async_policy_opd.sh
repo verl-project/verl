@@ -24,8 +24,9 @@ set -xeuo pipefail
 NUM_GPUS=${NUM_GPUS:-3}
 
 # Model paths
-STUDENT_MODEL=${STUDENT_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
-TEACHER_MODEL=${TEACHER_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+# Follow PR #5834 testing setup: Qwen2.5-0.5B student + Qwen2.5-3B-Instruct teacher
+STUDENT_MODEL=${STUDENT_MODEL:-Qwen/Qwen2.5-0.5B}
+TEACHER_MODEL=${TEACHER_MODEL:-Qwen/Qwen2.5-3B-Instruct}
 
 rollout_mode="async"
 rollout_name="vllm"
@@ -40,10 +41,11 @@ max_prompt_length=256
 max_response_length=512
 max_num_tokens=$(( max_prompt_length + max_response_length + 1 ))
 
-# Distillation parameters
-distillation_loss_mode="forward_kl_topk"
+# Distillation parameters (following PR #5834 setup)
+distillation_loss_mode="k1"
 distillation_topk=64
 use_policy_gradient=True
+use_task_rewards=False
 distillation_loss_max_clamp=10.0
 distillation_log_prob_min_clamp=-10.0
 
@@ -159,7 +161,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     distillation.teacher_model.inference.max_num_seqs=${max_num_tokens} \
     distillation.distillation_loss.loss_mode=${distillation_loss_mode} \
     distillation.distillation_loss.topk=${distillation_topk} \
-    distillation.distillation_loss.use_task_rewards=False \
+    distillation.distillation_loss.use_task_rewards=${use_task_rewards} \
     distillation.distillation_loss.use_policy_gradient=${use_policy_gradient} \
     distillation.distillation_loss.loss_max_clamp=${distillation_loss_max_clamp} \
     distillation.distillation_loss.log_prob_min_clamp=${distillation_log_prob_min_clamp} \
