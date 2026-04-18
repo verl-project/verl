@@ -904,8 +904,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids_rmpad = input_ids.values().unsqueeze(0)  # (1, total_nnz)
-                if position_ids.dim() == 3:
-                    position_ids_rmpad = position_ids.values().unsqueeze(1)  # (4, 1, total_nnz)
+                num_pos_components = tu.get_non_tensor_data(data=micro_batch, key="num_pos_components", default=0)
+                if num_pos_components > 0:
+                    # position_ids stored as flattened 1D nested tensor: (total_nnz * num_components,)
+                    # reshape to (num_components, 1, total_nnz)
+                    flat_pos = position_ids.values()  # (total_nnz * num_components,)
+                    total_nnz = flat_pos.shape[0] // num_pos_components
+                    position_ids_rmpad = flat_pos.view(total_nnz, num_pos_components).T.unsqueeze(1)
                 else:
                     position_ids_rmpad = position_ids.values().unsqueeze(0)  # (1, total_nnz)
             else:
@@ -976,10 +981,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     input_ids, padding=pad_token_id, output_size=(batch_size, max_seq_len)
                 )
 
-                if position_ids.dim() == 3:
+                num_pos_components = tu.get_non_tensor_data(data=micro_batch, key="num_pos_components", default=0)
+                if num_pos_components > 0:
+                    # position_ids stored as flattened 1D nested: each sample has (seq_len * num_components,)
+                    # pad to (batch, max_seq_len * num_components), then reshape to (num_components, batch, max_seq_len)
                     position_ids = torch.nested.to_padded_tensor(
-                        position_ids, padding=0, output_size=(batch_size, 4, max_seq_len)
-                    ).transpose(0, 1)  # (4, batch_size, max_seq_len)
+                        position_ids, padding=0, output_size=(batch_size, max_seq_len * num_pos_components)
+                    ).view(batch_size, max_seq_len, num_pos_components).permute(2, 0, 1)
                 else:
                     position_ids = torch.nested.to_padded_tensor(
                         position_ids, padding=0, output_size=(batch_size, max_seq_len)
