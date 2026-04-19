@@ -18,9 +18,21 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5CausalLMOutputWithPast,
+    Qwen3_5DynamicCache,
     Qwen3_5ForConditionalGeneration,
+    apply_mask_to_padding_states,
+)
+
+from verl.utils.ulysses import (
+    gather_heads_scatter_seq,
+    gather_seq_scatter_heads,
+    get_ulysses_sequence_parallel_group,
+    get_ulysses_sequence_parallel_rank,
+    get_ulysses_sequence_parallel_world_size,
+    slice_input_tensor,
 )
 
 logger = logging.getLogger(__file__)
@@ -260,3 +272,218 @@ def forward_with_triton_backend(
         entropy=entropy,
         hidden_states=outputs.hidden_states,
     )
+
+
+def qwen3_5_apply_mask_to_padding_states(hidden_states, attention_mask):
+    """
+    Tunes out the hidden states for padding tokens, see https://github.com/state-spaces/mamba/issues/66
+    """
+    # NOTE: attention mask is a 2D boolean tensor
+    if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
+        dtype = hidden_states.dtype
+        # Modification: Slice attention mask for Ulysses SP to align with hidden_states shard
+        ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
+        if ulysses_sp_size > 1:
+            attention_mask = slice_input_tensor(
+                attention_mask, dim=1, padding=False, group=get_ulysses_sequence_parallel_group()
+            )
+        hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
+
+    return hidden_states
+
+
+def _get_local_conv1d_weight(
+    conv1d_weight, key_dim, value_dim, ulysses_rank: int, local_key_dim: int, local_value_dim: int
+) -> torch.Tensor:
+    # Modification: shard depthwise conv1d weights to match head-sharded mixed_qkv channels.
+    w_full = conv1d_weight
+    assert w_full.shape[0] == key_dim * 2 + value_dim, (
+        f"conv1d weight dim ({w_full.shape[0]}) must match (2 * key_dim + value_dim) ({key_dim * 2 + value_dim})"
+    )
+    k_off = ulysses_rank * local_key_dim
+    v_off = ulysses_rank * local_value_dim
+    w_q = w_full[k_off : k_off + local_key_dim]
+    w_k = w_full[key_dim + k_off : key_dim + k_off + local_key_dim]
+    w_v = w_full[2 * key_dim + v_off : 2 * key_dim + v_off + local_value_dim]
+    return torch.cat([w_q, w_k, w_v], dim=0)
+
+
+def qwen3_5_gated_deltanet_forward_patched(
+    self,
+    hidden_states: torch.Tensor,
+    cache_params: Qwen3_5DynamicCache | None = None,
+    attention_mask: torch.Tensor | None = None,
+):
+    hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+
+    # Set up dimensions for reshapes later
+    batch_size, seq_len, _ = hidden_states.shape
+
+    use_precomputed_states = cache_params is not None and cache_params.has_previous_state and seq_len == 1
+
+    # getting projected states from cache if it exists
+    if cache_params is not None:
+        conv_state = cache_params.conv_states[self.layer_idx]
+        recurrent_state = cache_params.recurrent_states[self.layer_idx]
+
+    mixed_qkv = self.in_proj_qkv(hidden_states)
+    # Modification(removed): No need to transpose here as it's handled later in conv path
+    # mixed_qkv = mixed_qkv.transpose(1, 2)
+
+    z = self.in_proj_z(hidden_states)
+    z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+
+    b = self.in_proj_b(hidden_states)
+    a = self.in_proj_a(hidden_states)
+
+    # Modification: Ulysses SP all-to-all for linear attention heads.
+    ulysses_size = get_ulysses_sequence_parallel_world_size()
+    if ulysses_size > 1:
+        ulysses_rank = get_ulysses_sequence_parallel_rank()
+        assert self.num_k_heads % ulysses_size == 0 and self.num_v_heads % ulysses_size == 0, (
+            f"SP size ({ulysses_size}) must divide num_k_heads ({self.num_k_heads}) "
+            f"and num_v_heads ({self.num_v_heads}) for gated deltanet LASP"
+        )
+        local_num_k_heads = self.num_k_heads // ulysses_size
+        local_num_v_heads = self.num_v_heads // ulysses_size
+        local_key_dim = self.head_k_dim * local_num_k_heads
+        local_value_dim = self.head_v_dim * local_num_v_heads
+
+        # Reshape mixed_qkv to head layout for all-to-all: [B, S_local, D] -> split+reshape to heads
+        q_proj, k_proj, v_proj = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+
+        # All-to-all: gather full sequence, scatter heads -> [B, S_full, local_heads, head_dim]
+        q_proj = gather_seq_scatter_heads(q_proj, seq_dim=1, head_dim=2)
+        k_proj = gather_seq_scatter_heads(k_proj, seq_dim=1, head_dim=2)
+        v_proj = gather_seq_scatter_heads(v_proj, seq_dim=1, head_dim=2)
+
+        b = gather_seq_scatter_heads(b, seq_dim=1, head_dim=2)
+        a = gather_seq_scatter_heads(a, seq_dim=1, head_dim=2)
+
+        # Concat for conv1d: [B, S_full, local_dim]
+        mixed_qkv = torch.cat((q_proj, k_proj, v_proj), dim=-1)
+    else:
+        local_num_k_heads = self.num_k_heads
+        local_num_v_heads = self.num_v_heads
+        local_key_dim = self.key_dim
+        local_value_dim = self.value_dim
+
+    if use_precomputed_states:
+        # 2. Convolution sequence transformation
+        # NOTE: the conv state is updated in `causal_conv1d_update`
+        mixed_qkv = self.causal_conv1d_update(
+            mixed_qkv,
+            conv_state,
+            self.conv1d.weight.squeeze(1),
+            self.conv1d.bias,
+            self.activation,
+        )
+    else:
+        if cache_params is not None:
+            # Modification: Transpose for conv state padding and update cache
+            mixed_qkv_t = mixed_qkv.transpose(1, 2)
+            conv_state = F.pad(mixed_qkv_t, (self.conv_kernel_size - mixed_qkv_t.shape[-1], 0))
+            cache_params.conv_states[self.layer_idx] = conv_state
+        # Modification: Shard conv1d weights per Ulysses rank to match head-sharded channels.
+        if ulysses_size > 1:
+            conv_weight = _get_local_conv1d_weight(
+                self.conv1d.weight,
+                self.key_dim,
+                self.value_dim,
+                ulysses_rank=ulysses_rank,
+                local_key_dim=local_key_dim,
+                local_value_dim=local_value_dim,
+            )
+        else:
+            conv_weight = self.conv1d.weight
+
+        # Modification: shard conv1d weights per Ulysses rank to match head-sharded channels.
+        if self.causal_conv1d_fn is not None:
+            conv_weight = conv_weight.squeeze(1)
+            mixed_qkv = self.causal_conv1d_fn(
+                x=mixed_qkv,
+                weight=conv_weight,
+                bias=self.conv1d.bias,
+                activation=self.activation,
+                seq_idx=None,
+            )
+        else:
+            mixed_qkv = mixed_qkv.transpose(1, 2)
+            mixed_qkv = F.silu(
+                F.conv1d(
+                    mixed_qkv,
+                    weight=conv_weight,
+                    bias=self.conv1d.bias,
+                    padding=self.conv_kernel_size - 1,
+                    groups=local_key_dim * 2 + local_value_dim,
+                )[:, :, : mixed_qkv.shape[-1]]
+            )
+
+    mixed_qkv = mixed_qkv.transpose(1, 2)
+    # Modification: Use local variables (not global ones) to handle SP scenarios correctly
+    query, key, value = torch.split(
+        mixed_qkv,
+        [
+            local_key_dim,
+            local_key_dim,
+            local_value_dim,
+        ],
+        dim=-1,
+    )
+    query = query.reshape(query.shape[0], query.shape[1], local_num_k_heads, self.head_k_dim)
+    key = key.reshape(key.shape[0], key.shape[1], local_num_k_heads, self.head_k_dim)
+    value = value.reshape(value.shape[0], value.shape[1], local_num_v_heads, self.head_v_dim)
+
+    beta = b.sigmoid()
+    # If the model is loaded in fp16, without the .float() here, A might be -inf
+    # Modification: slice A_log/dt_bias for local V-heads under Ulysses SP.
+    if ulysses_size > 1:
+        v_head_offset = ulysses_rank * local_num_v_heads
+        v_head_slice = slice(v_head_offset, v_head_offset + local_num_v_heads)
+        g = -self.A_log[v_head_slice].float().exp() * F.softplus(a.float() + self.dt_bias[v_head_slice])
+    else:
+        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+    if self.num_v_heads // self.num_k_heads > 1:
+        query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+        key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+
+    if not use_precomputed_states:
+        core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g=g,
+            beta=beta,
+            initial_state=None,
+            output_final_state=cache_params is not None,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    else:
+        core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+            query,
+            key,
+            value,
+            g=g,
+            beta=beta,
+            initial_state=recurrent_state,
+            output_final_state=cache_params is not None,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    # Update cache
+    if cache_params is not None:
+        cache_params.recurrent_states[self.layer_idx] = last_recurrent_state
+
+    # Modification: gather attention output back to sequence-sharded layout before gated norm.
+    if ulysses_size > 1:
+        core_attn_out = gather_heads_scatter_seq(core_attn_out, head_dim=2, seq_dim=1)
+
+    # reshape input data into 2D tensor
+    core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
+    z = z.reshape(-1, self.head_v_dim)
+    core_attn_out = self.norm(core_attn_out, z)
+    core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
+
+    output = self.out_proj(core_attn_out)
+    return output
