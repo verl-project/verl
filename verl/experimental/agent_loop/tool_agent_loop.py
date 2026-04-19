@@ -437,12 +437,27 @@ class ToolAgentLoop(AgentLoopBase):
         self, tool_call: FunctionCall, tools_kwargs: dict[str, Any], agent_data: AgentData
     ) -> tuple[ToolResponse, float, dict]:
         """Call tool and return tool response."""
-        tool, instance_id = None, None
         active_tools = getattr(agent_data, "_active_tools", self.tools)
+
+        # Validate tool name
+        tool_name = tool_call.name
+        if tool_name not in active_tools:
+            available = list(active_tools.keys())
+            msg = f"Unknown function '{tool_name}'. Available tools: {available}"
+            logger.warning(msg)
+            return ToolResponse(text=msg), 0.0, {}
+
+        # Validate tool arguments
         try:
-            # TODO: append malformed tool_call to the prompt: invalid function name or arguments
-            tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
+        except (json.JSONDecodeError, TypeError) as e:
+            msg = f"Invalid JSON in arguments for '{tool_name}': {e}"
+            logger.warning(msg)
+            return ToolResponse(text=msg), 0.0, {}
+
+        # Execute tool
+        tool, instance_id = None, None
+        try:
             tool = active_tools[tool_name]
             kwargs = tools_kwargs.get(tool_name, {})
             instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
@@ -450,14 +465,8 @@ class ToolAgentLoop(AgentLoopBase):
                 instance_id, tool_args, agent_data=agent_data
             )
         except Exception as e:
-            logger.warning(f"Error when executing tool: {e}")
-            return (
-                ToolResponse(
-                    text=f"Error when executing tool: {e}",
-                ),
-                0.0,
-                {},
-            )
+            logger.warning(f"Error executing tool '{tool_name}': {e}")
+            return ToolResponse(text=f"Error executing tool '{tool_name}': {e}"), 0.0, {}
         finally:
             if tool and instance_id:
                 await tool.release(instance_id)
