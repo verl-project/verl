@@ -32,7 +32,7 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
-from verl.experimental.teacher_loop import TeacherModelManager
+from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.trainer.distillation import is_distillation_enabled
@@ -454,8 +454,8 @@ class AgentLoopWorker:
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
-        teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
-        teacher_load_balancer_handle: ray.actor.ActorHandle = None,
+        teacher_servers: Optional[dict[str, list[tuple[str, ray.actor.ActorHandle]]]] = None,
+        teacher_load_balancer_handle: Optional[dict[str, ray.actor.ActorHandle]] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
@@ -464,7 +464,8 @@ class AgentLoopWorker:
             servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
             reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
-            teacher_servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each teacher server.
+            teacher_servers: for each teacher key, the (address, handle) pairs of its LLM servers.
+            teacher_load_balancer_handle: for each teacher key, the shared load balancer actor.
         """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
@@ -475,19 +476,19 @@ class AgentLoopWorker:
         if self.distillation_enabled:
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.distillation_config)
             self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+            self.teacher_key: str = self.distillation_config.teacher_key
 
-            if teacher_servers is None:
+            if not teacher_servers:
                 raise ValueError("Distillation is enabled but no teacher servers were provided.")
-            if teacher_load_balancer_handle is None:
+            if not teacher_load_balancer_handle:
                 raise ValueError("Distillation is enabled but no teacher load balancer was provided.")
             if not hasattr(self, "teacher_server_manager"):
                 from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
                 self.teacher_server_manager = AsyncTeacherLLMServerManager(
-                    config,
-                    teacher_servers,
+                    config=config,
+                    servers=teacher_servers,
                     load_balancer_handle=teacher_load_balancer_handle,
-                    distillation_config=self.distillation_config,
                 )
 
         # for recipe to change
@@ -751,6 +752,7 @@ class AgentLoopWorker:
             prompt_ids=output.prompt_ids,
             response_ids=output.response_ids,
             validate=validate,
+            sample_kwargs=kwargs,
         )
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
@@ -888,12 +890,26 @@ class AgentLoopWorker:
                 output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
             output.metrics.compute_score = timing["compute_score"]
 
-    async def _compute_teacher_logprobs(self, output: AgentLoopOutput, prompt_ids, response_ids, validate):
+    async def _compute_teacher_logprobs(
+        self,
+        output: AgentLoopOutput,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        validate: bool,
+        sample_kwargs: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
+            routing_key = None
+            if sample_kwargs is not None:
+                routing_value = sample_kwargs.get(self.teacher_key)
+                if routing_value is not None:
+                    # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
+                    routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
                 sequence_ids=prompt_ids + response_ids,
                 multi_modal_data=output.multi_modal_data,
+                routing_key=routing_key,
             )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
@@ -1024,7 +1040,8 @@ class AgentLoopManager:
         config (DictConfig): whole config for main entrypoint.
         worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
         rollout_resource_pool (RayResourcePool): Resource pool for hybrid mode, only used by TensorRT-LLM.
-        teacher_model_manager (TeacherModelManager): Manager for streaming teacher computation, used for distillation.
+        teacher_model_manager (MultiTeacherModelManager): Manager for streaming teacher computation, used for
+        distillation.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
     """
 
@@ -1033,7 +1050,7 @@ class AgentLoopManager:
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        teacher_model_manager: TeacherModelManager = None,
+        teacher_model_manager: MultiTeacherModelManager = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
@@ -1066,7 +1083,7 @@ class AgentLoopManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_model_manager: TeacherModelManager = None,
+        teacher_model_manager: MultiTeacherModelManager = None,
     ):
         """Create agent loop manager."""
         instance = cls(config, worker_group, rollout_resource_pool, teacher_model_manager, reward_loop_worker_handles)
@@ -1129,10 +1146,18 @@ class AgentLoopManager:
         servers = list(zip(self.server_addresses, self.server_handles, strict=True))
 
         if self.distillation_enabled:
-            teacher_server_handles = self.teacher_model_manager.server_handles
-            teacher_server_addresses = self.teacher_model_manager.server_addresses
-            teacher_servers = list(zip(teacher_server_addresses, teacher_server_handles, strict=True))
-            teacher_load_balancer_handle = self.teacher_model_manager.load_balancer_handle
+            # teacher_model_manager exposes per-teacher dicts keyed by teacher key.
+            teacher_servers = {
+                key: list(
+                    zip(
+                        self.teacher_model_manager.server_addresses[key],
+                        self.teacher_model_manager.server_handles[key],
+                        strict=True,
+                    )
+                )
+                for key in self.teacher_model_manager.server_addresses
+            }
+            teacher_load_balancer_handle = dict(self.teacher_model_manager.load_balancer_handle)
         else:
             teacher_servers = None
             teacher_load_balancer_handle = None
