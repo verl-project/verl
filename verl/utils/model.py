@@ -606,7 +606,7 @@ def patch_valuehead_model(model) -> None:
     from types import MethodType
 
     from transformers import PreTrainedModel
-    from trl import AutoModelForCausalLMWithValueHead
+    from trl.experimental.ppo import AutoModelForCausalLMWithValueHead
 
     def tie_weights(self: "AutoModelForCausalLMWithValueHead") -> None:
         if isinstance(self.pretrained_model, PreTrainedModel):
@@ -652,7 +652,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
 
     assert is_trl_available()
 
-    from trl import AutoModelForCausalLMWithValueHead
+    from trl.experimental.ppo import AutoModelForCausalLMWithValueHead
 
     if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
         module_class = AutoModelForVision2Seq
