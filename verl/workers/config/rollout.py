@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 from omegaconf import MISSING
 
@@ -30,6 +30,7 @@ __all__ = [
     "TraceConfig",
     "ServerConfig",
     "PrometheusConfig",
+    "KvCacheMetricsConfig",
     "RolloutConfig",
     "DiffusionRolloutConfig",
     "CheckpointEngineConfig",
@@ -65,9 +66,9 @@ class SamplingConfig(BaseConfig):
 
 @dataclass
 class DiffusionSamplingConfig(SamplingConfig):
+    noise_level: float = 0.0
     num_inference_steps: int = 40
     seed: int = 42
-    extra_configs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -145,6 +146,23 @@ class PrometheusConfig(BaseConfig):
     file: str = "/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"
     # Specify served_model_name to avoid displaying overly long model paths in Grafana
     served_model_name: Optional[str] = None
+
+
+@dataclass
+class KvCacheMetricsConfig(BaseConfig):
+    """
+    HTTP /metrics (Prometheus text) scraping for ``load_balance_strategy: least_kv_cache``.
+
+    The load balancer GETs ``http://{replica_address}{metrics_path}`` for each replica.
+    Set ``metric_name`` to the gauge/counter identifier (before ``{``), engine-specific.
+    If multiple lines share that name with different labels, the largest value is used.
+    """
+
+    refresh_interval_s: float = 2.0
+    metrics_path: str = "/metrics"
+    # Exact metric identifier before ``{``, e.g. ``vllm:kv_cache_usage_perc`` or ``sglang:token_usage``
+    metric_name: Optional[str] = None
+    fetch_timeout_s: float = 2.0
 
 
 @dataclass
@@ -283,6 +301,18 @@ class RolloutConfig(BaseConfig):
 
     enable_sleep_mode: bool = True
 
+    # --- Global agent-loop load balancer (GlobalRequestLoadBalancer) ---
+    # Strategy names are registered in ``verl.experimental.agent_loop.load_balance``.
+    load_balance_strategy: str = "least_requests"
+    # For ``weighted_rr``: one weight per rollout replica (same order as server addresses).
+    load_balance_weights: Optional[list[float]] = None
+    load_balance_random_seed: Optional[int] = None
+    # Opt-in: affinity by AgentLoopWorker group (see ``num_load_balance_groups``).
+    group_sticky_routing: bool = False
+    # Workers with the same ``i % num_load_balance_groups`` share one load-balance group id.
+    num_load_balance_groups: int = 1
+    kv_cache_metrics: KvCacheMetricsConfig = field(default_factory=KvCacheMetricsConfig)
+
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     qat: Optional[dict] = None
@@ -334,6 +364,11 @@ class RolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
+        if self.num_load_balance_groups < 1:
+            raise ValueError("num_load_balance_groups must be >= 1")
+        if self.load_balance_weights is not None and len(self.load_balance_weights) < 1:
+            raise ValueError("load_balance_weights must be non-empty when set")
+
 
 @dataclass
 class DiffusionRolloutConfig(RolloutConfig):
@@ -347,8 +382,6 @@ class DiffusionRolloutConfig(RolloutConfig):
     width: int = 512
 
     num_inference_steps: int = 10
-
-    extra_configs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate diffusion rollout config"""

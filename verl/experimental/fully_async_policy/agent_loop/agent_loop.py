@@ -44,6 +44,20 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
     invisible to the AgentLoop.
     """
 
+    def __init__(
+        self,
+        config: DictConfig,
+        servers: list[tuple[str, ray.actor.ActorHandle]],
+        load_balancer_handle: ray.actor.ActorHandle,
+        load_balance_group_id: str | None = None,
+    ):
+        super().__init__(
+            config,
+            servers,
+            load_balancer_handle,
+            load_balance_group_id=load_balance_group_id,
+        )
+
     @rollout_trace_op
     async def generate(
         self,
@@ -53,6 +67,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        group_id: str | None = None,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -90,6 +105,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
                 sampling_params=sampling_params,
                 image_data=image_data,
                 video_data=video_data,
+                group_id=group_id,
             )
 
             # 2. merge output into final_output
@@ -142,8 +158,11 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
         teacher_load_balancer_handle: ray.actor.ActorHandle = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        load_balance_group_id: str | None = None,
     ):
-        self.server_manager = FullyAsyncLLMServerManager(config, servers, load_balancer_handle)
+        self.server_manager = FullyAsyncLLMServerManager(
+            config, servers, load_balancer_handle, load_balance_group_id=load_balance_group_id
+        )
         super().__init__(
             config,
             servers,
@@ -151,6 +170,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
             teacher_servers,
             teacher_load_balancer_handle,
             reward_loop_worker_handles,
+            load_balance_group_id=load_balance_group_id,
         )
 
 

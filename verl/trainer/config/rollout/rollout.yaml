@@ -216,6 +216,23 @@ multi_turn:
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
 calculate_log_probs: False
 
+# GlobalRequestLoadBalancer routing (agent-loop rollout). See verl.experimental.agent_loop.load_balance.
+# least_requests | least_kv_cache | weighted_rr | random
+load_balance_strategy: least_requests
+load_balance_weights: null
+load_balance_random_seed: null
+group_sticky_routing: false
+# Agent loop workers with the same (worker_index % num_load_balance_groups) share a group id for affinity.
+num_load_balance_groups: 1
+
+kv_cache_metrics:
+  _target_: verl.workers.config.KvCacheMetricsConfig
+  refresh_interval_s: 2.0
+  metrics_path: /metrics
+  # Set when using least_kv_cache (e.g. vllm:kv_cache_usage_perc or sglang:token_usage).
+  metric_name: null
+  fetch_timeout_s: 2.0
+
 # [Experimental] agent loop based rollout configs
 agent:
 
