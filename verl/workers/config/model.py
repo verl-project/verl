@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -23,6 +24,8 @@ from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["HFModelConfig", "DiffusionModelConfig", "MtpConfig"]
 
@@ -183,10 +186,19 @@ class HFModelConfig(BaseConfig):
         )
 
         # construct hf_config
-        attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
+        from verl.utils.device import get_default_attention_implementation, resolve_xpu_attn_implementation
+
+        attn_implementation = self.override_config.get(
+            "attn_implementation", get_default_attention_implementation()
+        )
+        logger.info(f"[attn] ModelConfig attn_implementation = {attn_implementation}")
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation
         )
+        # XPU sliding-window guard
+        attn_implementation = resolve_xpu_attn_implementation(attn_implementation, self.hf_config)
+        if attn_implementation != self.hf_config._attn_implementation:
+            self.hf_config._attn_implementation = attn_implementation
 
         override_config_kwargs = {}
 

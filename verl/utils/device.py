@@ -43,16 +43,94 @@ def is_torch_npu_available(check_device=True) -> bool:
         return False
 
 
+def is_torch_xpu_available() -> bool:
+    """Check the availability of XPU"""
+    try:
+        return torch.xpu.is_available()
+    except (ImportError, AttributeError):
+        return False
+
+
 is_cuda_available = torch.cuda.is_available()
 is_npu_available = is_torch_npu_available()
+is_xpu_available = is_torch_xpu_available()
+
+
+def _xpu_fa2_kernel_available() -> bool:
+    """Check if the XPU FlashAttention2 kernel is loadable via the HF kernels runtime."""
+    try:
+        from kernels import get_kernel
+
+        get_kernel("kernels-community/flash-attn2")
+        return True
+    except Exception:
+        return False
+
+
+def get_default_attention_implementation() -> str:
+    """Get default attention implementation for current device.
+
+    On XPU the priority is:
+      1. ``flash_attention_2`` — if ``kernels-community/flash-attn2`` is loadable
+         (routes through HF Transformers kernel dispatch, ~2-3x faster than SDPA).
+      2. ``sdpa`` — PyTorch-native scaled-dot-product attention (dispatches to
+         Intel SYCL-TLA Flash kernel internally).
+
+    Returns:
+        str: chosen attention implementation name
+    """
+    if is_xpu_available:
+        if _xpu_fa2_kernel_available():
+            logger.info(
+                "[XPU] kernels-community/flash-attn2 available — defaulting to flash_attention_2"
+            )
+            return "flash_attention_2"
+        logger.info("[XPU] flash-attn2 kernel not available — defaulting to sdpa")
+        return "sdpa"
+    else:
+        return "flash_attention_2"  # Default for CUDA/NPU
+
+
+def resolve_xpu_attn_implementation(attn_implementation: str, model_config=None) -> str:
+    """Apply XPU-specific safety guards to the chosen attention implementation.
+
+    On XPU:
+      - ``flash_attention_2`` with sliding-window models is unsupported; falls back to ``sdpa``.
+
+    Args:
+        attn_implementation: the requested implementation name.
+        model_config: a HF ``PretrainedConfig`` (optional) — used to check ``sliding_window``.
+
+    Returns:
+        str: the (possibly adjusted) attention implementation name.
+    """
+    if not is_xpu_available:
+        return attn_implementation
+
+    if attn_implementation == "flash_attention_2" and model_config is not None:
+        sw = getattr(model_config, "sliding_window", None)
+        if sw is not None and sw > 0:
+            logger.warning(
+                f"[XPU] Model has sliding_window={sw} which is unsupported with flash_attention_2 on XPU. "
+                "Falling back to sdpa."
+            )
+            return "sdpa"
+
+    return attn_implementation
 
 
 def get_resource_name() -> str:
     """Function that return ray resource name based on the device type.
     Returns:
-        ray resource name string, either "GPU" or "NPU".
+        ray resource name string, either "GPU", "NPU", or "xpu".
     """
-    return "GPU" if is_cuda_available else "NPU"
+    if is_cuda_available:
+        return "GPU"
+    elif is_npu_available:
+        return "NPU"
+    elif is_xpu_available:
+        return "xpu"
+    return "GPU"
 
 
 def get_visible_devices_keyword() -> str:
@@ -65,7 +143,13 @@ def get_visible_devices_keyword() -> str:
         str: 'CUDA_VISIBLE_DEVICES' if CUDA is available,
             'ASCEND_RT_VISIBLE_DEVICES' otherwise.
     """
-    return "CUDA_VISIBLE_DEVICES" if not is_torch_npu_available(check_device=False) else "ASCEND_RT_VISIBLE_DEVICES"
+    if is_cuda_available:
+        return "CUDA_VISIBLE_DEVICES"
+    elif is_npu_available:
+        return "ASCEND_RT_VISIBLE_DEVICES"
+    elif is_xpu_available:
+        return "ONEAPI_DEVICE_SELECTOR"
+    return "CUDA_VISIBLE_DEVICES"
 
 
 def get_device_name() -> str:
@@ -81,6 +165,8 @@ def get_device_name() -> str:
         device = "cuda"
     elif is_npu_available:
         device = "npu"
+    elif is_xpu_available:
+        device = "xpu"
     else:
         device = "cpu"
     return device
@@ -99,9 +185,11 @@ def get_torch_device():
     device_name = get_device_name()
     try:
         return getattr(torch, device_name)
-    except AttributeError:
-        logger.warning(f"Device namespace '{device_name}' not found in torch, try to load torch.cuda.")
-        return torch.cuda
+    except AttributeError as err:
+        raise RuntimeError(
+            f"Device namespace 'torch.{device_name}' not found. "
+            f"Ensure the correct PyTorch build is installed for device '{device_name}'."
+        ) from err
 
 
 def get_device_id() -> int:
@@ -124,6 +212,8 @@ def get_nccl_backend() -> str:
     """
     if is_npu_available:
         return "hccl"
+    elif is_xpu_available:
+        return "xccl"
     else:
         # default to nccl
         return "nccl"
@@ -164,6 +254,14 @@ def auto_set_device(config) -> None:
                 )
 
             config.trainer.device = "npu"
+        elif is_torch_xpu_available():
+            if config.trainer.device not in ["cpu", "xpu"]:
+                logger.warning(
+                    f"Detect setting config.trainer.device to {config.trainer.device} for Intel XPU, maybe"
+                    f"from default value in config file, automatically set to `xpu` instead."
+                )
+
+            config.trainer.device = "xpu"
         # Other cases: set device to "cuda" via config file, no need to change.
 
 
