@@ -95,7 +95,7 @@ class ServerAdapter(BaseRollout):
             self.sleep_level = VLLM_SLEEP_LEVEL
 
         self.device_uuid = get_device_uuid(get_device_id())
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{self.replica_rank}-rank-{rank % local_world_size}.sock"
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:
@@ -161,16 +161,17 @@ class ServerAdapter(BaseRollout):
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
-            kwargs={**kwargs, "use_shm": self.use_shm},
+            kwargs={**kwargs, "use_shm": self.use_shm, "replica_rank": self.replica_rank},
         )
 
-        bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
-        sender = BucketedWeightSender(
-            zmq_handle=self.zmq_handle,
-            bucket_size_mb=bucket_size_mb,
-            use_shm=self.use_shm,
-        )
-        await sender.async_send_weights(weights)
+        if not hasattr(self, "_weight_sender") or self._weight_sender is None:
+            bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
+            self._weight_sender = BucketedWeightSender(
+                zmq_handle=self.zmq_handle,
+                bucket_size_mb=bucket_size_mb,
+                use_shm=self.use_shm,
+            )
+        await self._weight_sender.async_send_weights(weights)
 
         if future is not None:
             await future
