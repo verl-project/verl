@@ -381,7 +381,28 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self._init_async_objects()
         self._create_worker_classes()
         self._init_reward_loop()
+        await self._create_teacher_model_manager()
         await self._init_async_rollout_manager()
+
+    async def _create_teacher_model_manager(self):
+        """Create TeacherModelManager for distillation if enabled.
+
+        TODO: TeacherModelManager.__init__ uses asyncio.run() internally via _run_all,
+        which conflicts with the already-running event loop. Run in a thread executor.
+        """
+        from verl.trainer.distillation.losses import is_distillation_enabled
+
+        self.teacher_model_manager = None
+        if is_distillation_enabled(self.config.get("distillation")):
+            import asyncio
+
+            from verl.experimental.teacher_loop import TeacherModelManager
+
+            loop = asyncio.get_running_loop()
+            self.teacher_model_manager = await loop.run_in_executor(
+                None,
+                lambda: TeacherModelManager(config=self.config.distillation, resource_pool=None),
+            )
 
     def _create_actor_rollout_classes(self):
         # Skip rollout creation and let agentloop handle it
@@ -417,7 +438,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         self.async_rollout_mode = True
         self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
-            config=self.config, worker_group=self.rollout_wg, reward_loop_worker_handles=reward_loop_worker_handles
+            config=self.config,
+            worker_group=self.rollout_wg,
+            reward_loop_worker_handles=reward_loop_worker_handles,
+            teacher_model_manager=self.teacher_model_manager,
         )
 
     # Add samples to the pending_queue

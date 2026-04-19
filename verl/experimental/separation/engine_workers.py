@@ -41,15 +41,16 @@ class DetachActorWorker(ActorRolloutRefWorker):
     FSDP, FSDP2, and Megatron strategies.
     """
 
-    def __init__(self, config: DictConfig, role: str):
+    def __init__(self, config: DictConfig, role: str, **kwargs):
         """
         Initialize the DetachActorWorker.
 
         Args:
             config: Configuration dictionary.
             role: The role of the worker (e.g., 'actor', 'rollout', 'ref').
+            **kwargs: Additional arguments passed to ActorRolloutRefWorker (e.g., distillation_config).
         """
-        ActorRolloutRefWorker.__init__(self, config, role)
+        ActorRolloutRefWorker.__init__(self, config, role, **kwargs)
         self._strategy_handlers = None
         self.copy_handler, self.restore_handler = self._get_strategy_handlers()
 
