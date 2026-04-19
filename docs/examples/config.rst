@@ -155,6 +155,7 @@ Actor/Rollout/Reference Policy
           min_num_params: 0
         param_offload: False
         optimizer_offload: False
+        optimizer_lazy_offload: False
         fsdp_size: -1
       checkpoint:
         # What to include in saved checkpoints
@@ -315,6 +316,14 @@ Actor/Rollout/Reference Policy
     offload
 
     - Trading speed for GPU memory.
+
+  - ``optimizer_lazy_offload``: Whether to lazily load optimizer states
+    only around ``optimizer.step()`` and offload them immediately after.
+
+    - Useful when ``optimizer_offload=False`` and you want to reduce peak
+      memory during actor updates, at the cost of slower training due to
+      additional optimizer load/offload overhead.
+    - Must not be enabled together with ``optimizer_offload``.
 
 - ``actor_rollout_ref.actor.use_kl_loss``: Whether to enable kl loss. Default is False.
 

@@ -241,9 +241,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
+        self._is_optimizer_lazy_offload = False
         if self._is_actor:
             self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
             self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
+            self._is_optimizer_lazy_offload = self.config.actor.fsdp_config.get("optimizer_lazy_offload", False)
+
         elif self._is_ref:
             # TODO: it seems that manual offload is slowly than FSDP offload
             self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
@@ -944,7 +947,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
                 log_gpu_memory_usage("After offload actor model during init", logger=logger)
 
-            if self._is_offload_optimizer:
+            if self._is_offload_optimizer or self._is_optimizer_lazy_offload:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
                 log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
 
@@ -1266,7 +1269,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if local_path is None:
             if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            if self._is_offload_optimizer:
+            if self._is_offload_optimizer or self._is_optimizer_lazy_offload:
                 offload_fsdp_optimizer(self.actor_optimizer)
             return
 
@@ -1280,7 +1283,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
-        if self._is_offload_optimizer:
+        if self._is_offload_optimizer or self._is_optimizer_lazy_offload:
             offload_fsdp_optimizer(self.actor_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
