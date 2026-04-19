@@ -277,6 +277,9 @@ class RolloutConfig(BaseConfig):
 
     quantization: Optional[str] = None
 
+    # When True and quantization is fp8, skip extra bf16->fp8 quant in SGLang update_weights (weights already FP8).
+    skip_mid_quantization: bool = False
+
     quantization_config_file: Optional[str] = None
 
     enable_rollout_routing_replay: bool = False

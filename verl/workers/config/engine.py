@@ -176,6 +176,8 @@ class McoreEngineConfig(EngineConfig):
         override_transformer_config (dict[str, Any]): Override configuration for transformer.
         use_mbridge (bool): Whether to use MBridge for communication.
         dtype (str): Mixed precision training param dtype, default "bfloat16"
+        export_weight_dtype (str): Dtype for exported HF weights toward rollout ("bf16", "fp16", "fp8").
+            When "fp8", the bridge should export FP8 tensors (requires compatible Megatron-Bridge / training).
     """
 
     # sequence_parallel is not listed as a frozen field for auto-correction purpose
@@ -201,6 +203,7 @@ class McoreEngineConfig(EngineConfig):
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
     use_mbridge: bool = True
     vanilla_mbridge: bool = True
+    export_weight_dtype: Literal["bf16", "fp16", "fp8"] = "bf16"
     strategy: str = "megatron"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 

@@ -64,6 +64,11 @@ def _set_envs_and_config(server_args: ServerArgs):
 
     # Set prometheus env vars
     if server_args.enable_metrics:
+        # PROMETHEUS_MULTIPROC_DIR (e.g. from runtime_env) must exist on every Ray worker
+        # node; shell `mkdir` in job scripts only runs on the driver/submit host.
+        pdir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+        if pdir:
+            os.makedirs(pdir, exist_ok=True)
         set_prometheus_multiproc_dir()
 
     # Set ulimit
@@ -241,7 +246,8 @@ class ServerAdapter(BaseRollout):
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
             update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-            if self.config.get("quantization", None) == "fp8":
+            skip_mid_quantization = self.config.get("skip_mid_quantization", False)
+            if self.config.get("quantization", None) == "fp8" and not skip_mid_quantization:
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
                 logger.info("Convert bf16 weights to fp8 format before loading")
@@ -250,8 +256,8 @@ class ServerAdapter(BaseRollout):
                     weights,
                     dtype=self.model_config.hf_config.dtype,
                 )
-            else:
-                weights = weights
+            elif self.config.get("quantization", None) == "fp8" and skip_mid_quantization:
+                logger.info("skip_mid_quantization=True: assume weights are already FP8; skip rollout-side quant")
 
             async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
                 await sgl_update_weights(

@@ -235,6 +235,15 @@ class MegatronWorker(Worker):
                 self.provider = provider
                 tf_config = None  # Will be set after model creation
             self.bridge = bridge
+
+            export_weight_dtype = megatron_config.get("export_weight_dtype", "bf16")
+            if isinstance(export_weight_dtype, str):
+                export_weight_dtype = export_weight_dtype.lower()
+            if export_weight_dtype not in ("bf16", "fp16", "fp8"):
+                raise ValueError(
+                    f"Invalid export_weight_dtype: {export_weight_dtype}. Must be one of: bf16, fp16, fp8"
+                )
+            self.bridge.export_weight_dtype = export_weight_dtype
         else:
             tf_config = hf_to_mcore_config(hf_config, dtype, **override_transformer_config)
             self.bridge = None
@@ -518,6 +527,17 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             actor_optimizer_scheduler = get_megatron_optimizer_param_scheduler(
                 optimizer=actor_optimizer, config=optim_config
             )
+            export_weight_dtype = self.config.actor.megatron.get("export_weight_dtype", "bf16")
+            if isinstance(export_weight_dtype, str):
+                export_weight_dtype = export_weight_dtype.lower()
+            if export_weight_dtype not in ("bf16", "fp16", "fp8"):
+                export_weight_dtype = "bf16"
+            if export_weight_dtype == "fp8" and self.bridge is not None:
+                initial_state_dict = getattr(self.bridge, "unquantized_state_dict", None)
+                if initial_state_dict is not None:
+                    actor_optimizer.reload_model_params(state_dict=initial_state_dict)
+                    logger.warning("[verl] Initialized optimizer main params from unquantized bf16 weights.")
+                    self.bridge.unquantized_state_dict = None
         else:
             optim_config = None
             actor_optimizer = None
