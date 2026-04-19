@@ -22,6 +22,8 @@ from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
+logger = logging.getLogger(__name__)
+
 
 def assign_non_tensor_data(tensor_dict: TensorDict, key, val):
     """Assign a single non-tensor value to a TensorDict.
@@ -881,11 +883,55 @@ def contiguous(data: TensorDict) -> TensorDict:
 
 
 def maybe_fix_3d_position_ids(data: TensorDict):
-    # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
-    # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
-    # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
+    # TensorDict may produce malformed jagged metadata/layout for 3D position_ids
+    # after consolidate + pickle/unpickle. This can trigger indexing errors in VLM
+    # pipelines. We keep the fast path for healthy tensors (set ragged axis to dim=2)
+    # and rebuild from input_ids offsets only for known broken layouts.
     if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+        pos = data["position_ids"]
+        offsets = pos.offsets()
+        values = pos.values()
+        batch_num = pos.shape[0]
+        rope_dim = pos.shape[1]
+
+        target_offsets = None
+        if "input_ids" in data.keys() and getattr(data["input_ids"], "is_nested", False):
+            in_offsets = data["input_ids"].offsets()
+            if in_offsets.numel() == batch_num + 1:
+                target_offsets = in_offsets.to(device=offsets.device, dtype=offsets.dtype)
+
+        inferred_rope_dim = rope_dim if isinstance(rope_dim, int) else None
+        if inferred_rope_dim is None and values.dim() == 2 and batch_num > 0 and values.shape[0] % batch_num == 0:
+            inferred_rope_dim = values.shape[0] // batch_num
+
+        is_broken = (
+            target_offsets is not None
+            and batch_num > 0
+            and inferred_rope_dim is not None
+            and values.dim() == 2
+            and values.shape[0] == batch_num * inferred_rope_dim
+            and offsets.numel() == batch_num + 1
+            and bool(torch.all(offsets.diff() == inferred_rope_dim))
+        )
+
+        if not is_broken:
+            pos._ragged_idx = 2
+            return
+
+        seq_lens = target_offsets.diff().tolist()
+        max_seq_len = values.shape[1]
+        has_valid_seq_lens = all(sl >= 0 for sl in seq_lens) and max(seq_lens, default=0) <= max_seq_len
+        if not has_valid_seq_lens:
+            logger.warning("Skip repairing broken 3D position_ids due to invalid target offsets")
+            pos._ragged_idx = 2
+            return
+
+        values_3d = values.contiguous().view(batch_num, inferred_rope_dim, max_seq_len)
+        chunks = [values_3d[i, :, :sl] for i, sl in enumerate(seq_lens)]
+        fixed_values = torch.cat(chunks, dim=1).contiguous()
+        fixed_pos = torch.nested.nested_tensor_from_jagged(values=fixed_values, offsets=target_offsets, jagged_dim=2)
+        fixed_pos._ragged_idx = 2
+        data["position_ids"] = fixed_pos
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:

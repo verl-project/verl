@@ -264,14 +264,11 @@ class AsyncRolloutRequest(BaseModel):
         attention_mask: torch.Tensor,
         multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        # special case for qwen2vl
-        is_qwen2vl = (
-            hasattr(processing_class, "image_processor")
-            and "Qwen2VLImageProcessor" in processing_class.image_processor.__class__.__name__
+        processor_name = processing_class.__class__.__name__
+        has_multimodal_rope = hasattr(processing_class, "get_rope_index") and hasattr(
+            processing_class, "image_processor"
         )
-        if is_qwen2vl:
-            from verl.models.transformers.qwen2_vl import get_rope_index
-
+        if has_multimodal_rope:
             image_grid_thw = video_grid_thw = second_per_grid_ts = None
             if multi_modal_inputs:
                 image_grid_thw = multi_modal_inputs.get("image_grid_thw")
@@ -284,14 +281,38 @@ class AsyncRolloutRequest(BaseModel):
             assert attention_mask.dim() == 2 and attention_mask.shape[0] == 1, (
                 f"attention_mask should be 2D with batch size 1, but got shape {attention_mask.shape}"
             )
-            new_position_ids = get_rope_index(
-                processing_class,
-                input_ids=input_ids.squeeze(0),
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                attention_mask=attention_mask.squeeze(0),
-            )
+
+            if processor_name == "Qwen3VLProcessor":
+                rope_kwargs = {
+                    "input_ids": input_ids,
+                    "image_grid_thw": image_grid_thw,
+                    "video_grid_thw": video_grid_thw,
+                    "attention_mask": attention_mask,
+                }
+                new_position_ids, _ = processing_class.get_rope_index(**rope_kwargs)  # (3, 1, seq_len)
+                vision_position_ids = new_position_ids[:, 0, :]  # (3, seq_len)
+
+                valid_mask = attention_mask[0].bool()
+                text_position_ids = torch.ones((1, input_ids.shape[-1]), dtype=torch.long, device=input_ids.device)
+                text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item(), device=input_ids.device)
+                return torch.cat((text_position_ids, vision_position_ids), dim=0)  # (4, seq_len)
+
+            # special case for qwen2/qwen2.5 style processors
+            rope_kwargs = {
+                "input_ids": input_ids.squeeze(0),
+                "image_grid_thw": image_grid_thw,
+                "video_grid_thw": video_grid_thw,
+                "attention_mask": attention_mask.squeeze(0),
+            }
+            if second_per_grid_ts is not None:
+                rope_kwargs["second_per_grid_ts"] = second_per_grid_ts
+            try:
+                new_position_ids = processing_class.get_rope_index(**rope_kwargs)
+            except TypeError:
+                rope_kwargs.pop("second_per_grid_ts", None)
+                new_position_ids = processing_class.get_rope_index(**rope_kwargs)
+            if isinstance(new_position_ids, tuple):
+                new_position_ids = new_position_ids[0]
             return new_position_ids  # (3, seq_len)
         else:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)

@@ -501,7 +501,7 @@ def forward_with_torch_backend(
 
     # Loss calculations
     if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+        rolled_labels = labels
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
@@ -535,7 +535,7 @@ def forward_with_triton_backend(
 
     # Loss calculations
     if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+        rolled_labels = labels
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:

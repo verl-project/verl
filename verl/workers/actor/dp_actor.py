@@ -32,6 +32,7 @@ from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, u
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.import_utils import deprecated
+from verl.utils.model import is_vision_language_model
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -213,9 +214,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                 # pad and slice the inputs if sp > 1
                 if self.use_ulysses_sp:
-                    is_vlm_model = hasattr(
-                        getattr(self.actor_module, "module", self.actor_module).config, "vision_config"
-                    )
+                    is_vlm_model = is_vision_language_model(self.actor_module)
                     if is_vlm_model:
                         # vlm model's inputs will be sliced after embedding
                         input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad(
@@ -235,6 +234,7 @@ class DataParallelPPOActor(BasePPOActor):
                         sp_size=self.ulysses_sequence_parallel_size,
                     )
 
+                input_ids_rmpad_rolled_for_model = input_ids_rmpad_rolled
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
@@ -242,6 +242,10 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
+                    if self.use_ulysses_sp and is_vlm_model:
+                        # VLM Ulysses slices sequences after embedding, so pass the
+                        # already-shifted local labels to keep hidden/label lengths aligned.
+                        extra_args["labels"] = input_ids_rmpad_rolled_for_model
 
                 output = self.actor_module(
                     input_ids=input_ids_rmpad,

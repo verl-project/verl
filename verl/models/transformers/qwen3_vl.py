@@ -26,8 +26,37 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 
 from verl.utils.transformers_compat import unpack_visual_output
 
+from .common.vision_pos_embed_utils import (
+    build_bilinear_interpolation_tensors,
+    merge_bilinear_interpolated_pos_embeds,
+)
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _is_sharded_tensor(tensor: Optional[torch.Tensor]) -> bool:
+    return tensor is not None and hasattr(tensor, "full_tensor")
+
+
+def _compute_log_probs_entropy_from_logits(
+    logits: torch.Tensor,
+    input_ids: torch.LongTensor,
+    temperature: float,
+) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+    if _is_sharded_tensor(logits):
+        logits = logits.full_tensor()
+
+    logits = logits / temperature
+    orig_dtype = logits.dtype
+    logits = logits.to(torch.float32)
+
+    probs = logits.softmax(dim=-1)
+    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
+    log_probs = logits.log_softmax(dim=-1)
+    token_log_probs = log_probs.gather(-1, input_ids.unsqueeze(-1)).squeeze(-1)
+
+    return token_log_probs, entropy.to(orig_dtype)
 
 
 def get_rope_index(
@@ -146,9 +175,15 @@ def _get_input_embeds(
     video_grid_thw: Optional[torch.LongTensor] = None,
 ):
     inputs_embeds = model.get_input_embeddings()(input_ids)
+    device = inputs_embeds.device
+    if image_grid_thw is not None:
+        image_grid_thw = image_grid_thw.to(device)
+    if video_grid_thw is not None:
+        video_grid_thw = video_grid_thw.to(device)
+
     image_mask, video_mask = None, None
     if pixel_values is not None:
-        pixel_values = pixel_values.type(model.visual.dtype)
+        pixel_values = pixel_values.to(device=device, dtype=model.visual.dtype)
         image_embeds, deepstack_image_embeds = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
         n_image_features = image_embeds.shape[0]
@@ -166,7 +201,7 @@ def _get_input_embeds(
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
-        pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
+        pixel_values_videos = pixel_values_videos.to(device=device, dtype=model.visual.dtype)
         video_embeds, deepstack_video_embeds = unpack_visual_output(
             model.visual(pixel_values_videos, grid_thw=video_grid_thw)
         )
@@ -289,19 +324,31 @@ def forward_with_torch_backend(
 
     # Loss calculations
     if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+        rolled_labels = labels
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO()
-    log_probs, entropy = fused_linear_for_ppo.forward(
-        hidden_states=hidden_states,
-        vocab_weights=self.lm_head.weight,
-        input_ids=rolled_labels,
-        temperature=temperature,
-    )
+    if _is_sharded_tensor(self.lm_head.weight):
+        logger.warning(
+            "Qwen3-VL torch fused PPO backend does not support sharded lm_head weights; "
+            "falling back to logits-based computation."
+        )
+        logits = self.lm_head(hidden_states)
+        log_probs, entropy = _compute_log_probs_entropy_from_logits(
+            logits=logits,
+            input_ids=rolled_labels,
+            temperature=temperature,
+        )
+    else:
+        fused_linear_for_ppo = FusedLinearForPPO()
+        log_probs, entropy = fused_linear_for_ppo.forward(
+            hidden_states=hidden_states,
+            vocab_weights=self.lm_head.weight,
+            input_ids=rolled_labels,
+            temperature=temperature,
+        )
     return Qwen3VLCausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
@@ -323,7 +370,7 @@ def forward_with_triton_backend(
 
     # Loss calculations
     if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+        rolled_labels = labels
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
@@ -379,3 +426,50 @@ def patch_qwen3_vl_moe_sparse_moe_block_forward():
     # Apply the patch
     Qwen3VLMoeTextSparseMoeBlock.forward = patched_forward
     logger.info("Monkey patched Qwen3VLMoeTextSparseMoeBlock.forward to fix router_weights bug")
+
+
+def _patch_qwen3_vl_vision_fast_pos_embed_interpolate(vision_model_cls, model_name: str):
+    if getattr(vision_model_cls.fast_pos_embed_interpolate, "_verl_device_safe_patch", False):
+        return
+
+    original_fast_pos_embed_interpolate = vision_model_cls.fast_pos_embed_interpolate
+
+    @functools.wraps(original_fast_pos_embed_interpolate)
+    def patched_fast_pos_embed_interpolate(self, grid_thw):
+        interpolation_tensors = build_bilinear_interpolation_tensors(
+            grid_thw=grid_thw,
+            num_grid_per_side=self.num_grid_per_side,
+            weight_dtype=self.pos_embed.weight.dtype,
+        )
+        pos_embed_weight = self.pos_embed.weight
+        if _is_sharded_tensor(pos_embed_weight):
+            # FSDP2 may wrap the embedding weight as a DTensor and route nn.Embedding
+            # indices through a CPU path. Materialize the small position embedding
+            # table locally on the active device so lookup stays device-consistent.
+            pos_embed_weight = pos_embed_weight.full_tensor().to(device=interpolation_tensors.device)
+            pos_embeds = torch.nn.functional.embedding(interpolation_tensors.idx_tensor, pos_embed_weight)
+        else:
+            pos_embeds = self.pos_embed(interpolation_tensors.idx_tensor).to(interpolation_tensors.device)
+        return merge_bilinear_interpolated_pos_embeds(
+            pos_embeds=pos_embeds,
+            weight_tensor=interpolation_tensors.weight_tensor,
+            grid_ts=interpolation_tensors.grid_ts,
+            grid_hs=interpolation_tensors.grid_hs,
+            grid_ws=interpolation_tensors.grid_ws,
+            merge_size=self.config.spatial_merge_size,
+        )
+
+    patched_fast_pos_embed_interpolate._verl_device_safe_patch = True
+    vision_model_cls.fast_pos_embed_interpolate = patched_fast_pos_embed_interpolate
+    logger.warning("Monkey patched %s.fast_pos_embed_interpolate for device-safe vision position embedding", model_name)
+
+
+def patch_qwen3_vl_vision_fast_pos_embed_interpolate():
+    try:
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
+        from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeVisionModel
+    except ImportError:
+        return
+
+    _patch_qwen3_vl_vision_fast_pos_embed_interpolate(Qwen3VLVisionModel, "Qwen3VLVisionModel")
+    _patch_qwen3_vl_vision_fast_pos_embed_interpolate(Qwen3VLMoeVisionModel, "Qwen3VLMoeVisionModel")

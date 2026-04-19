@@ -614,8 +614,10 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
             )
 
             if position_ids.dim() == 3:
+                rope_dim = position_ids.shape[1]
+                assert isinstance(rope_dim, int), f"Expected static rope_dim for 3D position_ids, got {rope_dim}"
                 position_ids = torch.nested.to_padded_tensor(
-                    position_ids, padding=0, output_size=(batch_size, 4, max_seq_len)
+                    position_ids, padding=0, output_size=(batch_size, rope_dim, max_seq_len)
                 ).transpose(0, 1)
             else:
                 position_ids = torch.nested.to_padded_tensor(

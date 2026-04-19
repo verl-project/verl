@@ -755,6 +755,18 @@ def extract_multi_modal_inputs(
     return multi_modal_inputs
 
 
+def is_vision_language_model(module_or_config) -> bool:
+    """Return whether a module/config corresponds to a vision-language model."""
+    target = getattr(module_or_config, "module", module_or_config)
+    config = getattr(target, "config", target)
+    if config is None:
+        return False
+    if hasattr(config, "vision_config"):
+        return True
+    hf_config = getattr(config, "hf_config", None)
+    return hf_config is not None and hasattr(hf_config, "vision_config")
+
+
 def get_lora_rank_from_adapter(adapter_path: str | os.PathLike) -> int:
     """
     Extract LoRA rank from adapter configuration file.
