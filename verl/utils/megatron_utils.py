@@ -29,6 +29,16 @@ import torch.nn.functional as F
 from megatron.core import ModelParallelConfig, mpu, parallel_state, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
+
+try:
+    from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as MegatronFSDP
+    from megatron.core.distributed.fsdp.src.megatron_fsdp import MegatronFSDP as MegatronFSDPInner
+
+    HAVE_MEGATRON_FSDP = True
+except ImportError:
+    MegatronFSDP = None
+    MegatronFSDPInner = None
+    HAVE_MEGATRON_FSDP = False
 from megatron.core.enums import ModelType
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.parallel_state import get_global_memory_buffer
@@ -209,6 +219,31 @@ class McoreModuleWrapperConfig:
     share_embeddings_and_output_weights: bool = False
     wrap_with_ddp: bool = True
     use_distributed_optimizer: bool = True
+    # Megatron FSDP settings
+    use_megatron_fsdp: bool = False
+    megatron_fsdp_zero_stage: int = 3
+    megatron_fsdp_overlap_grad_reduce: bool = True
+    megatron_fsdp_overlap_param_gather: bool = True
+
+
+def _build_ddp_config_dict(wrap_config: McoreModuleWrapperConfig, override_ddp_config: dict[str, Any] = None) -> dict:
+    ddp_config_dict = {
+        "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
+    }
+    if getattr(wrap_config, "use_megatron_fsdp", False):
+        zero_stage_map = {0: "no_shard", 1: "optim", 2: "optim_grads", 3: "optim_grads_params"}
+        zero_stage = getattr(wrap_config, "megatron_fsdp_zero_stage", 3)
+        if zero_stage not in zero_stage_map:
+            raise ValueError(
+                f"Invalid megatron_fsdp_zero_stage={zero_stage}. Must be one of {list(zero_stage_map.keys())}."
+            )
+        ddp_config_dict["use_megatron_fsdp"] = True
+        ddp_config_dict["data_parallel_sharding_strategy"] = zero_stage_map[zero_stage]
+        ddp_config_dict["overlap_grad_reduce"] = getattr(wrap_config, "megatron_fsdp_overlap_grad_reduce", True)
+        ddp_config_dict["overlap_param_gather"] = getattr(wrap_config, "megatron_fsdp_overlap_param_gather", True)
+    if override_ddp_config is not None:
+        ddp_config_dict.update(override_ddp_config)
+    return ddp_config_dict
 
 
 def make_megatron_module(
@@ -224,6 +259,7 @@ def make_megatron_module(
 ):
     from verl.models.mcore.config_converter import get_hf_rope_theta
 
+    pending_fsdp_config = None
     hf_config.rope_theta = get_hf_rope_theta(hf_config)
 
     if override_model_config is None:
@@ -298,18 +334,12 @@ def make_megatron_module(
             for callback in post_model_creation_callbacks:
                 provider.register_pre_wrap_hook(callback)
 
-            # Create DDP config if needed
+            # Create DDP/FSDP config if needed
             ddp_config = None
             if wrap_config.wrap_with_ddp:
                 from megatron.bridge.training.config import DistributedDataParallelConfig
 
-                ddp_config_dict = {
-                    "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
-                }
-                # Apply any DDP config overrides
-                if override_ddp_config is not None:
-                    ddp_config_dict.update(override_ddp_config)
-
+                ddp_config_dict = _build_ddp_config_dict(wrap_config, override_ddp_config)
                 ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
                 ddp_config.finalize()
 
@@ -328,20 +358,33 @@ def make_megatron_module(
             # Build ddp_config dict with use_distributed_optimizer, same as provider path
             ddp_config = None
             if wrap_config.wrap_with_ddp:
-                ddp_config_dict = {
-                    "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
-                }
-                if override_ddp_config is not None:
-                    ddp_config_dict.update(override_ddp_config)
-                ddp_config = ddp_config_dict
+                ddp_config = _build_ddp_config_dict(wrap_config, override_ddp_config)
 
-            model = bridge.get_model(
-                post_model_creation_callbacks=post_model_creation_callbacks,
-                wrap_with_ddp=wrap_config.wrap_with_ddp,
-                fp16=tf_config.fp16,
-                bf16=tf_config.bf16,
-                ddp_config=ddp_config,
-            )
+            use_fsdp = hasattr(wrap_config, "use_megatron_fsdp") and wrap_config.use_megatron_fsdp
+            if use_fsdp and not HAVE_MEGATRON_FSDP:
+                raise ImportError(
+                    "engine.use_megatron_fsdp=True requires megatron-fsdp package. "
+                    "Install from Megatron-LM dev branch with FSDP support."
+                )
+            if use_fsdp and wrap_config.wrap_with_ddp:
+                # FSDP wrapping deferred to after weight loading (mbridge can't parse FSDP structure)
+                model = bridge.get_model(
+                    post_model_creation_callbacks=post_model_creation_callbacks,
+                    wrap_with_ddp=False,
+                    fp16=tf_config.fp16,
+                    bf16=tf_config.bf16,
+                    ddp_config=None,
+                )
+                pending_fsdp_config = ddp_config
+            else:
+                model = bridge.get_model(
+                    post_model_creation_callbacks=post_model_creation_callbacks,
+                    wrap_with_ddp=wrap_config.wrap_with_ddp,
+                    fp16=tf_config.fp16,
+                    bf16=tf_config.bf16,
+                    ddp_config=ddp_config,
+                )
+                pending_fsdp_config = None
 
         if isinstance(tf_config, MLATransformerConfig):
             # Keep the same behavior as hf_to_mcore_config_dpskv3
@@ -366,16 +409,40 @@ def make_megatron_module(
             parallel_model.to(get_device_name())
             return parallel_model
 
+        if getattr(wrap_config, "use_megatron_fsdp", False):
+            raise NotImplementedError(
+                "Megatron FSDP is only supported with mbridge (engine.use_mbridge=True). "
+                "Set engine.use_mbridge=True or disable FSDP with engine.use_megatron_fsdp=False."
+            )
+
         model = get_model(
             megatron_model_provider,
             wrap_with_ddp=wrap_config.wrap_with_ddp,
             use_distributed_optimizer=wrap_config.use_distributed_optimizer,
             override_ddp_config=override_ddp_config,
         )
-    return model, tf_config
+    return model, tf_config, pending_fsdp_config
 
 
-ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
+def wrap_model_with_fsdp(model, fsdp_ddp_config_dict):
+    if not HAVE_MEGATRON_FSDP:
+        raise ImportError(
+            "Megatron FSDP requires megatron-fsdp package. "
+            "Install via: pip install megatron-core[fsdp] or install from Megatron-LM dev branch."
+        )
+    from megatron.core.distributed import DistributedDataParallelConfig as DDPConfig
+
+    ddp_config_obj = DDPConfig(**fsdp_ddp_config_dict)
+    if hasattr(ddp_config_obj, "finalize"):
+        ddp_config_obj.finalize()
+    config = get_model_config(model[0] if isinstance(model, list) else model)
+    if not isinstance(model, list):
+        model = [model]
+    return [MegatronFSDP(config=config, ddp_config=ddp_config_obj, module=m) for m in model]
+
+
+_fsdp_classes = tuple(c for c in (MegatronFSDP, MegatronFSDPInner) if c is not None)
+ALL_MODULE_WRAPPER_CLASSNAMES = (DDP,) + _fsdp_classes + (Float16Module,)
 
 
 def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
@@ -1383,13 +1450,21 @@ def get_megatron_module_device(models: list[Any]) -> str:
         return "cpu"
 
     model_chunk = models[0]
-    if not model_chunk.buffers:
+    # FSDP wrapper: buffers is a method (nn.Module.buffers()), not a list attribute
+    buffers = getattr(model_chunk, "buffers", None)
+    if buffers is None or callable(buffers):
+        try:
+            return next(model_chunk.module.parameters()).device.type
+        except (StopIteration, AttributeError):
+            return "cpu"
+
+    if not buffers:
         try:
             return next(model_chunk.module.parameters()).device.type
         except StopIteration:
             return "cpu"
 
-    buffer = model_chunk.buffers[0]
+    buffer = buffers[0]
     if buffer.param_data.storage().size() == 0:
         return "cpu"
     else:
