@@ -683,9 +683,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 optimizer_scheduler=self.actor_optimizer_scheduler,
                 use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
                 use_checkpoint_opt_param_scheduler=self.config.actor.optim.use_checkpoint_opt_param_scheduler,
+                use_mbridge=not self.config.actor.megatron.use_dist_checkpointing,
                 bridge=self.bridge,
                 provider=self.provider,
-                use_dist_checkpointing=self.config.actor.megatron.use_dist_checkpointing,
                 peft_cls=self.peft_cls,
             )
 
@@ -1239,9 +1239,9 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
             optimizer_scheduler=self.critic_optimizer_scheduler,
             use_distributed_optimizer=self.config.megatron.use_distributed_optimizer,
             use_checkpoint_opt_param_scheduler=self.config.optim.use_checkpoint_opt_param_scheduler,
+            use_mbridge=not self.config.megatron.use_dist_checkpointing,
             bridge=self.bridge,
             provider=self.provider,
-            use_dist_checkpointing=self.config.megatron.use_dist_checkpointing,
             peft_cls=self.peft_cls,
         )
 
