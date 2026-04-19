@@ -18,7 +18,17 @@ import pytest
 
 from verl.utils.flops_counter import FlopsCounter
 
-VALID_CONFIG_TYPE = {"llama", "qwen2", "qwen3", "qwen3_moe", "deepseek_v3", "mistral", "gemma3_text", "apertus"}
+VALID_CONFIG_TYPE = {
+    "llama",
+    "qwen2",
+    "qwen3",
+    "qwen3_moe",
+    "deepseek_v3",
+    "mistral",
+    "gemma3_text",
+    "gemma4",
+    "apertus",
+}
 
 
 class Config:
@@ -206,6 +216,25 @@ CONFIG = {
         # seqlen_square_sum: 905969664 (calculated with sliding window logic)
         # attn flops: 6 * 905969664 * 256 * 16 = 44530220924928
         # total: 986195089686528 / 1e12 = 986.195089686528
+        "expected_flops_tuple": (279084659638272 / 1e12, 963929979224064 / 1e12),
+    },
+    "gemma4": {
+        "config": {
+            "model_type": "gemma4",
+            "text_config": {
+                "vocab_size": 262208,
+                "hidden_size": 3840,
+                "intermediate_size": 15360,
+                "num_hidden_layers": 48,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 8,
+                "head_dim": 256,
+                "sliding_window": 1024,
+                "layer_types": None,
+                "sliding_window_pattern": 6,
+            },
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
         "expected_flops_tuple": (279084659638272 / 1e12, 963929979224064 / 1e12),
     },
     "gpt_oss": {
@@ -445,6 +474,7 @@ CONFIG = {
         "deepseek_v3",
         "mistral",
         "gemma3_text",
+        "gemma4",
         "apertus",
         "gpt_oss",
         "qwen3_vl",

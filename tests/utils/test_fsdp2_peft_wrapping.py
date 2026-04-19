@@ -20,11 +20,13 @@ works for: (1) vanilla models, (2) peft-wrapped models, (3) tied embeddings.
 """
 
 import unittest
+from functools import partial
 from types import SimpleNamespace
 
 import torch.nn as nn
+from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
 
-from verl.utils.fsdp_utils import _select_fsdp2_wrap_targets
+from verl.utils.fsdp_utils import _select_fsdp2_wrap_targets, get_fsdp_wrap_policy
 
 
 class MockDecoderLayer(nn.Module):
@@ -125,6 +127,20 @@ class TestFSDP2PeftWrapping(unittest.TestCase):
 
         embed_count = sum(1 for n in names if n == "model.embed_tokens")
         self.assertEqual(embed_count, 1, f"embed_tokens wrapped {embed_count} times, expected 1")
+
+    def test_get_fsdp_wrap_policy_tolerates_partially_stale_no_split_modules(self):
+        """FSDP1 wrapping should not fail when one requested class name cannot be resolved."""
+        model = MockCausalLM(tie_word_embeddings=False)
+        model._no_split_modules = ["MissingLayer", "MockDecoderLayer"]
+
+        policy = get_fsdp_wrap_policy(module=model)
+
+        self.assertIsNotNone(policy)
+        self.assertIs(policy.func, _or_policy)
+        self.assertEqual(len(policy.keywords["policies"]), 2)
+        self.assertIs(policy.keywords["policies"][0].func, transformer_auto_wrap_policy)
+        self.assertIs(policy.keywords["policies"][1].func, lambda_auto_wrap_policy)
+        self.assertIsInstance(policy.keywords["policies"][1], partial)
 
 
 if __name__ == "__main__":
