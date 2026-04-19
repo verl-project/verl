@@ -86,10 +86,21 @@ class TeacherModelManager:
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
     def _initialize_load_balancer(self):
-        from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer
+        from verl.experimental.agent_loop.agent_loop import (
+            GlobalRequestLoadBalancer,
+            build_global_load_balancer_remote_kwargs,
+        )
 
+        rollout_config = self.config.teacher_model.inference
+        lb_kwargs = build_global_load_balancer_remote_kwargs(rollout_config)
+        if rollout_config.load_balance_strategy == "weighted_rr" and rollout_config.load_balance_weights is not None:
+            nw = len(rollout_config.load_balance_weights)
+            ns = len(self.server_addresses)
+            if nw != ns:
+                raise ValueError(f"load_balance_weights length {nw} must match number of teacher rollout replicas {ns}")
         self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
             server_actor_ids=self.server_addresses,
+            **lb_kwargs,
         )
 
     @auto_await

@@ -24,12 +24,30 @@ from transformers.utils import get_json_schema
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop.agent_loop import GlobalRequestLoadBalancer, get_trajectory_info
+from verl.experimental.agent_loop.load_balance import create_load_balance_strategy
+from verl.experimental.agent_loop.prometheus_metrics import parse_prometheus_metric_value
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import CheckpointEngineConfig
+
+
+def _adjust_trainer_gpus_to_available(config: DictConfig) -> None:
+    """Cap trainer GPU pool to visible devices (avoids failures on e.g. 4-GPU machines vs default 8)."""
+    try:
+        import torch
+
+        n = torch.cuda.device_count()
+    except Exception:
+        n = 0
+    if n <= 0:
+        return
+    desired = int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes)
+    if desired > n:
+        config.trainer.nnodes = 1
+        config.trainer.n_gpus_per_node = n
 
 
 @pytest.fixture
@@ -53,7 +71,7 @@ def init_config() -> DictConfig:
 
     model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
     config.actor_rollout_ref.model.path = model_path
-    config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
+    config.actor_rollout_ref.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.enforce_eager = True
     config.actor_rollout_ref.rollout.prompt_length = 4096
@@ -61,6 +79,8 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.n = 4
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
+
+    _adjust_trainer_gpus_to_available(config)
 
     return config
 
@@ -74,57 +94,64 @@ def test_single_turn(init_config):
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
             }
-        }
-    )
-
-    agent_loop_manager = init_agent_loop_manager(init_config)
-
-    raw_prompts = [
-        [
-            {
-                "role": "user",
-                "content": "Let's play a role playing game. Your name is Alice, your favorite color is blue.",
-            }
-        ],
-        [{"role": "user", "content": "Let's play a role playing game. Your name is Bob, your favorite color is red."}],
-    ]
-    batch = DataProto(
-        non_tensor_batch={
-            "raw_prompt": np.array(raw_prompts),
-            "agent_name": np.array(["single_turn_agent"] * len(raw_prompts)),
-            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
-            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
         },
+        ignore_reinit_error=True,
     )
-    n = init_config.actor_rollout_ref.rollout.n
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
-    assert len(result) == len(raw_prompts) * n
+    try:
+        agent_loop_manager = init_agent_loop_manager(init_config)
 
-    # check result
-    seq_len = result.batch["prompts"].size(1) + result.batch["responses"].size(1)
-    assert result.batch["input_ids"].size(1) == seq_len
-    assert result.batch["attention_mask"].size(1) == seq_len
-    assert result.batch["position_ids"].size(1) == seq_len
+        raw_prompts = [
+            [
+                {
+                    "role": "user",
+                    "content": "Let's play a role playing game. Your name is Alice, your favorite color is blue.",
+                }
+            ],
+            [
+                {
+                    "role": "user",
+                    "content": "Let's play a role playing game. Your name is Bob, your favorite color is red.",
+                }
+            ],
+        ]
+        batch = DataProto(
+            non_tensor_batch={
+                "raw_prompt": np.array(raw_prompts),
+                "agent_name": np.array(["single_turn_agent"] * len(raw_prompts)),
+                "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
+                "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
+            },
+        )
+        n = init_config.actor_rollout_ref.rollout.n
+        batch = batch.repeat(n)
+        result = agent_loop_manager.generate_sequences(prompts=batch)
+        assert len(result) == len(raw_prompts) * n
 
-    if init_config.actor_rollout_ref.rollout.calculate_log_probs:
-        assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
+        # check result
+        seq_len = result.batch["prompts"].size(1) + result.batch["responses"].size(1)
+        assert result.batch["input_ids"].size(1) == seq_len
+        assert result.batch["attention_mask"].size(1) == seq_len
+        assert result.batch["position_ids"].size(1) == seq_len
 
-    # check compute score
-    assert result.batch["rm_scores"].shape == result.batch["responses"].shape
-    reward_tensor = result.batch["rm_scores"]
-    reward_extra_keys = result.meta_info.get("reward_extra_keys", [])
-    reward_extra_info = {key: result.non_tensor_batch[key] for key in reward_extra_keys}
-    assert reward_tensor.shape == result.batch["responses"].shape
-    assert "acc" in reward_extra_info, f"reward_extra_info {reward_extra_info} should contain 'acc'"
-    assert reward_extra_info["acc"].shape == (len(result),), f"invalid acc: {reward_extra_info['acc']}"
+        if init_config.actor_rollout_ref.rollout.calculate_log_probs:
+            assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
 
-    # check turns
-    num_turns = result.non_tensor_batch["__num_turns__"]
-    assert np.all(num_turns == 2)
+        # check compute score
+        assert result.batch["rm_scores"].shape == result.batch["responses"].shape
+        reward_tensor = result.batch["rm_scores"]
+        reward_extra_keys = result.meta_info.get("reward_extra_keys", [])
+        reward_extra_info = {key: result.non_tensor_batch[key] for key in reward_extra_keys}
+        assert reward_tensor.shape == result.batch["responses"].shape
+        assert "acc" in reward_extra_info, f"reward_extra_info {reward_extra_info} should contain 'acc'"
+        assert reward_extra_info["acc"].shape == (len(result),), f"invalid acc: {reward_extra_info['acc']}"
 
-    print("Test passed!")
-    ray.shutdown()
+        # check turns
+        num_turns = result.non_tensor_batch["__num_turns__"]
+        assert np.all(num_turns == 2)
+
+        print("Test passed!")
+    finally:
+        ray.shutdown()
 
 
 class WeatherTool(BaseTool):
@@ -201,106 +228,107 @@ def test_tool_agent(init_config):
         },
         ignore_reinit_error=True,
     )
+    try:
+        # =========================== 1. Init rollout manager ===========================
+        tool_config = {
+            "tools": [
+                {
+                    "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
+                    "config": {"type": "native"},
+                },
+                {
+                    "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
+                    "config": {"type": "native"},
+                },
+            ]
+        }
+        tool_config_path = "/tmp/tool_config.json"
+        with open(tool_config_path, "w") as f:
+            json.dump(tool_config, f)
 
-    # =========================== 1. Init rollout manager ===========================
-    tool_config = {
-        "tools": [
-            {
-                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
-                "config": {"type": "native"},
-            },
-            {
-                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
-                "config": {"type": "native"},
-            },
+        n = 2
+        init_config.actor_rollout_ref.rollout.n = n
+        init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
+        init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
+        init_config.actor_rollout_ref.rollout.calculate_log_probs = True
+        agent_loop_manager = init_agent_loop_manager(init_config)
+
+        # =========================== 2. Generate sequences  ===========================
+        raw_prompts = [
+            [
+                {"role": "user", "content": "How are you?"},
+            ],
+            [
+                {"role": "user", "content": "What's the temperature in Los Angeles now?"},
+            ],
+            [
+                {"role": "user", "content": "What's the temperature in New York now?"},
+            ],
+            [
+                {
+                    "role": "system",
+                    "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
+                    "Current Date: 2024-09-30",
+                },
+                {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
+            ],
         ]
-    }
-    tool_config_path = "/tmp/tool_config.json"
-    with open(tool_config_path, "w") as f:
-        json.dump(tool_config, f)
-
-    n = 2
-    init_config.actor_rollout_ref.rollout.n = n
-    init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
-    init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
-    init_config.actor_rollout_ref.rollout.calculate_log_probs = True
-    agent_loop_manager = init_agent_loop_manager(init_config)
-
-    # =========================== 2. Generate sequences  ===========================
-    raw_prompts = [
-        [
-            {"role": "user", "content": "How are you?"},
-        ],
-        [
-            {"role": "user", "content": "What's the temperature in Los Angeles now?"},
-        ],
-        [
-            {"role": "user", "content": "What's the temperature in New York now?"},
-        ],
-        [
-            {
-                "role": "system",
-                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
-                "Current Date: 2024-09-30",
+        batch = DataProto(
+            non_tensor_batch={
+                "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
+                "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
+                "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
+                "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
             },
-            {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
-        ],
-    ]
-    batch = DataProto(
-        non_tensor_batch={
-            "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
-            "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
-            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
-            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
-        },
-    )
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
-    assert len(result) == len(raw_prompts) * n
-
-    # Check turns
-    num_turns = result.non_tensor_batch["__num_turns__"]
-    print(f"num_turns: {num_turns}")
-    for i in range(len(num_turns)):
-        if i // n == 0:
-            # [user, assistant]
-            assert num_turns[i] == 2
-        else:
-            # [user, assistant, tool, assistant]
-            assert num_turns[i] == 4
-
-    # Check response_mask
-    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    responses = result.batch["responses"]
-    response_mask = result.batch["response_mask"]
-    attention_mask = result.batch["attention_mask"]
-    assert result.batch["rm_scores"].size(1) == responses.size(1)
-    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-    assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
-
-    response_length = response_mask.size(1)
-    for i in range(len(responses)):
-        # response with tool response
-        valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
-        response_with_obs = tokenizer.decode(valid_tokens)
-
-        # response without tool response
-        valid_tokens = responses[i][response_mask[i].bool()]
-        response_without_obs = tokenizer.decode(valid_tokens)
-
-        assert "<tool_response>" not in response_without_obs, (
-            f"found <tool_response> in response: {response_without_obs}"
         )
-        assert "</tool_response>" not in response_without_obs, (
-            f"found </tool_response> in response: {response_without_obs}"
-        )
-        print("=========================")
-        print(response_with_obs)
-        print("---")
-        print(response_without_obs)
+        batch = batch.repeat(n)
+        result = agent_loop_manager.generate_sequences(prompts=batch)
+        assert len(result) == len(raw_prompts) * n
 
-    print("Test passed!")
-    ray.shutdown()
+        # Check turns
+        num_turns = result.non_tensor_batch["__num_turns__"]
+        print(f"num_turns: {num_turns}")
+        for i in range(len(num_turns)):
+            if i // n == 0:
+                # [user, assistant]
+                assert num_turns[i] == 2
+            else:
+                # [user, assistant, tool, assistant]
+                assert num_turns[i] == 4
+
+        # Check response_mask
+        tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
+        responses = result.batch["responses"]
+        response_mask = result.batch["response_mask"]
+        attention_mask = result.batch["attention_mask"]
+        assert result.batch["rm_scores"].size(1) == responses.size(1)
+        assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
+        assert result.batch["rollout_log_probs"].size(1) == result.batch["responses"].size(1)
+
+        response_length = response_mask.size(1)
+        for i in range(len(responses)):
+            # response with tool response
+            valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
+            response_with_obs = tokenizer.decode(valid_tokens)
+
+            # response without tool response
+            valid_tokens = responses[i][response_mask[i].bool()]
+            response_without_obs = tokenizer.decode(valid_tokens)
+
+            assert "<tool_response>" not in response_without_obs, (
+                f"found <tool_response> in response: {response_without_obs}"
+            )
+            assert "</tool_response>" not in response_without_obs, (
+                f"found </tool_response> in response: {response_without_obs}"
+            )
+            print("=========================")
+            print(response_with_obs)
+            print("---")
+            print(response_without_obs)
+
+        print("Test passed!")
+    finally:
+        ray.shutdown()
 
 
 def test_tool_agent_with_interaction(init_config):
@@ -312,129 +340,135 @@ def test_tool_agent_with_interaction(init_config):
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
             }
-        }
-    )
-
-    # =========================== 1. Init rollout manager ===========================
-    tool_config = {
-        "tools": [
-            {
-                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
-                "config": {"type": "native"},
-            },
-            {
-                "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
-                "config": {"type": "native"},
-            },
-        ]
-    }
-    tool_config_path = "/tmp/tool_config.json"
-    with open(tool_config_path, "w") as f:
-        json.dump(tool_config, f)
-
-    interaction_config = {
-        "interaction": [
-            {"name": "weather", "class_name": "verl.interactions.weather_interaction.WeatherInteraction", "config": {}}
-        ]
-    }
-    interaction_config_path = "/tmp/interaction_config.json"
-    with open(interaction_config_path, "w") as f:
-        json.dump(interaction_config, f)
-
-    n = 2
-    init_config.actor_rollout_ref.rollout.n = n
-    init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
-    init_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path = interaction_config_path
-    init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
-    agent_loop_manager = init_agent_loop_manager(init_config)
-    checkpoint_engine_config = omega_conf_to_dataclass(
-        init_config.actor_rollout_ref.rollout.checkpoint_engine, CheckpointEngineConfig
-    )
-    checkpoint_manager = CheckpointEngineManager(
-        config=checkpoint_engine_config,
-        trainer=agent_loop_manager.worker_group,
-        replicas=agent_loop_manager.rollout_replicas,
-    )
-    checkpoint_manager.sleep_replicas()
-    checkpoint_manager.update_weights()
-
-    # =========================== 2. Generate sequences  ===========================
-    raw_prompts = [
-        [
-            {"role": "user", "content": "How are you?"},
-        ],
-        [
-            {"role": "user", "content": "What's the temperature in Los Angeles now?"},
-        ],
-        [
-            {"role": "user", "content": "What's the temperature in New York now?"},
-        ],
-        [
-            {
-                "role": "system",
-                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
-                "Current Date: 2024-09-30",
-            },
-            {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
-        ],
-    ]
-    batch = DataProto(
-        non_tensor_batch={
-            "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
-            "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
-            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
-            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
-            "extra_info": np.array(
-                [
-                    {"interaction_kwargs": {"name": "weather"}},
-                    {"interaction_kwargs": {"name": "weather"}},
-                    {"interaction_kwargs": {"name": "weather"}},
-                    {"interaction_kwargs": {"name": "weather"}},
-                ]
-            ),
         },
+        ignore_reinit_error=True,
     )
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
-    assert len(result) == len(raw_prompts) * n
+    try:
+        # =========================== 1. Init rollout manager ===========================
+        tool_config = {
+            "tools": [
+                {
+                    "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherTool",
+                    "config": {"type": "native"},
+                },
+                {
+                    "class_name": "tests.experimental.agent_loop.test_basic_agent_loop.WeatherToolWithData",
+                    "config": {"type": "native"},
+                },
+            ]
+        }
+        tool_config_path = "/tmp/tool_config.json"
+        with open(tool_config_path, "w") as f:
+            json.dump(tool_config, f)
 
-    # Check turns
-    num_turns = result.non_tensor_batch["__num_turns__"]
-    print(f"num_turns: {num_turns}")
-    for i in range(len(num_turns)):
-        if i // n == 0:
-            # [user, assistant, user]
-            assert num_turns[i] == 3
-        else:
-            # [user, assistant, tool, assistant, user]
-            assert num_turns[i] == 5
+        interaction_config = {
+            "interaction": [
+                {
+                    "name": "weather",
+                    "class_name": "verl.interactions.weather_interaction.WeatherInteraction",
+                    "config": {},
+                }
+            ]
+        }
+        interaction_config_path = "/tmp/interaction_config.json"
+        with open(interaction_config_path, "w") as f:
+            json.dump(interaction_config, f)
 
-    # Check response_mask
-    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    responses = result.batch["responses"]
-    response_mask = result.batch["response_mask"]
-    attention_mask = result.batch["attention_mask"]
-    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-    response_length = response_mask.size(1)
+        n = 2
+        init_config.actor_rollout_ref.rollout.n = n
+        init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
+        init_config.actor_rollout_ref.rollout.multi_turn.interaction_config_path = interaction_config_path
+        init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
+        agent_loop_manager = init_agent_loop_manager(init_config)
+        checkpoint_engine_config = omega_conf_to_dataclass(
+            init_config.actor_rollout_ref.rollout.checkpoint_engine, CheckpointEngineConfig
+        )
+        checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config,
+            trainer=agent_loop_manager.worker_group,
+            replicas=agent_loop_manager.rollout_replicas,
+        )
+        checkpoint_manager.sleep_replicas()
+        checkpoint_manager.update_weights()
 
-    for i in range(len(responses)):
-        # response with tool response
-        valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
-        response_with_obs = tokenizer.decode(valid_tokens)
+        # =========================== 2. Generate sequences  ===========================
+        raw_prompts = [
+            [
+                {"role": "user", "content": "How are you?"},
+            ],
+            [
+                {"role": "user", "content": "What's the temperature in Los Angeles now?"},
+            ],
+            [
+                {"role": "user", "content": "What's the temperature in New York now?"},
+            ],
+            [
+                {
+                    "role": "system",
+                    "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
+                    "Current Date: 2024-09-30",
+                },
+                {"role": "user", "content": "What's the temperature in San Francisco now? How about tomorrow?"},
+            ],
+        ]
+        batch = DataProto(
+            non_tensor_batch={
+                "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
+                "agent_name": np.array(["tool_agent"] * len(raw_prompts)),
+                "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
+                "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
+                "extra_info": np.array(
+                    [
+                        {"interaction_kwargs": {"name": "weather"}},
+                        {"interaction_kwargs": {"name": "weather"}},
+                        {"interaction_kwargs": {"name": "weather"}},
+                        {"interaction_kwargs": {"name": "weather"}},
+                    ]
+                ),
+            },
+        )
+        batch = batch.repeat(n)
+        result = agent_loop_manager.generate_sequences(prompts=batch)
+        assert len(result) == len(raw_prompts) * n
 
-        # response without tool response
-        valid_tokens = responses[i][response_mask[i].bool()]
-        response_without_obs = tokenizer.decode(valid_tokens)
+        # Check turns
+        num_turns = result.non_tensor_batch["__num_turns__"]
+        print(f"num_turns: {num_turns}")
+        for i in range(len(num_turns)):
+            if i // n == 0:
+                # [user, assistant, user]
+                assert num_turns[i] == 3
+            else:
+                # [user, assistant, tool, assistant, user]
+                assert num_turns[i] == 5
 
-        assert "\udb82\udc89" not in response_without_obs, f"found \udb82\udc89 in response: {response_without_obs}"
-        assert "\udb82\udc8a" not in response_without_obs, f"found \udb82\udc8a in response: {response_without_obs}"
-        print("=========================")
-        print(response_with_obs)
-        print("---")
-        print(response_without_obs)
+        # Check response_mask
+        tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
+        responses = result.batch["responses"]
+        response_mask = result.batch["response_mask"]
+        attention_mask = result.batch["attention_mask"]
+        assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
+        response_length = response_mask.size(1)
 
-    print("Test passed!")
-    ray.shutdown()
+        for i in range(len(responses)):
+            # response with tool response
+            valid_tokens = responses[i][attention_mask[i][-response_length:].bool()]
+            response_with_obs = tokenizer.decode(valid_tokens)
+
+            # response without tool response
+            valid_tokens = responses[i][response_mask[i].bool()]
+            response_without_obs = tokenizer.decode(valid_tokens)
+
+            assert "\udb82\udc89" not in response_without_obs, f"found \udb82\udc89 in response: {response_without_obs}"
+            assert "\udb82\udc8a" not in response_without_obs, f"found \udb82\udc8a in response: {response_without_obs}"
+            print("=========================")
+            print(response_with_obs)
+            print("---")
+            print(response_without_obs)
+
+        print("Test passed!")
+    finally:
+        ray.shutdown()
 
 
 @pytest.mark.asyncio
@@ -520,3 +554,70 @@ class TestLoadBalancerStickySession:
         ray.get(lb.release_server.remote(server_id=s0))
         s1 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))
         assert s0 == s1
+
+
+class TestPrometheusMetricsParse:
+    def test_parse_by_metric_name(self):
+        text = "# HELP x help\n# TYPE x gauge\nx 0.37\n"
+        assert parse_prometheus_metric_value(text, metric_name="x") == pytest.approx(0.37)
+
+    def test_multiple_series_same_name_uses_max(self):
+        text = 'vllm:kv_cache_usage_perc{model_name="a"} 0.2\nvllm:kv_cache_usage_perc{model_name="b"} 0.7\n'
+        assert parse_prometheus_metric_value(text, metric_name="vllm:kv_cache_usage_perc") == pytest.approx(0.7)
+
+
+class TestLoadBalanceRegistry:
+    def test_unknown_strategy_raises(self):
+        with pytest.raises(ValueError, match="Unknown load_balance_strategy"):
+            create_load_balance_strategy("not_a_real_strategy", server_actor_ids=["a"])
+
+
+class TestLoadBalancerStrategies:
+    def test_random_with_seed_is_deterministic(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1", "s2"],
+            load_balance_strategy="random",
+            strategy_init_kwargs={"random_seed": 123},
+        )
+        out = [ray.get(lb.acquire_server.remote(request_id=f"u{i}")) for i in range(6)]
+        lb2 = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1", "s2"],
+            load_balance_strategy="random",
+            strategy_init_kwargs={"random_seed": 123},
+        )
+        out2 = [ray.get(lb2.acquire_server.remote(request_id=f"u{i}")) for i in range(6)]
+        assert out == out2
+
+    def test_weighted_rr_returns_valid_server(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1"],
+            load_balance_strategy="weighted_rr",
+            strategy_init_kwargs={"weights": [1.0, 3.0]},
+        )
+        for i in range(8):
+            s = ray.get(lb.acquire_server.remote(request_id=f"w{i}"))
+            assert s in ("s0", "s1")
+
+
+class TestLoadBalancerGroupSticky:
+    def test_same_group_same_server(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1", "s2"],
+            load_balance_strategy="least_requests",
+            group_sticky_routing=True,
+        )
+        g0 = "g0"
+        a = ray.get(lb.acquire_server.remote(request_id="req-a", group_id=g0))
+        b = ray.get(lb.acquire_server.remote(request_id="req-b", group_id=g0))
+        assert a == b
+
+    def test_request_sticky_overrides_group(self, ray_for_lb):
+        lb = GlobalRequestLoadBalancer.remote(
+            server_actor_ids=["s0", "s1", "s2"],
+            load_balance_strategy="least_requests",
+            group_sticky_routing=True,
+        )
+        s_first = ray.get(lb.acquire_server.remote(request_id="sticky-id", group_id="g99"))
+        ray.get(lb.release_server.remote(server_id=s_first))
+        s_second = ray.get(lb.acquire_server.remote(request_id="sticky-id", group_id="g100"))
+        assert s_first == s_second

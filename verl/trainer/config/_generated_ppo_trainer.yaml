@@ -299,6 +299,17 @@ actor_rollout_ref:
       format: hermes
       num_repeat_rollouts: null
     calculate_log_probs: false
+    load_balance_strategy: least_requests
+    load_balance_weights: null
+    load_balance_random_seed: null
+    group_sticky_routing: false
+    num_load_balance_groups: 1
+    kv_cache_metrics:
+      _target_: verl.workers.config.KvCacheMetricsConfig
+      refresh_interval_s: 2.0
+      metrics_path: /metrics
+      metric_name: null
+      fetch_timeout_s: 2.0
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8

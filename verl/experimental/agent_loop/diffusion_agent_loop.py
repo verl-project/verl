@@ -98,6 +98,7 @@ class DiffusionAgentLoopWorker:
         teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
         teacher_load_balancer_handle: ray.actor.ActorHandle = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        load_balance_group_id: str | None = None,
     ):
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
@@ -109,6 +110,7 @@ class DiffusionAgentLoopWorker:
                 config,
                 servers,
                 load_balancer_handle=load_balancer_handle,
+                load_balance_group_id=load_balance_group_id,
             )
 
         self.dataset_cls = get_dataset_class(config.data)
