@@ -34,15 +34,15 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
     mapping = {}
 
     # Actor/Critic resource pool
-    if any(role in roles for role in [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy, Role.RewardModel]):
+    training_roles = [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy]
+    if any(role in roles for role in training_roles):
         assert config.trainer.n_gpus_per_node > 0, "config.trainer.n_gpus_per_node must be greater than 0"
         assert config.trainer.nnodes > 0, "config.trainer.nnodes must be greater than 0"
 
         trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
         resource_pool_spec["trainer_pool"] = trainer_pool
 
-        # Map training-related roles to the same resource pool
-        for role in [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy, Role.RewardModel]:
+        for role in training_roles:
             if role in roles:
                 mapping[role] = "trainer_pool"
 
@@ -50,6 +50,11 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
     if Role.Rollout in roles:
         assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
         assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
+
+    if Role.RewardModel in roles:
+        rm_cfg = config.reward.reward_model
+        assert rm_cfg.n_gpus_per_node > 0, "config.reward.reward_model.n_gpus_per_node must be greater than 0"
+        assert rm_cfg.nnodes > 0, "config.reward.reward_model.nnodes must be greater than 0"
 
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
