@@ -192,9 +192,7 @@ class DataParallelPPOCritic(BasePPOCritic):
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
         self.critic_module.train()
-        metrics = {
-            "critic/vf_loss": 0.0,
-        }
+        metrics = {}
 
         select_keys = ["input_ids", "responses", "response_mask", "attention_mask", "position_ids", "values", "returns"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -218,6 +216,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
                 self.critic_optimizer.zero_grad()
+                mini_batch_vf_loss = 0.0
 
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
@@ -253,11 +252,14 @@ class DataParallelPPOCritic(BasePPOCritic):
                         }
                     )
 
-                    metrics["critic/vf_loss"] += vf_loss.detach().item() * loss_scale_factor
+                    mini_batch_vf_loss += vf_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
-                mini_batch_metrics = {"critic/grad_norm": grad_norm.detach().item()}
+                mini_batch_metrics = {
+                    "critic/vf_loss": mini_batch_vf_loss,
+                    "critic/grad_norm": grad_norm.detach().item(),
+                }
                 append_to_dict(metrics, mini_batch_metrics)
         self.critic_optimizer.zero_grad()
         return metrics
