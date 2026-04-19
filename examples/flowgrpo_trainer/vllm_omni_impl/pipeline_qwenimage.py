@@ -20,6 +20,8 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
+from verl.models.diffusion_model import VllmOmniPipelineBase
+
 from ..scheduler import FlowMatchSDEDiscreteScheduler
 
 
@@ -35,6 +37,7 @@ def _coalesce_not_none(value, default):
 
 # Custom pipeline class for QwenImage that returns log probabilities during the diffusion process.
 # This is compatible with API of vllm-omni custom pipeline
+@VllmOmniPipelineBase.register("QwenImagePipeline")
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)

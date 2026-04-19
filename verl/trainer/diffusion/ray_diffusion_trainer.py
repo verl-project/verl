@@ -38,13 +38,12 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import DiffusionAlgoConfig
-from verl.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator
+from verl.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
-from verl.trainer.ppo.core_algos import get_adv_estimator_fn
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
@@ -57,23 +56,6 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.utils.padding import embeds_padding_2_no_padding
-
-
-def compute_response_mask(data: DataProto):
-    """Compute the valid-step mask for diffusion latents.
-
-    For diffusion models, every denoising timestep is a valid optimization step,
-    so the returned mask is all-ones covering all timesteps.
-
-    Args:
-        data (DataProto): The data containing batched diffusion model outputs, including ``all_latents``.
-
-    Returns:
-        torch.Tensor: An all-ones int32 mask of shape ``[batch, num_timesteps]``.
-    """
-    all_latents = data.batch["all_latents"]
-    b, t = all_latents.shape[:2]
-    return torch.ones((b, t), dtype=torch.int32, device=all_latents.device)
 
 
 def compute_advantage(
@@ -102,12 +84,8 @@ def compute_advantage(
     Returns:
         DataProto: The updated data with computed ``advantages`` and ``returns`` in its batch.
     """
-    if "response_mask" not in data.batch.keys():
-        data.batch["response_mask"] = compute_response_mask(data)
-
     adv_kwargs = {
-        "sample_level_rewards": data.batch["sample_level_rewards"],
-        "response_mask": data.batch["response_mask"],
+        "sample_level_rewards": data.batch["sample_level_rewards"].clone(),
         "config": config,
     }
     if "uid" in data.non_tensor_batch:
@@ -115,7 +93,7 @@ def compute_advantage(
     if "reward_baselines" in data.batch:
         adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
 
-    adv_estimator_fn = get_adv_estimator_fn(adv_estimator)
+    adv_estimator_fn = get_diffusion_adv_estimator_fn(adv_estimator)
     if adv_estimator == DiffusionAdvantageEstimator.FLOW_GRPO:
         adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         adv_kwargs["global_std"] = global_std
@@ -332,7 +310,7 @@ class RayFlowGRPOTrainer:
             rollout_data_dir (str): Directory path to save the rollout data
         """
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-            inputs = self.tokenizer.batch_decode(batch.batch["input_ids"], skip_special_tokens=True)
+            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
             outputs = batch.batch["responses"]
             scores = batch.batch["sample_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
@@ -768,7 +746,6 @@ class RayFlowGRPOTrainer:
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
-        tu.pop(batch_td, key="input_ids")
         metadata = {
             "compute_loss": False,
             "height": self.config.actor_rollout_ref.model.height,
@@ -793,7 +770,6 @@ class RayFlowGRPOTrainer:
     def _compute_old_log_prob(self, batch: DataProto):
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
-        tu.pop(batch_td, key="input_ids")
         tu.assign_non_tensor(
             batch_td,
             compute_loss=False,
@@ -813,7 +789,6 @@ class RayFlowGRPOTrainer:
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
-        tu.pop(batch_td, key="input_ids")
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -916,10 +891,6 @@ class RayFlowGRPOTrainer:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
-                    if "response_mask" not in batch.batch.keys():
-                        batch.batch["response_mask"] = compute_response_mask(batch)
-                    # compute global_valid tokens
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
@@ -929,10 +900,7 @@ class RayFlowGRPOTrainer:
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
-                    # Operating Mode Selection:
-                    # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
-                    rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
-                    bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+                    bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
                         batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
                     else:  # Recompute old_log_probs
@@ -956,22 +924,10 @@ class RayFlowGRPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
-
-                        # Compute rollout correction: IS weights, rejection sampling, and metrics
-                        # Only runs in decoupled mode (computes once per batch using stable π_old)
-                        # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
-                        if (
-                            rollout_corr_config is not None
-                            and "rollout_log_probs" in batch.batch
-                            and not bypass_recomputing_logprobs  # Only in decoupled mode
-                        ):
-                            from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
-
-                            # Compute IS weights, apply rejection sampling, compute metrics
-                            batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
-                            # IS and off-policy metrics already have rollout_corr/ prefix
-                            metrics.update(is_metrics)
+                        num_timesteps = batch.batch["old_log_probs"].shape[1]
+                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"].expand(
+                            -1, num_timesteps
+                        )
 
                         # compute advantages, executed on the driver process
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(

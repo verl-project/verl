@@ -1,0 +1,229 @@
+# Target class for this configuration
+_target_: verl.workers.config.diffusion.DiffusionRolloutConfig
+
+# actor_rollout_ref.rollout.name: vllm_omni. The default value will be removed in the future
+name: ???
+
+# Rollout mode. Only async is supported.
+mode: async
+
+# Number of nodes for standalone rollout server, must be > 0 in one-step-off/fully async training.
+nnodes: 0
+
+# Number of GPUs per node for rollout server.
+n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
+
+# typically the same as data max prompt length
+# same as data.max_prompt_length if it exists
+prompt_length: ${oc.select:data.max_prompt_length,512}
+
+# for vllm-omni rollout
+# Rollout model parameters type. Align with actor model's FSDP/Megatron type.
+dtype: bfloat16
+
+# Fraction of GPU memory used by vLLM-Omni for cache.
+gpu_memory_utilization: 0.5
+
+# Whether to disable CUDA graph. Default False to best performance.
+enforce_eager: False
+
+# batch size of cudagraph to capture. Require enforce_eager: False to use this option
+# Since cudagraph in inference engine can not be offloaded during update policy,
+# you can use smaller batch size to save memory used in cuda graph, eg: [1 ,2, 4, 8, 16, 32]
+# supported engines: vllm
+cudagraph_capture_sizes: null
+
+# Whether to free engine cache after generation.
+free_cache_engine: True
+
+# TP size for rollout
+tensor_model_parallel_size: 2
+
+# DP size for rollout
+data_parallel_size: 1
+
+# EP size for rollout
+expert_parallel_size: 1
+
+# PP size for rollout
+pipeline_model_parallel_size: 1
+
+# max number of tokens in a batch
+max_num_batched_tokens: 8192
+
+# max length for rollout
+max_model_len: null
+
+# max length of sequences
+max_num_seqs: 1024
+
+# may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
+enable_chunked_prefill: True
+
+# Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
+enable_prefix_caching: True
+
+# logprobs mode for rollout logprobs
+logprobs_mode: processed_logprobs
+
+# scheduling policy for vllm-omni rollout
+scheduling_policy: fcfs
+
+# Which loader to use for rollout model weights: dummy, hf, megatron, etc.
+# safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
+load_format: dummy
+
+# for huge model, layered summon can save memory (prevent OOM) but make it slower
+layered_summon: False
+
+# The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
+log_prob_micro_batch_size_per_gpu: null
+
+# disable logging statistics
+disable_log_stats: True
+
+# number of responses (i.e. num sample times). > 1 for grpo
+n: 1
+
+# Multi-turn interaction config for tools or chat.
+multi_turn:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.MultiTurnConfig
+
+  # set to True for multi-turn tool interaction tasks;
+  enable: False
+
+# Extra inference engine arguments (vllm-omni), please refer vllm/sglang/trtllm official doc for detail
+engine_kwargs:
+
+  # vllm-omni engine config
+  vllm_omni: {}
+
+# Sampling parameters used during validation (diffusion-specific).
+val_kwargs:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.diffusion.DiffusionSamplingConfig
+
+  # whether to repeat n times for validation
+  n: 1
+
+  # number of inference steps for diffusion model validation
+  num_inference_steps: 40
+
+  # Rollout Algorithm configuration,
+  algo:
+  
+    # Magnitude of SDE noise injected inside the active window during validation
+    noise_level: 0.0
+
+# Rollout Algorithm configuration,
+algo:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
+  # Magnitude of SDE noise injected inside the active window
+  noise_level: 1.0
+
+  # SDE variant: "sde" or "cps"
+  sde_type: sde
+
+  # Number of consecutive denoising steps in the active SDE window; null = all steps
+  sde_window_size: null
+
+  # [start, end) range for random window start-index sampling
+  sde_window_range: [0, 5]
+
+# support logging rollout prob for debugging purpose
+calculate_log_probs: False
+
+# [Experimental] agent loop based rollout configs
+agent:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.AgentLoopConfig
+
+  # Number of agent loop workers
+  num_workers: 8
+
+  # default agent loop to use if `agent_name` not set in RL dataset
+  default_agent_loop: diffusion_single_turn_agent
+
+# Checkpoint Engine config for update weights from trainer to rollout
+checkpoint_engine:
+
+  # Target class for checkpoint engine config
+  _target_: verl.workers.config.CheckpointEngineConfig
+
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  backend: naive
+
+  # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
+  # This parameter controls the maximum payload size for a single weight update request.
+  # Reference: https://github.com/volcengine/verl/pull/2418
+  # Currently only supported in SGLang rollout implementations
+  # Larger values may improve throughput but increase memory overhead
+  # Detailed performance comparison:
+  # https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/169#issuecomment-3070686720
+  # Default value (512MB) is optimized for typical GPU memory configurations
+  # For the best performance of `rebuild_cuda_tensor`, it is recommended to:
+  # 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
+  # 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+  # when using Tensor Parallelism (TP) >= 8.
+  update_weights_bucket_megabytes: 2048
+
+  # Additional keyword arguments to pass to the checkpoint engine constructor
+  engine_kwargs: {}
+
+  # If set, this Python module is imported on every worker process before the
+  # backend is instantiated, allowing custom backends to register themselves
+  # in CheckpointEngineRegistry.
+  custom_backend_module: null
+
+# Whether to skip tokenizer initialization for rollout engine
+# When enabled (True), the rollout assume token in token out for generation
+skip_tokenizer_init: True
+
+# Whether to enable rollout routing replay for MoE models
+# When enabled (True), the rollout will record the routing decisions.
+enable_rollout_routing_replay: False
+
+# profile the rollout model in `generate_sequence`
+profiler: null
+
+# prometheus configuration for vllm-omni server mode
+prometheus:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.PrometheusConfig
+
+  enable: false
+
+# type of quantization in vllm-omni
+quantization: null
+
+# MTP configuration, reuse model configuration
+mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
+
+# image height for diffusion model rollout
+height: 512
+
+# image width for diffusion model rollout
+width: 512
+
+# number of inference steps for diffusion model rollout
+num_inference_steps: 10
+
+# Classifier-free guidance scale (true CFG); values > 1.0 enable CFG with negative prompt
+true_cfg_scale: 4.0
+
+# Maximum text-encoder token sequence length for prompt encoding
+max_sequence_length: 512
+
+# Distilled guidance scale for models with guidance_embeds; null to disable
+guidance_scale: null
+
+# external libs for rollout-side extensions (e.g., rollout pipeline registrations such as vllm-omni)
+external_lib: null

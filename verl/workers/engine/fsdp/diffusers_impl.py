@@ -31,7 +31,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
 
-from verl.models.diffusers_model import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
+from verl.models.diffusion_model import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -581,7 +581,6 @@ class DiffusersFSDPEngine(BaseEngine):
                 {
                     "old_log_probs": micro_batch["old_log_probs"][:, step],
                     "advantages": micro_batch["advantages"][:, step],
-                    "response_mask": micro_batch["response_mask"][:, step],
                 },
             )
             tu.assign_non_tensor(

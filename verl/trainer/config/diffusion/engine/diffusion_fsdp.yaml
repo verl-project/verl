@@ -1,0 +1,54 @@
+# Target class for this configuration
+_target_: verl.workers.config.FSDPEngineConfig
+
+# policy for wrapping the model
+wrap_policy:
+
+  # Minimum number of parameters to trigger wrapping a layer with FSDP
+  min_num_params: 0
+
+# Whether to offload model parameters to CPU (trades speed for memory)
+# Note that this differs from the offload_policy in FSDP
+param_offload: false
+
+# Whether to offload optimizer state to CPU
+# Note that this differs from the offload_policy in FSDP
+optimizer_offload: false
+
+# Only for FSDP2: offload param/grad/optimizer during train
+offload_policy: false
+
+# Reshard after forward pass to reduce memory footprint
+# For FSDP1, `false` enables `ShardingStrategy.SHARD_GRAD_OP`
+reshard_after_forward: true
+
+# Number of GPUs in each FSDP shard group; -1 means auto
+fsdp_size: -1
+
+# Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
+# before the current forward computation.
+forward_prefetch: False
+
+# model dtype of fsdp
+model_dtype: fp32
+
+# Whether to use original parameters in fsdp. Only avaiable in fsdp1
+use_orig_params: false
+
+# Random seed for reproducibility.
+seed: 42
+
+# Whether to enable full determinism for distributed training, only for debugging.
+full_determinism: false
+
+# ulysses sequence parallel size
+ulysses_sequence_parallel_size: 1
+
+# Whether to use forward only in fsdp.
+forward_only: false
+
+# fsdp or fsdp2
+strategy: fsdp
+
+# Mixed precision training param dtype
+dtype: bfloat16 # ["bfloat16", "float16"]

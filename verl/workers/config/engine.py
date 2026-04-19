@@ -12,18 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import logging
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 
 from ...utils.profiler import ProfilerConfig
-from .model import DiffusionModelConfig, HFModelConfig
+from .model import HFModelConfig
 from .optimizer import OptimizerConfig
+
+if TYPE_CHECKING:
+    from .diffusion.model import DiffusionModelConfig
 
 __all__ = [
     "FSDPEngineConfig",
@@ -577,4 +582,6 @@ class TrainingWorkerConfig(BaseConfig):
     # automatically select engine and optimizer function.
     # This function takes model config and the device name as parameter.
     # Users can pass in a higher-order function to take more parameters
-    auto_select_engine_optim_fn: Callable[["HFModelConfig", str], tuple["EngineConfig", "OptimizerConfig"]] = None
+    auto_select_engine_optim_fn: Callable[
+        [HFModelConfig | DiffusionModelConfig, str], tuple[EngineConfig, OptimizerConfig]
+    ] = None

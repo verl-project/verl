@@ -75,7 +75,7 @@ def init_server():
 
     rollout_cfg = OmegaConf.create(
         {
-            "_target_": "verl.workers.config.DiffusionRolloutConfig",
+            "_target_": "verl.workers.config.diffusion.DiffusionRolloutConfig",
             "name": "vllm_omni",
             "mode": "async",
             "tensor_model_parallel_size": 1,
@@ -97,23 +97,18 @@ def init_server():
             "height": 512,
             "width": 512,
             "num_inference_steps": 10,
-            "engine_kwargs": {
-                "vllm_omni": {
-                    "custom_pipeline": (
-                        "examples.flowgrpo_trainer.vllm_omni.pipeline_qwenimage.QwenImagePipelineWithLogProb"
-                    ),
-                }
-            },
+            "external_lib": "examples.flowgrpo_trainer.vllm_omni_impl",
         }
     )
 
     model_cfg = OmegaConf.create(
         {
-            "_target_": "verl.workers.config.DiffusionModelConfig",
+            "_target_": "verl.workers.config.diffusion.DiffusionModelConfig",
             "path": model_path,
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
             "load_tokenizer": True,
+            "external_lib": "examples.flowgrpo_trainer.diffusers_impl",
         }
     )
 

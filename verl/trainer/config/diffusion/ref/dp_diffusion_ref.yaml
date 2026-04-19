@@ -1,0 +1,20 @@
+# defaults specify the default config from each component
+defaults:
+
+  # diffusion ref config, inheriting from trainer/config/diffusion/ref/diffusion_ref.yaml
+  - diffusion_ref
+
+  # fsdp engine config
+  - ../engine@fsdp_config: diffusion_fsdp
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl.workers.config.diffusion.FSDPDiffusionActorConfig
+
+# fsdp config
+fsdp_config:
+
+  # ref model is forward only
+  forward_only: True

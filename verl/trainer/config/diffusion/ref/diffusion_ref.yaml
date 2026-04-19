@@ -1,0 +1,8 @@
+# Number of rollouts per update (mirrors actor rollout_n)
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# actor_rollout_ref.ref: FSDP config same as actor. For models larger than 7B, it’s recommended to turn on offload for ref by default
+strategy: ${actor_rollout_ref.actor.strategy}
+
+# The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
+log_prob_micro_batch_size_per_gpu: null

@@ -11,30 +11,109 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Diffusion-specific policy loss functions and KL penalties."""
+"""Diffusion-specific loss functions and KL penalties."""
 
 from collections import defaultdict
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
 from omegaconf import DictConfig
 
-from verl.trainer.ppo.core_algos import register_adv_est, register_policy_loss
-from verl.workers.config import ActorConfig
+from verl.workers.config import DiffusionActorConfig
+
+DiffusionLossFn = Callable[
+    [
+        torch.Tensor,  # old_log_prob
+        torch.Tensor,  # log_prob
+        torch.Tensor,  # advantages
+        Optional[DictConfig | DiffusionActorConfig],  # config
+    ],
+    tuple[torch.Tensor, dict[str, Any]],
+]
+
+DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
+
+
+def register_diffusion_loss(name: str) -> Callable[[DiffusionLossFn], DiffusionLossFn]:
+    """Register a diffusion loss function with the given name.
+
+    Args:
+        name (str): The name to register the diffusion loss function under.
+
+    Returns:
+        function: Decorator function that registers the diffusion loss function.
+    """
+
+    def decorator(func: DiffusionLossFn) -> DiffusionLossFn:
+        DIFFUSION_LOSS_REGISTRY[name] = func
+        return func
+
+    return decorator
+
+
+def get_diffusion_loss_fn(name):
+    """Get the diffusion loss with a given name.
+
+    Args:
+        name: `(str)`
+            The name of the policy loss.
+
+    Returns:
+        `(callable)`: The policy loss function.
+    """
+    if name not in DIFFUSION_LOSS_REGISTRY:
+        raise ValueError(
+            f"Unsupported diffusion loss mode: {name}. Supported modes are: {list(DIFFUSION_LOSS_REGISTRY.keys())}"
+        )
+    return DIFFUSION_LOSS_REGISTRY[name]
 
 
 class DiffusionAdvantageEstimator(str, Enum):
-    """Advantage estimators specific to diffusion-based policy training."""
+    """Advantage estimators specific to diffusion-based training."""
 
     FLOW_GRPO = "flow_grpo"
 
 
-@register_adv_est(DiffusionAdvantageEstimator.FLOW_GRPO)
+DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
+
+
+def register_diffusion_adv_est(name_or_enum: str | DiffusionAdvantageEstimator) -> Any:
+    """Register a diffusion advantage estimator function with the given name.
+
+    Args:
+        name_or_enum: `(str)` or `(DiffusionAdvantageEstimator)`
+            The name or enum of the advantage estimator.
+
+    """
+
+    def decorator(fn):
+        name = name_or_enum.value if isinstance(name_or_enum, Enum) else name_or_enum
+        if name in DIFFUSION_ADV_ESTIMATOR_REGISTRY and DIFFUSION_ADV_ESTIMATOR_REGISTRY[name] != fn:
+            raise ValueError(
+                f"Diffusion adv estimator {name} has already been registered: "
+                f"{DIFFUSION_ADV_ESTIMATOR_REGISTRY[name]} vs {fn}"
+            )
+        DIFFUSION_ADV_ESTIMATOR_REGISTRY[name] = fn
+        return fn
+
+    return decorator
+
+
+def get_diffusion_adv_estimator_fn(name_or_enum):
+    """Get the diffusion advantage estimator function with a given name."""
+    name = name_or_enum.value if isinstance(name_or_enum, Enum) else name_or_enum
+    if name not in DIFFUSION_ADV_ESTIMATOR_REGISTRY:
+        raise ValueError(
+            f"Unknown diffusion advantage estimator: {name}. Supported: {list(DIFFUSION_ADV_ESTIMATOR_REGISTRY.keys())}"
+        )
+    return DIFFUSION_ADV_ESTIMATOR_REGISTRY[name]
+
+
+@register_diffusion_adv_est(DiffusionAdvantageEstimator.FLOW_GRPO)
 def compute_flow_grpo_outcome_advantage(
     sample_level_rewards: torch.Tensor,
-    response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-4,
     norm_adv_by_std_in_grpo: bool = True,
@@ -47,8 +126,6 @@ def compute_flow_grpo_outcome_advantage(
 
     Args:
         sample_level_rewards: `(torch.Tensor)`
-            shape is (bs, ), (bs, 1) or (bs, response_length)
-        response_mask: `(torch.Tensor)`
             shape is (bs, response_length)
         index: `(np.ndarray)`
             index array for grouping
@@ -72,10 +149,7 @@ def compute_flow_grpo_outcome_advantage(
             shape is (bs, response_length)
     """
     scores = sample_level_rewards
-    if scores.ndim == 1:
-        scores = scores.unsqueeze(-1)
-    scores = scores.expand_as(response_mask).clone()
-
+    assert scores.ndim == 2
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
@@ -114,15 +188,12 @@ def compute_flow_grpo_outcome_advantage(
     return scores, scores
 
 
-@register_policy_loss("flow_grpo")
-def compute_policy_loss_flow_grpo(
+@register_diffusion_loss("flow_grpo")
+def compute_diffusion_loss_flow_grpo(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
-    response_mask: torch.Tensor,
-    loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | ActorConfig] = None,
-    rollout_is_weights: torch.Tensor | None = None,
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the clipped policy objective and related metrics for FlowGRPO.
@@ -133,39 +204,34 @@ def compute_policy_loss_flow_grpo(
             Log-probabilities of actions under the old policy, shape (batch_size,).
         log_prob (torch.Tensor):
             Log-probabilities of actions under the current policy, shape (batch_size,).
-        response_mask (torch.Tensor):
-            Not used currently.
-        loss_agg_mode (str, optional):
-            Not used currently.
         advantages (torch.Tensor):
             Advantage estimates for each action, shape (batch_size,).
-        config: `(verl.trainer.config.ActorConfig)`:
+        config: `(verl.trainer.config.DiffusionActorConfig)`:
             config for the actor.
-        rollout_is_weights: `torch.Tensor, optional)`:
-            Not used currently.
     """
     assert config is not None
-    assert isinstance(config, ActorConfig)
+    assert isinstance(config, DiffusionActorConfig)
+    loss_cfg = config.diffusion_loss
     advantages = torch.clamp(
         advantages,
-        -config.clip_ratio_high,
-        config.clip_ratio_high,
+        -loss_cfg.adv_clip_max,
+        loss_cfg.adv_clip_max,
     )
     log_ratio = log_prob - old_log_prob
     ratio = torch.exp(log_ratio)
     unclipped_loss = -advantages * ratio
     clipped_loss = -advantages * torch.clamp(
         ratio,
-        1.0 - config.clip_ratio,
-        1.0 + config.clip_ratio,
+        1.0 - loss_cfg.clip_ratio,
+        1.0 + loss_cfg.clip_ratio,
     )
     pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
 
     with torch.no_grad():
         ppo_kl = torch.mean(-log_ratio)
-        pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > config.clip_ratio).float())
-        pg_clipfrac_higher = torch.mean((ratio - 1.0 > config.clip_ratio).float())
-        pg_clipfrac_lower = torch.mean((1.0 - ratio > config.clip_ratio).float())
+        pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > loss_cfg.clip_ratio).float())
+        pg_clipfrac_higher = torch.mean((ratio - 1.0 > loss_cfg.clip_ratio).float())
+        pg_clipfrac_lower = torch.mean((1.0 - ratio > loss_cfg.clip_ratio).float())
 
     pg_metrics = {
         "actor/ppo_kl": ppo_kl.detach().item(),

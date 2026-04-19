@@ -1,0 +1,29 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# defaults specify the default config from each component
+defaults:
+
+  # fsdp optimizer config
+  - ../../optim@optim: fsdp
+
+  # fsdp engine config
+  - ../engine@fsdp_config: diffusion_fsdp
+
+  # diffusion actor config, inheriting from trainer/config/diffusion/actor/diffusion_actor.yaml
+  - diffusion_actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl.workers.config.diffusion.FSDPDiffusionActorConfig
+
+# Training strategy: fsdp, fsdp2
+strategy: fsdp
+
+# Gradient clipping for actor updates, specific to the strategy.
+grad_clip: 1.0
