@@ -23,6 +23,7 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutp
 from verl.experimental.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
 from verl.utils.chat_template import apply_chat_template
 from verl.utils.profiler import simple_timer
+from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import TokenOutput
 
@@ -39,6 +40,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
 
+    @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
 
