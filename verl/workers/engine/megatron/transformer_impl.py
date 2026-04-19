@@ -313,6 +313,10 @@ class MegatronEngine(BaseEngine):
 
     def _maybe_enable_fused_kernels(self):
         if not self.engine_config.use_fused_kernels:
+            from verl.models.mcore.mtp_patch import patch_postprocess
+
+            for model in self.module:
+                patch_postprocess(model)
             return
 
         if self.is_value_model or self.model_config.mtp.enable:
