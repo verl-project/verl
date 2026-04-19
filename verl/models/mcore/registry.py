@@ -127,6 +127,7 @@ class SupportedModel(Enum):
     LLAMA4 = "Llama4ForConditionalGeneration"  # not tested
     QWEN3 = "Qwen3ForCausalLM"  # tested
     QWEN3_MOE = "Qwen3MoeForCausalLM"  # tested
+    QWEN3_5_MOE = "Qwen3_5MoeForCausalLM"  # tested
     GLM4_MOE = "Glm4MoeForCausalLM"
     QWEN3_TOKEN_CLASSIFICATION = "Qwen3ForTokenClassification"
     LLAMA_TOKEN_CLASSIFICATION = "LlamaForTokenClassification"
@@ -147,6 +148,7 @@ MODEL_CONFIG_CONVERTER_REGISTRY: dict[SupportedModel, Callable[[PretrainedConfig
     SupportedModel.LLAMA4: hf_to_mcore_config_llama4,
     SupportedModel.QWEN3: hf_to_mcore_config_dense,
     SupportedModel.QWEN3_MOE: hf_to_mcore_config_qwen3moe,
+    SupportedModel.QWEN3_5_MOE: hf_to_mcore_config_qwen3moe,
     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: hf_to_mcore_config_dense,
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: hf_to_mcore_config_dense,
 }
@@ -162,6 +164,7 @@ MODEL_INITIALIZER_REGISTRY: dict[SupportedModel, type[BaseModelInitializer]] = {
     SupportedModel.LLAMA4: DenseModel,
     SupportedModel.QWEN3: DenseModel,
     SupportedModel.QWEN3_MOE: Qwen3MoEModel,
+    SupportedModel.QWEN3_5_MOE: Qwen3MoEModel,
     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: DenseModel,
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: DenseModel,
 }
@@ -176,6 +179,7 @@ MODEL_FORWARD_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.LLAMA4: model_forward_gen(),
     SupportedModel.QWEN3: model_forward_gen(),
     SupportedModel.QWEN3_MOE: model_forward_gen(),
+    SupportedModel.QWEN3_5_MOE: model_forward_gen(),
     SupportedModel.QWEN2_5_VL: model_forward_gen(True),
     SupportedModel.QWEN3_MOE_VL: model_forward_gen(True),
     SupportedModel.QWEN3_VL: model_forward_gen(True),
@@ -198,6 +202,7 @@ MODEL_FORWARD_FUSED_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.LLAMA4: fused_forward_model_gen(),
     SupportedModel.QWEN3: fused_forward_model_gen(),
     SupportedModel.QWEN3_MOE: fused_forward_model_gen(),
+    SupportedModel.QWEN3_5_MOE: fused_forward_model_gen(),
     SupportedModel.DEEPSEEK_V3: fused_forward_model_gen(),
     SupportedModel.GLM4_MOE: fused_forward_model_gen(),
     SupportedModel.GPT_OSS: fused_forward_model_gen(),
@@ -213,6 +218,7 @@ MODEL_WEIGHT_CONVERTER_REGISTRY: dict[SupportedModel, type] = {
     SupportedModel.DEEPSEEK_V3: McoreToHFWeightConverterDpskv3,
     SupportedModel.QWEN3: McoreToHFWeightConverterDense,
     SupportedModel.QWEN3_MOE: McoreToHFWeightConverterQwen3Moe,
+    SupportedModel.QWEN3_5_MOE: McoreToHFWeightConverterQwen3Moe,
     SupportedModel.QWEN2_5_VL: McoreToHFWeightConverterQwen2_5_VL,
     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: McoreToHFWeightConverterDense,
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: McoreToHFWeightConverterDense,

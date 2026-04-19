@@ -218,6 +218,18 @@ class HFModelConfig(BaseConfig):
         if getattr(self.hf_config, "model_type", None) == "kimi_vl":
             self.hf_config.text_config.topk_method = "greedy"
 
+        # When MTP is disabled, zero out MTP layer counts from hf_config so that
+        # downstream engine/worker code does not need to handle each MTP field format
+        # individually. Supports both DeepSeek-style (num_nextn_predict_layers) and
+        # Qwen3.5-style (mtp_num_hidden_layers, possibly nested under text_config).
+        if not self.mtp.enable:
+            if hasattr(self.hf_config, "num_nextn_predict_layers"):
+                self.hf_config.num_nextn_predict_layers = 0
+            if hasattr(self.hf_config, "mtp_num_hidden_layers"):
+                self.hf_config.mtp_num_hidden_layers = 0
+            if hasattr(self.hf_config, "text_config") and hasattr(self.hf_config.text_config, "mtp_num_hidden_layers"):
+                self.hf_config.text_config.mtp_num_hidden_layers = 0
+
         # Ensure target_modules is a str or list[str] (only if not None)
         if self.target_modules is not None:
             if not isinstance(self.target_modules, (str | list)):
