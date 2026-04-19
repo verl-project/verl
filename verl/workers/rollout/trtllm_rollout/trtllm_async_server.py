@@ -368,7 +368,10 @@ class TRTLLMReplica(RolloutReplica):
         else:
             local_bundle_index = self.world_size * self.replica_rank
 
-        while local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count:
+        while (
+            start_pg_index < len(self.resource_pool.pgs)
+            and local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count
+        ):
             local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
             start_pg_index += 1
         assert (
@@ -425,7 +428,6 @@ class TRTLLMReplica(RolloutReplica):
             if not self.is_reward_model
             else f"trtllm_server_reward_{self.replica_rank}"
         )
-
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,
