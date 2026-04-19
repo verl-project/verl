@@ -43,7 +43,7 @@ from verl.utils.megatron.router_replay_utils import (
     set_router_replay_data,
 )
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
-from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
+from verl.utils.megatron_peft_utils import build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
     check_mtp_config,
     get_megatron_module_device,
@@ -724,10 +724,6 @@ class MegatronEngine(BaseEngine):
                 if non_merge_lora_sync
                 else self.bridge.export_hf_weights(self.module)
             )
-            if non_merge_lora_sync:
-                per_tensor_param = add_base_layer_suffix(
-                    per_tensor_param, model_type=self.model_config.hf_config.model_type
-                )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled:

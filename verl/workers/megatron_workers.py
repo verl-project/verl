@@ -54,7 +54,7 @@ from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import deprecated
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
-from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
+from verl.utils.megatron_peft_utils import build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -154,13 +154,19 @@ class MegatronWorker(Worker):
         self.share_embeddings_and_output_weights = getattr(hf_config, "tie_word_embeddings", False)
 
         # only actor need enable mtp
+        text_hf_config = getattr(hf_config, "text_config", hf_config)
         if enable_mtp:
-            assert hf_config.num_nextn_predict_layers > 0, "MTP requires at least one nextn_predict_layer"
+            assert (
+                getattr(text_hf_config, "num_nextn_predict_layers", 0) > 0
+                or getattr(text_hf_config, "mtp_num_hidden_layers", 0) > 0
+            ), "MTP requires at least one MTP layer (num_nextn_predict_layers or mtp_num_hidden_layers)"
             assert megatron_config.use_mbridge, "MTP requires use_mbridge to be True"
             override_transformer_config["mtp_loss_scaling_factor"] = self.config.model.mtp.mtp_loss_scaling_factor
         else:
-            if hasattr(hf_config, "num_nextn_predict_layers"):
-                hf_config.num_nextn_predict_layers = 0
+            if hasattr(text_hf_config, "num_nextn_predict_layers"):
+                text_hf_config.num_nextn_predict_layers = 0
+            elif hasattr(text_hf_config, "mtp_num_hidden_layers"):
+                text_hf_config.mtp_num_hidden_layers = 0
 
         self.enable_mtp = enable_mtp
 
@@ -755,7 +761,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.actor.actor_module, merge_adapter_weights=False
             )
             await self.rollout.update_weights(
-                add_base_layer_suffix(per_tensor_param_lora_base, model_type=self.hf_config.model_type),
+                per_tensor_param_lora_base,
                 peft_config=peft_config,
                 base_sync_done=False,
             )
