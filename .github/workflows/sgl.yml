@@ -63,7 +63,6 @@ on:
       - ".github/workflows/sgl.yml"
       - "tests/rollout/*sglang*"
       - "tests/rollout/async_rollout_utils.py"
-      - "tests/workers/rollout/*interaction*"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
