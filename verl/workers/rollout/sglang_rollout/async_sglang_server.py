@@ -56,6 +56,71 @@ logger.setLevel(logging.INFO)
 visible_devices_keyword = get_visible_devices_keyword()
 
 
+def _extract_sglang_prompt_logprobs(output: dict, num_prompt_logprobs: int) -> dict[str, list]:
+    """Convert SGLang prompt logprobs to the teacher manager format.
+
+    SGLang returns one entry per prompt token, with the first token carrying no
+    valid logprob/top-logprobs. We skip that first position and append one
+    trailing dummy row so the final length matches len(sequence_ids).
+    """
+    meta_info = output["meta_info"]
+
+    raw_token_logprobs = meta_info.get("input_token_logprobs") or []
+    raw_top_logprobs = meta_info.get("input_top_logprobs") or []
+
+    target_k = max(num_prompt_logprobs, 1)
+    use_top = num_prompt_logprobs > 0
+
+    # If the distillation loss requests top-k, SGLang must return input_top_logprobs.
+    if use_top and len(raw_top_logprobs) == 0:
+        raise ValueError(
+            "SGLang did not return input_top_logprobs, but prompt_logprobs > 0 was requested. "
+            "Please ensure return_logprob is enabled and top_logprobs_num is set correctly."
+        )
+
+    prompt_ids_ls: list[list[int]] = []
+    prompt_logprobs_ls: list[list[float]] = []
+
+    # Skip the first token: it has no preceding context.
+    for i in range(1, len(raw_token_logprobs)):
+        logprob, token_id, _ = raw_token_logprobs[i]
+
+        if use_top:
+            top_entries = raw_top_logprobs[i] if i < len(raw_top_logprobs) else []
+            if len(top_entries) == 0:
+                # Fail fast instead of silently falling back to greedy for top-k distillation.
+                raise ValueError(
+                    f"SGLang returned empty input_top_logprobs at position {i} "
+                    f"while prompt_logprobs={num_prompt_logprobs} was requested."
+                )
+
+            ids = [int(tid) for _, tid, _ in top_entries[:num_prompt_logprobs]]
+            lps = [float(lp) for lp, _, _ in top_entries[:num_prompt_logprobs]]
+
+            # Pad to fixed width (some positions may return fewer than K entries).
+            while len(ids) < target_k:
+                ids.append(0)
+                lps.append(0.0)
+        else:
+            # Non-topk: keep only greedy token logprob.
+            ids = [int(token_id)]
+            lps = [float(logprob) if logprob is not None else 0.0]
+            while len(ids) < target_k:
+                ids.append(0)
+                lps.append(0.0)
+
+        prompt_ids_ls.append(ids)
+        prompt_logprobs_ls.append(lps)
+
+    # Dummy row for the last prompt token so total length matches len(sequence_ids).
+    prompt_ids_ls.append([0] * target_k)
+    prompt_logprobs_ls.append([0.0] * target_k)
+
+    return {
+        "prompt_ids": prompt_ids_ls,
+        "prompt_logprobs": prompt_logprobs_ls,
+    }
+
 class SGLangHttpServer:
     """SGLang http server in single node, this is equivalent to launch server with command line:
     ```
@@ -407,15 +472,31 @@ class SGLangHttpServer:
         sampling_params["max_new_tokens"] = max_new_tokens
         return_logprob = sampling_params.pop("logprobs", False)
 
+        # prompt_logprobs: number of top-K token logprobs to return for each input token position.
+        # This is used by the OPD (On-Policy Distillation) teacher server to provide
+        # per-token distributions to the student model.
+        # SGLang uses return_logprob=True + logprob_start_len=0 to get input token logprobs,
+        # and top_logprobs_num=K for top-K logprobs at each position.
+        num_prompt_logprobs = sampling_params.pop("prompt_logprobs", None)
+        return_prompt_logprob = num_prompt_logprobs is not None
+
         request = {
             "rid": request_id,
             "input_ids": prompt_ids,
             "sampling_params": sampling_params,
-            "return_logprob": return_logprob,
+            "return_logprob": return_logprob or return_prompt_logprob,
             "image_data": image_data,
             # TODO: support video input for sglang
             # video_data=video_data,
         }
+
+        if return_prompt_logprob:
+            # logprob_start_len=0 instructs SGLang to return logprobs for all input tokens.
+            request["logprob_start_len"] = 0
+            # top_logprobs_num=K requests the top-K token logprobs at each input position.
+            # When num_prompt_logprobs==0, we only need the greedy (sampled) token logprob,
+            # which is provided by top_logprobs_num=0 in SGLang (returns the actual token logprob).
+            request["top_logprobs_num"] = num_prompt_logprobs
 
         if self.config.enable_rollout_routing_replay:
             request.update({"return_routed_experts": True})
@@ -466,12 +547,22 @@ class SGLangHttpServer:
                     -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
                 )
 
+        extra_fields = {"global_steps": self.global_steps}
+
+        if return_prompt_logprob:
+            extra_fields.update(
+                _extract_sglang_prompt_logprobs(
+                    output=output,
+                    num_prompt_logprobs=num_prompt_logprobs,
+                )
+            )
+
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
             stop_reason=finish_reason,
-            extra_fields={"global_steps": self.global_steps},
+            extra_fields=extra_fields,
         )
 
     async def set_global_steps(self, global_steps: int):
